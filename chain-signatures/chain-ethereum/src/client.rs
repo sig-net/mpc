@@ -29,7 +29,7 @@ pub enum MaybeBlock {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum CatchupItem {
-    /// A block fetched as part of a catchup batch, plus receipts. 
+    /// A block fetched as part of a catchup batch, plus receipts.
     /// `receipts` is `Vec::new()` for blocks with no transactions.
     BatchBlock {
         block: Block,
@@ -48,7 +48,7 @@ pub struct CatchupIter {
     client: Arc<EthereumClient>,
     next_block: BlockNumber,
     end_block: BlockNumber,
-    buffered_blocks: std::vec::IntoIter<MaybeBlock>,
+    buffered_blocks: std::vec::IntoIter<CatchupItem>,
 }
 
 impl CatchupIter {
@@ -80,14 +80,40 @@ impl CatchupIter {
 
         #[cfg(feature = "bench")]
         let start = std::time::Instant::now();
-        self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
+
+        let blocks = self.client.get_blocks(&batch_block_ids).await;
+        let receipts = self.client.get_block_receipts_batch(&batch_block_ids).await;
+
+        let items: Vec<CatchupItem> = if let Ok(receipts) = receipts {
+            blocks
+                .into_iter()
+                .zip(receipts)
+                .zip(batch_block_ids)
+                .map(
+                    |((maybe_block, maybe_receipts), block_id)| match maybe_block {
+                        MaybeBlock::Block(block) => CatchupItem::BatchBlock {
+                            block,
+                            receipts: maybe_receipts.unwrap_or_default(),
+                        },
+                        MaybeBlock::Missing(_) => CatchupItem::Missing(block_id),
+                    },
+                )
+                .collect()
+        } else {
+            batch_block_ids
+                .into_iter()
+                .map(CatchupItem::Missing)
+                .collect()
+        };
+
         #[cfg(feature = "bench")]
         crate::bench::add_batch_fetch_time(start.elapsed());
 
+        self.buffered_blocks = items.into_iter();
         self.next_block = batch_end;
     }
 
-    pub async fn next(&mut self) -> Option<MaybeBlock> {
+    pub async fn next(&mut self) -> Option<CatchupItem> {
         loop {
             if let Some(block) = self.buffered_blocks.next() {
                 return Some(block);
@@ -272,10 +298,10 @@ impl EthereumClient {
     }
 
     /// Fetch receipts for multiple blocks in a single JSON-RPC batch POST.
-    /// 
+    ///
     /// Returns one `Option<Vec<TransactionReceipt>>` per input `block_id`,
     /// in the same order as `block_ids`
-    /// 
+    ///
     /// On permanent failure the whole batch fails (consistent with
     /// `get_blocks`). The retry wrapper retries the entire batch.
     pub async fn get_block_receipts_batch(
@@ -514,11 +540,13 @@ mod tests {
             .enumerate()
             .map(|(index, block_number)| test_utils::block_response(index as u64 + 1, block_number))
             .collect::<Vec<_>>();
-        let second_batch = vec![test_utils::block_response(33, 42)];
+        let second_batch = vec![test_utils::block_response(65, 42)];
 
         let second_batch_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"0x2a\""#.to_string()))
+            .match_body(Matcher::Regex(
+                r#"eth_getBlockByNumber.*\"0x2a\""#.to_string(),
+            ))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -528,11 +556,24 @@ mod tests {
 
         let first_batch_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"0xa\""#.to_string()))
+            .match_body(Matcher::Regex(
+                r#"eth_getBlockByNumber.*\"0xa\""#.to_string(),
+            ))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(json!(first_batch).to_string())
+            .create_async()
+            .await;
+
+        // Receipt mocks: return an empty array for any eth_getBlockReceipts call.
+        // This test verifies block-batch laziness, not receipt content.
+        let _receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]".to_string())
             .create_async()
             .await;
 
@@ -541,17 +582,29 @@ mod tests {
 
         for expected_number in 10..42 {
             let next = iter.next().await;
-            assert!(matches!(
-                next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
-            ));
+            assert!(
+                matches!(
+                    &next,
+                    Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == expected_number
+                ),
+                "Expected block {}, got {:?}",
+                expected_number,
+                next
+            );
         }
 
         assert!(first_batch_mock.matched_async().await);
         assert!(!second_batch_mock.matched_async().await);
 
         let next = iter.next().await;
-        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.number == 42));
+        assert!(
+            matches!(
+                &next,
+                Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == 42
+            ),
+            "Expected block 42, got {:?}",
+            next
+        );
         assert!(second_batch_mock.matched_async().await);
         assert!(iter.next().await.is_none());
     }
@@ -564,15 +617,19 @@ mod tests {
             .enumerate()
             .map(|(idx, block_number)| test_utils::block_response(idx as u64 + 1, block_number))
             .collect::<Vec<_>>();
-        let second_batch = (32..64)
+        let second_batch = (0..32)
             .enumerate()
-            .map(|(idx, block_number)| test_utils::block_response((idx + 33) as u64, block_number))
+            .map(|(idx, block_number)| {
+                test_utils::block_response((idx + 65) as u64, block_number + 32)
+            })
             .collect::<Vec<_>>();
-        let third_batch = vec![test_utils::block_response(65, 64)];
+        let third_batch = vec![test_utils::block_response(129, 64)];
 
         let first_batch_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":32"#.to_string()))
+            .match_body(Matcher::Regex(
+                r#"eth_getBlockByNumber.*\"0x1f\""#.to_string(),
+            ))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -582,7 +639,9 @@ mod tests {
 
         let second_batch_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":64"#.to_string()))
+            .match_body(Matcher::Regex(
+                r#"eth_getBlockByNumber.*\"0x3f\""#.to_string(),
+            ))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -592,11 +651,24 @@ mod tests {
 
         let third_batch_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":65"#.to_string()))
+            .match_body(Matcher::Regex(
+                r#"eth_getBlockByNumber.*\"0x40\""#.to_string(),
+            ))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(json!(third_batch).to_string())
+            .create_async()
+            .await;
+
+        // Receipt mocks: return an empty array for any eth_getBlockReceipts call.
+        // This test verifies block-batch splitting, not receipt content.
+        let _receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]".to_string())
             .create_async()
             .await;
 
@@ -605,10 +677,15 @@ mod tests {
 
         for expected_number in 0..65 {
             let next = iter.next().await;
-            assert!(matches!(
-                next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
-            ));
+            assert!(
+                matches!(
+                    &next,
+                    Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == expected_number
+                ),
+                "Expected block {}, got {:?}",
+                expected_number,
+                next
+            );
         }
 
         assert!(iter.next().await.is_none());
