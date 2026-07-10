@@ -209,6 +209,25 @@ pub fn batch_block(
     CatchupItem::BatchBlock { block, receipts }
 }
 
+pub fn receipt_value(tx_hash: &str, block_number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "transactionHash": tx_hash,
+        "blockHash": format!("0x{:064x}", block_number),
+        "blockNumber": format!("0x{:x}", block_number),
+        "transactionIndex": "0x0",
+        "from": format!("0x{:040x}", 0),
+        "to":   format!("0x{:040x}", 1),
+        "cumulativeGasUsed": "0x0",
+        "gasUsed": "0x0",
+        "contractAddress": null,
+        "logs": [],
+        "status": "0x1",
+        "logsBloom": format!("0x{}", "0".repeat(512)),
+        "type": "0x2",
+        "effectiveGasPrice": "0x1"
+    })
+}
+
 pub fn receipts_batch_response(
     ids_and_receipts: &[(u64, Option<serde_json::Value>)],
 ) -> serde_json::Value {
