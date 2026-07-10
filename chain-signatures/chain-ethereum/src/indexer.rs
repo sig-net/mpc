@@ -813,16 +813,18 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 #[cfg(feature = "bench")]
                 let start = std::time::Instant::now();
 
-                let Some(block) = self.client.get_block(*block_id).await else {
+                // Refetch the block and receipts
+                let (block_res, receipts_res) = tokio::join!(
+                    self.client.get_block(*block_id),
+                    self.client.get_block_receipts(*block_id)
+                );
+
+                let Some(block) = block_res else {
                     anyhow::bail!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
                 };
-                let r = self
-                    .client
-                    .get_block_receipts(*block_id)
-                    .await?
-                    .unwrap_or_default();
+                let r = receipts_res?.unwrap_or_default();
 
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(start.elapsed());
@@ -880,16 +882,18 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             }
             CatchupItem::BatchBlock { block, receipts } => (block, receipts.as_slice()),
             CatchupItem::Missing(block_id) => {
-                let Some(b) = self.client.get_block(*block_id).await else {
+                // Refetch the block and receipts
+                let (block_res, receipts_res) = tokio::join!(
+                    self.client.get_block(*block_id),
+                    self.client.get_block_receipts(*block_id)
+                );
+
+                let Some(b) = block_res else {
                     anyhow::bail!(
                         "ethereum live stream yielded missing block {block_id:?} and refetch failed"
                     )
                 };
-                _receipts = self
-                    .client
-                    .get_block_receipts(*block_id)
-                    .await?
-                    .unwrap_or_default();
+                _receipts = receipts_res?.unwrap_or_default();
                 _block = b;
                 (&_block, _receipts.as_slice())
             }
