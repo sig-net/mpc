@@ -77,8 +77,7 @@ impl OrganizingPhase {
                 .await
             else {
                 tracing::warn!(?sign_id, round = ?state.round, "no active participants, reorganizing");
-                state.bump_round();
-                return SignPhase::Organizing(OrganizingPhase);
+                return state.reorganize();
             };
 
             let max_rounds = state.round + PROPOSER_SEARCH_WINDOW;
@@ -136,8 +135,7 @@ impl OrganizingPhase {
                         round = ?state.round,
                         "proposer timeout waiting for concurrency slot, reorganizing"
                     );
-                    state.bump_round();
-                    return SignPhase::Organizing(OrganizingPhase);
+                    return state.reorganize();
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
@@ -189,8 +187,7 @@ impl OrganizingPhase {
                         round = ?state.round,
                         "proposer timeout waiting for presignature, reorganizing"
                     );
-                    state.bump_round();
-                    return SignPhase::Organizing(OrganizingPhase);
+                    return state.reorganize();
                 }
             };
 
