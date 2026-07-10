@@ -820,7 +820,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 };
                 let r = self
                     .client
-                    .get_block_receipts((*block_id).into())
+                    .get_block_receipts(*block_id)
                     .await?
                     .unwrap_or_default();
 
@@ -888,7 +888,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 };
                 _receipts = self
                     .client
-                    .get_block_receipts((*block_id).into())
+                    .get_block_receipts(*block_id)
                     .await?
                     .unwrap_or_default();
                 _block = b;

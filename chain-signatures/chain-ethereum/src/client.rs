@@ -573,7 +573,7 @@ mod tests {
             .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body("[]".to_string())
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -668,7 +668,7 @@ mod tests {
             .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body("[]".to_string())
+            .with_body("[]")
             .create_async()
             .await;
 
