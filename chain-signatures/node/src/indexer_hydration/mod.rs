@@ -4,6 +4,7 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
+use crate::stream::StreamContext;
 use crate::types::CheckpointWatcher;
 
 pub use config::HydrationConfig;
@@ -358,6 +359,23 @@ pub async fn run<T: ChainTelemetry>(
 
     let root_pk = contract_watcher.wait_public_key().await;
 
+    // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)
+    let ctx = {
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc = crate::rpc::RpcChannel { tx: rpc_tx };
+        let mut ctx = StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc,
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            node_client.clone(),
+            checkpoints_rx.clone(),
+        );
+        ctx.caught_up = true;
+        ctx
+    };
+
     let ws_url: &str = hydration.rpc_ws_url.as_str();
     const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -504,8 +522,6 @@ pub async fn run<T: ChainTelemetry>(
                 continue;
             }
 
-            let sign_tx = sign_tx.clone();
-            let backlog = backlog.clone();
             let root_pk = contract_watcher.public_key().await.unwrap_or(root_pk);
 
             for ev in events.iter() {
@@ -539,13 +555,8 @@ pub async fn run<T: ChainTelemetry>(
                         continue;
                     };
 
-                    if let Err(e) = crate::stream::ops::process_sign_request(
-                        sign_request,
-                        sign_tx.clone(),
-                        backlog.clone(),
-                        true,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }
@@ -564,14 +575,8 @@ pub async fn run<T: ChainTelemetry>(
                     tracing::info!(
                         "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
                     );
-                    if let Err(e) = crate::stream::ops::process_respond_event(
-                        event,
-                        sign_tx.clone(),
-                        root_pk,
-                        &backlog,
-                        true,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::stream::ops::process_respond_event(event, &ctx, root_pk).await
                     {
                         tracing::error!("failed to process respond event: {e}");
                     }
@@ -601,13 +606,8 @@ pub async fn run<T: ChainTelemetry>(
                         continue;
                     };
 
-                    if let Err(e) = crate::stream::ops::process_sign_request(
-                        sign_request,
-                        sign_tx.clone(),
-                        backlog.clone(),
-                        true,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }
@@ -648,10 +648,8 @@ pub async fn run<T: ChainTelemetry>(
                             signature,
                             chain: Chain::Hydration,
                         },
-                        sign_tx.clone(),
+                        &ctx,
                         root_pk,
-                        &backlog,
-                        true,
                     )
                     .await
                     {

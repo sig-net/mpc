@@ -99,6 +99,37 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         (this, state_rx)
     }
 
+    /// Evaluate the outcome of a regression check and transition to Recovery if needed.
+    fn evaluate_regression_outcome(
+        &self,
+        result: RegressionOutcome,
+    ) -> Option<Option<ChainStreaming>> {
+        match result {
+            RegressionOutcome::Recovery => {
+                let new_state = ChainStreaming::Recovery { load_local: false };
+                let _ = self.state_tx.send(new_state);
+                Some(Some(new_state))
+            }
+            RegressionOutcome::Aligned => None,
+            RegressionOutcome::Shutdown => Some(None),
+        }
+    }
+
+    /// Watchdog-timeout handler shared by `handle_catchup` and `handle_live`.
+    async fn handle_watchdog_timeout(&mut self, context: &str) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        let timeout = self.watchdog_timeout;
+        let has_slot = self.backlog.has_checkpoint_slot(chain).await;
+        let pending = self.backlog.pending_checkpoint_count(chain).await;
+        tracing::warn!(
+            %chain, ?timeout, has_checkpoint_slot = has_slot,
+            pending_checkpoints = pending, "{} processing timed out; restarting pipeline", context
+        );
+        let new_state = ChainStreaming::Recovery { load_local: false };
+        let _ = self.state_tx.send(new_state);
+        Some(new_state)
+    }
+
     pub async fn run(mut self) {
         let chain = I::CHAIN;
         tracing::info!(%chain, "starting ChainStream pipeline");
@@ -226,21 +257,9 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                                 tokio::time::sleep(I::RETRY_DELAY).await;
                             }
                             Err(_) => {
-                                let has_slot =
-                                    self.backlog.has_checkpoint_slot(chain).await;
-                                let pending =
-                                    self.backlog.pending_checkpoint_count(chain).await;
-                                tracing::warn!(
-                                    %chain,
-                                    ?timeout,
-                                    has_checkpoint_slot = has_slot,
-                                    pending_checkpoints = pending,
-                                    "catchup block processing timed out; restarting pipeline"
-                                );
-                                let new_state =
-                                    ChainStreaming::Recovery { load_local: false };
-                                let _ = self.state_tx.send(new_state);
-                                return Some(new_state);
+                                return self
+                                    .handle_watchdog_timeout("catchup block")
+                                    .await;
                             }
                         }
                     }
@@ -250,30 +269,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
                 }
                 // Watchdog: if no catchup block is processed within the chain-specific timeout
                 _ = tokio::time::sleep(timeout) => {
-                    let has_slot = self.backlog.has_checkpoint_slot(chain).await;
-                    let pending = self.backlog.pending_checkpoint_count(chain).await;
-                    tracing::warn!(
-                        %chain,
-                        ?timeout,
-                        has_checkpoint_slot = has_slot,
-                        pending_checkpoints = pending,
-                        "catchup stalled; no block processed within timeout; restarting pipeline"
-                    );
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return self.handle_watchdog_timeout("catchup").await;
                 }
             }
         }
@@ -302,31 +304,14 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
                 }
                 // Watchdog: if no block is processed within the chain-specific timeout,
                 // the background producer is assumed stalled and the pipeline restarts.
                 _ = tokio::time::sleep(timeout) => {
-                    let has_slot = self.backlog.has_checkpoint_slot(chain).await;
-                    let pending = self.backlog.pending_checkpoint_count(chain).await;
-                    tracing::warn!(
-                        %chain,
-                        ?timeout,
-                        has_checkpoint_slot = has_slot,
-                        pending_checkpoints = pending,
-                        "live block processing timed out; restarting pipeline"
-                    );
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return self.handle_watchdog_timeout("live block").await;
                 }
             }
         }
