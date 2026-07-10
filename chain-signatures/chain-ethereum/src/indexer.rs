@@ -832,7 +832,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 (&_block, _receipts.as_slice())
             }
             CatchupItem::LiveBlock(block) => {
-                // Should not happen in catchup, but fetch for completeness
                 _receipts = self
                     .client
                     .get_block_receipts(block.header.number.into())
