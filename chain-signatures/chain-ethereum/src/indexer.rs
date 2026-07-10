@@ -18,6 +18,7 @@ use mpc_primitives::{
 };
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, Duration, Instant};
@@ -33,6 +34,10 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
 pub struct BlockAndRequests {
     block_number: u64,
     block_hash: alloy::primitives::B256,
+    /// Block timestamp captured from the block we already fetched, so
+    /// `emit_processed_block` doesn't need to re-fetch the block just to read
+    /// it back. Used for `ChainEvent::SignRequest`'s `block_timestamp` field.
+    block_timestamp: u64,
     indexed_requests: Vec<IndexedSignRequest>,
     respond_logs: Vec<Log>,
     execution_events: Vec<ChainEvent>,
@@ -42,6 +47,7 @@ impl BlockAndRequests {
     fn new(
         block_number: u64,
         block_hash: alloy::primitives::B256,
+        block_timestamp: u64,
         indexed_requests: Vec<IndexedSignRequest>,
         respond_logs: Vec<Log>,
         execution_events: Vec<ChainEvent>,
@@ -49,6 +55,7 @@ impl BlockAndRequests {
         Self {
             block_number,
             block_hash,
+            block_timestamp,
             indexed_requests,
             respond_logs,
             execution_events,
@@ -65,6 +72,8 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     contract_address: Address,
     catchup_complete: Arc<Notify>,
     live_blocks_rx: Option<mpsc::Receiver<MaybeBlock>>,
+    /// The block number of the latest finalized block at the time catchup started. Used to determine which blocks are finalized during catchup.
+    catchup_finalized_head: AtomicU64,
 }
 
 /// Result of a `backfill_execution_confirmation`. `Observed` carries an
@@ -99,6 +108,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            catchup_finalized_head: AtomicU64::new(0),
         })
     }
 
@@ -125,6 +135,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            catchup_finalized_head: AtomicU64::new(0),
         }
     }
 
@@ -180,11 +191,21 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Process the block and emit relevant ChainEvents from the block.
-    async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
+    ///
+    /// `is_finalized` indicates the block was already finalized at the time
+    /// it was fetched, so it cannot reorg and `emit_processed_block` can skip
+    /// the per-block re-fetch + reorg hash check (one `eth_getBlockByNumber`
+    /// per block).
+    ///
+    /// For catchup, this is depth-gated against the finalized head sampled once
+    /// at catchup start (`catchup_range`)
+    ///
+    /// For the live path, `is_finalized` is always `false`
+    async fn process_block(&self, block: &Block, is_finalized: bool) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
         self.telemetry.block_indexed(block.header.number);
         let processed = self.parse_block(block).await?;
-        self.emit_processed_block(processed).await?;
+        self.emit_processed_block(processed, is_finalized).await?;
 
         Ok(())
     }
@@ -261,6 +282,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(BlockAndRequests::new(
             block_number,
             block_hash,
+            block.header.timestamp,
             sign_requests,
             respond_logs,
             exec_events,
@@ -543,35 +565,43 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Emits the processed block in-order once we reach finality for it.
+    ///
+    /// `is_finalized` blocks skip the per-block re-fetch + reorg hash check
+    /// (see `process_block`).
     async fn emit_processed_block(
         &self,
         BlockAndRequests {
             block_number,
             block_hash,
+            block_timestamp,
             indexed_requests,
             respond_logs,
             execution_events,
         }: BlockAndRequests,
+        is_finalized: bool,
     ) -> anyhow::Result<()> {
         if !self.eth.optimistic_requests {
             self.wait_for_finalized_block(block_number).await?;
         }
 
-        let Some(block) = self
-            .client
-            .as_ref()
-            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .await
-        else {
-            anyhow::bail!("ethereum block {block_number} not found during emission");
-        };
+        // If the block is not finalized, re-fetch it and check that the hash matches
+        if !is_finalized {
+            let Some(block) = self
+                .client
+                .as_ref()
+                .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
+                .await
+            else {
+                anyhow::bail!("ethereum block {block_number} not found during emission");
+            };
 
-        if block.header.hash != block_hash {
-            // The block was reorged after `process_block` produced this payload.
-            // Do not emit stale events for a different canonical block, but also do
-            // not return an error that would cause the catchup path to retry this
-            // same stale payload forever.
-            return Ok(());
+            if block.header.hash != block_hash {
+                // The block was reorged after `process_block` produced this payload.
+                // Do not emit stale events for a different canonical block, but also do
+                // not return an error that would cause the catchup path to retry this
+                // same stale payload forever.
+                return Ok(());
+            }
         }
 
         for event in execution_events {
@@ -585,7 +615,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             self.events_tx
                 .send(ChainEvent::SignRequest {
                     request,
-                    block_timestamp: Some(block.header.timestamp),
+                    block_timestamp: Some(block_timestamp),
                 })
                 .await
                 .context("failed to emit SignRequest event")?;
@@ -745,6 +775,26 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
 
+        // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
+        if let Some(finalized_block) = self
+            .client
+            .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
+            .await
+        {
+            self.catchup_finalized_head
+                .store(finalized_block.header.number, Ordering::Relaxed);
+            tracing::info!(
+                finalized_head = finalized_block.header.number,
+                catchup_start,
+                anchor_height,
+                "sampled finalized head for catchup reorg-check gating"
+            );
+        } else {
+            tracing::warn!(
+                "could not sample finalized head for catchup; keeping reorg check for all blocks"
+            );
+        }
+
         // Convert the async state machine into a Stream
         let stream = stream::unfold(catchup_iter, |mut state| async move {
             let item = state.next().await;
@@ -793,7 +843,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         #[cfg(feature = "bench")]
         let start_process = std::time::Instant::now();
 
-        self.process_block(block).await?;
+        // Determine if the block is finalized based on the sampled finalized head at catchup start
+        let f0 = self.catchup_finalized_head.load(Ordering::Relaxed);
+        let is_finalized = block.header.number <= f0;
+        self.process_block(block, is_finalized).await?;
 
         #[cfg(feature = "bench")]
         {
@@ -811,7 +864,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             anyhow::bail!("ethereum live stream yielded missing block")
         };
 
-        self.process_block(block).await?;
+        // Live blocks are not yet finalized, so keep the reorg hash check
+        self.process_block(block, false).await?;
         Ok(())
     }
 
@@ -879,6 +933,7 @@ mod tests {
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
@@ -943,6 +998,232 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         assert!(err.to_string().contains("still unavailable after refetch"));
+    }
+
+    #[tokio::test]
+    async fn catchup_finalized_block_does_not_refetch_for_emission() {
+        let mut server = Server::new_async().await;
+
+        let block = test_utils::block(42);
+        let MaybeBlock::Block(block) = block else {
+            unreachable!("test_utils::block returns MaybeBlock::Block")
+        };
+        let block_number = block.header.number;
+
+        // `eth_getBlockReceipts` — expected exactly once (empty block: null).
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::missing_block_response(2).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // `eth_getBlockByNumber(Number)` for the same block — must NEVER be hit,
+        // because this catchup block is at or below the finalized head sampled at
+        // catchup start, so the reorg check is skipped.
+        let block_by_number_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(3, block_number).to_string())
+            .expect(0)
+            .create_async()
+            .await;
+
+        // Optimistic mode (default) so `wait_for_finalized_block` is skipped.
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+        // Block 42 was finalized at fetch time (head sampled at 100), so the
+        // re-fetch + reorg check is skipped.
+        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+
+        indexer
+            .process_catchup(&MaybeBlock::Block(block))
+            .await
+            .expect("catchup over a present finalized block should succeed");
+
+        receipts_mock.assert_async().await;
+        block_by_number_mock.assert_async().await;
+
+        // The block event must still be emitted.
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+    }
+
+    #[tokio::test]
+    async fn catchup_unfinalized_block_keeps_reorg_check() {
+        let mut server = Server::new_async().await;
+
+        let block = test_utils::block(42);
+        let MaybeBlock::Block(block) = block else {
+            unreachable!("test_utils::block returns MaybeBlock::Block")
+        };
+        let block_number = block.header.number;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::missing_block_response(2).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // `eth_getBlockByNumber(Number)` — expected once: block 42 is above the
+        // sampled finalized head (10), so the check runs. Matching hash → emit.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(3, block_number).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+        // Finalized head sampled at 10 → block 42 is unfinalized at fetch time.
+        indexer.catchup_finalized_head.store(10, Ordering::Relaxed);
+
+        indexer
+            .process_catchup(&MaybeBlock::Block(block))
+            .await
+            .expect("catchup over an unfinalized block should succeed");
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_process_refetches_block_for_reorg_check() {
+        let mut server = Server::new_async().await;
+
+        let MaybeBlock::Block(block) = test_utils::block(42) else {
+            unreachable!("test_utils::block returns MaybeBlock::Block")
+        };
+        let block_number = block.header.number;
+
+        // `eth_getBlockReceipts` — expected once.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::missing_block_response(2).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // `eth_getBlockByNumber(Number)` — expected once for the reorg check.
+        // Returns the same block (matching hash) so emission proceeds.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(3, block_number).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Optimistic mode (default) so `wait_for_finalized_block` is skipped.
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+
+        indexer
+            .process(&MaybeBlock::Block(block))
+            .await
+            .expect("live process over a block should succeed");
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_process_skips_emission_when_block_reorged() {
+        let mut server = Server::new_async().await;
+
+        // Original block we hand to `process` (hash derived from number 42).
+        let MaybeBlock::Block(block) = test_utils::block(42) else {
+            unreachable!("test_utils::block returns MaybeBlock::Block")
+        };
+        let block_number = block.header.number;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::missing_block_response(2).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Re-fetch returns a block with a DIFFERENT number/hash (99), so the
+        // hash comparison fails and emission is skipped.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(3, 99).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+
+        indexer
+            .process(&MaybeBlock::Block(block))
+            .await
+            .expect("reorged live block should not error");
+
+        // No events should be emitted for the reorged block.
+        assert!(
+            events_rx.try_recv().is_err(),
+            "no events should be emitted for a reorged live block"
+        );
     }
 
     #[tokio::test]
