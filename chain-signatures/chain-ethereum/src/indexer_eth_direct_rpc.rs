@@ -5,7 +5,7 @@ use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -75,10 +75,8 @@ impl RpcEthereumClient {
                         vec![json!(format!("{:#x}", hash.block_hash)), json!(false)]
                     }
                 };
-
                 (
                     request_id,
-                    *block_id,
                     json!({
                         "jsonrpc": "2.0",
                         "id": request_id,
@@ -92,60 +90,16 @@ impl RpcEthereumClient {
             })
             .collect::<Vec<_>>();
 
-        let request_ids = requests
-            .iter()
-            .map(|(request_id, block_id, _)| (*request_id, *block_id))
-            .collect::<Vec<_>>();
-        let payload = requests
+        let results: Vec<Option<Block>> = self.batch_execute(requests).await?;
+
+        Ok(results
             .into_iter()
-            .map(|(_, _, request)| request)
-            .collect::<Vec<_>>();
-
-        let response = self.http.post(&self.url).json(&payload).send().await?;
-        let value: serde_json::Value = response.json().await?;
-        let items = if let serde_json::Value::Array(items) = value {
-            items
-        } else {
-            anyhow::bail!("batch rpc response was not an array: {value}");
-        };
-
-        #[derive(serde::Deserialize)]
-        struct BatchResponse<T> {
-            id: u64,
-            result: Option<T>,
-            error: Option<serde_json::Value>,
-        }
-
-        let requested_blocks = request_ids.iter().copied().collect::<HashMap<_, _>>();
-        let mut blocks_by_id = HashMap::with_capacity(request_ids.len());
-        for item in items {
-            let response: BatchResponse<Block> = serde_json::from_value(item)?;
-            if let Some(error) = response.error {
-                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
-            }
-
-            let block_id = if let Some(block_id) = requested_blocks.get(&response.id).copied() {
-                block_id
-            } else {
-                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
-            };
-
-            let block = match response.result {
+            .zip(block_ids.iter())
+            .map(|(maybe, block_id)| match maybe {
                 Some(block) => MaybeBlock::Block(block),
-                None => MaybeBlock::Missing(block_id),
-            };
-            blocks_by_id.insert(response.id, block);
-        }
-
-        let blocks = request_ids
-            .into_iter()
-            .map(|(request_id, block_id)| {
-                blocks_by_id
-                    .remove(&request_id)
-                    .unwrap_or_else(|| MaybeBlock::Missing(block_id))
+                None => MaybeBlock::Missing(*block_id),
             })
-            .collect();
-        Ok(blocks)
+            .collect())
     }
 
     pub async fn get_block_receipts(
@@ -179,7 +133,6 @@ impl RpcEthereumClient {
                 let request_id = self.next_id();
                 (
                     request_id,
-                    *block_id,
                     json!({
                         "jsonrpc": "2.0",
                         "id": request_id,
@@ -190,52 +143,7 @@ impl RpcEthereumClient {
             })
             .collect::<Vec<_>>();
 
-        let request_ids = requests
-            .iter()
-            .map(|(request_id, block_id, _)| (*request_id, *block_id))
-            .collect::<Vec<_>>();
-        let payload = requests
-            .into_iter()
-            .map(|(_, _, request)| request)
-            .collect::<Vec<_>>();
-
-        let response = self.http.post(&self.url).json(&payload).send().await?;
-        let value: serde_json::Value = response.json().await?;
-        let items = if let serde_json::Value::Array(items) = value {
-            items
-        } else {
-            anyhow::bail!("batch rpc response was not an array: {value}");
-        };
-
-        #[derive(serde::Deserialize)]
-        struct BatchResponse<T> {
-            id: u64,
-            result: Option<Vec<T>>,
-            error: Option<serde_json::Value>,
-        }
-
-        let requested_ids = request_ids
-            .iter()
-            .copied()
-            .collect::<HashMap<_, _>>();
-        let mut receipts_by_id: HashMap<u64, Option<Vec<TransactionReceipt>>> =
-            HashMap::with_capacity(request_ids.len());
-        for item in items {
-            let response: BatchResponse<TransactionReceipt> = serde_json::from_value(item)?;
-            if let Some(error) = response.error {
-                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
-            }
-            if !requested_ids.contains_key(&response.id) {
-                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
-            }
-            receipts_by_id.insert(response.id, response.result);
-        }
-
-        let receipts = request_ids
-            .into_iter()
-            .map(|(request_id, _)| receipts_by_id.remove(&request_id).flatten())
-            .collect();
-        Ok(receipts)
+        self.batch_execute(requests).await
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
@@ -323,6 +231,58 @@ impl RpcEthereumClient {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         Ok(serde_json::from_value(result)?)
+    }
+
+    /// Send a pre-assembled JSON-RPC batch and return results in input order.
+    /// Each entry in the returned `Vec` corresponds to the request at the same
+    /// index. A server-returned `null` result or a missing response both map to
+    /// `None`.
+    async fn batch_execute<T: DeserializeOwned>(
+        &self,
+        requests: Vec<(u64, serde_json::Value)>,
+    ) -> anyhow::Result<Vec<Option<T>>> {
+        #[derive(serde::Deserialize)]
+        struct BatchResponse<T> {
+            id: u64,
+            result: Option<T>,
+            error: Option<serde_json::Value>,
+        }
+
+        // Extract the request IDs and build a set of valid IDs for validation. The
+        // payload is the JSON-RPC batch array of request objects.
+        let ordered_ids: Vec<u64> = requests.iter().map(|(id, _)| *id).collect();
+        let valid_ids: HashSet<u64> = ordered_ids.iter().copied().collect();
+        let payload: Vec<serde_json::Value> =
+            requests.into_iter().map(|(_, body)| body).collect();
+
+        // Send the batch request and parse the response. The response is expected to be an array of JSON-RPC response objects.
+        let response = self.http.post(&self.url).json(&payload).send().await?;
+        let value: serde_json::Value = response.json().await?;
+        let items = if let serde_json::Value::Array(items) = value {
+            items
+        } else {
+            anyhow::bail!("batch rpc response was not an array: {value}");
+        };
+
+        // Build a map of response IDs to results. 
+        let mut results_by_id: HashMap<u64, Option<T>> =
+            HashMap::with_capacity(ordered_ids.len());
+            
+        for item in items {
+            let response: BatchResponse<T> = serde_json::from_value(item)?;
+            if let Some(error) = response.error {
+                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
+            }
+            if !valid_ids.contains(&response.id) {
+                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
+            }
+            results_by_id.insert(response.id, response.result);
+        }
+
+        Ok(ordered_ids
+            .into_iter()
+            .map(|id| results_by_id.remove(&id).flatten())
+            .collect())
     }
 
     async fn block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
