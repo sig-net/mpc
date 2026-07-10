@@ -252,8 +252,7 @@ impl RpcEthereumClient {
         // payload is the JSON-RPC batch array of request objects.
         let ordered_ids: Vec<u64> = requests.iter().map(|(id, _)| *id).collect();
         let valid_ids: HashSet<u64> = ordered_ids.iter().copied().collect();
-        let payload: Vec<serde_json::Value> =
-            requests.into_iter().map(|(_, body)| body).collect();
+        let payload: Vec<serde_json::Value> = requests.into_iter().map(|(_, body)| body).collect();
 
         // Send the batch request and parse the response. The response is expected to be an array of JSON-RPC response objects.
         let response = self.http.post(&self.url).json(&payload).send().await?;
@@ -264,10 +263,9 @@ impl RpcEthereumClient {
             anyhow::bail!("batch rpc response was not an array: {value}");
         };
 
-        // Build a map of response IDs to results. 
-        let mut results_by_id: HashMap<u64, Option<T>> =
-            HashMap::with_capacity(ordered_ids.len());
-            
+        // Build a map of response IDs to results.
+        let mut results_by_id: HashMap<u64, Option<T>> = HashMap::with_capacity(ordered_ids.len());
+
         for item in items {
             let response: BatchResponse<T> = serde_json::from_value(item)?;
             if let Some(error) = response.error {

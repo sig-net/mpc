@@ -1013,6 +1013,292 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catchup_batch_receipts_single_batch_post() {
+        let mut server = Server::new_async().await;
+
+        // 32-block catchup: assert exactly 1 eth_getBlockReceipts(batch)
+        let blocks: Vec<_> = (1..=32)
+            .map(|n| test_utils::block_response(n as u64, n as u64))
+            .collect();
+        let blocks_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(blocks).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // client.get_block_receipts_batch is called next, taking AtomicU64 IDs 33..=64
+        let receipts_resp = (33..=64).map(|n| (n, Some(json!([])))).collect::<Vec<_>>();
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::receipts_batch_response(&receipts_resp).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+        // Ensure blocks are considered finalized to avoid reorg-check refetches in process_catchup
+        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+
+        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 1, 33);
+        for n in 1..=32 {
+            let item = iter.next().await.expect("expected item");
+            indexer
+                .process_catchup(&item)
+                .await
+                .expect("processing batch block should succeed");
+
+            assert!(matches!(
+                events_rx.recv().await,
+                Some(ChainEvent::Block(b)) if b == n
+            ));
+        }
+
+        blocks_mock.assert_async().await;
+        receipts_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn catchup_batch_receipts_preserves_order() {
+        let mut server = Server::new_async().await;
+
+        // Mock batch receipt responses deliberately out-of-order by id
+        let blocks_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    test_utils::block_response(1, 10),
+                    test_utils::block_response(2, 11)
+                ])
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    { "jsonrpc": "2.0", "id": 4, "result": [] }, // block 11
+                    { "jsonrpc": "2.0", "id": 3, "result": [] } // block 10
+                ])
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+
+        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 10, 12);
+
+        let item1 = iter.next().await.unwrap();
+        indexer.process_catchup(&item1).await.unwrap();
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(10))
+        ));
+
+        let item2 = iter.next().await.unwrap();
+        indexer.process_catchup(&item2).await.unwrap();
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(11))
+        ));
+
+        blocks_mock.assert_async().await;
+        receipts_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn catchup_missing_block_falls_back_to_single_receipt_fetch() {
+        let mut server = Server::new_async().await;
+        let block_number = 12;
+
+        // One Missing in the batch;
+        // assert process_catchup does 1 get_block + 1 single eth_getBlockReceipts for that block.
+        let block_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, block_number).to_string())
+            .expect(1) // Should only be fetched once because we consider it finalized
+            .create_async()
+            .await;
+
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": []
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+
+        // Ensure block is considered finalized to avoid the reorg-check refetch
+        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+
+        let item = CatchupItem::Missing(BlockId::Number(BlockNumberOrTag::Number(block_number)));
+        indexer
+            .process_catchup(&item)
+            .await
+            .expect("processing missing block should succeed with refetch");
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+
+        block_mock.assert_async().await;
+        receipts_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn catchup_batch_receipts_null_treated_as_empty() {
+        let mut server = Server::new_async().await;
+        let block_number = 42;
+
+        // A batch receipts response with null
+        let blocks_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!([test_utils::block_response(1, block_number)]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::receipts_batch_response(&[(2, None)]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+        // Ensure block is considered finalized to avoid the reorg-check refetch
+        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+
+        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 42, 43);
+        let item = iter.next().await.unwrap();
+
+        indexer
+            .process_catchup(&item)
+            .await
+            .expect("processing batch block with null receipts (normalized) should succeed");
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+
+        blocks_mock.assert_async().await;
+        receipts_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn live_process_fetches_receipts_singly() {
+        let mut server = Server::new_async().await;
+        let block_number = 42;
+        let item = test_utils::live_block(block_number);
+        let CatchupItem::LiveBlock(_) = &item else {
+            unreachable!()
+        };
+
+        // Live path: assert exactly 1 single eth_getBlockReceipts
+        let receipts_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": [format!("0x{block_number:x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": []
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Reorg check also happens for live blocks.
+        let reorg_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(2, block_number).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
+
+        indexer
+            .process(&item)
+            .await
+            .expect("live process should succeed");
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(n)) if n == block_number
+        ));
+
+        receipts_mock.assert_async().await;
+        reorg_mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
         let (mut indexer, mut events_rx) =
             test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
@@ -1041,20 +1327,6 @@ mod tests {
             unreachable!("test_utils::batch_block returns CatchupItem::BatchBlock")
         };
         let block_number = block.header.number;
-
-        // `eth_getBlockReceipts` — expected expected 0 times because it was already part of the batch
-        let receipts_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(2).to_string())
-            .expect(0)
-            .create_async()
-            .await;
 
         // `eth_getBlockByNumber(Number)` for the same block — must NEVER be hit,
         // because this catchup block is at or below the finalized head sampled at
@@ -1085,7 +1357,6 @@ mod tests {
             .await
             .expect("catchup over a present finalized block should succeed");
 
-        receipts_mock.assert_async().await;
         block_by_number_mock.assert_async().await;
 
         // The block event must still be emitted.
@@ -1105,22 +1376,9 @@ mod tests {
         };
         let block_number = block.header.number;
 
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(2).to_string())
-            .expect(0)
-            .create_async()
-            .await;
-
         // `eth_getBlockByNumber(Number)` — expected once: block 42 is above the
         // sampled finalized head (10), so the check runs. Matching hash → emit.
-        server
+        let block_by_number_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockByNumber",
@@ -1144,6 +1402,8 @@ mod tests {
             .await
             .expect("catchup over an unfinalized block should succeed");
 
+        block_by_number_mock.assert_async().await;
+
         assert!(matches!(
             events_rx.recv().await,
             Some(ChainEvent::Block(n)) if n == block_number
@@ -1160,8 +1420,7 @@ mod tests {
         };
         let block_number = block.header.number;
 
-        // `eth_getBlockReceipts` — expected once.
-        server
+        let receipts_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockReceipts",
@@ -1169,14 +1428,21 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(2).to_string())
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": []
+                })
+                .to_string(),
+            )
             .expect(1)
             .create_async()
             .await;
 
         // `eth_getBlockByNumber(Number)` — expected once for the reorg check.
         // Returns the same block (matching hash) so emission proceeds.
-        server
+        let reorg_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockByNumber",
@@ -1189,7 +1455,6 @@ mod tests {
             .create_async()
             .await;
 
-        // Optimistic mode (default) so `wait_for_finalized_block` is skipped.
         let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
             .build_with_rx()
             .await;
@@ -1203,6 +1468,9 @@ mod tests {
             events_rx.recv().await,
             Some(ChainEvent::Block(n)) if n == block_number
         ));
+
+        receipts_mock.assert_async().await;
+        reorg_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1215,7 +1483,7 @@ mod tests {
         };
         let block_number = block.header.number;
 
-        server
+        let receipts_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockReceipts",
@@ -1223,14 +1491,21 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(2).to_string())
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": []
+                })
+                .to_string(),
+            )
             .expect(1)
             .create_async()
             .await;
 
         // Re-fetch returns a block with a DIFFERENT number/hash (99), so the
         // hash comparison fails and emission is skipped.
-        server
+        let reorg_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockByNumber",
@@ -1257,6 +1532,9 @@ mod tests {
             events_rx.try_recv().is_err(),
             "no events should be emitted for a reorged live block"
         );
+
+        receipts_mock.assert_async().await;
+        reorg_mock.assert_async().await;
     }
 
     #[tokio::test]

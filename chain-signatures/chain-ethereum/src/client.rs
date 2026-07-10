@@ -800,4 +800,96 @@ mod tests {
 
         assert!(block.is_none());
     }
+
+    #[tokio::test]
+    async fn catchup_iter_receipt_batch_order_preservation() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 2 blocks: 10 (0xa), 11 (0xb). IDs 1 and 2 (counter starts at 1).
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    test_utils::block_response(1, 10),
+                    test_utils::block_response(2, 11),
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Receipts batch IDs are 3 and 4. Return them SWAPPED (4 then 3) to test
+        // that batch_execute reorders by ID so block 10 → 1 receipt, block 11 → 2 receipts.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    // ID 4 first (block 11 → 2 receipts)
+                    { "jsonrpc": "2.0", "id": 4, "result": [{
+                        "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                        "blockHash": "0x000000000000000000000000000000000000000000000000000000000000000b",
+                        "blockNumber": "0xb", "transactionIndex": "0x0",
+                        "from": "0x0000000000000000000000000000000000000000",
+                        "to":   "0x0000000000000000000000000000000000000001",
+                        "cumulativeGasUsed": "0x0", "gasUsed": "0x0",
+                        "contractAddress": null, "logs": [], "status": "0x1",
+                        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "type": "0x2", "effectiveGasPrice": "0x1"
+                    }, {
+                        "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+                        "blockHash": "0x000000000000000000000000000000000000000000000000000000000000000b",
+                        "blockNumber": "0xb", "transactionIndex": "0x1",
+                        "from": "0x0000000000000000000000000000000000000000",
+                        "to":   "0x0000000000000000000000000000000000000001",
+                        "cumulativeGasUsed": "0x0", "gasUsed": "0x0",
+                        "contractAddress": null, "logs": [], "status": "0x1",
+                        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "type": "0x2", "effectiveGasPrice": "0x1"
+                    }]},
+                    // ID 3 second (block 10 → 1 receipt)
+                    { "jsonrpc": "2.0", "id": 3, "result": [{
+                        "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                        "blockHash": "0x000000000000000000000000000000000000000000000000000000000000000a",
+                        "blockNumber": "0xa", "transactionIndex": "0x0",
+                        "from": "0x0000000000000000000000000000000000000000",
+                        "to":   "0x0000000000000000000000000000000000000001",
+                        "cumulativeGasUsed": "0x0", "gasUsed": "0x0",
+                        "contractAddress": null, "logs": [], "status": "0x1",
+                        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                        "type": "0x2", "effectiveGasPrice": "0x1"
+                    }]}
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
+        let mut iter = CatchupIter::new(client, 10, 12);
+
+        let item1 = iter.next().await.unwrap();
+        let item2 = iter.next().await.unwrap();
+
+        // Block 10 → 1 receipt (ID 3 was second in response but maps to block 10)
+        if let CatchupItem::BatchBlock { block, receipts } = item1 {
+            assert_eq!(block.header.number, 10, "first item should be block 10");
+            assert_eq!(receipts.len(), 1, "block 10 should have 1 receipt");
+        } else {
+            panic!("Expected BatchBlock for block 10, got {:?}", item1);
+        }
+
+        // Block 11 → 2 receipts (ID 4 was first in response but maps to block 11)
+        if let CatchupItem::BatchBlock { block, receipts } = item2 {
+            assert_eq!(block.header.number, 11, "second item should be block 11");
+            assert_eq!(receipts.len(), 2, "block 11 should have 2 receipts");
+        } else {
+            panic!("Expected BatchBlock for block 11, got {:?}", item2);
+        }
+    }
 }
