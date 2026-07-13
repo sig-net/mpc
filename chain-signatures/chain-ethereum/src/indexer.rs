@@ -1,5 +1,8 @@
 use crate::abi::ChainSignatures;
-use crate::client::{BlockNumber, CatchupItem, CatchupIter, EthereumClient, MaybeBlock};
+use crate::client::{
+    BlockNumber, CatchupItem, EthereumClient, MaybeBlock, CATCHUP_BLOCK_BATCH_SIZE,
+    CATCHUP_CONCURRENT_BATCHES,
+};
 use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
 use crate::EthConfig;
 use alloy::consensus::Transaction;
@@ -9,7 +12,7 @@ use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::stream::{self, StreamExt};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
@@ -764,8 +767,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
-
         // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
         if let Some(finalized_block) = self
             .client
@@ -786,11 +787,23 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        // Convert the async state machine into a Stream
-        let stream = stream::unfold(catchup_iter, |mut state| async move {
-            let item = state.next().await;
-            item.map(|block| (block, state))
-        });
+        let client = self.client.clone();
+        let stream = stream::iter(
+            (catchup_start..anchor_height)
+                .step_by(CATCHUP_BLOCK_BATCH_SIZE as usize)
+                .map(move |start| {
+                    let end = start
+                        .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
+                        .min(anchor_height);
+                    (start, end)
+                }),
+        )
+        .map(move |(start, end)| {
+            let client = client.clone();
+            async move { client.fetch_batch(start, end).await }
+        })
+        .buffered(CATCHUP_CONCURRENT_BATCHES)
+        .flat_map(stream::iter);
 
         Box::pin(stream)
     }
