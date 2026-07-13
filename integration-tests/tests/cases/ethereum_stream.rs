@@ -20,7 +20,7 @@ use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming, StreamContext};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
     Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs,
@@ -472,14 +472,16 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_replayed_payload = false;
@@ -653,14 +655,16 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_execution_follow_up = false;
@@ -841,14 +845,16 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_catchup_flush = false;

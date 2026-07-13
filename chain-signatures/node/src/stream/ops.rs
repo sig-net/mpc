@@ -1,68 +1,62 @@
-use crate::backlog::Backlog;
+use anyhow::Context;
+
 use crate::respond_bidirectional::CompletedTx;
-use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
+use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
     RespondBidirectionalEvent, SignCommand, SignId, SignKind, Signature, SignatureRespondedEvent,
 };
-use tokio::sync::mpsc;
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
-    sign_tx: mpsc::Sender<SignCommand>,
-    backlog: Backlog,
-    caught_up: bool,
+    ctx: &StreamContext,
 ) -> anyhow::Result<()> {
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
     }
 
-    backlog.insert(sign_request.clone()).await;
+    ctx.backlog.insert(sign_request.clone()).await;
 
-    let chain = sign_request.chain;
-    if caught_up {
-        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(?err, %chain, "failed to send sign request into queue");
-        }
+    if ctx.caught_up {
+        let chain = sign_request.chain;
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
     }
 
     Ok(())
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
-    backlog: &Backlog,
+    ctx: &StreamContext,
     source_chain: Chain,
-    sign_tx: mpsc::Sender<SignCommand>,
-) {
-    for sign_request in backlog.take_requeueable_requests(source_chain).await {
+) -> anyhow::Result<()> {
+    for sign_request in ctx.backlog.take_requeueable_requests(source_chain).await {
         let sign_id = sign_request.id;
         let source_chain = sign_request.chain;
-        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(
-                ?err,
-                ?sign_id,
-                ?source_chain,
-                "failed to requeue sign request after catchup"
-            );
-        }
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}"
+                )
+            })?;
     }
+    Ok(())
 }
 
-pub(crate) async fn resume_pending_publish_requests(
-    backlog: &Backlog,
-    source_chain: Chain,
-    contract_watcher: &ContractStateWatcher,
-    rpc: &RpcChannel,
-) {
-    let publishable = backlog.publishable_requests(source_chain).await;
+pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
+    let publishable = ctx.backlog.publishable_requests(source_chain).await;
     if publishable.is_empty() {
         return;
     }
 
-    let Some(public_key) = contract_watcher.public_key().await else {
+    let Some(public_key) = ctx.contract_watcher.public_key().await else {
         tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
         return;
     };
@@ -72,7 +66,7 @@ pub(crate) async fn resume_pending_publish_requests(
         }
 
         let sign_id = sign_request.id;
-        rpc.publish_signature(
+        ctx.rpc.publish_signature(
             public_key,
             sign_request,
             publish.signature,
@@ -94,24 +88,17 @@ fn verify_entry_signature(
         entry.request.args.payload,
         signature,
     )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "respond event carried invalid signature for sign id {:?}: {err}",
-            sign_id
-        )
-    })
+    .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))
 }
 
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
-    sign_tx: mpsc::Sender<SignCommand>,
+    ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
-    backlog: &Backlog,
-    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id);
     let source_chain = respond_event.chain;
-    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
         tracing::info!(
             ?sign_id,
             ?source_chain,
@@ -127,11 +114,12 @@ pub(crate) async fn process_respond_event(
     let event = match &entry.request.kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
-            backlog.remove(source_chain, &sign_id).await;
-            if caught_up {
-                if let Err(err) = sign_tx.send(SignCommand::Completion(sign_id)).await {
-                    anyhow::bail!("failed to send completion for respond event: {err:?}");
-                }
+            ctx.backlog.remove(source_chain, &sign_id).await;
+            if ctx.caught_up {
+                ctx.sign_tx
+                    .send(SignCommand::Completion(sign_id))
+                    .await
+                    .context("failed to send completion for respond event")?;
             }
             return Ok(());
         }
@@ -157,9 +145,9 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event.target_chain().map_err(|err| {
-        anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
-    })?;
+    let target_chain = event
+        .target_chain()
+        .with_context(|| format!("failed to process respond event for sign id: {sign_id:?}"))?;
 
     // Get the MPC public key and derive the from_address.
     let epsilon = event.epsilon()?;
@@ -203,44 +191,34 @@ pub(crate) async fn process_respond_event(
         "bidirectional tx details before advancement",
     );
 
-    match backlog
+    ctx.backlog
         .advance(source_chain, sign_id, bidirectional_tx)
         .await
-    {
-        Ok(_) => {
-            tracing::info!(
-                ?sign_id,
-                ?tx_id,
-                ?target_chain,
-                "advance bidirectional tx to execution successful"
-            );
-        }
-        Err(err) => {
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?target_chain,
-                ?err,
-                "advance bidirectional tx to execution failed"
-            );
-        }
-    }
+        .with_context(|| {
+            format!(
+                "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}"
+            )
+        })?;
+    tracing::info!(
+        ?sign_id,
+        ?tx_id,
+        ?target_chain,
+        "advance bidirectional tx to execution successful"
+    );
 
     Ok(())
 }
 
 pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
-    sign_tx: mpsc::Sender<SignCommand>,
+    ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
-    backlog: &Backlog,
-    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id);
     let source_chain = event.chain;
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
 
-    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
         return Ok(());
     };
@@ -254,18 +232,22 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     verify_entry_signature(root_pk, &entry, &event.signature, sign_id)?;
 
-    if backlog.remove(source_chain, &sign_id).await.is_some() {
+    if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
         return Ok(());
     }
 
-    if caught_up {
-        sign_tx
+    if ctx.caught_up {
+        ctx.sign_tx
             .send(SignCommand::Completion(sign_id))
             .await
-            .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+            .with_context(|| {
+                format!(
+                    "failed to send completion for respond bidirectional for sign id {sign_id:?}"
+                )
+            })?;
     }
 
     Ok(())
@@ -273,17 +255,14 @@ pub(crate) async fn process_respond_bidirectional_event(
 
 /// Process an execution confirmation emitted by a chain client.
 /// The target chain is the chain where the execution was observed.
-#[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
     sign_id: SignId,
     source_chain: Chain,
     block_height: u64,
     result: ExecutionOutcome,
-    backlog: &Backlog,
-    sign_tx: mpsc::Sender<SignCommand>,
+    ctx: &StreamContext,
     target_chain: Chain,
-    caught_up: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(
         ?tx_id,
@@ -296,7 +275,7 @@ pub async fn process_execution_confirmed(
 
     // Remove the watcher; if it's not found, it might have been processed already
     let Some((unwatched_sign_id, pending_tx)) =
-        backlog.unwatch_execution(target_chain, &tx_id).await
+        ctx.backlog.unwatch_execution(target_chain, &tx_id).await
     else {
         tracing::warn!(
             ?tx_id,
@@ -308,7 +287,8 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    let chain_ctx = backlog
+    let chain_ctx = ctx
+        .backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
         .and_then(|entry| match entry.request.kind {
@@ -328,48 +308,44 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    if let Err(err) = backlog
+    ctx.backlog
         .set_request(
             pending_tx.source_chain,
             &unwatched_sign_id,
             sign_request.clone(),
         )
         .await
-    {
-        tracing::error!(
-            ?tx_id,
-            ?unwatched_sign_id,
-            ?source_chain,
-            ?err,
-            "failed to persist completion request on pending tx"
-        );
-        anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
-    }
+        .with_context(|| {
+            format!(
+                "failed to persist completion request on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+            )
+        })?;
 
-    let set_res = backlog
+    let set_res = ctx
+        .backlog
         .set_status(
             pending_tx.source_chain,
             &unwatched_sign_id,
             SignStatus::PendingGenerationBidirectional,
         )
         .await;
-    let updated_tx = match set_res {
-        Some(tx) => tx,
-        None => {
-            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
-            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
-        }
-    };
+    let updated_tx = set_res.ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed to set status on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {:?}",
+            pending_tx.source_chain
+        )
+    })?;
     tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
     let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
-    if caught_up || chain != target_chain {
-        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(?err, %chain, "failed to send sign request into queue");
-        }
+    if ctx.caught_up || chain != target_chain {
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
     }
 
     Ok(())
@@ -378,38 +354,38 @@ pub async fn process_execution_confirmed(
 pub(crate) async fn process_block_event<T: ChainTelemetry>(
     chain: Chain,
     block: u64,
-    backlog: &Backlog,
-    sign_tx: &mpsc::Sender<SignCommand>,
-    caught_up: bool,
+    ctx: &StreamContext,
     telemetry: &T,
-) {
+) -> anyhow::Result<()> {
     telemetry.block_finalized(block);
 
     // should not create checkpoint for blocks that are not caught up, as that would
     // try to create signatures for checkpoints where we are not live.
-    if !caught_up {
-        return;
+    if !ctx.caught_up {
+        return Ok(());
     }
-    let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
-        return;
+    let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {
+        return Ok(());
     };
 
     telemetry.checkpoint_created(checkpoint.block_height);
 
-    tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
     let digest = checkpoint.digest();
     let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
-    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(
-        mpc_primitives::ConsensusCheckpointDigest {
-            chain,
-            height: checkpoint.block_height,
-            digest,
-        },
-        epsilon,
-    ));
-    if let Err(err) = sign_tx.send(sign).await {
-        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
-    }
+    let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
+        chain,
+        height: checkpoint.block_height,
+        digest,
+    };
+    let sign_id = checkpoint_digest.sign_id();
+    tracing::info!(block, ?checkpoint, %chain, ?sign_id, "created checkpoint");
+    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
+    ctx.sign_tx
+        .send(sign)
+        .await
+        .with_context(|| format!("failed to enqueue checkpoint sign request for chain {chain}"))?;
+
+    Ok(())
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.

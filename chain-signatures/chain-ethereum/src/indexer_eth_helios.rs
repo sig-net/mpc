@@ -71,6 +71,28 @@ impl HeliosEthereumClient {
             .map_err(|err| anyhow::anyhow!("Failed to get block receipts for block: {:?}", err))
     }
 
+    /// Helios has no native JSON-RPC batch, so batch = `join_all` of single
+    /// `get_block_receipts` calls (mirrors `get_blocks`). Order-preserving via
+    /// the input index ordering of `join_all`.
+    pub async fn get_block_receipts_batch(
+        &self,
+        block_ids: &[alloy::rpc::types::BlockId],
+    ) -> anyhow::Result<Vec<Option<Vec<alloy::rpc::types::TransactionReceipt>>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = join_all(
+            block_ids
+                .iter()
+                .copied()
+                .map(|block_id| async move { self.get_block_receipts(block_id).await }),
+        )
+        .await;
+
+        results.into_iter().collect()
+    }
+
     pub async fn get_nonce(
         &self,
         address: Address,

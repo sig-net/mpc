@@ -14,8 +14,9 @@ use crate::types::CheckpointWatcher;
 
 pub use crate::stream::pipeline::ChainPipeline;
 
+use anyhow::Context;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
-use mpc_primitives::{ChainEvent, SignCommand};
+use mpc_primitives::{Chain, ChainEvent, SignCommand};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,23 +26,51 @@ pub enum ChainStreaming {
     Live,
 }
 
+/// Shared, per-chain dependencies
+pub struct StreamContext {
+    pub backlog: Backlog,
+    pub sign_tx: mpsc::Sender<SignCommand>,
+    pub rpc: RpcChannel,
+    pub contract_watcher: ContractStateWatcher,
+    pub mesh_state: watch::Receiver<MeshState>,
+    pub node_client: NodeClient,
+    pub checkpoints_rx: CheckpointWatcher,
+    pub caught_up: bool,
+}
+
+impl StreamContext {
+    pub fn new(
+        backlog: Backlog,
+        sign_tx: mpsc::Sender<SignCommand>,
+        rpc: RpcChannel,
+        contract_watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        checkpoints_rx: CheckpointWatcher,
+    ) -> Self {
+        Self {
+            backlog,
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state,
+            node_client,
+            checkpoints_rx,
+            caught_up: false,
+        }
+    }
+}
+
 /// Shared indexer loop: recovers backlog then processes events from the stream
-#[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     mut stream: S,
-    sign_tx: mpsc::Sender<SignCommand>,
-    rpc: RpcChannel,
-    backlog: Backlog,
+    mut ctx: StreamContext,
     telemetry: T,
-    mut contract_watcher: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
-    checkpoints_rx: CheckpointWatcher,
 ) {
     let chain = S::Indexer::CHAIN;
     tracing::info!(%chain, "starting stream");
 
-    let threshold = contract_watcher.wait_threshold().await;
+    let threshold = ctx.contract_watcher.wait_threshold().await;
 
     let indexer = match stream.start().await {
         Ok(indexer) => indexer,
@@ -53,104 +82,34 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
-        checkpoints_rx.clone(),
-        backlog.clone(),
-        sign_tx.clone(),
-        mesh_state.clone(),
-        node_client,
+        ctx.checkpoints_rx.clone(),
+        ctx.backlog.clone(),
+        ctx.sign_tx.clone(),
+        ctx.mesh_state.clone(),
+        ctx.node_client.clone(),
         threshold,
-        contract_watcher.account_id().clone(),
+        ctx.contract_watcher.account_id().clone(),
     );
     let indexer_task = tokio::spawn(pipeline.run());
 
-    let root_pk = contract_watcher.wait_public_key().await;
+    let root_pk = ctx.contract_watcher.wait_public_key().await;
 
-    let mut caught_up = false;
     loop {
         tokio::select! {
             event = stream.next_event() => {
                 let Some(event) = event else {
                     break;
                 };
-                match event {
-                    ChainEvent::CatchupCompleted => {
-                        if caught_up {
-                            continue;
-                        }
-                        caught_up = true;
-
-                        requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
-                        resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
-                    }
-                    ChainEvent::SignRequest { request, block_timestamp } => {
-                        // Handle metrics reporting for the sign request event
-                        if let Some(ts) = block_timestamp {
-                            // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
-                            telemetry.request_indexed_at(ts);
-                        } else {
-                            // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
-                            telemetry.request_indexed();
-                        }
-
-                        if let Err(err) =
-                            process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
-                        {
-                            tracing::error!(?err, %chain, "failed to process sign request");
-                        }
-                    }
-                    ChainEvent::Respond(ev) => {
-                        if let Err(err) = process_respond_event(
-                            ev,
-                            sign_tx.clone(),
-                            root_pk,
-                            &backlog,
-                            caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond event");
-                        }
-                    }
-                    ChainEvent::RespondBidirectional(ev) => {
-                        if let Err(err) =
-                            process_respond_bidirectional_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up)
-                                .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond bidirectional event");
-                        }
-                    }
-                    ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
-                    }
-                    ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        sign_id,
-                        source_chain,
-                        block_height,
-                        result,
-                    } => {
-                        if let Err(err) = process_execution_confirmed(
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height,
-                            result,
-                            &backlog,
-                            sign_tx.clone(),
-                            chain,
-                            caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process execution confirmation");
-                        }
-                    }
+                if let Err(err) =
+                    handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
+                {
+                    tracing::error!(?err, %chain, "failed to process chain event");
                 }
             }
             _ = state_rx.changed() => {
                 let state = *state_rx.borrow_and_update();
                 if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
-                    caught_up = false;
+                    ctx.caught_up = false;
                 }
             }
         }
@@ -158,6 +117,82 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 
     tracing::warn!(%chain, "stream shutting down");
     indexer_task.abort();
+}
+
+/// Dispatch a single chain event to the appropriate processor.
+async fn handle_chain_event<T: ChainTelemetry>(
+    event: ChainEvent,
+    ctx: &mut StreamContext,
+    telemetry: &T,
+    root_pk: mpc_primitives::PublicKey,
+    chain: Chain,
+) -> anyhow::Result<()> {
+    match event {
+        ChainEvent::CatchupCompleted => {
+            if ctx.caught_up {
+                return Ok(());
+            }
+            ctx.caught_up = true;
+
+            requeue_pending_sign_requests(ctx, chain)
+                .await
+                .context("failed to requeue pending sign requests")?;
+            resume_pending_publish_requests(ctx, chain).await;
+        }
+        ChainEvent::SignRequest {
+            request,
+            block_timestamp,
+        } => {
+            // Handle metrics reporting for the sign request event
+            if let Some(ts) = block_timestamp {
+                // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
+                telemetry.request_indexed_at(ts);
+            } else {
+                // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
+                telemetry.request_indexed();
+            }
+
+            process_sign_request(request, ctx)
+                .await
+                .context("failed to process sign request")?;
+        }
+        ChainEvent::Respond(ev) => {
+            process_respond_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond event")?;
+        }
+        ChainEvent::RespondBidirectional(ev) => {
+            process_respond_bidirectional_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond bidirectional event")?;
+        }
+        ChainEvent::Block(block) => {
+            process_block_event(chain, block, ctx, telemetry)
+                .await
+                .context("failed to process block event")?;
+        }
+        ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id,
+            source_chain,
+            block_height,
+            result,
+        } => {
+            process_execution_confirmed(
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height,
+                result,
+                ctx,
+                chain,
+            )
+            .await
+            .context("failed to process execution confirmation")?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

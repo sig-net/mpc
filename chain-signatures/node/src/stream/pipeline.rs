@@ -41,6 +41,8 @@ pub struct ChainPipeline<I: ChainIndexer> {
     node_client: NodeClient,
     threshold: usize,
     my_account_id: AccountId,
+    /// Per-block watchdog timeout for `handle_live` and `handle_catchup`.
+    watchdog_timeout: Duration,
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
@@ -92,8 +94,40 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
+            watchdog_timeout: live_block_timeout(I::CHAIN),
         };
         (this, state_rx)
+    }
+
+    /// Evaluate the outcome of a regression check and transition to Recovery if needed.
+    fn evaluate_regression_outcome(
+        &self,
+        result: RegressionOutcome,
+    ) -> Option<Option<ChainStreaming>> {
+        match result {
+            RegressionOutcome::Recovery => {
+                let new_state = ChainStreaming::Recovery { load_local: false };
+                let _ = self.state_tx.send(new_state);
+                Some(Some(new_state))
+            }
+            RegressionOutcome::Aligned => None,
+            RegressionOutcome::Shutdown => Some(None),
+        }
+    }
+
+    /// Watchdog-timeout handler shared by `handle_catchup` and `handle_live`.
+    async fn handle_watchdog_timeout(&mut self, context: &str) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        let timeout = self.watchdog_timeout;
+        let has_slot = self.backlog.has_checkpoint_slot(chain).await;
+        let pending = self.backlog.pending_checkpoint_count(chain).await;
+        tracing::warn!(
+            %chain, ?timeout, has_checkpoint_slot = has_slot,
+            pending_checkpoints = pending, "{} processing timed out; restarting pipeline", context
+        );
+        let new_state = ChainStreaming::Recovery { load_local: false };
+        let _ = self.state_tx.send(new_state);
+        Some(new_state)
     }
 
     pub async fn run(mut self) {
@@ -196,6 +230,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         tracing::info!(%chain, anchor_height, "starting/re-starting catchup");
         let mut catchup_iter = self.indexer.catchup_range(anchor_height).await;
+        let timeout = self.watchdog_timeout;
 
         loop {
             tokio::select! {
@@ -203,9 +238,30 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     let Some(catchup_item) = catchup_item else {
                         break;
                     };
-                    while let Err(err) = self.indexer.process_catchup(&catchup_item).await {
-                        tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
-                        tokio::time::sleep(I::RETRY_DELAY).await;
+
+                    // Bound each processing attempt (parse + finality wait).
+                    loop {
+                        match tokio::time::timeout(
+                            timeout,
+                            self.indexer.process_catchup(&catchup_item),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => break,
+                            Ok(Err(err)) => {
+                                tracing::warn!(
+                                    ?err,
+                                    %chain,
+                                    "catchup item processing failed; retrying"
+                                );
+                                tokio::time::sleep(I::RETRY_DELAY).await;
+                            }
+                            Err(_) => {
+                                return self
+                                    .handle_watchdog_timeout("catchup block")
+                                    .await;
+                            }
+                        }
                     }
                 }
                 result = wait_detected_regression(
@@ -213,15 +269,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
+                }
+                // Watchdog: if no catchup block is processed within the chain-specific timeout
+                _ = tokio::time::sleep(timeout) => {
+                    return self.handle_watchdog_timeout("catchup").await;
                 }
             }
         }
@@ -237,7 +291,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
     async fn handle_live(&mut self) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
-        let timeout = live_block_timeout(chain);
+        let timeout = self.watchdog_timeout;
         loop {
             tokio::select! {
                 alive = self.indexer.process_next_block(), if self.backlog.has_checkpoint_slot(chain).await => {
@@ -250,23 +304,14 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
                 }
                 // Watchdog: if no block is processed within the chain-specific timeout,
                 // the background producer is assumed stalled and the pipeline restarts.
                 _ = tokio::time::sleep(timeout) => {
-                    tracing::warn!(%chain, ?timeout, "live block processing timed out; restarting pipeline");
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return self.handle_watchdog_timeout("live block").await;
                 }
             }
         }
@@ -356,6 +401,7 @@ async fn detect_regression(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use async_trait::async_trait;
     use mpc_primitives::CheckpointDigest;
     use std::time::Duration;
 
@@ -529,6 +575,134 @@ mod tests {
             result,
             RegressionOutcome::Recovery,
             "should detect regression after new mismatched value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_catchup_watchdog_restarts_on_hung_process_catchup() {
+        /// A `ChainIndexer` that simulates a hung `process_catchup` method.
+        struct HungCatchupIndexer;
+
+        #[async_trait]
+        impl ChainIndexer for HungCatchupIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+            type Block = u64;
+            type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
+            const RETRY_DELAY: Duration = Duration::from_millis(1);
+
+            async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+                Ok(Some(10))
+            }
+
+            async fn next(&mut self) -> Option<Self::Block> {
+                None
+            }
+
+            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                futures_util::stream::iter(vec![1u64].into_iter())
+            }
+
+            // Never returns
+            async fn process_catchup(&mut self, _block: &Self::Block) -> anyhow::Result<()> {
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+
+        let backlog = Backlog::new();
+        let (_cp_tx, cp_rx) = watch::channel(None);
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (_stx, _srx) = mpsc::channel(1);
+
+        let (mut pipeline, _state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Catchup { anchor_height: 10 },
+            HungCatchupIndexer,
+            cp_rx,
+            backlog,
+            _stx,
+            mesh_rx,
+            NodeClient::new(&Default::default()),
+            0,
+            "test.near".parse().unwrap(),
+        );
+        pipeline.watchdog_timeout = Duration::from_secs(1);
+
+        // `handle_catchup` must escape the hung block via the watchdog and
+        // return `Recovery`, instead of hanging forever
+        let result = tokio::time::timeout(Duration::from_secs(5), pipeline.handle_catchup(10))
+            .await
+            .expect("hung process_catchup should be caught by watchdog, not hang");
+        assert!(
+            matches!(result, Some(ChainStreaming::Recovery { load_local: false })),
+            "expected Recovery after catchup watchdog, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_catchup_watchdog_restarts_when_checkpoint_cap_full() {
+        /// A `ChainIndexer` that never produces blocks, so `handle_catchup` can't make progress.
+        struct EmptyCatchupIndexer;
+
+        #[async_trait]
+        impl ChainIndexer for EmptyCatchupIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+            type Block = u64;
+            type Iter = futures_util::stream::Empty<Self::Block>;
+            const RETRY_DELAY: Duration = Duration::from_millis(1);
+
+            async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+                Ok(Some(10))
+            }
+
+            async fn next(&mut self) -> Option<Self::Block> {
+                None
+            }
+
+            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                futures_util::stream::empty()
+            }
+        }
+
+        // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+        for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
+            let h = (i as u64) * interval;
+            assert!(
+                backlog.set_processed_block(chain, h).await.is_some(),
+                "auto-checkpoint at height {h} should succeed"
+            );
+        }
+        assert!(!backlog.has_checkpoint_slot(chain).await);
+
+        // No consensus checkpoint changes => `wait_detected_regression` blocks.
+        let (_cp_tx, cp_rx) = watch::channel(None);
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (_stx, _srx) = mpsc::channel(1);
+
+        let (mut pipeline, _state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Catchup { anchor_height: 10 },
+            EmptyCatchupIndexer,
+            cp_rx,
+            backlog,
+            _stx,
+            mesh_rx,
+            NodeClient::new(&Default::default()),
+            0,
+            "test.near".parse().unwrap(),
+        );
+        // Set fast timeout for test
+        pipeline.watchdog_timeout = Duration::from_secs(1);
+
+        // With the cap full and no consensus changes, `handle_catchup` can't
+        // make progress and must restart via the watchdog
+        let result = tokio::time::timeout(Duration::from_secs(5), pipeline.handle_catchup(10))
+            .await
+            .expect("full checkpoint cap should be caught by watchdog, not hang");
+        assert!(
+            matches!(result, Some(ChainStreaming::Recovery { load_local: false })),
+            "expected Recovery after catchup watchdog, got {result:?}"
         );
     }
 }

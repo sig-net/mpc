@@ -621,6 +621,12 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     let mut last_ws_msg = Instant::now();
     let mut watchdog = tokio::time::interval(Duration::from_secs(5));
 
+    // Mirrors `wait_for_finalized_block`'s staleness warn in the Ethereum indexer
+    const SLOT_STALL_WARN_SECS: u64 = 60;
+    let mut last_slot: Option<u64> = None;
+    let mut last_slot_advanced_at = Instant::now();
+    let mut last_slot_stall_warn_at = Instant::now();
+
     // Simple TTL cache to avoid multiple getTransaction calls for the same signature
     let mut seen: HashMap<Signature, Instant> = HashMap::new();
     let ttl = Duration::from_secs(30);
@@ -637,6 +643,12 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                         last_ws_msg = Instant::now();
 
                         let slot = response.context.slot;
+
+                        // Update last observed slot and reset the stall timer if it advanced
+                        if last_slot.is_none_or(|s| slot > s) {
+                            last_slot = Some(slot);
+                            last_slot_advanced_at = Instant::now();
+                        }
 
                         // Update indexed block metrics
                         telemetry.block_indexed(slot);
@@ -703,6 +715,22 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                         "solana logs subscription stalled: no ws message for {:?}",
                         stall_timeout
                     );
+                }
+
+                // Warn if the last observed slot has not advanced for a while
+                let now = Instant::now();
+                let secs_since_advance = now.duration_since(last_slot_advanced_at).as_secs();
+                if secs_since_advance >= SLOT_STALL_WARN_SECS
+                    && now.duration_since(last_slot_stall_warn_at).as_secs() >= SLOT_STALL_WARN_SECS
+                {
+                    tracing::warn!(
+                        last_slot,
+                        secs_since_advance,
+                        "solana observed slot has not advanced; \
+                         live feed may be stuck delivering stale slots. \
+                         If this persists the stream watchdog will restart the pipeline"
+                    );
+                    last_slot_stall_warn_at = now;
                 }
             }
         }

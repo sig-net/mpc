@@ -1,4 +1,3 @@
-use super::organize::OrganizingPhase;
 use super::state::SignState;
 use super::task::{GeneratingPhase, SignPhase};
 use super::work_queue::SignPositWorkQueue;
@@ -166,8 +165,7 @@ impl PositPhase {
                     me=?ctx.governance.me,
                     "deliberator timeout waiting for Propose, reorganizing"
                 );
-                state.bump_round();
-                return Err(SignPhase::Organizing(OrganizingPhase));
+                return Err(state.reorganize());
             }
         };
 
@@ -288,8 +286,7 @@ impl PositPhase {
                                     ?round,
                                     "not enough start participants"
                                 );
-                                state.bump_round();
-                                return SignPhase::Organizing(OrganizingPhase);
+                                return state.reorganize();
                             }
 
                             tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
@@ -321,8 +318,7 @@ impl PositPhase {
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
-                            state.bump_round();
-                            return SignPhase::Organizing(OrganizingPhase);
+                            return state.reorganize();
                         }
 
                         // Starting as soon as we have enough accepts leaves
@@ -363,8 +359,7 @@ impl PositPhase {
                         tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
                     }
 
-                    state.bump_round();
-                    return SignPhase::Organizing(OrganizingPhase);
+                    return state.reorganize();
                 }
                 _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
                     accept_deadline_reached = true;

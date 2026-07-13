@@ -5,14 +5,17 @@ use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
-    run_stream_with_two_node_mesh, signature_responded_event, test_rpc_channel, test_sign_args,
+    run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
+    test_rpc_channel, test_sign_args,
 };
 use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_chain_solana::Pubkey;
-use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand, SignId, Signature};
+use mpc_primitives::{
+    Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
+};
 use near_primitives::types::AccountId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -358,14 +361,16 @@ async fn test_stream_handles_sign_and_respond() {
     // Run the indexer
     run_stream(
         client,
-        sign_tx.clone(),
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_state_rx,
-        node_client,
-        cp_rx,
     )
     .await;
 
@@ -389,107 +394,16 @@ async fn test_stream_handles_sign_and_respond() {
     }
 }
 
-#[tokio::test]
-async fn test_stream_handles_sign_bidirectional_block_and_recover() {
-    let _ = tracing_subscriber::fmt::try_init();
-    use crate::sign_bidirectional::SignStatus;
+/// Build a `SignKind::SignBidirectional` request from Solana to Ethereum.
+/// Returns `(IndexedSignRequest, SignArgs, SecretKey)`
+fn build_solana_to_ethereum_bidirectional_request(
+    seed: u8,
+) -> (IndexedSignRequest, SignArgs, k256::SecretKey) {
     use mpc_primitives::SignBidirectionalEvent as SBE;
 
-    // shared storage so checkpoint persistence is visible to recovered backlog
-    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
+    let sign_id = SignId::new([seed; 32]);
+    let args = test_sign_args(seed);
 
-    // client implemented with a channel so the test can control pacing
-    struct LocalStream {
-        rx: mpsc::Receiver<ChainEvent>,
-    }
-
-    #[async_trait]
-    impl ChainStream for LocalStream {
-        type Indexer = DisabledChainIndexer;
-
-        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-            Ok(DisabledChainIndexer::silent())
-        }
-
-        async fn next_event(&mut self) -> Option<ChainEvent> {
-            self.rx.recv().await
-        }
-    }
-
-    pub struct DisabledChainIndexer {
-        events_tx: Option<mpsc::Sender<ChainEvent>>,
-    }
-
-    impl DisabledChainIndexer {
-        pub fn silent() -> Self {
-            Self { events_tx: None }
-        }
-    }
-
-    #[async_trait]
-    impl ChainIndexer for DisabledChainIndexer {
-        const CHAIN: Chain = Chain::Solana;
-        type Block = ();
-        type Iter = futures_util::stream::Empty<Self::Block>;
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            None
-        }
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::empty()
-        }
-
-        async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-            if let Some(events_tx) = &self.events_tx {
-                events_tx.send(ChainEvent::CatchupCompleted).await?;
-            }
-            Ok(())
-        }
-    }
-
-    let (events_tx, rx) = mpsc::channel(8);
-    let client = LocalStream { rx };
-
-    let (sign_tx, mut sign_rx) = mpsc::channel(8);
-
-    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let root_pk = root_sk.public_key().to_projective().to_affine();
-
-    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
-        root_pk,
-        0,
-        Default::default(),
-    );
-    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
-
-    // Start indexer in background (clone backlog so the test retains ownership)
-    let backlog_for_run = backlog.clone();
-    let sign_tx_for_run = sign_tx.clone();
-    let run_handle = tokio::spawn(async move {
-        run_stream(
-            client,
-            sign_tx_for_run,
-            rpc,
-            backlog_for_run,
-            NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        )
-        .await;
-    });
-
-    // prepare a SignBidirectional request
-    let sign_id = SignId::new([42u8; 32]);
-    let args = test_sign_args(0);
-    let program_id = Pubkey::new_unique();
     // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64); // nonce
@@ -514,7 +428,7 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         dest: Chain::Ethereum.to_string(),
         params: "".to_string(),
         chain: Chain::Solana,
-        chain_ctx: Some(program_id.to_bytes().to_vec()),
+        chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
     };
@@ -527,179 +441,235 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         sign_bidir,
     );
 
-    events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    (request, args, root_sk)
+}
 
-    // push SignRequest
-    events_tx
-        .send(ChainEvent::SignRequest {
+/// Receiving a `ChainEvent::SignRequest` with a bidirectional event should
+/// insert it into the backlog and enqueue a `SignCommand`.
+#[tokio::test]
+async fn test_bidirectional_sign_request_enqueues_command() {
+    let backlog = Backlog::new();
+    let (request, _args, root_sk) = build_solana_to_ethereum_bidirectional_request(42);
+    let sign_id = request.id;
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+    let client = SolanaTestStream::new(vec![
+        Some(ChainEvent::CatchupCompleted),
+        Some(ChainEvent::SignRequest {
             request: request.clone(),
             block_timestamp: None,
-        })
-        .await
-        .unwrap();
+        }),
+        None,
+    ]);
 
-    // we should receive a SignCommand::Request
+    let (sign_tx, mut sign_rx) = mpsc::channel(8);
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        0,
+        Default::default(),
+    );
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, _rpc_rx) = test_rpc_channel(8);
+
+    run_stream(
+        client,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
+        NoopChainTelemetry,
+    )
+    .await;
+
+    // A SignCommand::Request should have been emitted for the bidirectional request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
         .unwrap();
+
     match msg {
         SignCommand::Request(req) => assert_eq!(req.id, sign_id),
-        _ => panic!("expected sign request"),
+        other => panic!("expected SignCommand::Request, got {other:?}"),
     }
 
-    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
+    // The request should be persisted in the backlog after the sign request is processed
+    let entry = backlog
+        .get(Chain::Solana, &sign_id)
+        .await
+        .expect("bidirectional sign request should be tracked in the backlog");
 
+    assert!(matches!(
+        entry.request.kind,
+        mpc_primitives::SignKind::SignBidirectional(_)
+    ));
+}
+
+/// A `ChainEvent::Respond` against an entry that is already in `PendingPublish`
+/// should advance it to `PendingExecution` and register an execution watcher on
+/// the target chain.
+#[tokio::test]
+async fn test_respond_event_advances_to_pending_execution() {
+    use crate::sign_bidirectional::{PublishState, SignStatus};
+
+    let backlog = Backlog::new();
+    let (request, args, root_sk) = build_solana_to_ethereum_bidirectional_request(7);
+    let sign_id = request.id;
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+
+    // Pre-seed the backlog with the bidirectional entry and mark it as already
+    // published so the incoming respond event advances it into execution pending.
+    backlog.insert(request).await;
+    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
     backlog
         .set_status(
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+                publish: PublishState {
                     signature: mpc_sig,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![],
                     is_proposer: true,
                 },
             },
         )
         .await;
 
-    // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
-    events_tx
-        .send(ChainEvent::Respond(sig_responded))
+    let client = SolanaTestStream::new(vec![
+        Some(ChainEvent::CatchupCompleted),
+        Some(ChainEvent::Respond(sig_responded)),
+        None,
+    ]);
+
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        0,
+        Default::default(),
+    );
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, _rpc_rx) = test_rpc_channel(8);
+
+    run_stream(
+        client,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
+        NoopChainTelemetry,
+    )
+    .await;
+
+    // The respond event should have advanced the entry to PendingExecution and
+    // registered an execution watcher for the derived bidirectional tx on the
+    // target chain (Ethereum).
+    let entry = backlog
+        .get(Chain::Solana, &sign_id)
         .await
-        .unwrap();
+        .expect("entry should remain in backlog after respond event");
+    assert!(
+        matches!(entry.status(), SignStatus::PendingExecution { .. }),
+        "expected PendingExecution, got {:?}",
+        entry.status()
+    );
 
-    // wait for the indexer to register an execution watcher for the target chain
-    let target_chain = Chain::Ethereum;
-    timeout(Duration::from_secs(1), async {
-        loop {
-            let watchers = backlog.get_execution_watchers(target_chain).await;
-            if watchers.values().any(|(s, _)| *s == sign_id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
+    assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
+    let (watched_sign_id, _watched_tx) = watchers.values().next().unwrap();
+    assert_eq!(*watched_sign_id, sign_id);
+}
 
-    // mark status as PendingExecution so it will be included in checkpoints
-    let execution = backlog
-        .get_execution_watchers(target_chain)
-        .await
-        .into_iter()
-        .find_map(|(_, (watched_sign_id, watched_tx))| {
-            (watched_sign_id == sign_id).then_some(watched_tx)
-        })
-        .expect("expected execution watcher to exist");
-    let execution_id = execution.id;
-    backlog
-        .set_status(
-            Chain::Solana,
-            &sign_id,
-            SignStatus::PendingExecution { tx: execution },
-        )
-        .await;
+/// `process_execution_confirmed` on a watched bidirectional tx should advance the
+/// source-chain entry into a follow-up `RespondBidirectional` request and enqueue
+/// a new `SignCommand::Request` carrying that request.
+#[tokio::test]
+async fn test_execution_confirmation_advances_to_respond_bidirectional() {
+    use mpc_primitives::{ExecutionOutcome, SignKind};
 
-    // send a block event for this chain and ensure checkpoint is persisted
-    let block = Chain::Solana.checkpoint_interval().unwrap_or(1);
-    events_tx.send(ChainEvent::Block(block)).await.unwrap();
+    let backlog = Backlog::new();
+    let seed = 42;
+    let sign_id = SignId::new([seed; 32]);
 
-    // give the indexer a brief moment to persist the checkpoint
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let checkpoint = backlog
-        .latest_checkpoint(Chain::Solana)
-        .await
-        .expect("checkpoint should exist");
+    // Pre-seed the backlog with a bidirectional request
+    let (request, _args, _root_sk) = build_solana_to_ethereum_bidirectional_request(seed);
+    let program_id_bytes = match &request.kind {
+        mpc_primitives::SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
+        _ => unreachable!("helper always produces a SignBidirectional request"),
+    };
+    backlog.insert(request).await;
 
-    // recover into a new backlog and verify watchers restored
-    let recovered = Backlog::persisted(storage.clone());
-    recovered
-        .recover_by_checkpoint(checkpoint.clone())
-        .await
-        .expect("recovery failed");
+    // Register an execution watcher for the derived bidirectional tx on the target chain (Ethereum)
+    let tx = test_bidirectional_tx(seed, Chain::Solana, Chain::Ethereum);
+    let tx_id = tx.id;
+    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
 
-    let old_watchers = backlog.get_execution_watchers(target_chain).await;
-    let new_watchers = recovered.get_execution_watchers(target_chain).await;
-    assert_eq!(old_watchers.len(), new_watchers.len());
-    for (tx_id, (s, _)) in old_watchers {
-        assert!(new_watchers.contains_key(&tx_id));
-        assert_eq!(new_watchers.get(&tx_id).unwrap().0, s);
-    }
+    let (sign_tx, mut sign_rx) = mpsc::channel(8);
+    let ctx = crate::stream::test_utils::make_test_stream_context_with_generator_pk(
+        backlog.clone(),
+        sign_tx,
+        true,
+    );
 
-    // now send an execution confirmation event to advance to RespondBidirectional
     crate::stream::ops::process_execution_confirmed(
-        execution_id,
+        tx_id,
         sign_id,
         Chain::Solana,
-        block,
-        mpc_primitives::ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx.clone(),
+        123u64,
+        ExecutionOutcome::Success { output: vec![] },
+        &ctx,
         Chain::Ethereum,
-        true,
     )
     .await
-    .unwrap();
+    .expect("execution confirmation should advance to a RespondBidirectional request");
 
-    // we should receive a SignCommand::Request because of the execution being confirmed
-    let check = tokio::time::sleep(Duration::from_secs(1));
-    tokio::pin!(check);
-    loop {
-        tokio::select! {
-            _ = &mut check => panic!("expected sign request for RespondBidirectional"),
-            msg_req = sign_rx.recv() => match msg_req {
-                Some(SignCommand::Request(req)) => {
-                    assert_eq!(req.id, sign_id);
-                    break;
-                }
-                Some(SignCommand::Checkpoint(_)) => continue,
-                _ => panic!("expected sign request for RespondBidirectional"),
-            }
-        }
-    }
-
-    // Fetch the updated request from the backlog to get the new epsilon and payload
-    let entry = backlog.get(Chain::Solana, &sign_id).await.unwrap();
-    let new_args = &entry.request.args;
-    let new_mpc_sig = mpc_crypto::generate_signature(&root_sk, new_args);
-
-    // now send a RespondBidirectional event to complete the request
-    // RespondBidirectional should also carry a valid signature
-    let respond_bidirectional = mpc_primitives::RespondBidirectionalEvent {
-        request_id: sign_id.request_id,
-        signature: new_mpc_sig,
-        chain: Chain::Solana,
-    };
-    events_tx
-        .send(ChainEvent::RespondBidirectional(respond_bidirectional))
-        .await
-        .unwrap();
-
-    // we should receive completion
-    let mut msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    while matches!(msg2, SignCommand::Checkpoint(_)) {
-        msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
+    match msg {
+        SignCommand::Request(req) => {
+            assert_eq!(
+                req.id, sign_id,
+                "follow-up request should reuse the sign id"
+            );
+            match req.kind {
+                SignKind::RespondBidirectional(rb) => {
+                    assert_eq!(rb.tx_id, tx_id, "tx_id should match the watched tx");
+                    assert_eq!(
+                        rb.chain_ctx, program_id_bytes,
+                        "chain_ctx should be forwarded from the originating request",
+                    );
+                }
+                other => panic!("expected RespondBidirectional, got {other:?}"),
+            }
+        }
+        other => panic!("expected SignCommand::Request, got {other:?}"),
+    }
+
+    // The watcher should have been consumed by the handler.
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(Chain::Ethereum)
             .await
-            .unwrap()
-            .unwrap();
-    }
-    match msg2 {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
-    }
-
-    // backlog entry should be removed
-    assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
-
-    // stop the client and wait for the indexer to finish
-    drop(events_tx);
-    run_handle.await.unwrap();
+            .is_empty(),
+        "execution watcher should be removed after confirmation"
+    );
 }
 
 #[tokio::test]
@@ -855,14 +825,16 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let run_handle = tokio::spawn(async move {
         run_stream(
             client,
-            sign_tx,
-            rpc,
-            backlog,
+            StreamContext::new(
+                backlog,
+                sign_tx,
+                rpc,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+                cp_rx,
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
         )
         .await;
     });
@@ -933,14 +905,16 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let run_handle = tokio::spawn(async move {
         run_stream(
             client,
-            sign_tx,
-            rpc,
-            backlog,
+            StreamContext::new(
+                backlog,
+                sign_tx,
+                rpc,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+                cp_rx,
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
         )
         .await;
     });

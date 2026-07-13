@@ -13,7 +13,7 @@ use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming, StreamContext};
 use mpc_primitives::{
     Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId,
     Signature, LATEST_MPC_KEY_VERSION,
@@ -518,14 +518,16 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,
-            sign_tx,
-            rpc,
-            recovered_backlog,
+            StreamContext::new(
+                recovered_backlog.clone(),
+                sign_tx.clone(),
+                rpc.clone(),
+                contract_watcher.clone(),
+                mesh_rx.clone(),
+                node_client.clone(),
+                checkpoints_rx.clone(),
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_rx,
-            node_client,
-            checkpoints_rx,
         )
         .await;
     });

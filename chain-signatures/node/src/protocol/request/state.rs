@@ -1,4 +1,6 @@
 use super::limiter::SignPermit;
+use super::organize::OrganizingPhase;
+use super::task::SignPhase;
 use super::*;
 
 pub struct SignState {
@@ -42,7 +44,16 @@ impl SignState {
         &self.request
     }
 
-    pub fn bump_round(&mut self) {
+    /// Abandon the current attempt: advance to the next round (releasing the
+    /// held permit and resetting the timeout budget) and restart the state
+    /// machine from the Organizing phase. The single back-edge of the sign
+    /// state machine.
+    pub fn reorganize(&mut self) -> SignPhase {
+        self.bump_round();
+        SignPhase::Organizing(OrganizingPhase)
+    }
+
+    fn bump_round(&mut self) {
         let prev_round = self.round;
         self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);

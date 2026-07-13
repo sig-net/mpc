@@ -76,7 +76,8 @@ impl From<&Signature> for ChainSignatures::Signature {
     }
 }
 
-/// TODO: this should probably get merged with the client used by indexer
+/// An Ethereum client that implements the `ChainPublisher` trait for publishing signatures to an Ethereum smart contract.
+/// This client is separate from the client used by the indexer (separation of concerns: read vs write).
 #[derive(Clone)]
 pub struct EthClient {
     /// The contract instance for interacting with the ChainSignatures contract

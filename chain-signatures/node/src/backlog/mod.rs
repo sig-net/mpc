@@ -321,6 +321,12 @@ impl Backlog {
             .set(len as i64);
     }
 
+    fn observe_pending_checkpoints(&self, chain: Chain, len: usize) {
+        crate::metrics::requests::PENDING_CHECKPOINTS
+            .with_label_values(&[chain.as_str()])
+            .set(len as i64);
+    }
+
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
@@ -529,6 +535,7 @@ impl Backlog {
         interval: u64,
     ) -> Option<Checkpoint> {
         let mut pending = self.pending(&chain).write().await;
+        let prev = pending.processed_block_height().unwrap_or(0);
         pending.set_processed_block(height);
 
         tracing::trace!(
@@ -538,8 +545,23 @@ impl Backlog {
             "backlog updated processed block height"
         );
 
-        // Create a checkpoint on interval
-        if height.is_multiple_of(interval) {
+        if interval == 0 {
+            return None;
+        }
+
+        // Create a checkpoint when crossing an interval boundary, not only
+        // when landing exactly on an interval multiple. This matters for chains
+        // like Solana where the indexer only observes slots containing
+        // program-relevant transactions; sparse traffic may jump from slot 119
+        // to 500 and never observe slot 120 exactly.
+        //
+        // Caveat: this does not checkpoint every sparse request immediately. If
+        // the last processed height and the new height are in the same interval
+        // bucket, the request waits until the next observed height crosses a
+        // boundary. On restart/recovery, the node still resumes from the latest
+        // confirmed checkpoint and replays only the post-checkpoint same-bucket
+        // tail.
+        if height / interval > prev / interval {
             let tx_count = pending.len();
             drop(pending);
             if let Some(checkpoint) = self.checkpoint(chain).await {
@@ -577,10 +599,12 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
-        self.pending_checkpoints(&chain)
-            .write()
-            .await
-            .insert(checkpoint.block_height, checkpoint.clone());
+        let len = {
+            let mut pending = self.pending_checkpoints(&chain).write().await;
+            pending.insert(checkpoint.block_height, checkpoint.clone());
+            pending.len()
+        };
+        self.observe_pending_checkpoints(chain, len);
 
         Some(checkpoint)
     }
@@ -589,10 +613,12 @@ impl Backlog {
     /// Removes it from pending and persists to storage as the latest consensus checkpoint.
     pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
         // Remove from pending checkpoints (frees a slot for future checkpoints)
-        {
+        let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
             pending.retain(|&height, _| height > checkpoint.block_height);
-        }
+            pending.len()
+        };
+        self.observe_pending_checkpoints(chain, len);
 
         // Persist as the latest consensus checkpoint
         if let Err(err) = self.storage.persist(checkpoint).await {
@@ -621,6 +647,11 @@ impl Backlog {
     pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
         let pending = self.pending_checkpoints(&chain).read().await;
         pending.len() < MAX_PENDING_CHECKPOINTS
+    }
+
+    /// Number of pending checkpoints for a chain.
+    pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
+        self.pending_checkpoints(&chain).read().await.len()
     }
 
     /// Find a checkpoint by its consensus digest.
@@ -660,6 +691,7 @@ impl Backlog {
         // Clear all pending (unconfirmed) checkpoints for this chain.
         // Any checkpoint that was waiting for consensus is now obsolete.
         self.pending_checkpoints(&chain).write().await.clear();
+        self.observe_pending_checkpoints(chain, 0);
 
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
@@ -1849,6 +1881,110 @@ mod tests {
         let checkpoint = checkpoint.unwrap();
         assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
+    }
+
+    async fn seed_pending_solana_request(backlog: &Backlog) {
+        let tx = create_test_tx(1);
+        insert_bidirectional_with_status(
+            backlog,
+            Chain::Solana,
+            tx.clone(),
+            pending_execution_status(&tx),
+            "solana",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_boundary_crossing_sparse_request_waits_until_next_bucket() {
+        let backlog = Backlog::new();
+        seed_pending_solana_request(&backlog).await;
+
+        // This documents the main caveat of boundary-crossing checkpointing:
+        // sparse requests still wait if the next observed slot remains in the
+        // same interval bucket.
+        //
+        // 480 -> 500: same bucket (both / 120 == 4), no checkpoint.
+        backlog
+            .set_processed_block_interval(Chain::Solana, 480, 120)
+            .await;
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 500, 120)
+            .await;
+        assert!(cp.is_none());
+
+        // 500 -> 600: crosses from bucket 4 to bucket 5
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 600, 120)
+            .await;
+        assert!(cp.is_some());
+        let cp = cp.unwrap();
+        assert_eq!(cp.block_height, 600);
+        assert_eq!(cp.pending_requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_boundary_crossing_same_bucket_no_checkpoint() {
+        let backlog = Backlog::new();
+        seed_pending_solana_request(&backlog).await;
+
+        // 121 crosses from bucket 0 to bucket 1
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 121, 120)
+            .await;
+        assert!(cp.is_some());
+
+        // 130 stays in bucket 1; no new boundary crossed
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 130, 120)
+            .await;
+        assert!(cp.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_crossing_within_first_bucket_no_checkpoint() {
+        let backlog = Backlog::new();
+        seed_pending_solana_request(&backlog).await;
+
+        // First observed slot 50 is still in bucket 0 (50 / 120 == 0 == prev default 0)
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 50, 120)
+            .await;
+        assert!(cp.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_crossing_exact_multiple_still_checkpoints() {
+        let backlog = Backlog::new();
+        seed_pending_solana_request(&backlog).await;
+
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 119, 120)
+            .await;
+        assert!(cp.is_none());
+
+        // Exact multiple still works; it crosses from bucket 0 to bucket 1
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 120, 120)
+            .await;
+        assert!(cp.is_some());
+        assert_eq!(cp.unwrap().block_height, 120);
+    }
+
+    #[tokio::test]
+    async fn test_boundary_crossing_first_observed_height_above_interval() {
+        let backlog = Backlog::new();
+        seed_pending_solana_request(&backlog).await;
+
+        // First ever processed block is 500 (prev defaults to 0)
+        // 500 / 120 = 4 > 0, so a boundary was crossed.
+        let cp = backlog
+            .set_processed_block_interval(Chain::Solana, 500, 120)
+            .await;
+        assert!(cp.is_some());
+        let cp = cp.unwrap();
+        assert_eq!(cp.block_height, 500);
+        assert_eq!(cp.pending_requests.len(), 1);
     }
 
     #[tokio::test]
