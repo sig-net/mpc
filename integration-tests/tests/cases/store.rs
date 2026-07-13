@@ -357,3 +357,78 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+use mpc_node::storage::CheckpointStorage;
+use mpc_primitives::{Chain, Checkpoint};
+
+#[test(tokio::test)]
+async fn test_checkpoint_redis_storage() -> anyhow::Result<()> {
+    let spawner = ClusterSpawner::default()
+        .network("test-checkpoint-redis")
+        .init_network()
+        .await?;
+
+    let account_id: near_sdk::AccountId = "party0.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let storage = CheckpointStorage::Redis(redis.pool(), account_id);
+
+    // Clean storage returns None
+    assert!(storage.load_latest(Chain::Solana).await?.is_none());
+    assert!(storage.load_all_pending(Chain::Solana).await?.is_empty());
+
+    // Persist pending checkpoint
+    let cp1 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 10,
+        pending_requests: vec![],
+    };
+    storage.persist_pending(&cp1).await?;
+
+    let pending = storage.load_all_pending(Chain::Solana).await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].block_height, 10);
+
+    // Promote pending to latest
+    storage.promote_pending_to_latest(&cp1).await?;
+
+    // Check that it's now latest
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.block_height, 10);
+
+    // Check that pending is empty now (rename removed it)
+    assert!(storage.load_all_pending(Chain::Solana).await?.is_empty());
+
+    // Test fallback if pending doesn't exist
+    let cp2 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 20,
+        pending_requests: vec![],
+    };
+    // We don't call persist_pending here!
+    // promote_pending_to_latest should fallback to persist
+    storage.promote_pending_to_latest(&cp2).await?;
+
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.block_height, 20);
+
+    // Test clear_pending_up_to
+    let cp3 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 30,
+        pending_requests: vec![],
+    };
+    storage.persist_pending(&cp3).await?;
+    let cp4 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 40,
+        pending_requests: vec![],
+    };
+    storage.persist_pending(&cp4).await?;
+    
+    storage.clear_pending_up_to(Chain::Solana, 35).await?;
+    let pending = storage.load_all_pending(Chain::Solana).await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].block_height, 40);
+
+    Ok(())
+}

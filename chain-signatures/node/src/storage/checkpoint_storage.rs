@@ -89,6 +89,40 @@ impl CheckpointStorage {
         Ok(())
     }
 
+    /// Promote a pending checkpoint to be the latest consensus checkpoint.
+    /// If the pending key does not exist (e.g. during consensus regression), it falls back to a normal persist.
+    pub async fn promote_pending_to_latest(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let pending_key = self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height);
+                let latest_key = self.checkpoint_key(checkpoint.chain);
+
+                let result: redis::RedisResult<()> = redis::cmd("RENAME")
+                    .arg(&pending_key)
+                    .arg(&latest_key)
+                    .query_async(&mut conn)
+                    .await;
+
+                if result.is_err() {
+                    // Fallback if pending key is missing or RENAME fails
+                    let value = serde_json::to_string(checkpoint)
+                        .context("failed to serialize checkpoint persistence")?;
+                    conn.set::<_, _, ()>(latest_key, &value)
+                        .await
+                        .context("failed to persist checkpoint to redis on fallback")?;
+                }
+            }
+            CheckpointStorage::InMemory { latest, .. } => {
+                latest
+                    .write()
+                    .await
+                    .insert(checkpoint.chain, checkpoint.clone());
+            }
+        }
+        Ok(())
+    }
+
     pub async fn load_latest(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {

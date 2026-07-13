@@ -633,8 +633,8 @@ impl Backlog {
         self.observe_pending_checkpoints(chain, len);
 
         // Persist as the latest consensus checkpoint
-        if let Err(err) = self.storage.persist(checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to persist consensus checkpoint");
+        if let Err(err) = self.storage.promote_pending_to_latest(checkpoint).await {
+            tracing::warn!(?chain, %err, "failed to promote and persist consensus checkpoint");
         }
         
         if let Err(err) = self.storage.clear_pending_up_to(chain, checkpoint.block_height).await {
@@ -732,10 +732,6 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // We intentionally do not manipulate the pending cache here.
-        // It's not necessarily true that the checkpoint we're recovering to is a pending one
-        // (e.g. during consensus regression it's a confirmed remote checkpoint).
-        // Cache clearing for diverged state is handled explicitly by the caller (e.g. consensus alignment).
 
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
