@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-use mpc_chain_ethereum::EthConfig;
+use mpc_chain_ethereum::{DEFAULT_CATCHUP_CONCURRENT_BATCHES, EthConfig};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     optimistic_requests: false,
                     light_client: false,
+                    catchup_concurrent_batches: DEFAULT_CATCHUP_CONCURRENT_BATCHES,
                 }),
                 ..Default::default()
             };
