@@ -228,7 +228,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     impl CollectMessages for SignatureTracker {
         fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            let (message, (from, _to, _ts)) = msg;
+            let SendMessage { message, from, .. } = msg;
             match message {
                 Message::Posit(posit_msg) => {
                     if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
@@ -273,7 +273,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         .with_outgoing_message_filter(
             2,
             Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
+                let SendMessage { message, .. } = msg;
                 if let Message::Posit(posit_msg) = message {
                     if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
                         if sign_id == bad_sign_id

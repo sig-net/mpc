@@ -104,7 +104,12 @@ impl MessageChannel {
     pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
         if let Err(err) = self
             .outgoing
-            .send((message.into(), (from, to, Instant::now())))
+            .send(SendMessage {
+                message: message.into(),
+                from,
+                to,
+                queued_at: Instant::now(),
+            })
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");

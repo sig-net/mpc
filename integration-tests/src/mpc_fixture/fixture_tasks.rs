@@ -52,7 +52,7 @@ pub(super) fn test_mock_network(
                     // (might want to add MessageOutbox, too, but for now this is easier)
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active().clone();
-                    let (msg, (from, to, _ts)) = &send_message;
+                    let SendMessage { message: msg, from, to, .. } = &send_message;
                     let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
                     match SignedMessage::encrypt(
                         &[msg],
