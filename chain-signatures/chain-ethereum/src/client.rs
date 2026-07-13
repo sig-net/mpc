@@ -11,6 +11,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
 
+// TODO: check if our RPC providers support higher batch sizes
 /// Catchup batch size for [`CatchupIter`]
 pub const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
@@ -74,45 +75,8 @@ impl CatchupIter {
             .next_block
             .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
             .min(self.end_block);
-        let batch_block_ids = (self.next_block..batch_end)
-            .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .collect::<Vec<_>>();
 
-        #[cfg(feature = "bench")]
-        let start = std::time::Instant::now();
-
-        // Fetch blocks and receipts in parallel
-        let (blocks, receipts) = tokio::join!(
-            self.client.get_blocks(&batch_block_ids),
-            self.client.get_block_receipts_batch(&batch_block_ids)
-        );
-
-        // If receipts fetch fails, treat all blocks as missing receipts.
-        // Consistent with the behavior of get_blocks, which returns MaybeBlock::Missing for all blocks if the batch fails.
-        let items: Vec<CatchupItem> = if let Ok(receipts) = receipts {
-            blocks
-                .into_iter()
-                .zip(receipts)
-                .zip(batch_block_ids)
-                .map(
-                    |((maybe_block, maybe_receipts), block_id)| match maybe_block {
-                        MaybeBlock::Block(block) => CatchupItem::BatchBlock {
-                            block,
-                            receipts: maybe_receipts.unwrap_or_default(),
-                        },
-                        MaybeBlock::Missing(_) => CatchupItem::Missing(block_id),
-                    },
-                )
-                .collect()
-        } else {
-            batch_block_ids
-                .into_iter()
-                .map(CatchupItem::Missing)
-                .collect()
-        };
-
-        #[cfg(feature = "bench")]
-        crate::bench::add_batch_fetch_time(start.elapsed());
+        let items = fetch_batch(self.client.clone(), self.next_block, batch_end).await;
 
         self.buffered_blocks = items.into_iter();
         self.next_block = batch_end;
@@ -131,6 +95,55 @@ impl CatchupIter {
             self.fetch_next_batch().await;
         }
     }
+}
+
+/// Fetch one catchup batch covering the half-open block range `[start, end)`.
+async fn fetch_batch(
+    client: Arc<EthereumClient>,
+    start: BlockNumber,
+    end: BlockNumber,
+) -> Vec<CatchupItem> {
+    let batch_block_ids = (start..end)
+        .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
+        .collect::<Vec<_>>();
+
+    #[cfg(feature = "bench")]
+    let start_time = std::time::Instant::now();
+
+    // Fetch blocks and receipts in parallel
+    let (blocks, receipts) = tokio::join!(
+        client.get_blocks(&batch_block_ids),
+        client.get_block_receipts_batch(&batch_block_ids)
+    );
+
+    // If receipts fetch fails, treat all blocks as missing receipts.
+    // Consistent with the behavior of get_blocks, which returns MaybeBlock::Missing for all blocks if the batch fails.
+    let items: Vec<CatchupItem> = if let Ok(receipts) = receipts {
+        blocks
+            .into_iter()
+            .zip(receipts)
+            .zip(batch_block_ids)
+            .map(
+                |((maybe_block, maybe_receipts), block_id)| match maybe_block {
+                    MaybeBlock::Block(block) => CatchupItem::BatchBlock {
+                        block,
+                        receipts: maybe_receipts.unwrap_or_default(),
+                    },
+                    MaybeBlock::Missing(_) => CatchupItem::Missing(block_id),
+                },
+            )
+            .collect()
+    } else {
+        batch_block_ids
+            .into_iter()
+            .map(CatchupItem::Missing)
+            .collect()
+    };
+
+    #[cfg(feature = "bench")]
+    crate::bench::add_batch_fetch_time(start_time.elapsed());
+
+    items
 }
 
 // Constants for Ethereum RPC client retry behavior
