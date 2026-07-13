@@ -7,6 +7,7 @@ use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ pub enum CheckpointStorage {
     Redis(Pool, AccountId),
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
+        pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
     },
 }
 
@@ -30,6 +32,7 @@ impl CheckpointStorage {
     pub fn in_memory() -> Self {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
+            pending: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -41,6 +44,25 @@ impl CheckpointStorage {
             CheckpointStorage::InMemory { .. } => format!("checkpoint:latest:{chain}"),
         }
     }
+
+    fn pending_checkpoint_key(&self, chain: Chain, height: u64) -> String {
+        match self {
+            CheckpointStorage::Redis(_, account_id) => {
+                format!("{account_id}:checkpoint:pending:{CHECKPOINT_VERSION}:{chain}:{height}")
+            }
+            CheckpointStorage::InMemory { .. } => format!("checkpoint:pending:{chain}:{height}"),
+        }
+    }
+    
+    fn pending_checkpoints_pattern(&self, chain: Chain) -> String {
+        match self {
+            CheckpointStorage::Redis(_, account_id) => {
+                format!("{account_id}:checkpoint:pending:{CHECKPOINT_VERSION}:{chain}:*")
+            }
+            CheckpointStorage::InMemory { .. } => format!("checkpoint:pending:{chain}:*"),
+        }
+    }
+
 
     /// Persist a checkpoint as the latest consensus checkpoint.
     ///
@@ -57,7 +79,7 @@ impl CheckpointStorage {
                     .await
                     .context("failed to persist checkpoint to redis")?;
             }
-            CheckpointStorage::InMemory { latest } => {
+            CheckpointStorage::InMemory { latest, .. } => {
                 latest
                     .write()
                     .await
@@ -84,8 +106,88 @@ impl CheckpointStorage {
                     None => Ok(None),
                 }
             }
-            CheckpointStorage::InMemory { latest } => Ok(latest.read().await.get(&chain).cloned()),
+            CheckpointStorage::InMemory { latest, .. } => Ok(latest.read().await.get(&chain).cloned()),
         }
+    }
+
+    /// Persist a pending checkpoint to storage.
+    pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let value = serde_json::to_string(checkpoint)
+                    .context("failed to serialize checkpoint persistence")?;
+
+                conn.set::<_, _, ()>(self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height), &value)
+                    .await
+                    .context("failed to persist pending checkpoint to redis")?;
+            }
+            CheckpointStorage::InMemory { pending, .. } => {
+                let mut pending_map = pending.write().await;
+                let chain_pending = pending_map.entry(checkpoint.chain).or_insert_with(BTreeMap::new);
+                chain_pending.insert(checkpoint.block_height, checkpoint.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Load all pending checkpoints for a chain.
+    pub async fn load_all_pending(&self, chain: Chain) -> anyhow::Result<Vec<Checkpoint>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let pattern = self.pending_checkpoints_pattern(chain);
+                let keys: Vec<String> = redis::cmd("KEYS").arg(pattern).query_async(&mut conn).await?;
+                if keys.is_empty() {
+                    return Ok(vec![]);
+                }
+                let values: Vec<Option<String>> = redis::cmd("MGET").arg(&keys).query_async(&mut conn).await?;
+                let mut checkpoints = Vec::new();
+                for value in values.into_iter().flatten() {
+                    let checkpoint: Checkpoint = serde_json::from_str(&value).context("failed to deserialize pending checkpoint")?;
+                    checkpoints.push(checkpoint);
+                }
+                checkpoints.sort_by_key(|c| c.block_height);
+                Ok(checkpoints)
+            }
+            CheckpointStorage::InMemory { pending, .. } => {
+                let pending_map = pending.read().await;
+                let checkpoints = pending_map.get(&chain).map(|c| c.values().cloned().collect()).unwrap_or_default();
+                Ok(checkpoints)
+            }
+        }
+    }
+
+    /// Clear all pending checkpoints up to a certain height.
+    pub async fn clear_pending_up_to(&self, chain: Chain, height: u64) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let pattern = self.pending_checkpoints_pattern(chain);
+                let keys: Vec<String> = redis::cmd("KEYS").arg(pattern).query_async(&mut conn).await?;
+                let mut keys_to_delete = Vec::new();
+                for key in keys {
+                    let parts: Vec<&str> = key.split(':').collect();
+                    if let Some(key_height_str) = parts.last() {
+                        if let Ok(key_height) = key_height_str.parse::<u64>() {
+                            if key_height <= height {
+                                keys_to_delete.push(key);
+                            }
+                        }
+                    }
+                }
+                if !keys_to_delete.is_empty() {
+                    conn.del::<_, ()>(keys_to_delete).await?;
+                }
+            }
+            CheckpointStorage::InMemory { pending, .. } => {
+                let mut pending_map = pending.write().await;
+                if let Some(chain_pending) = pending_map.get_mut(&chain) {
+                    chain_pending.retain(|&h, _| h > height);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -124,6 +226,47 @@ mod tests {
         // 5. Verify latest is updated
         let latest = storage.load_latest(Chain::Solana).await?.unwrap();
         assert_eq!(latest.block_height, 20);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpoint_storage_pending() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+
+        // 1. Clean storage returns empty pending
+        assert!(storage.load_all_pending(Chain::Solana).await?.is_empty());
+
+        // 2. Persist pending checkpoints
+        let cp1 = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 10,
+            pending_requests: vec![],
+        };
+        storage.persist_pending(&cp1).await?;
+
+        let cp2 = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 20,
+            pending_requests: vec![],
+        };
+        storage.persist_pending(&cp2).await?;
+
+        // 3. Verify all pending loaded correctly
+        let pending = storage.load_all_pending(Chain::Solana).await?;
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].block_height, 10);
+        assert_eq!(pending[1].block_height, 20);
+
+        // 4. Clear pending up to height 10
+        storage.clear_pending_up_to(Chain::Solana, 15).await?;
+        let pending = storage.load_all_pending(Chain::Solana).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].block_height, 20);
+
+        // 5. Clear remaining pending
+        storage.clear_pending_up_to(Chain::Solana, 20).await?;
+        assert!(storage.load_all_pending(Chain::Solana).await?.is_empty());
 
         Ok(())
     }

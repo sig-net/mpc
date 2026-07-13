@@ -321,6 +321,14 @@ impl Backlog {
             .set(len as i64);
     }
 
+    /// Removes all pending checkpoints for the given chain.
+    /// Also updates the metric to 0.
+    pub async fn clear_pending_checkpoints(&self, chain: Chain) {
+        let mut cache = self.pending_checkpoints(&chain).write().await;
+        cache.clear();
+        self.observe_pending_checkpoints(chain, 0);
+    }
+
     fn observe_pending_checkpoints(&self, chain: Chain, len: usize) {
         crate::metrics::requests::PENDING_CHECKPOINTS
             .with_label_values(&[chain.as_str()])
@@ -599,6 +607,10 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
+        if let Err(err) = self.storage.persist_pending(&checkpoint).await {
+            tracing::warn!(?chain, %err, "failed to persist pending checkpoint");
+        }
+
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
             pending.insert(checkpoint.block_height, checkpoint.clone());
@@ -624,6 +636,10 @@ impl Backlog {
         if let Err(err) = self.storage.persist(checkpoint).await {
             tracing::warn!(?chain, %err, "failed to persist consensus checkpoint");
         }
+        
+        if let Err(err) = self.storage.clear_pending_up_to(chain, checkpoint.block_height).await {
+            tracing::warn!(?chain, %err, "failed to clear pending checkpoints up to confirmed height");
+        }
 
         tracing::info!(
             ?chain,
@@ -641,6 +657,34 @@ impl Backlog {
             }
         }
         self.storage.load_latest(chain).await.ok().flatten()
+    }
+
+    /// Loads the local state on startup. Hydrates pending checkpoints from storage
+    /// and returns the highest pending checkpoint. If none exist, returns the latest confirmed checkpoint.
+    pub async fn load_local_state(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        let mut highest_pending: Option<Checkpoint> = None;
+        if let Ok(pending_checkpoints) = self.storage.load_all_pending(chain).await {
+            let mut cache = self.pending_checkpoints(&chain).write().await;
+            for cp in pending_checkpoints {
+                if let Some(ref current_highest) = highest_pending {
+                    if cp.block_height > current_highest.block_height {
+                        highest_pending = Some(cp.clone());
+                    }
+                } else {
+                    highest_pending = Some(cp.clone());
+                }
+                cache.insert(cp.block_height, cp);
+            }
+            let len = cache.len();
+            drop(cache);
+            self.observe_pending_checkpoints(chain, len);
+        }
+        
+        if highest_pending.is_some() {
+            return Ok(highest_pending);
+        }
+        
+        self.storage.load_latest(chain).await
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
@@ -688,10 +732,10 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // Clear all pending (unconfirmed) checkpoints for this chain.
-        // Any checkpoint that was waiting for consensus is now obsolete.
-        self.pending_checkpoints(&chain).write().await.clear();
-        self.observe_pending_checkpoints(chain, 0);
+        // We intentionally do not manipulate the pending cache here.
+        // It's not necessarily true that the checkpoint we're recovering to is a pending one
+        // (e.g. during consensus regression it's a confirmed remote checkpoint).
+        // Cache clearing for diverged state is handled explicitly by the caller (e.g. consensus alignment).
 
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
@@ -2390,11 +2434,15 @@ mod tests {
         assert_eq!(fresh_cp.block_height, interval / 2);
 
         backlog.storage.persist(&fresh_cp).await.unwrap();
+        
+        // During regression, we clear pending checkpoints before recovering
+        backlog.clear_pending_checkpoints(chain).await;
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
+        
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
             0,
-            "pending checkpoints should be completely cleared"
+            "pending checkpoints should be cleared during regression"
         );
         assert_eq!(
             backlog.latest_checkpoint(chain).await.unwrap().block_height,
@@ -2486,5 +2534,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(found.block_height, interval);
+    }
+
+    #[tokio::test]
+    async fn test_load_local_state_hydrates_pending_checkpoints() {
+        let backlog = Backlog::new();
+        let chain = Chain::Solana;
+        let interval = 100;
+
+        let cp1 = Checkpoint {
+            chain,
+            block_height: interval,
+            pending_requests: vec![],
+        };
+        let cp2 = Checkpoint {
+            chain,
+            block_height: interval * 2,
+            pending_requests: vec![],
+        };
+        let cp3 = Checkpoint {
+            chain,
+            block_height: interval * 3,
+            pending_requests: vec![],
+        };
+
+        backlog.storage.persist(&cp1).await.unwrap();
+        backlog.storage.persist_pending(&cp2).await.unwrap();
+        backlog.storage.persist_pending(&cp3).await.unwrap();
+
+        // The memory cache should be empty initially
+        backlog.pending_checkpoints(&chain).write().await.clear();
+
+        let loaded = backlog.load_local_state(chain).await.unwrap().unwrap();
+        assert_eq!(loaded.block_height, interval * 3);
+
+        // Cache should be hydrated
+        let cache = backlog.pending_checkpoints(&chain).read().await;
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&(interval * 2)));
+        assert!(cache.contains_key(&(interval * 3)));
     }
 }

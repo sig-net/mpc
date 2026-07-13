@@ -61,6 +61,8 @@ pub async fn align_backlog_with_consensus(
         tracing::warn!(?chain, %err, "failed to persist regressed checkpoint");
     }
 
+    backlog.clear_pending_checkpoints(chain).await;
+
     if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
         return None;
