@@ -44,15 +44,16 @@ const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
 const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
 const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
 
+// TODO: these should be configurable (create GasConfig struct) if we add other EVM chains in the future
 // Ethereum gas limits
 const ETH_BASE_GAS_LIMIT: u64 = 40_000;
 const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
 /// The maximum gas limit per transaction.
 const ETH_MAX_GAS_LIMIT: u64 = 16_777_216;
-/// Buffer applied on top of the dynamically estimated gas: numerator/denominator
-/// (e.g. 12/10 == +20%).
-const ETH_GAS_ESTIMATION_BUFFER_NUMERATOR: u64 = 12;
-const ETH_GAS_ESTIMATION_BUFFER_DENOMINATOR: u64 = 10;
+/// Fractional buffer applied on top of the dynamically estimated gas.
+/// Absorbs variance between estimation and execution so transactions
+/// don't revert on chain.
+const ETH_GAS_ESTIMATION_BUFFER_PERCENT: u64 = 20;
 
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
@@ -322,8 +323,7 @@ impl EthClient {
         match call.estimate_gas().await {
             Ok(est) => {
                 // Add a buffer, capped at the per-tx block gas limit, never below the configured base limit
-                let buffered = est.saturating_mul(ETH_GAS_ESTIMATION_BUFFER_NUMERATOR)
-                    / ETH_GAS_ESTIMATION_BUFFER_DENOMINATOR;
+                let buffered = est + (est / 100).saturating_mul(ETH_GAS_ESTIMATION_BUFFER_PERCENT);
                 let capped = buffered.min(ETH_MAX_GAS_LIMIT);
                 std::cmp::max(capped, ETH_BASE_GAS_LIMIT)
             }
