@@ -68,7 +68,6 @@ impl Checkpoint {
         hasher.update(self.block_height.to_le_bytes());
         for pending in &self.pending_requests {
             hasher.update(pending.sign_id.request_id);
-            hasher.update(&pending.transaction);
         }
         hasher.finalize().into()
     }
