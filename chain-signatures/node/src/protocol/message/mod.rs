@@ -26,6 +26,7 @@ pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
+pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
@@ -62,7 +63,7 @@ impl MessageChannel {
         let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
-        let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(MAX_SUBSCRIBE_REQUESTS);
         let inbox = MessageInbox::new(
             inbox_tx.clone(),
             inbox_rx,
