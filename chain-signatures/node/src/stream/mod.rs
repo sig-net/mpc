@@ -97,7 +97,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     // are from valid blocks and safe to forward. Reconnect relies solely on the
     // in-band `CatchupInProgress` marker for its caught-up gating.
     let pipeline_caught_up = Arc::new(AtomicBool::new(false));
-    let (pipeline, mut state_rx) = ChainPipeline::new(
+    let (pipeline, _state_rx) = ChainPipeline::new(
         indexer,
         ctx.checkpoints_rx.clone(),
         ctx.backlog.clone(),
@@ -113,101 +113,108 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     let root_pk = ctx.contract_watcher.wait_public_key().await;
 
     loop {
-        tokio::select! {
-            event = stream.next_event() => {
-                let Some(event) = event else {
-                    break;
-                };
-                let effectively_caught_up = ctx.caught_up && pipeline_caught_up.load(Ordering::Acquire);
-                match event {
-                    ChainEvent::CatchupInProgress => {
-                        ctx.caught_up = false;
-                    }
-                    ChainEvent::CatchupCompleted => {
-                        if ctx.caught_up {
-                            continue;
-                        }
-                        ctx.caught_up = true;
+        let Some(event) = stream.next_event().await else {
+            break;
+        };
+        let effectively_caught_up = ctx.caught_up && pipeline_caught_up.load(Ordering::Acquire);
+        match event {
+            ChainEvent::CatchupInProgress => {
+                ctx.caught_up = false;
+            }
+            ChainEvent::CatchupCompleted => {
+                if ctx.caught_up {
+                    continue;
+                }
+                ctx.caught_up = true;
 
-                        requeue_pending_sign_requests(&ctx.backlog, chain, ctx.sign_tx.clone()).await;
-                        resume_pending_publish_requests(&ctx.backlog, chain, &ctx.contract_watcher, &ctx.rpc).await;
-                    }
-                    ChainEvent::SignRequest { request, block_timestamp } => {
-                        if let Some(ts) = block_timestamp {
-                            telemetry.request_indexed_at(ts);
-                        } else {
-                            telemetry.request_indexed();
-                        }
+                requeue_pending_sign_requests(&ctx.backlog, chain, ctx.sign_tx.clone()).await;
+                resume_pending_publish_requests(
+                    &ctx.backlog,
+                    chain,
+                    &ctx.contract_watcher,
+                    &ctx.rpc,
+                )
+                .await;
+            }
+            ChainEvent::SignRequest {
+                request,
+                block_timestamp,
+            } => {
+                if let Some(ts) = block_timestamp {
+                    telemetry.request_indexed_at(ts);
+                } else {
+                    telemetry.request_indexed();
+                }
 
-                        if let Err(err) = process_sign_request(
-                            request,
-                            ctx.sign_tx.clone(),
-                            ctx.backlog.clone(),
-                            effectively_caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process sign request");
-                        }
-                    }
-                    ChainEvent::Respond(ev) => {
-                        if let Err(err) = process_respond_event(
-                            ev,
-                            ctx.sign_tx.clone(),
-                            root_pk,
-                            &ctx.backlog,
-                            effectively_caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond event");
-                        }
-                    }
-                    ChainEvent::RespondBidirectional(ev) => {
-                        if let Err(err) = process_respond_bidirectional_event(
-                            ev,
-                            ctx.sign_tx.clone(),
-                            root_pk,
-                            &ctx.backlog,
-                            effectively_caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond bidirectional event");
-                        }
-                    }
-                    ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &ctx.backlog, &ctx.sign_tx, effectively_caught_up, &telemetry).await;
-                    }
-                    ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        sign_id,
-                        source_chain,
-                        block_height,
-                        result,
-                    } => {
-                        if let Err(err) = process_execution_confirmed(
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height,
-                            result,
-                            &ctx.backlog,
-                            ctx.sign_tx.clone(),
-                            chain,
-                            effectively_caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process execution confirmation");
-                        }
-                    }
+                if let Err(err) = process_sign_request(
+                    request,
+                    ctx.sign_tx.clone(),
+                    ctx.backlog.clone(),
+                    effectively_caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process sign request");
                 }
             }
-            _ = state_rx.changed() => {
-                let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
-                    ctx.caught_up = false;
+            ChainEvent::Respond(ev) => {
+                if let Err(err) = process_respond_event(
+                    ev,
+                    ctx.sign_tx.clone(),
+                    root_pk,
+                    &ctx.backlog,
+                    effectively_caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process respond event");
+                }
+            }
+            ChainEvent::RespondBidirectional(ev) => {
+                if let Err(err) = process_respond_bidirectional_event(
+                    ev,
+                    ctx.sign_tx.clone(),
+                    root_pk,
+                    &ctx.backlog,
+                    effectively_caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process respond bidirectional event");
+                }
+            }
+            ChainEvent::Block(block) => {
+                process_block_event(
+                    chain,
+                    block,
+                    &ctx.backlog,
+                    &ctx.sign_tx,
+                    effectively_caught_up,
+                    &telemetry,
+                )
+                .await;
+            }
+            ChainEvent::ExecutionConfirmed {
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height,
+                result,
+            } => {
+                if let Err(err) = process_execution_confirmed(
+                    tx_id,
+                    sign_id,
+                    source_chain,
+                    block_height,
+                    result,
+                    &ctx.backlog,
+                    ctx.sign_tx.clone(),
+                    chain,
+                    effectively_caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process execution confirmation");
                 }
             }
         }

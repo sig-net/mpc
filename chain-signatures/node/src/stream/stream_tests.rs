@@ -21,16 +21,39 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
+/// Holds the events for a `VecEventStream`.  If the original event list
+/// contains a `CatchupCompleted` marker, the constructor splits the list
+/// around it: events *before* the marker are delivered first (simulating
+/// catchup-phase events), then the pipeline's own `CatchupCompleted` is
+/// awaited from the indexer channel, and finally events *after* the marker
+/// are delivered (simulating post-catchup / live events).
+///
+/// This keeps the pipeline as the sole owner of `pipeline_caught_up` —
+/// `run_stream` never writes to the atomic, matching production semantics.
 struct VecEventStreamState {
     started: bool,
-    events: Vec<Option<ChainEvent>>,
+    pre_events: Vec<Option<ChainEvent>>,
+    post_events: Vec<Option<ChainEvent>>,
+    pipeline_rx: Option<mpsc::Receiver<ChainEvent>>,
+    pipeline_catchup_done: bool,
 }
 
 impl VecEventStreamState {
     fn new(events: Vec<Option<ChainEvent>>) -> Self {
+        let split_pos = events
+            .iter()
+            .position(|e| matches!(e, Some(ChainEvent::CatchupCompleted)));
+        let (pre, post) = if let Some(pos) = split_pos {
+            (events[..pos].to_vec(), events[pos + 1..].to_vec())
+        } else {
+            (vec![], events)
+        };
         Self {
             started: false,
-            events,
+            pre_events: pre,
+            post_events: post,
+            pipeline_rx: None,
+            pipeline_catchup_done: false,
         }
     }
 }
@@ -47,12 +70,6 @@ macro_rules! impl_vec_event_stream {
 
         struct $indexer {
             events_tx: Option<mpsc::Sender<ChainEvent>>,
-        }
-
-        impl $indexer {
-            pub fn silent() -> Self {
-                Self { events_tx: None }
-            }
         }
 
         #[async_trait]
@@ -74,7 +91,6 @@ macro_rules! impl_vec_event_stream {
                 if let Some(events_tx) = &self.events_tx {
                     events_tx.send(ChainEvent::CatchupCompleted).await?;
                 }
-
                 Ok(())
             }
         }
@@ -85,15 +101,38 @@ macro_rules! impl_vec_event_stream {
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
                 self.0.started = true;
-                Ok($indexer::silent())
+                let (tx, rx) = mpsc::channel(16);
+                self.0.pipeline_rx = Some(rx);
+                Ok($indexer {
+                    events_tx: Some(tx),
+                })
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
-                if self.0.events.is_empty() {
-                    return None;
+                // 1. Deliver pre-catchup events (arrived during catchup).
+                if !self.0.pre_events.is_empty() {
+                    return self.0.pre_events.remove(0);
                 }
 
-                self.0.events.remove(0)
+                // 2. Wait for pipeline lifecycle events (CatchupCompleted).
+                if !self.0.pipeline_catchup_done {
+                    if let Some(rx) = &mut self.0.pipeline_rx {
+                        while let Some(event) = rx.recv().await {
+                            let done = matches!(event, ChainEvent::CatchupCompleted);
+                            if done {
+                                self.0.pipeline_catchup_done = true;
+                            }
+                            return Some(event);
+                        }
+                    }
+                    self.0.pipeline_catchup_done = true;
+                }
+
+                // 3. Deliver post-catchup events (arrived during livestream).
+                if self.0.post_events.is_empty() {
+                    return None;
+                }
+                self.0.post_events.remove(0)
             }
         }
     };
@@ -404,36 +443,22 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
     let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
 
-    // client implemented with a channel so the test can control pacing
+    // Stream backed by a channel so the test can control pacing.
+    // The indexer is connected to the same channel so pipeline-driven
+    // lifecycle events (CatchupCompleted) flow through it.
     struct LocalStream {
         rx: mpsc::Receiver<ChainEvent>,
+        indexer_tx: mpsc::Sender<ChainEvent>,
+        catchup_done_tx: Option<oneshot::Sender<()>>,
+    }
+
+    struct ConnectedIndexer {
+        events_tx: mpsc::Sender<ChainEvent>,
+        catchup_done_tx: Option<oneshot::Sender<()>>,
     }
 
     #[async_trait]
-    impl ChainStream for LocalStream {
-        type Indexer = DisabledChainIndexer;
-
-        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-            Ok(DisabledChainIndexer::silent())
-        }
-
-        async fn next_event(&mut self) -> Option<ChainEvent> {
-            self.rx.recv().await
-        }
-    }
-
-    pub struct DisabledChainIndexer {
-        events_tx: Option<mpsc::Sender<ChainEvent>>,
-    }
-
-    impl DisabledChainIndexer {
-        pub fn silent() -> Self {
-            Self { events_tx: None }
-        }
-    }
-
-    #[async_trait]
-    impl ChainIndexer for DisabledChainIndexer {
+    impl ChainIndexer for ConnectedIndexer {
         const CHAIN: Chain = Chain::Solana;
         type Block = ();
         type Iter = futures_util::stream::Empty<Self::Block>;
@@ -447,15 +472,37 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         }
 
         async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-            if let Some(events_tx) = &self.events_tx {
-                events_tx.send(ChainEvent::CatchupCompleted).await?;
+            self.events_tx.send(ChainEvent::CatchupCompleted).await?;
+            if let Some(tx) = self.catchup_done_tx.take() {
+                let _ = tx.send(());
             }
             Ok(())
         }
     }
 
+    #[async_trait]
+    impl ChainStream for LocalStream {
+        type Indexer = ConnectedIndexer;
+
+        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+            Ok(ConnectedIndexer {
+                events_tx: self.indexer_tx.clone(),
+                catchup_done_tx: self.catchup_done_tx.take(),
+            })
+        }
+
+        async fn next_event(&mut self) -> Option<ChainEvent> {
+            self.rx.recv().await
+        }
+    }
+
     let (events_tx, rx) = mpsc::channel(8);
-    let client = LocalStream { rx };
+    let (catchup_done_tx, catchup_done_rx) = oneshot::channel::<()>();
+    let client = LocalStream {
+        rx,
+        indexer_tx: events_tx.clone(),
+        catchup_done_tx: Some(catchup_done_tx),
+    };
 
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
@@ -534,7 +581,13 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         sign_bidir,
     );
 
-    events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+    // Wait for the pipeline to complete catchup and set pipeline_caught_up.
+    // The pipeline's notify_catchup_completed sends CatchupCompleted through
+    // the shared channel and then signals this oneshot.
+    timeout(Duration::from_secs(5), catchup_done_rx)
+        .await
+        .expect("pipeline should complete catchup")
+        .unwrap();
 
     // push SignRequest
     events_tx
@@ -1050,7 +1103,6 @@ async fn test_recovery_transitions_to_catchup() {
 async fn test_runtime_regression_triggers_recovery() {
     struct MockLiveIndexer {
         next_called_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        livestream_called_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     }
 
     #[async_trait]
@@ -1061,9 +1113,6 @@ async fn test_runtime_regression_triggers_recovery() {
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
         async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-            if let Some(tx) = self.livestream_called_tx.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
             Ok(Some(10))
         }
 
@@ -1099,14 +1148,12 @@ async fn test_runtime_regression_triggers_recovery() {
     let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest { height: 10, digest }));
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (next_called_tx, next_called_rx) = oneshot::channel();
-    let (livestream_called_tx, livestream_called_rx) = oneshot::channel();
     let (_stx, _srx) = mpsc::channel(1);
     let indexer = MockLiveIndexer {
         next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
-        livestream_called_tx: Arc::new(Mutex::new(Some(livestream_called_tx))),
     };
 
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
+    let (pipeline, mut state_rx) = ChainPipeline::from_state(
         ChainStreaming::Live,
         indexer,
         cp_rx,
@@ -1133,22 +1180,17 @@ async fn test_runtime_regression_triggers_recovery() {
         }))
         .unwrap();
 
-    // Give the pipeline time to observe the mismatched digest in
-    // wait_detected_regression before we restore the matching one.
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    // Restore matching digest so align_backlog_with_consensus in Recovery
-    // can complete. find_consensus_checkpoint with 0 peers retries every
-    // 3s, so the abort via consensus_rx.changed() may take a few seconds.
-    cp_tx
-        .send(Some(CheckpointDigest { height: 10, digest }))
-        .unwrap();
-
-    // Recovery calls livestream(), so this proves the regression triggered it.
-    timeout(Duration::from_secs(5), livestream_called_rx)
-        .await
-        .expect("regression should trigger Recovery which calls livestream()")
-        .unwrap();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let s = *state_rx.borrow_and_update();
+            if matches!(s, ChainStreaming::Recovery { .. }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("should transition back to Recovery state upon regression");
 
     task_handle.abort();
 }
