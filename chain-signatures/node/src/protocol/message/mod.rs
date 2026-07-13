@@ -41,36 +41,49 @@ pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
+/// Receiving half of the message system: accepts encrypted messages from peers,
+/// decrypts and dedups them, and routes each to its subscriber channel.
 pub struct MessageInbox {
-    /// encrypted messages that are pending to be decrypted. These are messages that we received
-    /// from other nodes that weren't able to be processed yet due to missing info such as the
-    /// participant id in the case of slow resharing.
-    try_decrypt: VecDeque<(Ciphered, Instant)>,
+    /// Received messages staged for decryption, with arrival time. A message
+    /// from an unknown participant (e.g. mid-resharing) is retried on later
+    /// passes until `expire` drops it.
+    pending_decrypt: VecDeque<(Ciphered, Instant)>,
 
     /// This idempotent checker is used to check that the same batch of messages does not make
     /// it back in the system somehow. Uses the signature to make this check.
     idempotent: lru::LruCache<Signature, ()>,
 
-    /// A filter to filter out messages that have somehow made it back into the system after
-    /// being processed.
+    /// Kill-list of finished protocol instances (fed by generator `Drop`s, on
+    /// completion or abort). Late messages for these ids are dropped so they
+    /// can't recreate orphan subscriber entries in the maps below.
     filter: MessageFilter,
 
-    /// Incoming messages that are pending to be processed. These are encrypted and signed.
+    /// Sender half of the incoming channel; kept to report capacity metrics.
     inbox_tx: mpsc::Sender<Ciphered>,
+    /// Encrypted, signed messages from peers, awaiting decryption and routing.
     inbox_rx: mpsc::Receiver<Ciphered>,
 
-    /// Subscription requests from MessageChannel
+    /// Sender half of the subscription channel; kept to report capacity metrics.
     subscribe_tx: mpsc::Sender<SubscribeRequest>,
+    /// Subscribe/unsubscribe requests from `MessageChannel`.
     subscribe_rx: mpsc::Receiver<SubscribeRequest>,
 
     generating: Subscriber<GeneratingMessage>,
     resharing: Subscriber<ResharingMessage>,
     ready: Subscriber<ReadyMessage>,
+
+    /// Protocol messages per running triple generation; entries created on
+    /// demand and removed on unsubscribe.
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
+    /// Posit conversations for all triples; demuxed per-id by the TripleSpawner.
     triple_posit: Subscriber<(TripleId, Participant, PositAction)>,
+    /// Protocol messages per running presignature generation.
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
+    /// Posit conversations for all presignatures; demuxed by the PresignatureSpawner.
     presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
+    /// Protocol messages per running signature generation.
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
+    /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
     signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
@@ -84,7 +97,7 @@ impl MessageInbox {
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
-            try_decrypt: VecDeque::new(),
+            pending_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_tx, filter_rx),
             inbox_tx,
@@ -187,7 +200,7 @@ impl MessageInbox {
     }
 
     fn expire(&mut self, timeout: Duration) {
-        self.try_decrypt
+        self.pending_decrypt
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
@@ -199,7 +212,7 @@ impl MessageInbox {
         let mut retry = Vec::new();
 
         let mut messages = Vec::new();
-        while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
+        while let Some((encrypted, timestamp)) = self.pending_decrypt.pop_front() {
             let decrypted: Result<Vec<Message>, _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
                     if self.idempotent.put(sig.clone(), ()).is_some() {
@@ -222,7 +235,7 @@ impl MessageInbox {
             };
         }
 
-        self.try_decrypt.extend(retry);
+        self.pending_decrypt.extend(retry);
         messages
     }
 
@@ -389,7 +402,7 @@ impl MessageInbox {
                     let cipher_sk = config.local.network.cipher_sk;
 
                     self.expire(expiration);
-                    self.try_decrypt.push_back((encrypted, Instant::now()));
+                    self.pending_decrypt.push_back((encrypted, Instant::now()));
                     let messages = self.decrypt(&cipher_sk, &participants);
 
                     // update filter before fanning out messages.
@@ -407,11 +420,17 @@ impl MessageInbox {
     }
 }
 
+/// Cloneable handle to the message system: the senders into each of its
+/// channels. The receiving ends live in [`MessageInbox`] / [`MessageOutbox`].
 #[derive(Clone)]
 pub struct MessageChannel {
+    /// Messages to be signed, encrypted, and sent to peers (drained by `MessageOutbox`).
     outgoing: mpsc::Sender<SendMessage>,
+    /// Subscription control: asks `MessageInbox` to create/drop subscriber channels.
     subscribe: mpsc::Sender<SubscribeRequest>,
+    /// Marks completed protocols so their late messages are dropped.
     filter: mpsc::Sender<(Protocols, u64)>,
+    /// Entry point for encrypted messages from peers (drained by `MessageInbox`).
     pub inbox: mpsc::Sender<Ciphered>,
 }
 
@@ -850,8 +869,9 @@ pub struct Partition {
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
-    /// The messages that are pending to be sent to other nodes.
+    /// Sender half of the outbox channel; kept to report capacity metrics.
     outbox_tx: mpsc::Sender<SendMessage>,
+    /// Messages queued via `MessageChannel::send`, awaiting partition + encrypt + send.
     outbox_rx: mpsc::Receiver<SendMessage>,
 
     // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
