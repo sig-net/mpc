@@ -44,9 +44,16 @@ const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
 const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
 const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
 
+// TODO: these should be configurable (create GasConfig struct) if we add other EVM chains in the future
 // Ethereum gas limits
 const ETH_BASE_GAS_LIMIT: u64 = 40_000;
 const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
+/// The maximum gas limit per transaction.
+const ETH_MAX_GAS_LIMIT: u64 = 16_777_216;
+/// Fractional buffer applied on top of the dynamically estimated gas.
+/// Absorbs variance between estimation and execution so transactions
+/// don't revert on chain.
+const ETH_GAS_ESTIMATION_BUFFER_PERCENT: u64 = 20;
 
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
@@ -302,6 +309,35 @@ impl EthClient {
         Ok(())
     }
 
+    /// Estimate the gas limit for a batch of responses.
+    ///
+    /// Uses the node's `eth_estimateGas` then applies a 20% buffer to absorb variance.
+    ///
+    /// On failure fallsback to a conservative static heuristic based on the batch size.
+    async fn estimate_batch_gas(
+        &self,
+        responses: &[ChainSignatures::Response],
+        num_requests: u64,
+    ) -> u64 {
+        let call = self.contract.respond(responses.to_vec());
+        match call.estimate_gas().await {
+            Ok(est) => {
+                // Add a buffer, capped at the per-tx block gas limit, never below the configured base limit
+                let buffered = est + (est / 100).saturating_mul(ETH_GAS_ESTIMATION_BUFFER_PERCENT);
+                let capped = buffered.min(ETH_MAX_GAS_LIMIT);
+                std::cmp::max(capped, ETH_BASE_GAS_LIMIT)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    num_requests,
+                    "dynamic gas estimation failed, falling back to static heuristic"
+                );
+                std::cmp::max(ETH_BASE_GAS_LIMIT, ETH_BATCH_GAS_PER_REQUEST * num_requests)
+            }
+        }
+    }
+
     pub async fn batch_publish_signatures(
         &self,
         actions: &[PublishAction],
@@ -323,11 +359,9 @@ impl EthClient {
             })
             .collect();
 
-        // TODO: Consider using a more accurate dynamic gas estimation
-        let gas = std::cmp::max(
-            ETH_BASE_GAS_LIMIT,
-            ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
-        );
+        let gas = self
+            .estimate_batch_gas(&responses, num_requests as u64)
+            .await;
 
         self.execute_publish(responses, gas, &sign_ids).await?;
 
@@ -693,5 +727,86 @@ mod tests {
             result.is_ok(),
             "The happy path should complete successfully"
         );
+    }
+
+    #[tokio::test]
+    async fn test_estimate_batch_gas_uses_dynamic_estimate_with_buffer() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // Node reports 500_000 gas for the `respond` call.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_estimateGas"})))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x7a120"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
+
+        // 500_000 * 12 / 10 == 600_000
+        let gas = client.estimate_batch_gas(&[], 1).await;
+        assert_eq!(gas, 600_000);
+    }
+
+    #[tokio::test]
+    async fn test_estimate_batch_gas_clamps_to_base_limit() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // A suspiciously tiny estimate (well below ETH_BASE_GAS_LIMIT) should be
+        // lifted to the base limit so the tx is never under-funded.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_estimateGas"})))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
+
+        let gas = client.estimate_batch_gas(&[], 1).await;
+        assert_eq!(gas, ETH_BASE_GAS_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn test_estimate_batch_gas_falls_back_on_estimation_error() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // Node rejects the estimate (e.g. contract would revert).
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_estimateGas"})))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": "execution reverted"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
+
+        // 3 requests -> static heuristic = max(40_000, 20_000 * 3) = 60_000.
+        let gas = client.estimate_batch_gas(&[], 3).await;
+        assert_eq!(gas, 60_000);
     }
 }
