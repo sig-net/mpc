@@ -28,6 +28,7 @@ struct RpcCount {
 // `EthereumIndexer` (per-instance) so each catchup reports independently
 static RPC_STATS: Mutex<Option<HashMap<&'static str, RpcCount>>> = Mutex::new(None);
 static BATCH_FETCH_NS: AtomicU64 = AtomicU64::new(0);
+static BATCH_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static REFETCH_NS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static BLOCKS_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +69,7 @@ pub fn rpc_reset() {
         m.clear();
     }
     BATCH_FETCH_NS.store(0, Ordering::Relaxed);
+    BATCH_WAIT_NS.store(0, Ordering::Relaxed);
     REFETCH_NS.store(0, Ordering::Relaxed);
     PROCESS_TIME_NS.store(0, Ordering::Relaxed);
     BLOCKS_PROCESSED.store(0, Ordering::Relaxed);
@@ -81,6 +83,12 @@ pub fn rpc_reset() {
 /// nanoseconds to preserve sub-millisecond precision.
 pub fn add_batch_fetch_time(d: Duration) {
     BATCH_FETCH_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// Accumulate time the catchup consumer spent blocked waiting for the next
+/// batch future to resolve.
+pub fn add_batch_wait_time(d: Duration) {
+    BATCH_WAIT_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// Accumulate time spent in the per-block single-block refetch path inside
@@ -121,6 +129,7 @@ pub fn report_metrics(stage: &str) {
     let total_rpc: u64 = rpcs.iter().map(|(_, c)| c.logical).sum();
     let total_http: u64 = rpcs.iter().map(|(_, c)| c.http).sum();
     let batch_fetch_ms = (BATCH_FETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let batch_wait_ms = (BATCH_WAIT_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let refetch_ms = (REFETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let per_block_process_ms =
         (PROCESS_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
@@ -154,6 +163,6 @@ pub fn report_metrics(stage: &str) {
 
     tracing::info!(
         target: TARGET,
-        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  batch_fetch_ms {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown (logical, http round-trips):\n{breakdown}"
+        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  batch_fetch_ms {batch_fetch_ms} (summed, overlaps under prefetch)\n  batch_wait_ms   {batch_wait_ms} (critical-path fetch wait)\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown (logical, http round-trips):\n{breakdown}"
     );
 }
