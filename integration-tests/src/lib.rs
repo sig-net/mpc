@@ -20,7 +20,7 @@ use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
-use mpc_chain_ethereum::{DEFAULT_CATCHUP_CONCURRENT_BATCHES, EthConfig};
+use mpc_chain_ethereum::{EthConfig, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;

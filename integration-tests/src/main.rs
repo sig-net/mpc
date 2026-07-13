@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-use mpc_chain_ethereum::{DEFAULT_CATCHUP_CONCURRENT_BATCHES, EthConfig};
+use mpc_chain_ethereum::{EthConfig, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;

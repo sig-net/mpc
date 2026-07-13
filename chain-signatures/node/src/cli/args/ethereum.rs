@@ -1,4 +1,6 @@
-use mpc_chain_ethereum::{EthConfig, MAX_CATCHUP_CONCURRENT_BATCHES, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
+use mpc_chain_ethereum::{
+    EthConfig, DEFAULT_CATCHUP_CONCURRENT_BATCHES, MAX_CATCHUP_CONCURRENT_BATCHES,
+};
 use secrecy::{ExposeSecret, SecretString};
 
 // Configures Ethereum indexer.
@@ -73,12 +75,8 @@ pub struct EthArgs {
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
     pub eth_optimistic_requests: bool,
 
-    /// Number of concurrent catchup batches to fetch. 
-    #[clap(
-        long,
-        env("MPC_ETH_CATCHUP_CONCURRENT_BATCHES"),
-        default_value = "3"
-    )]
+    /// Number of concurrent catchup batches to fetch.
+    #[clap(long, env("MPC_ETH_CATCHUP_CONCURRENT_BATCHES"), default_value = "3")]
     pub eth_catchup_concurrent_batches: usize,
 }
 
@@ -180,8 +178,7 @@ impl EthArgs {
                 eth_refresh_finalized_interval: 0,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
-                eth_catchup_concurrent_batches:
-                    DEFAULT_CATCHUP_CONCURRENT_BATCHES,
+                eth_catchup_concurrent_batches: DEFAULT_CATCHUP_CONCURRENT_BATCHES,
             },
         }
     }

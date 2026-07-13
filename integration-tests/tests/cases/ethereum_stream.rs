@@ -10,7 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
-use mpc_chain_ethereum::{DEFAULT_CATCHUP_CONCURRENT_BATCHES, EthConfig, EthereumStream};
+use mpc_chain_ethereum::{EthConfig, EthereumStream, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
