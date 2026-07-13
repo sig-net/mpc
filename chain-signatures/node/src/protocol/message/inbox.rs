@@ -28,6 +28,11 @@ use tokio::sync::{mpsc, watch};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Metric labels for the per-generation subscriber maps
+const TRIPLE_TASK_LABEL: &str = "triple_task";
+const PRESIGNATURE_TASK_LABEL: &str = "presign_task";
+const SIGNATURE_TASK_LABEL: &str = "sign_task";
+
 /// Receiving half of the message system: accepts encrypted messages from peers,
 /// decrypts and dedups them, and routes each to its subscriber channel.
 pub struct MessageInbox {
@@ -154,28 +159,28 @@ impl MessageInbox {
                 let sub = self
                     .triple
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
+                    .or_insert_with(|| Subscriber::unsubscribed(TRIPLE_TASK_LABEL));
                 let _ = sub.try_send_lossy(message);
                 sub.report_capacity();
-                set_inbox_count("triple_task", self.triple.len());
+                set_inbox_count(TRIPLE_TASK_LABEL, self.triple.len());
             }
             Message::Presignature(message) => {
                 let sub = self
                     .presignature
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
+                    .or_insert_with(|| Subscriber::unsubscribed(PRESIGNATURE_TASK_LABEL));
                 let _ = sub.try_send_lossy(message);
                 sub.report_capacity();
-                set_inbox_count("presign_task", self.presignature.len());
+                set_inbox_count(PRESIGNATURE_TASK_LABEL, self.presignature.len());
             }
             Message::Signature(message) => {
                 let sub = self
                     .signature
                     .entry((message.id, message.presignature_id))
-                    .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
+                    .or_insert_with(|| Subscriber::unsubscribed(SIGNATURE_TASK_LABEL));
                 let _ = sub.try_send_lossy(message);
                 sub.report_capacity();
-                set_inbox_count("sign_task", self.signature.len());
+                set_inbox_count(SIGNATURE_TASK_LABEL, self.signature.len());
             }
             Message::Unknown(entries) => {
                 tracing::warn!(
@@ -273,7 +278,7 @@ impl MessageInbox {
                     let sub = self
                         .triple
                         .entry(id)
-                        .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
+                        .or_insert_with(|| Subscriber::unsubscribed(TRIPLE_TASK_LABEL));
                     let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Triple(rx));
                 }
@@ -283,7 +288,7 @@ impl MessageInbox {
                     } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
-                    set_inbox_count("triple_task", self.triple.len());
+                    set_inbox_count(TRIPLE_TASK_LABEL, self.triple.len());
                 }
             },
             SubscribeId::Presignature(id) => match sub.action {
@@ -291,7 +296,7 @@ impl MessageInbox {
                     let sub = self
                         .presignature
                         .entry(id)
-                        .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
+                        .or_insert_with(|| Subscriber::unsubscribed(PRESIGNATURE_TASK_LABEL));
                     let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Presignature(rx));
                 }
@@ -304,7 +309,7 @@ impl MessageInbox {
                             "trying to unsub from an unknown presignature subscription"
                         );
                     }
-                    set_inbox_count("presign_task", self.presignature.len());
+                    set_inbox_count(PRESIGNATURE_TASK_LABEL, self.presignature.len());
                 }
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
@@ -312,7 +317,7 @@ impl MessageInbox {
                     let sub = self
                         .signature
                         .entry((sign_id, presignature_id))
-                        .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
+                        .or_insert_with(|| Subscriber::unsubscribed(SIGNATURE_TASK_LABEL));
                     let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
@@ -326,7 +331,7 @@ impl MessageInbox {
                             "trying to unsub from an unknown signature subscription"
                         );
                     }
-                    set_inbox_count("sign_task", self.signature.len());
+                    set_inbox_count(SIGNATURE_TASK_LABEL, self.signature.len());
                 }
             },
             SubscribeId::Ready => match sub.action {
