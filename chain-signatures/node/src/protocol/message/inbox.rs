@@ -248,10 +248,6 @@ impl MessageInbox {
         self.filter.clear();
     }
 
-    pub fn clear_idempotent(&mut self) {
-        self.idempotent.clear();
-    }
-
     pub fn process_subscribe(&mut self, sub: SubscribeRequest) {
         match sub.id {
             SubscribeId::Generating => match sub.action {
