@@ -242,6 +242,7 @@ impl EthereumClient {
         )
     }
 
+    /// Fetch a batch of blocks and their receipts in parallel, returning a vector of `CatchupItem`s.
     pub async fn fetch_batch(&self, start: BlockNumber, end: BlockNumber) -> Vec<CatchupItem> {
         let batch_block_ids = (start..end)
             .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))

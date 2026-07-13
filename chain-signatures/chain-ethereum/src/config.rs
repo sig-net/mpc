@@ -1,6 +1,8 @@
 use std::fmt;
 
+/// Default number of concurrent batches to fetch during catchup.
 pub const DEFAULT_CATCHUP_CONCURRENT_BATCHES: usize = 3;
+/// Maximum number of concurrent batches to fetch during catchup.
 pub const MAX_CATCHUP_CONCURRENT_BATCHES: usize = 8;
 
 #[derive(Clone)]

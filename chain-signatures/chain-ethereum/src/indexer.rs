@@ -784,7 +784,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        let concurrent = if self.eth.light_client {
+        // Determine the concurrency for catchup.  
+        let concurrency = if self.eth.light_client {
             1
         } else {
             self.eth
@@ -792,7 +793,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 .clamp(1, MAX_CATCHUP_CONCURRENT_BATCHES)
         };
         self.client
-            .catchup_batch_stream(catchup_start, anchor_height, concurrent)
+            .catchup_batch_stream(catchup_start, anchor_height, concurrency)
     }
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
