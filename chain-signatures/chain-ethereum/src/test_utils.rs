@@ -1,4 +1,4 @@
-use crate::client::EthereumClient;
+use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::Address;
@@ -184,15 +184,62 @@ pub fn block_response(request_id: u64, number: u64) -> serde_json::Value {
 }
 
 /// Build a deserialized `Block` for a given block `number`, suitable for
-/// feeding directly into `process_catchup` / `process` as `MaybeBlock::Block`.
+/// feeding directly into `process_catchup` / `process` as `CatchupItem::LiveBlock`.
 /// The hash is `0x{number:064x}` and the timestamp is `0x1`.
-pub fn block(number: u64) -> crate::client::MaybeBlock {
-    use crate::client::MaybeBlock;
+pub fn live_block(number: u64) -> CatchupItem {
     let value = block_response(1, number)
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
     let block: alloy::rpc::types::Block =
         serde_json::from_value(value).expect("block fixture should deserialize");
-    MaybeBlock::Block(block)
+    CatchupItem::LiveBlock(block)
+}
+
+pub fn batch_block(
+    number: u64,
+    receipts: Vec<alloy::rpc::types::TransactionReceipt>,
+) -> CatchupItem {
+    let value = block_response(1, number)
+        .get("result")
+        .expect("block_response has a result envelope")
+        .clone();
+    let block: alloy::rpc::types::Block =
+        serde_json::from_value(value).expect("block fixture should deserialize");
+    CatchupItem::BatchBlock { block, receipts }
+}
+
+pub fn receipt_value(tx_hash: &str, block_number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "transactionHash": tx_hash,
+        "blockHash": format!("0x{:064x}", block_number),
+        "blockNumber": format!("0x{:x}", block_number),
+        "transactionIndex": "0x0",
+        "from": format!("0x{:040x}", 0),
+        "to":   format!("0x{:040x}", 1),
+        "cumulativeGasUsed": "0x0",
+        "gasUsed": "0x0",
+        "contractAddress": null,
+        "logs": [],
+        "status": "0x1",
+        "logsBloom": format!("0x{}", "0".repeat(512)),
+        "type": "0x2",
+        "effectiveGasPrice": "0x1"
+    })
+}
+
+pub fn receipts_batch_response(
+    ids_and_receipts: &[(u64, Option<serde_json::Value>)],
+) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = ids_and_receipts
+        .iter()
+        .map(|(id, result)| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
 }
