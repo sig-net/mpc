@@ -54,7 +54,7 @@ pub struct MessageChannel {
     /// Marks completed protocols so their late messages are dropped.
     filter: mpsc::Sender<(Protocols, u64)>,
     /// Entry point for encrypted messages from peers (drained by `MessageInbox`).
-    pub inbox: mpsc::Sender<Ciphered>,
+    inbox: mpsc::Sender<Ciphered>,
 }
 
 impl MessageChannel {
@@ -111,6 +111,13 @@ impl MessageChannel {
         } else {
             set_channel_capacity_tx("outgoing", &self.outgoing);
         }
+    }
+
+    /// Raw sender into the inbox, for test fixtures that route messages
+    /// between in-process nodes directly instead of over HTTP.
+    #[cfg(feature = "test-feature")]
+    pub fn inbox_sender(&self) -> mpsc::Sender<Ciphered> {
+        self.inbox.clone()
     }
 
     pub async fn send_inbox(&self, encrypted: Ciphered) {
