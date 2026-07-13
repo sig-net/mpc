@@ -1,7 +1,5 @@
 use crate::abi::ChainSignatures;
-use crate::client::{
-    BlockNumber, CatchupItem, EthereumClient, MaybeBlock, CATCHUP_BLOCK_BATCH_SIZE,
-};
+use crate::client::{BlockNumber, CatchupItem, EthereumClient, MaybeBlock};
 use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
 use crate::{EthConfig, MAX_CATCHUP_CONCURRENT_BATCHES};
 use alloy::consensus::Transaction;
@@ -11,7 +9,7 @@ use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt};
+use futures_util::Stream;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
@@ -718,7 +716,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = CatchupItem;
-    type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
+    type Iter = std::pin::Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -786,8 +784,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        let client = self.client.clone();
-        // Number of concurrent catchup batches to fetch
         let concurrent = if self.eth.light_client {
             1
         } else {
@@ -795,24 +791,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 .catchup_concurrent_batches
                 .clamp(1, MAX_CATCHUP_CONCURRENT_BATCHES)
         };
-        let stream = stream::iter(
-            (catchup_start..anchor_height)
-                .step_by(CATCHUP_BLOCK_BATCH_SIZE as usize)
-                .map(move |start| {
-                    let end = start
-                        .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
-                        .min(anchor_height);
-                    (start, end)
-                }),
-        )
-        .map(move |(start, end)| {
-            let client = client.clone();
-            async move { client.fetch_batch(start, end).await }
-        })
-        .buffered(concurrent)
-        .flat_map(stream::iter);
-
-        Box::pin(stream)
+        self.client
+            .catchup_batch_stream(catchup_start, anchor_height, concurrent)
     }
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
@@ -981,6 +961,7 @@ mod tests {
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256};
     use alloy::rpc::types::BlockId;
+    use futures_util::stream::StreamExt;
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::ChainIndexer;
     use mpc_primitives::{
@@ -1071,9 +1052,9 @@ mod tests {
         // Ensure blocks are considered finalized to avoid reorg-check refetches in process_catchup
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 1, 33);
+        let mut stream = indexer.client.catchup_batch_stream(1, 33, 1);
         for n in 1..=32 {
-            let item = iter.next().await.expect("expected item");
+            let item = stream.next().await.expect("expected item");
             indexer
                 .process_catchup(&item)
                 .await
@@ -1131,16 +1112,16 @@ mod tests {
             .await;
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 10, 12);
+        let mut stream = indexer.client.catchup_batch_stream(10, 12, 1);
 
-        let item1 = iter.next().await.unwrap();
+        let item1 = stream.next().await.unwrap();
         indexer.process_catchup(&item1).await.unwrap();
         assert!(matches!(
             events_rx.recv().await,
             Some(ChainEvent::Block(10))
         ));
 
-        let item2 = iter.next().await.unwrap();
+        let item2 = stream.next().await.unwrap();
         indexer.process_catchup(&item2).await.unwrap();
         assert!(matches!(
             events_rx.recv().await,
@@ -1245,8 +1226,8 @@ mod tests {
         // Ensure block is considered finalized to avoid the reorg-check refetch
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 42, 43);
-        let item = iter.next().await.unwrap();
+        let mut stream = indexer.client.catchup_batch_stream(42, 43, 1);
+        let item = stream.next().await.unwrap();
 
         indexer
             .process_catchup(&item)

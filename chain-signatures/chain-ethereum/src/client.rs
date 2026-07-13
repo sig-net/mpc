@@ -1,7 +1,8 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId, TransactionReceipt};
-use std::sync::Arc;
+use futures_util::stream::{self, Stream, StreamExt};
+use std::pin::Pin;
 use std::time::Duration;
 
 use crate::indexer_eth_direct_rpc;
@@ -12,7 +13,6 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use super::indexer_eth_helios;
 
 // TODO: check if our RPC providers support higher batch sizes
-/// Catchup batch size for [`CatchupIter`]
 pub const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
 /// Block number alias shared by the client and indexer.
@@ -26,7 +26,7 @@ pub enum MaybeBlock {
     Missing(BlockId),
 }
 
-/// Catchup item yielded by [`CatchupIter`] and consumed by `process_catchup`.
+/// Catchup item yielded by [`EthereumClient::catchup_batch_stream`] and consumed by `process_catchup`.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum CatchupItem {
@@ -42,59 +42,6 @@ pub enum CatchupItem {
     /// A block from the live stream. Receipts are fetched lazily in
     /// `process`.
     LiveBlock(Block),
-}
-
-/// Lazy batching iterator over `[start_block, end_block)` range.
-pub struct CatchupIter {
-    client: Arc<EthereumClient>,
-    next_block: BlockNumber,
-    end_block: BlockNumber,
-    buffered_blocks: std::vec::IntoIter<CatchupItem>,
-}
-
-impl CatchupIter {
-    pub fn new(
-        client: Arc<EthereumClient>,
-        start_block: BlockNumber,
-        end_block: BlockNumber,
-    ) -> Self {
-        Self {
-            client,
-            next_block: start_block,
-            end_block,
-            buffered_blocks: Vec::new().into_iter(),
-        }
-    }
-
-    async fn fetch_next_batch(&mut self) {
-        if self.next_block >= self.end_block {
-            return;
-        }
-
-        let batch_end = self
-            .next_block
-            .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
-            .min(self.end_block);
-
-        let items = self.client.fetch_batch(self.next_block, batch_end).await;
-
-        self.buffered_blocks = items.into_iter();
-        self.next_block = batch_end;
-    }
-
-    pub async fn next(&mut self) -> Option<CatchupItem> {
-        loop {
-            if let Some(block) = self.buffered_blocks.next() {
-                return Some(block);
-            }
-
-            if self.next_block >= self.end_block {
-                return None;
-            }
-
-            self.fetch_next_batch().await;
-        }
-    }
 }
 
 // Constants for Ethereum RPC client retry behavior
@@ -336,6 +283,37 @@ impl EthereumClient {
         items
     }
 
+    /// Returns a stream of catchup items for the range `[start, end)`, fetching up to `concurrency` batches in parallel.
+    pub fn catchup_batch_stream(
+        &self,
+        start: BlockNumber,
+        end: BlockNumber,
+        concurrency: usize,
+    ) -> Pin<Box<dyn Stream<Item = CatchupItem> + Send + 'static>> {
+        let client = self.clone();
+        let stream = stream::iter(
+            (start..end)
+                .step_by(CATCHUP_BLOCK_BATCH_SIZE as usize)
+                .map(move |s| (s, s.saturating_add(CATCHUP_BLOCK_BATCH_SIZE).min(end))),
+        )
+        .map(move |(s, e)| {
+            let client = client.clone();
+            async move { client.fetch_batch(s, e).await }
+        })
+        .buffered(concurrency)
+        .flat_map(stream::iter);
+
+        #[cfg(feature = "bench")]
+        let stream = stream::unfold(stream, |mut s| async move {
+            let t = std::time::Instant::now();
+            let item = s.next().await;
+            crate::bench::add_batch_wait_time(t.elapsed());
+            item.map(|b| (b, s))
+        });
+
+        Box::pin(stream)
+    }
+
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_nonce", {
             match &self.inner {
@@ -543,7 +521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_iter_fetches_batches_lazily() {
+    async fn catchup_stream_yields_blocks_in_order_and_terminates() {
         let mut server = mockito::Server::new_async().await;
 
         let first_batch = (10..42)
@@ -576,8 +554,6 @@ mod tests {
             .create_async()
             .await;
 
-        // Receipt mocks: return an empty array for any eth_getBlockReceipts call.
-        // This test verifies block-batch laziness, not receipt content.
         let _receipts_mock = server
             .mock("POST", "/")
             .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
@@ -587,11 +563,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 43);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(10, 43, 1);
 
-        for expected_number in 10..42 {
-            let next = iter.next().await;
+        for expected_number in 10..=42 {
+            let next = stream.next().await;
             assert!(
                 matches!(
                     &next,
@@ -603,24 +579,13 @@ mod tests {
             );
         }
 
+        assert!(stream.next().await.is_none());
         assert!(first_batch_mock.matched_async().await);
-        assert!(!second_batch_mock.matched_async().await);
-
-        let next = iter.next().await;
-        assert!(
-            matches!(
-                &next,
-                Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == 42
-            ),
-            "Expected block 42, got {:?}",
-            next
-        );
         assert!(second_batch_mock.matched_async().await);
-        assert!(iter.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn catchup_iter_splits_requests_into_32_32_1_batches() {
+    async fn catchup_stream_splits_requests_into_32_32_1_batches() {
         let mut server = mockito::Server::new_async().await;
 
         let first_batch = (0..32)
@@ -682,11 +647,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 0, 65);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(0, 65, 3);
 
         for expected_number in 0..65 {
-            let next = iter.next().await;
+            let next = stream.next().await;
             assert!(
                 matches!(
                     &next,
@@ -698,7 +663,7 @@ mod tests {
             );
         }
 
-        assert!(iter.next().await.is_none());
+        assert!(stream.next().await.is_none());
         assert!(first_batch_mock.matched_async().await);
         assert!(second_batch_mock.matched_async().await);
         assert!(third_batch_mock.matched_async().await);
@@ -812,7 +777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_iter_receipt_batch_order_preservation() {
+    async fn catchup_stream_receipt_batch_order_preservation() {
         let mut server = mockito::Server::new_async().await;
 
         // 2 blocks: 10 (0xa), 11 (0xb). IDs 1 and 2 (counter starts at 1).
@@ -861,11 +826,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 12);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(10, 12, 1);
 
-        let item1 = iter.next().await.unwrap();
-        let item2 = iter.next().await.unwrap();
+        let item1 = stream.next().await.unwrap();
+        let item2 = stream.next().await.unwrap();
 
         // Block 10 → 1 receipt (ID 3 was second in response but maps to block 10)
         if let CatchupItem::BatchBlock { block, receipts } = item1 {
