@@ -784,7 +784,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        // Determine the concurrency for catchup.  
+        // Determine the concurrency for catchup.
         let concurrency = if self.eth.light_client {
             1
         } else {
