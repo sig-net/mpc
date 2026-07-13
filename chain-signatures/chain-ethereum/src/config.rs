@@ -1,5 +1,8 @@
 use std::fmt;
 
+pub const DEFAULT_CATCHUP_CONCURRENT_BATCHES: usize = 3;
+pub const MAX_CATCHUP_CONCURRENT_BATCHES: usize = 8;
+
 #[derive(Clone)]
 pub struct EthConfig {
     /// The ethereum account secret key used to sign eth respond txn.
@@ -20,6 +23,7 @@ pub struct EthConfig {
     pub optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
     pub light_client: bool,
+    pub catchup_concurrent_batches: usize,
 }
 
 impl EthConfig {
@@ -48,6 +52,10 @@ impl fmt::Debug for EthConfig {
             )
             .field("optimistic_requests", &self.optimistic_requests)
             .field("light_client", &self.light_client)
+            .field(
+                "catchup_concurrent_batches",
+                &self.catchup_concurrent_batches,
+            )
             .finish()
     }
 }

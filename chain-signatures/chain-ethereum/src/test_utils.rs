@@ -1,6 +1,6 @@
 use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
-use crate::EthConfig;
+use crate::{EthConfig, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
 use alloy::primitives::Address;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
@@ -31,6 +31,7 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
         helios_data_path: "".to_string(),
         refresh_finalized_interval: 0,
         optimistic_requests: false,
+        catchup_concurrent_batches: DEFAULT_CATCHUP_CONCURRENT_BATCHES,
     };
 
     EthereumClient::new_with_strategy(eth, retry_strategy)
@@ -66,6 +67,7 @@ impl TestIndexerBuilder {
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
                 optimistic_requests: true,
                 light_client: false,
+                catchup_concurrent_batches: DEFAULT_CATCHUP_CONCURRENT_BATCHES,
             },
             state_manager: MockStateManager::new(),
             optimistic_requests: true,

@@ -349,6 +349,8 @@ impl ChainPublisher for EthClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::DEFAULT_CATCHUP_CONCURRENT_BATCHES;
+
     use super::*;
     use alloy::primitives::{B256, U256};
     use k256::{AffinePoint, Scalar};
@@ -372,6 +374,7 @@ mod tests {
             refresh_finalized_interval: 1000,
             optimistic_requests: false,
             light_client: false,
+            catchup_concurrent_batches: DEFAULT_CATCHUP_CONCURRENT_BATCHES,
         }
     }
 

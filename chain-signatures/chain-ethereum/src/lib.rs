@@ -17,5 +17,5 @@ mod test_utils;
 mod util;
 
 pub use client::MaybeBlock;
-pub use config::EthConfig;
+pub use config::{EthConfig, DEFAULT_CATCHUP_CONCURRENT_BATCHES, MAX_CATCHUP_CONCURRENT_BATCHES};
 pub use indexer::EthereumStream;

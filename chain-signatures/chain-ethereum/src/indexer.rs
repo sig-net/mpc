@@ -1,10 +1,9 @@
 use crate::abi::ChainSignatures;
 use crate::client::{
     BlockNumber, CatchupItem, EthereumClient, MaybeBlock, CATCHUP_BLOCK_BATCH_SIZE,
-    CATCHUP_CONCURRENT_BATCHES,
 };
 use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
-use crate::EthConfig;
+use crate::{EthConfig, MAX_CATCHUP_CONCURRENT_BATCHES};
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
@@ -788,6 +787,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         }
 
         let client = self.client.clone();
+        // Number of concurrent catchup batches to fetch
+        let concurrent = if self.eth.light_client {
+            1
+        } else {
+            self.eth
+                .catchup_concurrent_batches
+                .clamp(1, MAX_CATCHUP_CONCURRENT_BATCHES)
+        };
         let stream = stream::iter(
             (catchup_start..anchor_height)
                 .step_by(CATCHUP_BLOCK_BATCH_SIZE as usize)
@@ -802,7 +809,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             let client = client.clone();
             async move { client.fetch_batch(start, end).await }
         })
-        .buffered(CATCHUP_CONCURRENT_BATCHES)
+        .buffered(concurrent)
         .flat_map(stream::iter);
 
         Box::pin(stream)

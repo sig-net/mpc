@@ -35,6 +35,7 @@ config, not constructed by hand.
 | `refresh_finalized_interval` | —                | no        | blocks between finalized-head polls |
 | `optimistic_requests`     | `OPTIMISTIC`        | no        | default on; set `0` to disable optimistic requests and exercise per-block `wait_for_finalized_block` polling |
 | `light_client`            | —                   | no        | set `true` to select the Helios backend (`helios` feature required) |
+| `catchup_concurrent_batches` | `CATCHUP_CONCURRENT_BATCHES` / `MPC_ETH_CATCHUP_CONCURRENT_BATCHES` | no | number of catchup batches fetched in parallel via `buffered(N)`; default `3`, clamped to `1..=8`. Helios forces `1`.
 
 ## Benchmarking catchup
 
@@ -82,6 +83,7 @@ cargo run --example bench_catchup --features bench
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
 | `NETWORK`        | no        | default `sepolia` |
 | `OPTIMISTIC`     | no        | `1` (default) enables optimistic requests; `0` exercises finality polling |
+| `CATCHUP_CONCURRENT_BATCHES` | no | concurrent catchup batches via `buffered(N)`; default `3`, clamped `1..=8` |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
 ## Features

@@ -1,4 +1,4 @@
-use mpc_chain_ethereum::EthConfig;
+use mpc_chain_ethereum::{EthConfig, MAX_CATCHUP_CONCURRENT_BATCHES, DEFAULT_CATCHUP_CONCURRENT_BATCHES};
 use secrecy::{ExposeSecret, SecretString};
 
 // Configures Ethereum indexer.
@@ -72,6 +72,14 @@ pub struct EthArgs {
     /// Useful for testing where we do not want to reach finality due to how long it takes.
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
     pub eth_optimistic_requests: bool,
+
+    /// Number of concurrent catchup batches to fetch. 
+    #[clap(
+        long,
+        env("MPC_ETH_CATCHUP_CONCURRENT_BATCHES"),
+        default_value = "3"
+    )]
+    pub eth_catchup_concurrent_batches: usize,
 }
 
 impl EthArgs {
@@ -111,6 +119,10 @@ impl EthArgs {
         if self.eth_optimistic_requests {
             args.push("--eth-optimistic-requests".to_string());
         }
+        args.extend([
+            "--eth-catchup-concurrent-batches".to_string(),
+            self.eth_catchup_concurrent_batches.to_string(),
+        ]);
         if self.eth_light_client {
             args.push("--eth-light-client".to_string());
         }
@@ -138,6 +150,9 @@ impl EthArgs {
             light_client: self.eth_light_client,
             #[cfg(not(feature = "helios"))]
             light_client: false,
+            catchup_concurrent_batches: self
+                .eth_catchup_concurrent_batches
+                .clamp(1, MAX_CATCHUP_CONCURRENT_BATCHES),
         })
     }
 
@@ -153,6 +168,7 @@ impl EthArgs {
                 eth_refresh_finalized_interval: config.refresh_finalized_interval,
                 eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
+                eth_catchup_concurrent_batches: config.catchup_concurrent_batches,
             },
             _ => Self {
                 eth_account_sk: None,
@@ -164,6 +180,8 @@ impl EthArgs {
                 eth_refresh_finalized_interval: 0,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
+                eth_catchup_concurrent_batches:
+                    DEFAULT_CATCHUP_CONCURRENT_BATCHES,
             },
         }
     }

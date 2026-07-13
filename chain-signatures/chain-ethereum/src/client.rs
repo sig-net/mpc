@@ -15,9 +15,6 @@ use super::indexer_eth_helios;
 /// Catchup batch size for [`CatchupIter`]
 pub const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
-/// Maximum number of concurrent catchup batches to fetch in parallel
-pub const CATCHUP_CONCURRENT_BATCHES: usize = 3;
-
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
 

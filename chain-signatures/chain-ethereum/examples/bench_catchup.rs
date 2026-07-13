@@ -31,7 +31,9 @@
 
 use anyhow::anyhow;
 use futures_util::StreamExt;
-use mpc_chain_ethereum::{EthConfig, EthereumStream};
+use mpc_chain_ethereum::{
+    EthConfig, EthereumStream, DEFAULT_CATCHUP_CONCURRENT_BATCHES, MAX_CATCHUP_CONCURRENT_BATCHES,
+};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainStream, MockStateManager, NoopChainTelemetry, StateManager,
 };
@@ -74,6 +76,12 @@ fn make_config() -> anyhow::Result<EthConfig> {
         refresh_finalized_interval: 1,
         optimistic_requests: env_bool("OPTIMISTIC", true)?,
         light_client: false,
+        catchup_concurrent_batches: env_u64("CATCHUP_CONCURRENT_BATCHES")
+            .ok()
+            .filter(|&n| n >= 1)
+            .map(|n| n as usize)
+            .unwrap_or(DEFAULT_CATCHUP_CONCURRENT_BATCHES)
+            .min(MAX_CATCHUP_CONCURRENT_BATCHES),
     })
 }
 
