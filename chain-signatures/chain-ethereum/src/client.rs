@@ -45,6 +45,13 @@ pub enum CatchupItem {
     LiveBlock(Block),
 }
 
+/// Intermediate state of a block during catchup batch processing.
+enum BlockSlot {
+    Missing(BlockId),
+    NoLogs(Block),
+    PendingLogs(Block, BlockId),
+}
+
 /// Lazy batching iterator over `[start_block, end_block)` range.
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
@@ -79,74 +86,71 @@ impl CatchupIter {
             .next_block
             .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
             .min(self.end_block);
-        let batch_block_ids = (self.next_block..batch_end)
-            .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .collect::<Vec<_>>();
+
+        let batch_block_ids: Vec<BlockId> = (self.next_block..batch_end)
+            .map(|n| BlockId::Number(BlockNumberOrTag::Number(n)))
+            .collect();
 
         #[cfg(feature = "bench")]
         let start = std::time::Instant::now();
 
-        // Fetch blocks
         let blocks = self.client.get_blocks(&batch_block_ids).await;
 
-        // For each block, check if the bloom indicates that the contract may have emitted logs.
-        let mut bloom_positive_ids: Vec<BlockId> = Vec::new();
-        let mut logs_index: Vec<Option<usize>> = Vec::with_capacity(batch_block_ids.len());
-        let mut present_blocks: Vec<Option<Block>> = Vec::with_capacity(batch_block_ids.len());
-        for maybe in blocks {
-            match maybe {
+        // Classify each block: missing, bloom-negative (no logs to fetch), or
+        // bloom-positive (needs a slot in the logs batch request).
+        let slots: Vec<BlockSlot> = blocks
+            .into_iter()
+            .zip(&batch_block_ids)
+            .map(|(maybe, &block_id)| match maybe {
+                MaybeBlock::Missing(_) => BlockSlot::Missing(block_id),
                 MaybeBlock::Block(block) => {
-                    let positive = block_may_contain_logs(&block, self.contract_address);
-                    let idx = if positive {
-                        let i = bloom_positive_ids.len();
-                        bloom_positive_ids.push(BlockId::Number(BlockNumberOrTag::Number(
-                            block.header.number,
-                        )));
-                        Some(i)
+                    if block_may_contain_logs(&block, self.contract_address) {
+                        BlockSlot::PendingLogs(block, block_id)
                     } else {
-                        None
-                    };
-                    logs_index.push(idx);
-                    present_blocks.push(Some(block));
+                        BlockSlot::NoLogs(block)
+                    }
                 }
-                MaybeBlock::Missing(_) => {
-                    logs_index.push(None);
-                    present_blocks.push(None);
-                }
-            }
-        }
+            })
+            .collect();
 
-        // Fetch logs for blocks whose bloom indicates the contract may have emitted logs.
-        let (logs_results, logs_failed) = if bloom_positive_ids.is_empty() {
-            (Vec::new(), false)
+        let logs_request_ids: Vec<BlockId> = slots
+            .iter()
+            .filter_map(|slot| match slot {
+                BlockSlot::PendingLogs(_, id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+
+        // Fetch logs for bloom-positive blocks. On failure, those blocks are
+        // reported as missing so the caller refetches them individually.
+        let (mut logs_iter, logs_failed) = if logs_request_ids.is_empty() {
+            (Vec::new().into_iter(), false)
         } else {
             match self
                 .client
-                .get_logs_batch(self.contract_address, &bloom_positive_ids)
+                .get_logs_batch(self.contract_address, &logs_request_ids)
                 .await
             {
-                Ok(v) => (v, false),
-                Err(_) => (Vec::new(), true),
+                Ok(logs) => (logs.into_iter(), false),
+                Err(_) => (Vec::new().into_iter(), true),
             }
         };
 
-        let mut logs_iter = logs_results.into_iter();
-        let items: Vec<CatchupItem> = present_blocks
+        // Reconstruct the batch items in the original order, with logs for bloom-positive blocks.
+        let items: Vec<CatchupItem> = slots
             .into_iter()
-            .zip(batch_block_ids)
-            .zip(logs_index)
-            .map(|((maybe, block_id), idx_opt)| match maybe {
-                None => CatchupItem::Missing(block_id),
-                Some(block) => match idx_opt {
-                    None => CatchupItem::BatchBlock {
-                        block,
-                        logs: Vec::new(),
-                    },
-                    Some(_) if logs_failed => CatchupItem::Missing(block_id),
-                    Some(_) => CatchupItem::BatchBlock {
-                        block,
-                        logs: logs_iter.next().unwrap_or_default(),
-                    },
+            .map(|slot| match slot {
+                BlockSlot::Missing(block_id) => CatchupItem::Missing(block_id),
+                BlockSlot::NoLogs(block) => CatchupItem::BatchBlock {
+                    block,
+                    logs: Vec::new(),
+                },
+                BlockSlot::PendingLogs(_block, block_id) if logs_failed => {
+                    CatchupItem::Missing(block_id)
+                }
+                BlockSlot::PendingLogs(block, _) => CatchupItem::BatchBlock {
+                    block,
+                    logs: logs_iter.next().unwrap_or_default(),
                 },
             })
             .collect();
