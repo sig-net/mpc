@@ -229,9 +229,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Parse already-filtered contract logs out of a block and assemble the
-    /// [`BlockAndRequests`] (sign requests, respond logs, execution
-    /// confirmations).
+    /// Parse the block and its relevant logs into a `BlockAndRequests` payload.
     async fn parse_block(
         &self,
         block: &Block,
@@ -965,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_batch_receipts_single_batch_post() {
+    async fn catchup_batch_logs_skipped_on_empty_bloom() {
         let mut server = Server::new_async().await;
 
         // 32-block catchup: blocks have empty blooms so the batch issues exactly
