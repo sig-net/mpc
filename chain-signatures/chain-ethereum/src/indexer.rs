@@ -4,7 +4,7 @@ use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered
 use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::{Address, B256};
+use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
@@ -16,7 +16,7 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
     SignId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -209,16 +209,33 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     ) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
         self.telemetry.block_indexed(block.header.number);
-        let processed = self.parse_block(block, receipts).await?;
+
+        // Temporary
+        let relevant_logs: Vec<Log> = receipts
+            .iter()
+            .flat_map(|receipt| {
+                receipt
+                    .inner
+                    .logs()
+                    .iter()
+                    .filter(|log| log.address() == self.contract_address)
+                    .cloned()
+            })
+            .collect();
+
+        let processed = self.parse_block(block, &relevant_logs).await?;
         self.emit_processed_block(processed, is_finalized).await?;
 
         Ok(())
     }
 
+    /// Parse already-filtered contract logs out of a block and assemble the
+    /// [`BlockAndRequests`] (sign requests, respond logs, execution
+    /// confirmations).
     async fn parse_block(
         &self,
         block: &Block,
-        block_receipts: &[TransactionReceipt],
+        relevant_logs: &[Log],
     ) -> anyhow::Result<BlockAndRequests> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -231,20 +248,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
         let mut sign_requests = Vec::new();
 
-        let relevant_logs: Vec<Log> = block_receipts
-            .iter()
-            .flat_map(|receipt| {
-                receipt
-                    .inner
-                    .logs()
-                    .iter()
-                    .filter(|log| log.address() == self.contract_address)
-                    .cloned()
-            })
-            .collect();
-
         let (respond_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
-            relevant_logs.into_iter().partition(|log| {
+            relevant_logs.iter().cloned().partition(|log| {
                 log.topic0().is_some_and(|topic| {
                     *topic == ChainSignatures::SignatureResponded::SIGNATURE_HASH
                 })
@@ -264,9 +269,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
-        let exec_events = self
-            .collect_execution_confirmations(block_number, block_receipts)
-            .await?;
+        let exec_events = self.collect_execution_confirmations(block_number).await?;
 
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.
@@ -379,11 +382,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
-        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0.into()).await? else {
+        // Fetch this single watcher tx's receipt
+        let Some(receipt) = self.client.get_transaction_receipt(tx_id.0.into()).await? else {
             return Ok(BackfillOutcome::NotObserved);
         };
 
-        let Some(mined_block_number) = tx.block_number else {
+        let Some(mined_block_number) = receipt.block_number else {
+            tracing::debug!(
+                ?tx_id,
+                ?sign_id,
+                "late watcher backfill: transaction receipt has no block number"
+            );
             return Ok(BackfillOutcome::NotObserved);
         };
 
@@ -398,33 +407,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
             return Ok(BackfillOutcome::NotObserved);
         }
-
-        let Some(block_receipts) = self
-            .client
-            .get_block_receipts(mined_block_number.into())
-            .await?
-        else {
-            tracing::debug!(
-                ?tx_id,
-                ?sign_id,
-                mined_block_number,
-                "late watcher backfill found mined transaction without block receipts"
-            );
-            return Ok(BackfillOutcome::NotObserved);
-        };
-
-        let Some(receipt) = block_receipts
-            .into_iter()
-            .find(|receipt| receipt.transaction_hash == tx_id.0)
-        else {
-            tracing::warn!(
-                ?tx_id,
-                ?sign_id,
-                mined_block_number,
-                "late watcher backfill could not find transaction receipt in mined block"
-            );
-            return Ok(BackfillOutcome::NotObserved);
-        };
 
         tracing::info!(
             ?tx_id,
@@ -443,13 +425,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     async fn collect_execution_confirmations(
         &self,
         block_number: u64,
-        block_receipts: &[TransactionReceipt],
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        let block_receipts: HashMap<B256, TransactionReceipt> = block_receipts
-            .iter()
-            .map(|receipt| (receipt.transaction_hash, receipt.clone()))
-            .collect::<HashMap<_, _>>();
-
         let mut events = Vec::new();
         let mut resolved_tx_ids = HashSet::new();
 
@@ -468,22 +444,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         // a failed extraction stays pending for retry, not flagged Failed.
         let mut observed_tx_ids = HashSet::new();
 
+        // Per-watcher `eth_getTransactionReceipt`
         for (tx_id, (sign_id, pending_tx)) in watchers {
             tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
-            if let Some(receipt) = block_receipts.get(&pending_tx.id.0) {
-                observed_tx_ids.insert(tx_id);
-                if let Some(event) = self
-                    .execution_confirmed_event(tx_id, sign_id, &pending_tx, block_number, receipt)
-                    .await
-                {
-                    events.push(event);
-                    resolved_tx_ids.insert(tx_id);
-                }
-                // `None` means extraction failed — leave pending for retry.
-                // `observed_tx_ids` above exempts it from the staleness check.
-                continue;
-            }
-
             match self
                 .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
                 .await?
@@ -494,6 +457,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                         events.push(event);
                         resolved_tx_ids.insert(tx_id);
                     }
+                    // `None` means extraction failed — leave pending for retry.
+                    // `observed_tx_ids` above exempts it from the staleness check.
                 }
                 BackfillOutcome::NotObserved => {}
             }
@@ -1582,29 +1547,6 @@ mod tests {
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
         let to_address = address!("5fbdb2315678afecb367f032d93f642f64180aa3");
 
-        let tx_response = json!({
-            "hash": format!("{tx_hash:#x}"),
-            "nonce": "0x1",
-            "blockHash": format!("{block_hash:#x}"),
-            "blockNumber": "0x2",
-            "transactionIndex": "0x0",
-            "from": format!("{from_address:#x}"),
-            "to": format!("{to_address:#x}"),
-            "value": "0x0",
-            "gasPrice": "0x3a29f0f8",
-            "gas": "0x5208",
-            "maxFeePerGas": "0xba43b7400",
-            "maxPriorityFeePerGas": "0x5f5e100",
-            "input": "0x",
-            "r": "0xd309309a59a49021281cb6bb41d164c96eab4e50f0c1bd24c03ca336e7bc2bb7",
-            "s": "0x28a7f089143d0a1355ebeb2a1b9f0e5ad9eca4303021c1400d61bc23c9ac5319",
-            "v": "0x0",
-            "yParity": "0x0",
-            "chainId": "0x7a69",
-            "accessList": [],
-            "type": "0x2"
-        });
-
         let receipt_response = json!({
             "transactionHash": format!("{tx_hash:#x}"),
             "blockHash": format!("{block_hash:#x}"),
@@ -1625,7 +1567,7 @@ mod tests {
         server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getTransactionByHash",
+                "method": "eth_getTransactionReceipt",
                 "params": [format!("{tx_hash:#x}")]
             })))
             .with_status(200)
@@ -1634,26 +1576,7 @@ mod tests {
                 json!({
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "result": tx_response,
-                })
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": ["0x2"]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": [receipt_response],
+                    "result": receipt_response,
                 })
                 .to_string(),
             )
@@ -1689,7 +1612,7 @@ mod tests {
         let indexer = builder.build().await;
 
         let events = indexer
-            .collect_execution_confirmations(5, &[])
+            .collect_execution_confirmations(5)
             .await
             .expect("late watcher backfill should succeed");
 
