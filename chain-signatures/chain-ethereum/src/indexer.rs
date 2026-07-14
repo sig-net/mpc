@@ -1,11 +1,13 @@
 use crate::abi::ChainSignatures;
-use crate::client::{BlockNumber, CatchupItem, CatchupIter, EthereumClient, MaybeBlock};
+use crate::client::{
+    block_may_contain_logs, BlockNumber, CatchupItem, CatchupIter, EthereumClient, MaybeBlock,
+};
 use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
 use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
+use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -190,6 +192,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
+    /// Fetch the contract-relevant logs for a single `block`, gated by its
+    /// bloom filter.
+    async fn fetch_block_logs(&self, block: &Block) -> anyhow::Result<Vec<Log>> {
+        if !block_may_contain_logs(block, self.contract_address) {
+            return Ok(Vec::new());
+        }
+        self.client
+            .get_logs(self.contract_address, block.header.number.into())
+            .await
+    }
+
     /// Process the block and emit relevant ChainEvents from the block.
     ///
     /// `is_finalized` indicates the block was already finalized at the time
@@ -204,26 +217,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     async fn process_block(
         &self,
         block: &Block,
-        receipts: &[TransactionReceipt],
+        relevant_logs: &[Log],
         is_finalized: bool,
     ) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
         self.telemetry.block_indexed(block.header.number);
 
-        // Temporary
-        let relevant_logs: Vec<Log> = receipts
-            .iter()
-            .flat_map(|receipt| {
-                receipt
-                    .inner
-                    .logs()
-                    .iter()
-                    .filter(|log| log.address() == self.contract_address)
-                    .cloned()
-            })
-            .collect();
-
-        let processed = self.parse_block(block, &relevant_logs).await?;
+        let processed = self.parse_block(block, relevant_logs).await?;
         self.emit_processed_block(processed, is_finalized).await?;
 
         Ok(())
@@ -729,7 +729,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
+        let catchup_iter = CatchupIter::new(
+            self.client.clone(),
+            catchup_start,
+            anchor_height,
+            self.contract_address,
+        );
 
         // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
         if let Some(finalized_block) = self
@@ -765,10 +770,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // it, since it `block` is of reference type. Maybe the language will let
         // us elide this in the future, but for now we need to introduce a new var.
         let _block;
-        let _receipts;
+        let _logs;
 
-        let (block, receipts) = match item {
-            CatchupItem::BatchBlock { block, receipts } => (block, receipts.as_slice()),
+        let (block, logs) = match item {
+            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
             CatchupItem::Missing(block_id) => {
                 tracing::warn!(
                     ?block_id,
@@ -778,33 +783,24 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 #[cfg(feature = "bench")]
                 let start = std::time::Instant::now();
 
-                // Refetch the block and receipts
-                let (block_res, receipts_res) = tokio::join!(
-                    self.client.get_block(*block_id),
-                    self.client.get_block_receipts(*block_id)
-                );
-
-                let Some(block) = block_res else {
+                // Refetch the block, then bloom-gate a single-block `eth_getLogs`.
+                let Some(block) = self.client.get_block(*block_id).await else {
                     anyhow::bail!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
                 };
-                let r = receipts_res?.unwrap_or_default();
+                let l = self.fetch_block_logs(&block).await?;
 
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(start.elapsed());
 
                 _block = block;
-                _receipts = r;
-                (&_block, _receipts.as_slice())
+                _logs = l;
+                (&_block, _logs.as_slice())
             }
             CatchupItem::LiveBlock(block) => {
-                _receipts = self
-                    .client
-                    .get_block_receipts(block.header.number.into())
-                    .await?
-                    .unwrap_or_default();
-                (block, _receipts.as_slice())
+                _logs = self.fetch_block_logs(block).await?;
+                (block, _logs.as_slice())
             }
         };
 
@@ -819,7 +815,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // Determine if the block is finalized based on the sampled finalized head at catchup start
         let f0 = self.catchup_finalized_head.load(Ordering::Relaxed);
         let is_finalized = block.header.number <= f0;
-        self.process_block(block, receipts, is_finalized).await?;
+        self.process_block(block, logs, is_finalized).await?;
 
         #[cfg(feature = "bench")]
         {
@@ -834,38 +830,28 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
     async fn process(&mut self, item: &Self::Block) -> anyhow::Result<()> {
         let _block;
-        let _receipts;
+        let _logs;
 
-        let (block, receipts) = match item {
+        let (block, logs) = match item {
             CatchupItem::LiveBlock(block) => {
-                _receipts = self
-                    .client
-                    .get_block_receipts(block.header.number.into())
-                    .await?
-                    .unwrap_or_default();
-                (block, _receipts.as_slice())
+                _logs = self.fetch_block_logs(block).await?;
+                (block, _logs.as_slice())
             }
-            CatchupItem::BatchBlock { block, receipts } => (block, receipts.as_slice()),
+            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
             CatchupItem::Missing(block_id) => {
-                // Refetch the block and receipts
-                let (block_res, receipts_res) = tokio::join!(
-                    self.client.get_block(*block_id),
-                    self.client.get_block_receipts(*block_id)
-                );
-
-                let Some(b) = block_res else {
+                let Some(b) = self.client.get_block(*block_id).await else {
                     anyhow::bail!(
                         "ethereum live stream yielded missing block {block_id:?} and refetch failed"
                     )
                 };
-                _receipts = receipts_res?.unwrap_or_default();
+                _logs = self.fetch_block_logs(&b).await?;
                 _block = b;
-                (&_block, _receipts.as_slice())
+                (&_block, _logs.as_slice())
             }
         };
 
         // Live blocks are not yet finalized, so keep the reorg hash check
-        self.process_block(block, receipts, false).await?;
+        self.process_block(block, logs, false).await?;
         Ok(())
     }
 
@@ -953,13 +939,11 @@ mod tests {
 
         server
             .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": ["0xc"]
-            })))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(2).to_string())
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -984,7 +968,8 @@ mod tests {
     async fn catchup_batch_receipts_single_batch_post() {
         let mut server = Server::new_async().await;
 
-        // 32-block catchup: assert exactly 1 eth_getBlockReceipts(batch)
+        // 32-block catchup: blocks have empty blooms so the batch issues exactly
+        // 1 eth_getBlockByNumber(batch) and ZERO eth_getLogs (bloom gate skips).
         let blocks: Vec<_> = (1..=32)
             .map(|n| test_utils::block_response(n as u64, n as u64))
             .collect();
@@ -998,15 +983,13 @@ mod tests {
             .create_async()
             .await;
 
-        // client.get_block_receipts_batch is called next, taking AtomicU64 IDs 33..=64
-        let receipts_resp = (33..=64).map(|n| (n, Some(json!([])))).collect::<Vec<_>>();
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(test_utils::receipts_batch_response(&receipts_resp).to_string())
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1016,7 +999,12 @@ mod tests {
         // Ensure blocks are considered finalized to avoid reorg-check refetches in process_catchup
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 1, 33);
+        let mut iter = crate::client::CatchupIter::new(
+            indexer.client.clone(),
+            1,
+            33,
+            indexer.contract_address,
+        );
         for n in 1..=32 {
             let item = iter.next().await.expect("expected item");
             indexer
@@ -1031,7 +1019,7 @@ mod tests {
         }
 
         blocks_mock.assert_async().await;
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1055,19 +1043,13 @@ mod tests {
             .create_async()
             .await;
 
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                json!([
-                    { "jsonrpc": "2.0", "id": 4, "result": [] }, // block 11
-                    { "jsonrpc": "2.0", "id": 3, "result": [] } // block 10
-                ])
-                .to_string(),
-            )
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1076,7 +1058,12 @@ mod tests {
             .await;
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 10, 12);
+        let mut iter = crate::client::CatchupIter::new(
+            indexer.client.clone(),
+            10,
+            12,
+            indexer.contract_address,
+        );
 
         let item1 = iter.next().await.unwrap();
         indexer.process_catchup(&item1).await.unwrap();
@@ -1093,11 +1080,11 @@ mod tests {
         ));
 
         blocks_mock.assert_async().await;
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn catchup_missing_block_falls_back_to_single_receipt_fetch() {
+    async fn catchup_missing_block_falls_back_to_single_logs_fetch() {
         let mut server = Server::new_async().await;
         let block_number = 12;
 
@@ -1116,23 +1103,13 @@ mod tests {
             .create_async()
             .await;
 
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": []
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1155,7 +1132,7 @@ mod tests {
         ));
 
         block_mock.assert_async().await;
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1174,13 +1151,13 @@ mod tests {
             .create_async()
             .await;
 
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockReceipts".to_string()))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(test_utils::receipts_batch_response(&[(2, None)]).to_string())
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1190,7 +1167,12 @@ mod tests {
         // Ensure block is considered finalized to avoid the reorg-check refetch
         indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
 
-        let mut iter = crate::client::CatchupIter::new(indexer.client.clone(), 42, 43);
+        let mut iter = crate::client::CatchupIter::new(
+            indexer.client.clone(),
+            42,
+            43,
+            indexer.contract_address,
+        );
         let item = iter.next().await.unwrap();
 
         indexer
@@ -1204,11 +1186,11 @@ mod tests {
         ));
 
         blocks_mock.assert_async().await;
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn live_process_fetches_receipts_singly() {
+    async fn live_process_fetches_logs_singly() {
         let mut server = Server::new_async().await;
         let block_number = 42;
         let item = test_utils::live_block(block_number);
@@ -1216,24 +1198,15 @@ mod tests {
             unreachable!()
         };
 
-        // Live path: assert exactly 1 single eth_getBlockReceipts
-        let receipts_mock = server
+        // Live path with an empty-bloom block: the bloom gate skips the
+        // eth_getLogs fetch entirely.
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": []
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1262,7 +1235,7 @@ mod tests {
             Some(ChainEvent::Block(n)) if n == block_number
         ));
 
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
         reorg_mock.assert_async().await;
     }
 
@@ -1388,23 +1361,13 @@ mod tests {
         };
         let block_number = block.header.number;
 
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": []
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1437,7 +1400,7 @@ mod tests {
             Some(ChainEvent::Block(n)) if n == block_number
         ));
 
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
         reorg_mock.assert_async().await;
     }
 
@@ -1451,23 +1414,13 @@ mod tests {
         };
         let block_number = block.header.number;
 
-        let receipts_mock = server
+        let logs_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockReceipts",
-                "params": [format!("0x{block_number:x}")]
-            })))
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .expect(0)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": []
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .with_body("[]")
             .create_async()
             .await;
 
@@ -1501,7 +1454,7 @@ mod tests {
             "no events should be emitted for a reorged live block"
         );
 
-        receipts_mock.assert_async().await;
+        logs_mock.assert_async().await;
         reorg_mock.assert_async().await;
     }
 

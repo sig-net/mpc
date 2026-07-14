@@ -102,16 +102,6 @@ impl RpcEthereumClient {
             .collect())
     }
 
-    pub async fn get_block_receipts(
-        &self,
-        block_id: BlockId,
-    ) -> anyhow::Result<Option<Vec<TransactionReceipt>>> {
-        #[cfg(feature = "bench")]
-        bench::rpc_inc("eth_getBlockReceipts");
-
-        self.block_receipts(block_id).await
-    }
-
     /// Fetch a single transaction's receipt via `eth_getTransactionReceipt`.
     ///
     /// Returns `None` if the tx is unknown or not yet mined (pending).
@@ -123,40 +113,6 @@ impl RpcEthereumClient {
         bench::rpc_inc("eth_getTransactionReceipt");
 
         self.transaction_receipt(tx_hash).await
-    }
-
-    /// Fetch receipts for multiple blocks in batch.
-    /// Order-preserving: result `i` corresponds to `block_ids[i]`, regardless
-    /// of response ordering (uses response `id` mapping, mirroring `get_blocks`).
-    /// A `null` result maps to `None` (block has no transactions).
-    pub async fn get_block_receipts_batch(
-        &self,
-        block_ids: &[BlockId],
-    ) -> anyhow::Result<Vec<Option<Vec<TransactionReceipt>>>> {
-        if block_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        #[cfg(feature = "bench")]
-        bench::rpc_inc_n("eth_getBlockReceipts(batch)", block_ids.len() as u64);
-
-        let requests = block_ids
-            .iter()
-            .map(|block_id| {
-                let request_id = self.next_id();
-                (
-                    request_id,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "method": "eth_getBlockReceipts",
-                        "params": [to_hex_block_id(*block_id)],
-                    }),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        self.batch_execute(requests).await
     }
 
     /// Fetch all logs emitted by `address` within `block_id` via a single
@@ -378,17 +334,6 @@ impl RpcEthereumClient {
                 .await
             }
         }
-    }
-
-    async fn block_receipts(
-        &self,
-        block_id: BlockId,
-    ) -> anyhow::Result<Option<Vec<TransactionReceipt>>> {
-        self.rpc_call(
-            "eth_getBlockReceipts",
-            vec![json!(to_hex_block_id(block_id))],
-        )
-        .await
     }
 
     /// Issue `eth_getTransactionReceipt` and deserialize the result as an

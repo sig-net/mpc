@@ -37,7 +37,7 @@ pub enum CatchupItem {
     /// A block fetched as part of a catchup batch, plus its logs.
     /// `logs` is `Vec::new()` for blocks with no relevant logs.
     BatchBlock { block: Block, logs: Vec<Log> },
-/// A block that was missing from the catchup batch response.
+    /// A block that was missing from the catchup batch response.
     /// `process_catchup` refetches both block and receipts individually.
     Missing(BlockId),
     /// A block from the live stream. Receipts are fetched lazily in
