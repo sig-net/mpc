@@ -21,7 +21,13 @@ use std::time::{Duration, Instant};
 type FromParticipant = Participant;
 type ToParticipant = Participant;
 type MessageRoute = (FromParticipant, ToParticipant);
-pub type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
+/// An outbound message with its route.
+pub struct SendMessage {
+    pub message: Message,
+    pub from: FromParticipant,
+    pub to: ToParticipant,
+    pub queued_at: Instant,
+}
 
 pub struct Partition {
     messages: Vec<Message>,
@@ -199,11 +205,11 @@ impl MessageOutbox {
         let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
             tokio::select! {
-                Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                Some(SendMessage { message, from, to, queued_at }) = self.outbox_rx.recv() => {
                     set_channel_capacity_tx("outgoing", &self.outbox_tx);
                     // add it to the outbox and sort it by from and to participant
                     let entry = self.messages.entry((from, to)).or_default();
-                    entry.push((msg, timestamp));
+                    entry.push((message, queued_at));
                 }
                 _ = interval.tick() => {
                     self.publish(&client, &config, &contract).await;

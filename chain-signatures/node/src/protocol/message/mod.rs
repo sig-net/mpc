@@ -26,6 +26,7 @@ pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
+pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
@@ -56,7 +57,7 @@ pub struct MessageChannel {
     /// Marks completed protocols so their late messages are dropped.
     filter: mpsc::Sender<(Protocols, u64)>,
     /// Entry point for encrypted messages from peers (drained by `MessageInbox`).
-    pub inbox: mpsc::Sender<Ciphered>,
+    inbox: mpsc::Sender<Ciphered>,
 }
 
 impl MessageChannel {
@@ -64,7 +65,7 @@ impl MessageChannel {
         let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
-        let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(MAX_SUBSCRIBE_REQUESTS);
         let inbox = MessageInbox::new(
             inbox_tx.clone(),
             inbox_rx,
@@ -106,13 +107,25 @@ impl MessageChannel {
     pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
         if let Err(err) = self
             .outgoing
-            .send((message.into(), (from, to, Instant::now())))
+            .send(SendMessage {
+                message: message.into(),
+                from,
+                to,
+                queued_at: Instant::now(),
+            })
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
         } else {
             set_channel_capacity_tx("outgoing", &self.outgoing);
         }
+    }
+
+    /// Raw sender into the inbox, for test fixtures that route messages
+    /// between in-process nodes directly instead of over HTTP.
+    #[cfg(feature = "test-feature")]
+    pub fn inbox_sender(&self) -> mpsc::Sender<Ciphered> {
+        self.inbox.clone()
     }
 
     pub async fn send_inbox(&self, encrypted: Ciphered) {

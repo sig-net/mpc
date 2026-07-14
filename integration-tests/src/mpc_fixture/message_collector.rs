@@ -33,7 +33,12 @@ pub struct MessagePrinter;
 
 impl CollectMessages for MessagePrinter {
     fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
-        let (msg, (from, to, _ts)) = msg;
+        let SendMessage {
+            message: msg,
+            from,
+            to,
+            ..
+        } = msg;
         let msg_type = message_type_str(msg);
         let action = if passed_filter {
             "Forwarded"
@@ -68,7 +73,12 @@ pub struct PerLinkCounter {
 
 impl CollectMessages for MessageCounter {
     fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
-        let (msg, (from, to, _ts)) = msg;
+        let SendMessage {
+            message: msg,
+            from,
+            to,
+            ..
+        } = msg;
 
         let sender_stats = self.links.entry(*from).or_default();
         let link_stats = sender_stats.entry(*to).or_default();
