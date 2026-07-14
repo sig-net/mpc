@@ -2,7 +2,7 @@ use crate::{EthConfig, MaybeBlock};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
-use alloy::rpc::types::TransactionRequest;
+use alloy::rpc::types::{Filter, Log, TransactionRequest};
 use futures_util::future::join_all;
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
@@ -93,6 +93,44 @@ impl HeliosEthereumClient {
         results.into_iter().collect()
     }
 
+    /// Fetch all logs emitted by `address` within `block_id` 
+    pub async fn get_logs(
+        &self,
+        address: Address,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<Vec<Log>> {
+        self.client
+            .get_logs(&logs_filter(address, block_id))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "Failed to get logs for address {address:?} block {block_id:?}: {:?}",
+                    err
+                )
+            })
+    }
+
+    /// Fetch `eth_getLogs` for multiple blocks in parallel
+    pub async fn get_logs_batch(
+        &self,
+        address: Address,
+        block_ids: &[alloy::rpc::types::BlockId],
+    ) -> anyhow::Result<Vec<Vec<Log>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = join_all(
+            block_ids
+                .iter()
+                .copied()
+                .map(|block_id| async move { self.get_logs(address, block_id).await }),
+        )
+        .await;
+
+        results.into_iter().collect()
+    }
+
     pub async fn get_nonce(
         &self,
         address: Address,
@@ -176,6 +214,20 @@ impl HeliosEthereumClient {
             anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
         })
     }
+}
+
+/// Build an alloy [`Filter`] scoped to a single `address` and one block,
+/// mirroring the direct-RPC `logs_filter_object`.
+///
+/// - `BlockId::Hash` → `Filter::AtBlockHash(hash)` (pins to the exact block).
+/// - `BlockId::Number(tag)` → `Filter::Range { from = to = tag }`.
+fn logs_filter(address: Address, block_id: BlockId) -> Filter {
+    let mut filter = Filter::new().address(address);
+    filter = match block_id {
+        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
+        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
+    };
+    filter
 }
 
 pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient> {

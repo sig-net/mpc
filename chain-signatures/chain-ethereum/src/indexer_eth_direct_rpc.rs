@@ -1,7 +1,7 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
-use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
+use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -144,6 +144,60 @@ impl RpcEthereumClient {
             .collect::<Vec<_>>();
 
         self.batch_execute(requests).await
+    }
+
+    /// Fetch all logs emitted by `address` within `block_id` via a single
+    /// `eth_getLogs` call, server-filtered to that address.
+    ///
+    /// A block with no logs at `address` returns an empty `Vec`.
+    pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_getLogs");
+
+        self.logs(address, block_id).await
+    }
+
+    /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
+    /// returning one `Vec<Log>` per input `block_id`, in input order.
+    ///
+    /// All requests share the same `address`. Each entry corresponds to the
+    /// request at the same index. A server-returned `null` result (or a
+    /// missing response) maps to an empty `Vec` (no logs from `address` in
+    /// that block).
+    pub async fn get_logs_batch(
+        &self,
+        address: Address,
+        block_ids: &[BlockId],
+    ) -> anyhow::Result<Vec<Vec<Log>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        #[cfg(feature = "bench")]
+        bench::rpc_inc_n("eth_getLogs(batch)", block_ids.len() as u64);
+
+        let requests = block_ids
+            .iter()
+            .map(|block_id| {
+                let request_id = self.next_id();
+                (
+                    request_id,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "eth_getLogs",
+                        "params": [logs_filter_object(address, *block_id)],
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let results: Vec<Option<Vec<Log>>> = self.batch_execute(requests).await?;
+
+        Ok(results
+            .into_iter()
+            .map(|opt| opt.unwrap_or_default())
+            .collect())
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
@@ -324,6 +378,13 @@ impl RpcEthereumClient {
         .await
     }
 
+    /// Issue a single-block `eth_getLogs` address filter via the raw RPC
+    /// path and deserialize the result array as `Vec<Log>`.
+    async fn logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
+        self.rpc_call::<Vec<Log>>("eth_getLogs", vec![logs_filter_object(address, block_id)])
+            .await
+    }
+
     async fn transaction_by_hash(&self, tx_hash: B256) -> anyhow::Result<Option<Transaction>> {
         self.rpc_call(
             "eth_getTransactionByHash",
@@ -434,6 +495,27 @@ fn hex_to_u64(value: &str) -> anyhow::Result<u64> {
         .map_err(|err| anyhow::anyhow!("failed to parse hex value '{value}': {err}"))
 }
 
+/// Build the `eth_getLogs` filter object for a single `address` scoped to one
+/// block.
+///
+/// - `BlockId::Hash` → `{ "blockHash": "0x..", "address": "0x.." }` (pins to
+///   the exact block, immune to reorgs).
+/// - `BlockId::Number(tag)` → `{ "fromBlock": tag, "toBlock": tag,
+///   "address": "0x.." }` (request by number/tag).
+fn logs_filter_object(address: Address, block_id: BlockId) -> serde_json::Value {
+    match block_id {
+        BlockId::Hash(hash) => json!({
+            "blockHash": format!("{:#x}", hash.block_hash),
+            "address": format_address(address),
+        }),
+        BlockId::Number(_) => json!({
+            "fromBlock": to_hex_block_id(block_id),
+            "toBlock": to_hex_block_id(block_id),
+            "address": format_address(address),
+        }),
+    }
+}
+
 fn to_hex_block_id(block_id: BlockId) -> String {
     match block_id {
         BlockId::Number(BlockNumberOrTag::Number(number)) => to_hex_u64(number),
@@ -519,6 +601,148 @@ mod tests {
             &blocks[1],
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
         ));
+    }
+
+    /// Helper: a fully-populated `eth_getLogs` log entry
+    fn log_value(addr: Address, block_number: u64, log_index: u64) -> serde_json::Value {
+        let block_hash = format!("0x{:064x}", block_number);
+        let tx_hash = format!("0x{:064x}", block_number);
+        json!({
+            "logIndex": format!("0x{log_index:x}"),
+            "blockNumber": format!("0x{block_number:x}"),
+            "blockHash": block_hash,
+            "transactionHash": tx_hash,
+            "transactionIndex": "0x0",
+            "address": format!("{:#x}", addr),
+            "topics": [],
+            "data": "0x",
+        })
+    }
+
+    fn filter_response(id: u64, logs: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({ "jsonrpc": "2.0", "id": id, "result": logs })
+    }
+
+    #[tokio::test]
+    async fn get_logs_issues_address_filtered_eth_getlogs_for_number() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let addr = Address::with_last_byte(0x42);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
+            .match_body(Matcher::Regex(
+                // "0x42" appears at the end of a checksummed address
+                r#"42"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(filter_response(1, vec![log_value(addr, 7, 0)]).to_string())
+            .create_async()
+            .await;
+
+        let logs = client
+            .get_logs(addr, BlockId::Number(BlockNumberOrTag::Number(7)))
+            .await
+            .expect("get_logs should succeed");
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address(), addr);
+    }
+
+    #[tokio::test]
+    async fn get_logs_empty_array_maps_to_empty_vec() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let addr = Address::with_last_byte(0x07);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(filter_response(1, vec![]).to_string())
+            .create_async()
+            .await;
+
+        let logs = client
+            .get_logs(addr, BlockId::Number(BlockNumberOrTag::Number(11215038)))
+            .await
+            .expect("get_logs should succeed");
+
+        assert!(logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_uses_block_hash_filter_for_hash_block_id() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let addr = Address::with_last_byte(0x99);
+        let block_hash = B256::with_last_byte(0xab);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                filter_response(1, vec![log_value(addr, 0xab, 0), log_value(addr, 0xab, 1)])
+                    .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let logs = client
+            .get_logs(addr, BlockId::Hash(block_hash.into()))
+            .await
+            .expect("get_logs should succeed");
+
+        assert_eq!(logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_logs_batch_preserves_request_order_when_responses_reordered() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let addr = Address::with_last_byte(0x42);
+        let block_ids = vec![
+            BlockId::Number(BlockNumberOrTag::Number(10)),
+            BlockId::Number(BlockNumberOrTag::Number(11)),
+            BlockId::Number(BlockNumberOrTag::Number(12)),
+        ];
+
+        // Match any eth_getLogs batch POST; respond with 2 results in
+        // reversed order: id 3 first, then 1, then 2 (note: id 2 returns null).
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    filter_response(3, vec![log_value(addr, 12, 0)]),
+                    filter_response(1, vec![]),          // empty for block 10
+                    { "jsonrpc": "2.0", "id": 2, "result": null }, // null → empty vec for block 11
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let results = client
+            .get_logs_batch(addr, &block_ids)
+            .await
+            .expect("batch fetch should succeed");
+
+        assert_eq!(results.len(), 3);
+        // block 10 → id 1 → empty array
+        assert!(results[0].is_empty());
+        // block 11 → id 2 → null → empty vec
+        assert!(results[1].is_empty());
+        // block 12 → id 3 → 1 log
+        assert_eq!(results[2].len(), 1);
+        assert_eq!(results[2][0].address(), addr);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, BlockId, TransactionReceipt};
+use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -325,6 +325,44 @@ impl EthereumClient {
                     }
                     EthereumClientInner::DirectRpc(client) => {
                         client.get_block_receipts_batch(block_ids).await
+                    }
+                }
+            }
+        )
+    }
+
+    /// Fetch all logs emitted by `address` within `block_id` via a single
+    /// server-filtered `eth_getLogs`.
+    pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
+        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_logs", {
+            match &self.inner {
+                #[cfg(feature = "helios")]
+                EthereumClientInner::Helios(client) => client.get_logs(address, block_id).await,
+                EthereumClientInner::DirectRpc(client) => client.get_logs(address, block_id).await,
+            }
+        })
+    }
+
+    /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
+    /// returning one `Vec<Log>` per input `block_id`, in input order.
+    /// Each request is address-filtered to the same `address`.
+    pub async fn get_logs_batch(
+        &self,
+        address: Address,
+        block_ids: &[BlockId],
+    ) -> anyhow::Result<Vec<Vec<Log>>> {
+        retry_rpc!(
+            ETH_RPC_BATCH_TIMEOUT,
+            self.retry_strategy,
+            "get_logs_batch",
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => {
+                        client.get_logs_batch(address, block_ids).await
+                    }
+                    EthereumClientInner::DirectRpc(client) => {
+                        client.get_logs_batch(address, block_ids).await
                     }
                 }
             }
