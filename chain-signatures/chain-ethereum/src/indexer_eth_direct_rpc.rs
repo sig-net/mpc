@@ -112,6 +112,19 @@ impl RpcEthereumClient {
         self.block_receipts(block_id).await
     }
 
+    /// Fetch a single transaction's receipt via `eth_getTransactionReceipt`.
+    ///
+    /// Returns `None` if the tx is unknown or not yet mined (pending).
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> anyhow::Result<Option<TransactionReceipt>> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_getTransactionReceipt");
+
+        self.transaction_receipt(tx_hash).await
+    }
+
     /// Fetch receipts for multiple blocks in batch.
     /// Order-preserving: result `i` corresponds to `block_ids[i]`, regardless
     /// of response ordering (uses response `id` mapping, mirroring `get_blocks`).
@@ -374,6 +387,19 @@ impl RpcEthereumClient {
         self.rpc_call(
             "eth_getBlockReceipts",
             vec![json!(to_hex_block_id(block_id))],
+        )
+        .await
+    }
+
+    /// Issue `eth_getTransactionReceipt` and deserialize the result as an
+    /// optional `TransactionReceipt`. `null` (pending / unknown tx) → `None`.
+    async fn transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> anyhow::Result<Option<TransactionReceipt>> {
+        self.rpc_call(
+            "eth_getTransactionReceipt",
+            vec![json!(format!("{:#x}", tx_hash))],
         )
         .await
     }
@@ -743,6 +769,63 @@ mod tests {
         // block 12 → id 3 → 1 log
         assert_eq!(results[2].len(), 1);
         assert_eq!(results[2][0].address(), addr);
+    }
+
+    #[tokio::test]
+    async fn get_transaction_receipt_returns_receipt_for_mined_tx() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let tx_hash = B256::with_last_byte(0x42);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getTransactionReceipt"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": crate::test_utils::receipt_value(
+                        &format!("{:#x}", tx_hash),
+                        7,
+                    ),
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let receipt = client
+            .get_transaction_receipt(tx_hash)
+            .await
+            .expect("get_transaction_receipt should succeed");
+
+        let receipt = receipt.expect("mined tx should yield Some(receipt)");
+        assert_eq!(receipt.transaction_hash, tx_hash);
+    }
+
+    #[tokio::test]
+    async fn get_transaction_receipt_returns_none_on_null_result() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let tx_hash = B256::with_last_byte(0x07);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"eth_getTransactionReceipt"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .create_async()
+            .await;
+
+        let receipt = client
+            .get_transaction_receipt(tx_hash)
+            .await
+            .expect("get_transaction_receipt should succeed");
+
+        assert!(receipt.is_none(), "null result should map to None");
     }
 
     #[test]

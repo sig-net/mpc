@@ -71,6 +71,22 @@ impl HeliosEthereumClient {
             .map_err(|err| anyhow::anyhow!("Failed to get block receipts for block: {:?}", err))
     }
 
+    /// Fetch a single transaction's receipt
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>> {
+        self.client
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "Failed to get transaction receipt for {tx_hash:?}: {:?}",
+                    err
+                )
+            })
+    }
+
     /// Helios has no native JSON-RPC batch, so batch = `join_all` of single
     /// `get_block_receipts` calls (mirrors `get_blocks`). Order-preserving via
     /// the input index ordering of `join_all`.
@@ -93,7 +109,7 @@ impl HeliosEthereumClient {
         results.into_iter().collect()
     }
 
-    /// Fetch all logs emitted by `address` within `block_id` 
+    /// Fetch all logs emitted by `address` within `block_id`
     pub async fn get_logs(
         &self,
         address: Address,

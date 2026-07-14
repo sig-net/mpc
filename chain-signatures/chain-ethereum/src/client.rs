@@ -1,5 +1,5 @@
 use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use std::sync::Arc;
 use std::time::Duration;
@@ -325,6 +325,31 @@ impl EthereumClient {
                     }
                     EthereumClientInner::DirectRpc(client) => {
                         client.get_block_receipts_batch(block_ids).await
+                    }
+                }
+            }
+        )
+    }
+
+    /// Fetch a single transaction's receipt via `eth_getTransactionReceipt`.
+    ///
+    /// Returns `None` for an unknown or pending (not-yet-mined) tx.
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: B256,
+    ) -> anyhow::Result<Option<TransactionReceipt>> {
+        retry_rpc!(
+            ETH_RPC_TIMEOUT,
+            self.retry_strategy,
+            "get_transaction_receipt",
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => {
+                        client.get_transaction_receipt(tx_hash).await
+                    }
+                    EthereumClientInner::DirectRpc(client) => {
+                        client.get_transaction_receipt(tx_hash).await
                     }
                 }
             }
