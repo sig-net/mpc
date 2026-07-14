@@ -25,6 +25,11 @@ pub enum MaybeBlock {
     Missing(BlockId),
 }
 
+/// Returns `true` if the block's logs bloom may contain logs emitted by `address`.
+pub fn block_may_contain_logs(block: &Block, address: Address) -> bool {
+    block.header.logs_bloom.contains_raw_log(address, &[])
+}
+
 /// Catchup item yielded by [`CatchupIter`] and consumed by `process_catchup`.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -494,6 +499,7 @@ impl EthereumClient {
 mod tests {
     use super::*;
     use crate::test_utils;
+    use alloy::primitives::Bloom;
     use mockito::{Matcher, Server};
     use serde_json::json;
 
@@ -940,5 +946,61 @@ mod tests {
         } else {
             panic!("Expected BatchBlock for block 11, got {:?}", item2);
         }
+    }
+
+    /// Build a `Block` with the given `logs_bloom`.
+    fn block_with_bloom(bloom: alloy::primitives::Bloom) -> Block {
+        let mut block: Block = serde_json::from_value(
+            test_utils::block_response(1, 7)
+                .get("result")
+                .expect("envelope present")
+                .clone(),
+        )
+        .expect("fixture should deserialize");
+        block.header.logs_bloom = bloom;
+        block
+    }
+
+    #[test]
+    fn block_may_contain_logs_empty_bloom_returns_false() {
+        let block = block_with_bloom(Bloom::default());
+        let addr = Address::with_last_byte(0x42);
+
+        assert!(!block_may_contain_logs(&block, addr));
+    }
+
+    #[test]
+    fn block_may_contain_logs_accrued_address_returns_true() {
+        let addr = Address::with_last_byte(0x42);
+        let mut bloom = Bloom::default();
+        bloom.accrue_raw_log(addr, &[]);
+
+        let block = block_with_bloom(bloom);
+
+        // Bloom accrued with our address → true (no false negative).
+        assert!(block_may_contain_logs(&block, addr));
+    }
+
+    #[test]
+    fn block_may_contain_logs_disjoint_address_returns_false() {
+        let addr = Address::with_last_byte(0x42);
+        let other = Address::with_last_byte(0x07);
+
+        let mut bloom = Bloom::default();
+        bloom.accrue_raw_log(other, &[]);
+
+        let block = block_with_bloom(bloom);
+
+        // Bloom accrued with a different address must NOT report our address → false (no false positive).
+        assert!(!block_may_contain_logs(&block, addr));
+    }
+
+    #[test]
+    fn block_may_contain_logs_saturated_bloom_is_false_positive_tolerated() {
+        let addr = Address::with_last_byte(0x42);
+        // An all-ones bloom matches every address — false positive, but we tolerate it.
+        let block = block_with_bloom(Bloom::from([0xffu8; 256]));
+
+        assert!(block_may_contain_logs(&block, addr));
     }
 }
