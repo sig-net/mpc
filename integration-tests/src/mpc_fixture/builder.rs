@@ -326,7 +326,7 @@ impl MpcFixtureBuilder {
                 .unwrap();
             routing_table.insert(
                 Participant::from(*participant),
-                node.messaging.channel.inbox.clone(),
+                node.messaging.channel.inbox_sender(),
             );
         }
         routing_table
