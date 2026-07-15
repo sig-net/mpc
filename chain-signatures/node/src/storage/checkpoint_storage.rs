@@ -216,21 +216,26 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let pattern = self.pending_checkpoints_pattern(chain);
-                let keys: Vec<String> = redis::cmd("KEYS").arg(pattern).query_async(&mut conn).await?;
-                let mut keys_to_delete = Vec::new();
-                for key in keys {
-                    let parts: Vec<&str> = key.split(':').collect();
-                    if let Some(key_height_str) = parts.last() {
-                        if let Ok(key_height) = key_height_str.parse::<u64>() {
-                            if key_height <= height {
-                                keys_to_delete.push(key);
-                            }
-                        }
-                    }
-                }
-                if !keys_to_delete.is_empty() {
-                    conn.del::<_, ()>(keys_to_delete).await?;
-                }
+                let script = redis::Script::new(r#"
+                    local keys = redis.call('KEYS', ARGV[1])
+                    local limit = tonumber(ARGV[2])
+                    for _, key in ipairs(keys) do
+                        local parts = {}
+                        for part in string.gmatch(key, "[^:]+") do
+                            table.insert(parts, part)
+                        end
+                        local height = tonumber(parts[#parts])
+                        if height and height <= limit then
+                            redis.call('DEL', key)
+                        end
+                    end
+                "#);
+                let _: () = script
+                    .arg(pattern)
+                    .arg(height)
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to execute clear_pending_up_to script")?;
             }
             CheckpointStorage::InMemory { pending, .. } => {
                 let mut pending_map = pending.write().await;
