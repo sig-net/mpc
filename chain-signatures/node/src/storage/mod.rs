@@ -11,7 +11,7 @@ pub use protocol_storage::StorageError;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change
-pub const STORAGE_VERSION: &str = "v11";
+pub const STORAGE_VERSION: &str = "v12";
 
 /// Configures storage.
 #[derive(Debug, Clone, clap::Parser)]
