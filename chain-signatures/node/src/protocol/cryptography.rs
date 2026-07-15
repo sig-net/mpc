@@ -394,7 +394,8 @@ impl ResharingState {
         Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
             epoch: contract.old_epoch + 1,
             participants: contract.new_participants.clone(),
-            threshold: contract.threshold,
+            // The reshared key uses the new threshold going forward.
+            threshold: contract.new_threshold,
             private_share,
             public_key: contract.public_key,
         }))
@@ -405,7 +406,7 @@ impl ReshareAwaiting {
     fn startable(&self, contract: &ResharingContractState) -> bool {
         let ready = self.ready_count(contract);
         let total = contract.new_participants.len();
-        let threshold = contract.threshold;
+        let threshold = contract.new_threshold;
 
         total >= threshold && ready == total
     }

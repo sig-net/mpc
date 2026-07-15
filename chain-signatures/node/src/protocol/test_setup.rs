@@ -1,8 +1,8 @@
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::signature::SignatureSpawnerTask;
-use crate::protocol::{MessageChannel, MpcSignProtocol, Sign};
+use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -16,7 +16,7 @@ pub struct TestProtocolStorage {
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: mpsc::Receiver<Sign>,
+    pub sign_rx: mpsc::Receiver<mpc_primitives::SignCommand>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,

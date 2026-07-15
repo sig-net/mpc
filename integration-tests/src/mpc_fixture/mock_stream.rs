@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mpc_indexer_core::{ChainIndexer, ChainStream};
+use mpc_chain_integration_core::{ChainIndexer, ChainStream};
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
 use mpc_primitives::{Chain, ChainEvent, SignKind};
@@ -153,21 +153,21 @@ impl InnerMockStream {
             let RpcAction::Publish(publish_action) = action;
 
             // Skip events for other chains
-            if publish_action.indexed.chain != Chain::Solana {
+            if publish_action.request.chain != Chain::Solana {
                 continue;
             }
 
             // for now, the mock stream only converts signature RPC actions to chain events
-            if !matches!(publish_action.indexed.kind, SignKind::Sign,) {
+            if !matches!(publish_action.request.kind, SignKind::Sign,) {
                 tracing::warn!(
-                    kind=?publish_action.indexed.kind,
+                    kind=?publish_action.request.kind,
                     "kind not yet supported in test framework",
                 );
                 continue;
             }
 
             let respond_event = mpc_primitives::SignatureRespondedEvent {
-                request_id: publish_action.indexed.id.request_id,
+                request_id: publish_action.request.id.request_id,
                 signature: publish_action.signature,
                 chain: Chain::Solana,
             };

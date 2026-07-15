@@ -5,6 +5,7 @@ pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
+pub mod request;
 pub mod signature;
 pub mod state;
 pub mod sync;
@@ -20,7 +21,6 @@ pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{
     Chain, ConsensusCheckpointDigest, IndexedSignRequest, RespondBidirectionalTx,
 };
-pub use signature::Sign;
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
@@ -28,7 +28,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
-use crate::protocol::signature::SignatureSpawnerTask;
+use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;

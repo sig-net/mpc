@@ -1,31 +1,27 @@
-mod canton;
-mod ethereum;
 mod hydration;
-mod near;
-#[cfg(test)]
-mod test_utils;
+mod near_governance;
 
 use crate::config::Config;
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use crate::util::retry::{retry_rpc, RetryConfig};
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
-pub use canton::CantonClient;
-pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
+pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
+use mpc_chain_integration_core::{
+    utils::retry::{retry_rpc, RetryConfig},
+    ChainPublisher, PublishAction,
+};
 pub use mpc_contract::primitives::{Read, View};
 use mpc_primitives::{CheckpointDigest, Signature};
-pub use near::NearClient;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -40,50 +36,6 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 // Publish retry constants
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
-const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
-const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
-
-/// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
-#[async_trait::async_trait]
-pub trait ChainPublisher: Send + Sync + 'static {
-    /// Accepts a publish action. The publisher encapsulates how this is executed
-    /// (e.g., immediate spawn, or pushing to an internal batching queue).
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
-}
-
-#[derive(Clone)]
-pub struct PublishAction {
-    pub public_key: mpc_crypto::PublicKey,
-    pub indexed: IndexedSignRequest,
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub timestamp: Instant,
-}
-
-impl PublishAction {
-    pub fn new(
-        public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
-        output: FullSignature<Secp256k1>,
-        participants: Vec<Participant>,
-    ) -> Option<Self> {
-        let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
-        let signature = crate::kdf::into_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            indexed.args.payload,
-        )
-        .ok()?;
-        Some(Self {
-            public_key,
-            indexed,
-            signature,
-            participants,
-            timestamp: Instant::now(),
-        })
-    }
-}
 
 pub enum RpcAction {
     Publish(PublishAction),
@@ -108,12 +60,12 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
-        let sign_id = indexed.id;
-        let Some(action) = PublishAction::new(public_key, indexed, output, participants) else {
+        let sign_id = request.id;
+        let Some(action) = PublishAction::new(public_key, request, output, participants) else {
             tracing::error!(
                 ?sign_id,
                 "failed to validate signature; trashing publish request",
@@ -131,7 +83,7 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
@@ -141,7 +93,7 @@ impl RpcChannel {
                 .tx
                 .send(RpcAction::Publish(PublishAction {
                     public_key,
-                    indexed,
+                    request,
                     signature,
                     participants,
                     timestamp: Instant::now(),
@@ -369,8 +321,8 @@ impl ContractStateWatcher {
 }
 
 pub struct RpcExecutor {
-    /// The NEAR client used to fetch contract state and config.
-    near: NearClient,
+    /// The NEAR governance client used to fetch contract state and config.
+    near: NearGovernanceClient,
     /// The publishers for each chain.
     publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     /// The receiver for incoming RPC actions.
@@ -379,7 +331,7 @@ pub struct RpcExecutor {
 
 impl RpcExecutor {
     pub async fn new(
-        near: NearClient,
+        near: NearGovernanceClient,
         publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     ) -> (RpcChannel, Self) {
         let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
@@ -397,7 +349,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+        checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
     ) {
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
@@ -428,7 +380,7 @@ impl RpcExecutor {
                 return;
             };
 
-            let chain = action.indexed.chain;
+            let chain = action.request.chain;
 
             // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
             let Some(publisher) = publishers.get(&chain) else {
@@ -446,10 +398,10 @@ impl RpcExecutor {
 }
 
 async fn update_contract_data(
-    near: NearClient,
+    near: NearGovernanceClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
-    checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -497,12 +449,11 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        for (chain, sc) in signed_checkpoints {
-            let new_digest = CheckpointDigest {
+        for (chain, tx) in &checkpoints {
+            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
                 height: sc.checkpoint.height,
                 digest: sc.checkpoint.digest,
-            };
-            let tx = &checkpoints[chain];
+            });
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
@@ -516,8 +467,8 @@ async fn update_contract_data(
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
-    let chain = action.indexed.chain;
-    let sign_id = action.indexed.id;
+    let chain = action.request.chain;
+    let sign_id = action.request.id;
 
     tracing::info!(
         ?sign_id,
@@ -561,39 +512,16 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
-/// Helper to record metrics when a signature is successfully published to a chain.
-pub fn record_publish_metrics(action: &PublishAction) {
-    let chain = action.indexed.chain;
-    let elapsed_secs = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
-
-    if elapsed_secs <= chain.expected_response_time_secs() {
-        record_request_latency_since(
-            chain,
-            SignRequestStep::Total,
-            "in_time",
-            action.indexed.unix_timestamp_indexed,
-        );
-    } else {
-        record_request_latency_since(
-            chain,
-            SignRequestStep::Total,
-            "expired",
-            action.indexed.unix_timestamp_indexed,
-        );
-    }
-    record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::test_utils::{make_indexed, make_publish_action, make_signature, scalar};
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
+    use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::SignKind;
 
     /// A publisher that counts the number of times it has been called.
@@ -654,6 +582,7 @@ mod tests {
             old_participants: participants.clone(),
             new_participants: participants.clone(),
             threshold: 2,
+            new_threshold: 2,
             public_key: AffinePoint::default(),
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
@@ -680,33 +609,6 @@ mod tests {
         assert_eq!(resumed.epoch, 1);
         assert_eq!(resumed.threshold, 2);
         assert_eq!(resumed.me, Participant::from(0));
-    }
-
-    #[test]
-    fn publish_action_accepts_valid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
-
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
-    }
-
-    #[test]
-    fn publish_action_rejects_invalid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let mut output = make_signature(&sk, epsilon, payload);
-        output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
-
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
     }
 
     #[tokio::test]

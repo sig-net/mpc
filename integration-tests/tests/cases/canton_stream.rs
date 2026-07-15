@@ -2,14 +2,18 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
-use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
+use mpc_chain_canton::{
+    daml::{CantonSignature, EcdsaSigData},
+    der_encode_signature, CantonChainCtx, CantonStream,
+};
+use mpc_chain_integration_core::{
+    utils::hashing::hash_payload, ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager,
+};
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
-use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
-use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
+use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
 use mpc_node::stream::{ChainPipeline, ChainStreaming};
 use mpc_primitives::{
     ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
@@ -29,13 +33,14 @@ async fn stream_canton(
     backlog: Backlog,
 ) -> Result<(
     CantonStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<CheckpointDigest>,
+    watch::Sender<Option<CheckpointDigest>>,
 )> {
     let config = sandbox.get_config();
-    let mut stream = CantonStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
+    let mut stream = CantonStream::new(config, backlog.clone(), NoopChainTelemetry)
+        .await
         .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = tokio::sync::watch::channel(None);
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
@@ -114,7 +119,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", event.kind);
     };
 
-    let expected_hash = hash_rlp_data(&bidir.serialized_transaction);
+    let expected_hash = hash_payload(&bidir.serialized_transaction);
     let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
         .expect("test tx hash must be a valid scalar");
     assert_eq!(
@@ -409,7 +414,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
                 .chain_ctx
                 .as_deref()
                 .expect("missing chain_ctx on Canton sign request");
-            let ctx: mpc_node::indexer_canton::CantonChainCtx =
+            let ctx: CantonChainCtx =
                 borsh::from_slice(chain_ctx_bytes).expect("failed to deserialize CantonChainCtx");
             ctx.sign_event_contract_id.clone()
         }

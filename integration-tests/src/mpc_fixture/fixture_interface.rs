@@ -12,9 +12,9 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
-use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState, Sign};
+use mpc_node::protocol::{MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub struct MpcFixtureNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: mpsc::Sender<Sign>,
+    pub sign_tx: mpsc::Sender<SignCommand>,
     pub msg_channel: MessageChannel,
     pub mock_streams: HashMap<Chain, MockStream>,
 
@@ -72,6 +72,7 @@ impl MpcFixture {
             old_participants: running.participants.clone(),
             new_participants: running.participants.clone(),
             threshold: running.threshold,
+            new_threshold: running.threshold,
             public_key: running.public_key,
             finished_votes: Default::default(),
             cancel_votes: Default::default(),

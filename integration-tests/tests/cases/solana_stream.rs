@@ -2,21 +2,21 @@ use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
+use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
+use mpc_chain_solana::{SolConfig, SolanaStream};
 use mpc_crypto::ScalarExt;
-use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_sol::{SolConfig, SolanaStream};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
-use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming, StreamContext};
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId,
+    Signature, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -44,7 +44,7 @@ async fn stream_solana(
     config: SolConfig,
 ) -> Result<(
     SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<CheckpointDigest>,
+    watch::Sender<Option<CheckpointDigest>>,
 )> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
@@ -55,12 +55,12 @@ async fn stream_solana_with_backlog(
     backlog: Backlog,
 ) -> Result<(
     SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<CheckpointDigest>,
+    watch::Sender<Option<CheckpointDigest>>,
 )> {
-    let mut stream = SolanaStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
+    let mut stream = SolanaStream::new(config, backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = watch::channel(None);
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     // Start from Recovery so that handle_recovery() calls livestream(), which
@@ -490,10 +490,10 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config), recovered_backlog.clone(), NoopChainTelemetry)
+    let stream = SolanaStream::new(config, recovered_backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
 
-    let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
+    let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
     let rpc = RpcChannel { tx: rpc_tx };
 
@@ -514,18 +514,20 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
-    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,
-            sign_tx,
-            rpc,
-            recovered_backlog,
+            StreamContext::new(
+                recovered_backlog.clone(),
+                sign_tx.clone(),
+                rpc.clone(),
+                contract_watcher.clone(),
+                mesh_rx.clone(),
+                node_client.clone(),
+                checkpoints_rx.clone(),
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_rx,
-            node_client,
-            checkpoints_rx,
         )
         .await;
     });
@@ -547,7 +549,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .context("rpc channel closed before publish action")?;
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
-        if let Sign::Request(req) = &message {
+        if let SignCommand::Request(req) = &message {
             if req.id == sign_id {
                 anyhow::bail!("recovered publish request was incorrectly requeued for signing");
             }
@@ -556,8 +558,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     match action {
         RpcAction::Publish(action) => {
-            assert_eq!(action.indexed.id, sign_id);
-            assert_eq!(action.indexed.chain, Chain::Solana);
+            assert_eq!(action.request.id, sign_id);
+            assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, signature);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }

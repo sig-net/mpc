@@ -8,9 +8,9 @@ use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::Message;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::SignId;
+use mpc_primitives::{Chain, IndexedSignRequest, SignCommand, SignId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -295,8 +295,8 @@ async fn test_sign_request_during_resharing() {
     );
 }
 
-fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest::sign(
+fn sign_request(seed: u8) -> SignCommand {
+    SignCommand::Request(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
         super::helpers::test_sign_arg(seed),
         Chain::NEAR,
@@ -310,7 +310,7 @@ fn sign_request(seed: u8) -> Sign {
 async fn test_presignature_timeout() {
     fn create_filter() -> MessageFilter {
         let mut drop_counter = 20;
-        Box::new(move |(msg, _)| {
+        Box::new(move |SendMessage { message: msg, .. }| {
             let pass = match msg {
                 mpc_node::protocol::Message::Presignature(_) => drop_counter == 0,
                 _ => true,
@@ -1005,7 +1005,7 @@ async fn test_sign_missing_presignature_after_posits() {
     // node would be involved in signing the first time
     fn create_filter(tx: oneshot::Sender<()>) -> MessageFilter {
         let mut maybe_tx = Some(tx);
-        Box::new(move |(msg, _)| match msg {
+        Box::new(move |SendMessage { message: msg, .. }| match msg {
             mpc_node::protocol::Message::Signature(_signature_message) => {
                 if let Some(tx) = maybe_tx.take() {
                     tx.send(()).unwrap();
@@ -1076,7 +1076,7 @@ async fn test_sign_missing_presignature_after_posits() {
 /// generation pause after receiving enough AlreadyGenerating rejections.
 ///
 /// Setup:
-/// - Nodes 0 and 1 enter SignGenerating together, messages are gated to freeze their progress
+/// - Nodes 0 and 1 enter the Generating phase together, messages are gated to freeze their progress
 /// - Node 2 is excluded, one ORGANIZE_POSIT_TIMEOUT later, it tries to be a proposer
 /// - Nodes 0 and 1 reply with AlreadyGenerating.
 /// - The gate is released, signature messages flow, and the signature completes
@@ -1093,7 +1093,9 @@ async fn test_non_participants_pause_posits() {
     }
     impl CollectMessages for Tracker {
         fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            let (message, (from, to, _ts)) = msg;
+            let SendMessage {
+                message, from, to, ..
+            } = msg;
             if *to == self.target {
                 if let Message::Posit(posit_msg) = message {
                     if matches!(
@@ -1135,7 +1137,7 @@ async fn test_non_participants_pause_posits() {
             // Node 0: Hold signature messages until the gate is released.
             0,
             Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
+                let SendMessage { message, .. } = msg;
                 if matches!(message, Message::Signature(_)) {
                     while !gate_0.load(Ordering::Acquire) {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1148,7 +1150,7 @@ async fn test_non_participants_pause_posits() {
             // Node 1: Hold signature messages until the gate is released.
             1,
             Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
+                let SendMessage { message, .. } = msg;
                 if matches!(message, Message::Signature(_)) {
                     while !gate_1.load(Ordering::Acquire) {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1161,7 +1163,7 @@ async fn test_non_participants_pause_posits() {
             // Node 2: receives a PROPOSE from node 1 but we drop the ACCEPT, so node 2 is excluded from the signature.
             2,
             Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
+                let SendMessage { message, .. } = msg;
                 if let Message::Posit(posit_msg) = message {
                     if matches!(posit_msg.action, PositAction::Accept) {
                         return false;
@@ -1233,7 +1235,7 @@ async fn test_non_participants_pause_posits() {
     // Node 2 still hasn't seen the signature. Wait until it proposes again.
     // After the pause, node 2 may need up to (num_nodes+1) more rounds to get
     // its turn as proposer. Each round lasts ORGANIZE_POSIT_TIMEOUT.
-    let organize_timeout = mpc_node::protocol::signature::organize_posit_timeout();
+    let organize_timeout = mpc_node::protocol::request::organize_posit_timeout();
     let second_wait = Duration::from_millis(signature_timeout_ms) + 4 * organize_timeout;
     tokio::time::timeout(second_wait, async {
         loop {
