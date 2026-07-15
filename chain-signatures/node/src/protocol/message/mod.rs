@@ -186,11 +186,11 @@ impl MessageChannel {
         what: &'static str,
     ) -> mpsc::Receiver<T> {
         let Some(subscription) = self.subscribe(id).await else {
-            tracing::warn!(what, "failed to subscribe");
+            tracing::warn!(what, ?id, "failed to subscribe");
             return mpsc::channel(1).1;
         };
         T::receiver(subscription).unwrap_or_else(|| {
-            tracing::warn!(what, "received unexpected subscribe response");
+            tracing::warn!(what, ?id, "received unexpected subscribe response");
             mpsc::channel(1).1
         })
     }
@@ -203,10 +203,10 @@ impl MessageChannel {
         what: &'static str,
     ) -> mpsc::Receiver<T> {
         let Some(subscription) = self.subscribe(id).await else {
-            panic!("failed to subscribe for {what}");
+            panic!("failed to subscribe for {what} {id:?}");
         };
         T::receiver(subscription)
-            .unwrap_or_else(|| panic!("received unexpected subscribe response for {what}"))
+            .unwrap_or_else(|| panic!("received unexpected subscribe response for {what} {id:?}"))
     }
 
     async fn send_unsubscribe(&self, id: SubscribeId, what: &'static str) {
@@ -216,7 +216,7 @@ impl MessageChannel {
             .await
             .is_err()
         {
-            tracing::warn!(what, "unable to send unsubscribe request");
+            tracing::warn!(what, ?id, "unable to send unsubscribe request");
         } else {
             set_channel_capacity_tx("subscribe", &self.subscribe);
         }

@@ -28,6 +28,7 @@ pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
     MAX_MESSAGE_SUB_CHANNEL_SIZE
 };
 
+#[derive(Debug, Clone, Copy)]
 pub enum SubscribeId {
     Generating,
     Resharing,
