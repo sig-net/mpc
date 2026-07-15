@@ -148,13 +148,39 @@ impl CheckpointStorage {
     pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
-                let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-
-                conn.set::<_, _, ()>(self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height), &value)
-                    .await
-                    .context("failed to persist pending checkpoint to redis")?;
+                let mut interval = std::time::Duration::from_millis(100);
+                loop {
+                    match pool.get().await {
+                        Ok(mut conn) => {
+                            let key = self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height);
+                            match conn.set::<_, _, ()>(key, &value).await {
+                                Ok(_) => break,
+                                Err(err) => {
+                                    tracing::error!(
+                                        chain = ?checkpoint.chain,
+                                        height = checkpoint.block_height,
+                                        %err,
+                                        ?interval,
+                                        "failed to persist pending checkpoint to redis, retrying..."
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                chain = ?checkpoint.chain,
+                                height = checkpoint.block_height,
+                                %err,
+                                ?interval,
+                                "failed to get redis connection for pending checkpoint, retrying..."
+                            );
+                        }
+                    }
+                    tokio::time::sleep(interval).await;
+                    interval = std::cmp::min(interval * 2, std::time::Duration::from_secs(5));
+                }
             }
             CheckpointStorage::InMemory { pending, .. } => {
                 let mut pending_map = pending.write().await;
