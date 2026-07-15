@@ -11,7 +11,10 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::{
+    future::{join_all, try_join_all},
+    stream,
+};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
@@ -420,21 +423,18 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(BackfillOutcome::Observed { event })
     }
 
+    /// Collects execution confirmations for all watchers at the given block number.
     async fn collect_execution_confirmations(
         &self,
         block_number: u64,
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        let mut events = Vec::new();
-        // let mut resolved_tx_ids = HashSet::new();
-
         let watchers = self
             .state_manager
             .get_execution_watchers(Chain::Ethereum)
             .await;
 
-        // If there are no watchers return early.
         if watchers.is_empty() {
-            return Ok(events);
+            return Ok(Vec::new());
         }
 
         tracing::info!(
@@ -443,7 +443,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             "collect_execution_confirmations checking watchers"
         );
 
-        // Group watchers by from_address to deduplicate nonce fetching
+        // Group watchers by from_address
         let mut watchers_by_sender: HashMap<Address, Vec<_>> = HashMap::new();
         for (tx_id, (sign_id, pending_tx)) in watchers {
             watchers_by_sender
@@ -452,64 +452,72 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .push((tx_id, sign_id, pending_tx));
         }
 
-        for (sender, pending_txs) in watchers_by_sender {
-            // Fetch the nonce for this sender at the exact current block
-            let current_nonce = match self
-                .client
-                .get_nonce(
-                    sender,
-                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
-                )
-                .await
-            {
-                Ok(nonce) => nonce,
+        // Fetch the current nonce for each unique sender
+        let nonce_futures = watchers_by_sender
+            .into_iter()
+            .map(|(sender, txs)| async move {
+                // Fetch the nonce for this sender at the exact current block
+                let current_nonce = self
+                    .client
+                    .get_nonce(
+                        sender.into(),
+                        BlockId::Number(BlockNumberOrTag::Number(block_number)),
+                    )
+                    .await;
+                (sender, txs, current_nonce)
+            });
+        let senders_with_nonces = join_all(nonce_futures).await;
+
+        // Filter transactions down to ONLY those whose nonce has been consumed
+        let ready_txs: Vec<_> = senders_with_nonces
+            .into_iter()
+            .filter_map(|(sender, txs, nonce_res)| match nonce_res {
+                Ok(current_nonce) => Some(
+                    txs.into_iter()
+                        .filter(move |(_, _, tx)| tx.nonce < current_nonce),
+                ),
                 Err(err) => {
                     tracing::warn!(?sender, ?err, "Failed to fetch nonce for sender");
-                    continue;
+                    None
                 }
-            };
+            })
+            .flatten()
+            .collect();
 
-            // Iterate over the pending transactions for this sender and check if their nonce has been consumed
-            for (tx_id, sign_id, pending_tx) in pending_txs {
-                if current_nonce <= pending_tx.nonce {
-                    // Nonce hasn't been reached yet. Still pending. 0 RPC calls needed!
-                    continue;
-                }
+        // Fetch receipts for the ready transactions
+        let receipt_futures =
+            ready_txs
+                .into_iter()
+                .map(|(tx_id, sign_id, pending_tx)| async move {
+                    let outcome = self
+                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                        .await?;
+                    Ok::<_, anyhow::Error>((tx_id, sign_id, pending_tx, outcome))
+                });
 
-                // TODO: submit as batch or parallelize the per-watcher `eth_getTransactionReceipt` calls once
-                // we have a way to track rate-limits and backoff for all requests (right now we just retry individually on failure)
-                // The nonce has been consumed by the network. The tx was either mined or replaced.
-                match self
-                    .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                    .await?
-                {
-                    BackfillOutcome::Observed { event } => {
-                        if let Some(event) = event {
-                            events.push(event);
-                        }
-                        // If event is None, extraction failed — leave pending for retry
-                    }
-                    BackfillOutcome::NotObserved => {
-                        // Nonce consumed, but our specific tx_hash isn't mined.
-                        // This means the transaction was replaced or dropped.
-                        tracing::warn!(
-                            ?tx_id,
-                            ?sign_id,
-                            expected_nonce = pending_tx.nonce,
-                            current_nonce,
-                            "transaction replaced or dropped (nonce consumed by another tx)"
-                        );
-                        events.push(ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain: pending_tx.source_chain,
-                            block_height: block_number,
-                            result: ExecutionOutcome::Failed,
-                        });
-                    }
+        let receipt_results = try_join_all(receipt_futures).await?;
+
+        // Process the receipt results into events
+        let events = receipt_results
+            .into_iter()
+            .filter_map(|(tx_id, sign_id, pending_tx, outcome)| match outcome {
+                BackfillOutcome::Observed { event } => event, // Return event if Some, skip if None (extraction failed)
+                BackfillOutcome::NotObserved => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        "transaction replaced or dropped (nonce consumed by another tx)"
+                    );
+                    Some(ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        sign_id,
+                        source_chain: pending_tx.source_chain,
+                        block_height: block_number,
+                        result: ExecutionOutcome::Failed,
+                    })
                 }
-            }
-        }
+            })
+            .collect();
 
         Ok(events)
     }
