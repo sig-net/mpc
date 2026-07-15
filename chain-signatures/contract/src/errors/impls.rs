@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 use super::{
-    ConversionError, Error, ErrorKind, ErrorRepr, InitError, InvalidParameters, InvalidState,
-    JoinError, PublicKeyError, RespondError, SignError, VoteError,
+    CheckpointError, ConversionError, Error, ErrorKind, ErrorRepr, InitError, InvalidParameters,
+    InvalidState, JoinError, PublicKeyError, RespondError, SignError, VoteError,
 };
 
 impl Error {
@@ -57,6 +57,12 @@ impl From<SignError> for Error {
 impl From<RespondError> for Error {
     fn from(code: RespondError) -> Self {
         Self::simple(ErrorKind::Respond(code))
+    }
+}
+
+impl From<CheckpointError> for Error {
+    fn from(code: CheckpointError) -> Self {
+        Self::simple(ErrorKind::Checkpoint(code))
     }
 }
 

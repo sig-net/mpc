@@ -44,7 +44,10 @@ impl MockChain {
         let mut inner = self.inner.lock().await;
         let events: Vec<ChainEvent> = requests
             .iter()
-            .map(|r| ChainEvent::SignRequest(r.clone()))
+            .map(|r| ChainEvent::SignRequest {
+                request: r.clone(),
+                block_timestamp: None,
+            })
             .collect();
         inner.distribute_events(&events).await;
     }
@@ -61,19 +64,19 @@ impl MockChain {
     fn rpc_action_to_events(action: &RpcAction) -> Vec<ChainEvent> {
         let RpcAction::Publish(publish_action) = action;
 
-        if publish_action.indexed.chain != Chain::Solana {
+        if publish_action.request.chain != Chain::Solana {
             return vec![];
         }
-        if !matches!(publish_action.indexed.kind, SignKind::Sign) {
+        if !matches!(publish_action.request.kind, SignKind::Sign) {
             tracing::warn!(
-                kind=?publish_action.indexed.kind,
+                kind=?publish_action.request.kind,
                 "MockChain: kind not yet supported",
             );
             return vec![];
         }
 
         let respond_event = mpc_primitives::SignatureRespondedEvent {
-            request_id: publish_action.indexed.id.request_id,
+            request_id: publish_action.request.id.request_id,
             signature: publish_action.signature,
             chain: Chain::Solana,
         };

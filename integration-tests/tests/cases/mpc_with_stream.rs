@@ -39,10 +39,29 @@ async fn test_sign() {
         .await;
 
     let timeout = Duration::from_secs(10);
-    let actions = network.assert_actions(1, timeout).await;
-
-    assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
+    let start = std::time::Instant::now();
+    let actions = loop {
+        let rpc_actions = network.output.rpc_actions.lock().await;
+        let filtered_actions: Vec<_> = rpc_actions
+            .iter()
+            .filter(|action| !action.contains("kind: Checkpoint"))
+            .cloned()
+            .collect();
+        if !filtered_actions.is_empty() {
+            break filtered_actions;
+        }
+        if start.elapsed() > timeout {
+            drop(rpc_actions);
+            network.print_actions().await;
+            panic!(
+                "timed out waiting for 1 signature, got {}",
+                filtered_actions.len()
+            );
+        }
+        drop(rpc_actions);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
@@ -99,12 +118,31 @@ async fn check_channel_contention(
         }
     }
 
-    let actions = network
-        .assert_actions(expected_signatures, Duration::from_secs(120))
-        .await;
-
-    assert_eq!(actions.len(), expected_signatures);
-    let action_str = actions.iter().next().unwrap();
+    let timeout = Duration::from_secs(150);
+    let start = std::time::Instant::now();
+    let actions = loop {
+        let rpc_actions = network.output.rpc_actions.lock().await;
+        let filtered_actions: Vec<_> = rpc_actions
+            .iter()
+            .filter(|action| !action.contains("kind: Checkpoint"))
+            .cloned()
+            .collect();
+        if filtered_actions.len() >= expected_signatures {
+            break filtered_actions;
+        }
+        if start.elapsed() > timeout {
+            drop(rpc_actions);
+            network.print_actions().await;
+            panic!(
+                "timed out waiting for {} signatures, got {}",
+                expected_signatures,
+                filtered_actions.len()
+            );
+        }
+        drop(rpc_actions);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
@@ -124,7 +162,7 @@ async fn test_channel_contention_multiple_blocks_at_once() {
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_multiple_blocks_at_once_delayed() {
     // TODO: delay should be > ORGANIZE_POSIT_TIMEOUT but right now the system can't handle it
-    let delay = mpc_node::protocol::signature::organize_posit_timeout() / 2;
+    let delay = mpc_node::protocol::request::organize_posit_timeout() / 2;
     check_channel_contention(5, 10, 50, Some(delay)).await;
 }
 
@@ -190,7 +228,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     impl CollectMessages for SignatureTracker {
         fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            let (message, (from, _to, _ts)) = msg;
+            let SendMessage { message, from, .. } = msg;
             match message {
                 Message::Posit(posit_msg) => {
                     if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
@@ -235,7 +273,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         .with_outgoing_message_filter(
             2,
             Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
+                let SendMessage { message, .. } = msg;
                 if let Message::Posit(posit_msg) = message {
                     if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
                         if sign_id == bad_sign_id

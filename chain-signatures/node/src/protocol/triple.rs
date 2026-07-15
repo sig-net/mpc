@@ -7,7 +7,8 @@ use crate::mesh::MeshState;
 use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::{AffinePointExt, JoinMap};
+use crate::util::JoinMap;
+use mpc_chain_near::AffinePointExt as _;
 
 use mpc_contract::config::ProtocolConfig;
 

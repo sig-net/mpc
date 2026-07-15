@@ -1,4 +1,6 @@
 use cait_sith::protocol::Participant;
+use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use mpc_chain_solana::SolConfig;
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
@@ -301,7 +303,7 @@ impl ClusterSpawner {
     pub fn solana(mut self) -> Self {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
-            self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+            self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),      // Will be filled in later
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
@@ -339,10 +341,10 @@ impl ClusterSpawner {
 
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
-            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+            self.cfg.canton = Some(CantonConfig {
                 json_api_url: String::new(),
                 json_api_ws_url: String::new(),
-                auth: mpc_node::indexer_canton::CantonAuthConfig {
+                auth: CantonAuthConfig {
                     token_url: String::new(),
                     client_id: String::new(),
                     client_secret: String::new(),

@@ -10,8 +10,6 @@ use std::future::Future;
 use std::hash::Hash;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub mod retry;
-
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
 }
@@ -47,12 +45,12 @@ impl NearPublicKeyExt for near_crypto::PublicKey {
     }
 }
 
-pub trait AffinePointExt {
+/// Convert a secp256k1 `AffinePoint` into a NEAR public key.
+pub trait NearPublicKeyFromAffineExt {
     fn into_near_public_key(self) -> near_crypto::PublicKey;
-    fn to_base58(&self) -> String;
 }
 
-impl AffinePointExt for AffinePoint {
+impl NearPublicKeyFromAffineExt for AffinePoint {
     fn into_near_public_key(self) -> near_crypto::PublicKey {
         near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
@@ -60,28 +58,6 @@ impl AffinePointExt for AffinePoint {
             )
             .unwrap(),
         )
-    }
-
-    fn to_base58(&self) -> String {
-        let key = near_crypto::Secp256K1PublicKey::try_from(
-            &self.to_encoded_point(false).as_bytes()[1..65],
-        )
-        .unwrap();
-        format!("{key:?}")
-    }
-}
-
-pub fn mpc_to_sol_signature(
-    signature: &mpc_primitives::Signature,
-    big_r: k256::EncodedPoint,
-) -> signet_program::Signature {
-    signet_program::Signature {
-        big_r: signet_program::AffinePoint {
-            x: big_r.as_bytes()[1..33].try_into().unwrap(),
-            y: big_r.as_bytes()[33..65].try_into().unwrap(),
-        },
-        s: signature.s.to_bytes().into(),
-        recovery_id: signature.recovery_id,
     }
 }
 
@@ -104,65 +80,6 @@ pub fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
-}
-
-/// Encode `(string, bytes, string, uint256, string, string, string, string)`
-/// exactly like the legacy `ethabi` path so request IDs stay stable.
-#[allow(clippy::too_many_arguments)]
-pub fn ethabi_request_id(
-    sender: &str,
-    payload: [u8; 32],
-    path: &str,
-    key_version: u32,
-    chain_id: &str,
-    algo: &str,
-    dest: &str,
-    params: &str,
-) -> [u8; 32] {
-    const HEAD_WORDS: usize = 8;
-    const WORD_SIZE: usize = 32;
-
-    fn u256_word(value: u64) -> [u8; WORD_SIZE] {
-        let mut word = [0u8; WORD_SIZE];
-        word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
-        word
-    }
-
-    fn push_dynamic(
-        heads: &mut Vec<[u8; WORD_SIZE]>,
-        tails: &mut Vec<u8>,
-        head_size: usize,
-        bytes: &[u8],
-    ) {
-        let offset = head_size + tails.len();
-        heads.push(u256_word(offset as u64));
-        tails.extend_from_slice(&u256_word(bytes.len() as u64));
-        tails.extend_from_slice(bytes);
-
-        let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
-        tails.extend(std::iter::repeat_n(0u8, padding));
-    }
-
-    let head_size = HEAD_WORDS * WORD_SIZE;
-    let mut heads = Vec::with_capacity(HEAD_WORDS);
-    let mut tails = Vec::new();
-
-    push_dynamic(&mut heads, &mut tails, head_size, sender.as_bytes());
-    push_dynamic(&mut heads, &mut tails, head_size, payload.as_slice());
-    push_dynamic(&mut heads, &mut tails, head_size, path.as_bytes());
-    heads.push(u256_word(key_version as u64));
-    push_dynamic(&mut heads, &mut tails, head_size, chain_id.as_bytes());
-    push_dynamic(&mut heads, &mut tails, head_size, algo.as_bytes());
-    push_dynamic(&mut heads, &mut tails, head_size, dest.as_bytes());
-    push_dynamic(&mut heads, &mut tails, head_size, params.as_bytes());
-
-    let mut encoded = Vec::with_capacity(head_size + tails.len());
-    for head in heads {
-        encoded.extend_from_slice(&head);
-    }
-    encoded.extend_from_slice(&tails);
-
-    *alloy::primitives::keccak256(encoded)
 }
 
 /// Calculate elapsed time from a unix timestamp to now
@@ -210,7 +127,7 @@ impl<T, U> JoinMap<T, U> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.mapping.is_empty()
+        self.tasks.is_empty()
     }
 }
 

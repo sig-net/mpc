@@ -15,7 +15,9 @@ const CHECKPOINT_VERSION: &str = "v13";
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
-    InMemory(Arc<RwLock<HashMap<Chain, Checkpoint>>>),
+    InMemory {
+        latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
+    },
 }
 
 impl Default for CheckpointStorage {
@@ -26,7 +28,9 @@ impl Default for CheckpointStorage {
 
 impl CheckpointStorage {
     pub fn in_memory() -> Self {
-        Self::InMemory(Arc::new(RwLock::new(HashMap::new())))
+        Self::InMemory {
+            latest: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     fn checkpoint_key(&self, chain: Chain) -> String {
@@ -34,22 +38,27 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(_, account_id) => {
                 format!("{account_id}:checkpoint:latest:{CHECKPOINT_VERSION}:{chain}")
             }
-            CheckpointStorage::InMemory(_) => format!("checkpoint:latest:{chain}"),
+            CheckpointStorage::InMemory { .. } => format!("checkpoint:latest:{chain}"),
         }
     }
 
+    /// Persist a checkpoint as the latest consensus checkpoint.
+    ///
+    /// Only consensus-confirmed checkpoints should be persisted.
+    /// Overwrites the previous latest entry.
     pub async fn persist(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), value)
+
+                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), &value)
                     .await
-                    .context("failed to set checkpoint in redis")?;
+                    .context("failed to persist checkpoint to redis")?;
             }
-            CheckpointStorage::InMemory(storage) => {
-                storage
+            CheckpointStorage::InMemory { latest } => {
+                latest
                     .write()
                     .await
                     .insert(checkpoint.chain, checkpoint.clone());
@@ -75,7 +84,47 @@ impl CheckpointStorage {
                     None => Ok(None),
                 }
             }
-            CheckpointStorage::InMemory(storage) => Ok(storage.read().await.get(&chain).cloned()),
+            CheckpointStorage::InMemory { latest } => Ok(latest.read().await.get(&chain).cloned()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mpc_primitives::Chain;
+
+    #[tokio::test]
+    async fn test_in_memory_checkpoint_storage() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+
+        // 1. Clean storage returns None
+        assert!(storage.load_latest(Chain::Solana).await?.is_none());
+
+        // 2. Persist first checkpoint
+        let cp1 = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 10,
+            pending_requests: vec![],
+        };
+        storage.persist(&cp1).await?;
+
+        // 3. Verify latest
+        let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+        assert_eq!(latest.block_height, 10);
+
+        // 4. Persist second checkpoint at higher height
+        let cp2 = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 20,
+            pending_requests: vec![],
+        };
+        storage.persist(&cp2).await?;
+
+        // 5. Verify latest is updated
+        let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+        assert_eq!(latest.block_height, 20);
+
+        Ok(())
     }
 }

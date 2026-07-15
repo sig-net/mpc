@@ -7,7 +7,12 @@ use crate::{
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum ChainEvent {
-    SignRequest(IndexedSignRequest),
+    SignRequest {
+        /// The sign request that was observed on the chain.
+        request: IndexedSignRequest,
+        /// Optional block timestamp of the request, if available. This is used for metrics reporting.
+        block_timestamp: Option<u64>,
+    },
     Respond(SignatureRespondedEvent),
     RespondBidirectional(RespondBidirectionalEvent),
 
@@ -32,10 +37,14 @@ pub enum ChainEvent {
 impl std::fmt::Debug for ChainEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChainEvent::SignRequest(r) => f
-                .debug_tuple("SignRequest")
-                .field(&r.id)
-                .field(&r.chain.as_str())
+            ChainEvent::SignRequest {
+                request,
+                block_timestamp,
+            } => f
+                .debug_struct("SignRequest")
+                .field("id", &request.id)
+                .field("chain", &request.chain.as_str())
+                .field("block_timestamp", block_timestamp)
                 .finish(),
             ChainEvent::Respond(ev) => f
                 .debug_tuple("Respond")

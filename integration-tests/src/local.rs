@@ -6,9 +6,10 @@ use crate::{execute, utils, NodeConfig};
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
+use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::EthArgs;
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -19,7 +20,6 @@ pub struct Node {
     pub cipher_sk: hpke::SecretKey,
     cfg: NodeConfig,
     web_port: u16,
-
     // process held so it's not dropped. Once dropped, process will be killed.
     process: Child,
     // near rpc address, after proxy
@@ -64,17 +64,16 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
-        let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
-        let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
-        let hydration =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(cfg.hydration.clone());
-        let canton = mpc_node::indexer_canton::CantonArgs::from_config(cfg.canton.clone());
+        let eth = EthArgs::from_config(cfg.eth.clone());
+        let sol = SolArgs::from_config(cfg.sol.clone());
+        let hydration = HydrationArgs::from_config(cfg.hydration.clone());
+        let canton = CantonArgs::from_config(cfg.canton.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
-        let cli = mpc_node::cli::Cli::Start {
+        let cli = Cli::Start {
             near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
@@ -166,16 +165,15 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
-        let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
-        let hydration =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton = mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
-        let cli = mpc_node::cli::Cli::Start {
+        let sol = SolArgs::from_config(config.cfg.sol.clone());
+        let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton = CantonArgs::from_config(config.cfg.canton.clone());
+        let cli = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),

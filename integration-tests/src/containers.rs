@@ -23,10 +23,12 @@ use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use mpc_chain_near::Options as NearIndexerOptions;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
@@ -157,16 +159,14 @@ impl Node {
     }
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
-        let hydration_args =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton_args =
-            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
-        let args = mpc_node::cli::Cli::Start {
+        let sol_args = SolArgs::from_config(config.cfg.sol.clone());
+        let hydration_args = HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton_args = CantonArgs::from_config(config.cfg.canton.clone());
+        let args = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
@@ -904,8 +904,8 @@ impl Solana {
         anyhow::bail!("solana-test-validator did not become ready in time")
     }
 
-    pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
-        mpc_node::indexer_sol::SolConfig {
+    pub fn get_config(&self, program_address: String) -> SolConfig {
+        SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
             rpc_ws_url: self.ws_address.clone(),

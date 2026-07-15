@@ -1,22 +1,16 @@
-use crate::indexer_eth::EthereumClient;
-use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::{BidirectionalTxExt, TransactionOutput};
-use alloy::consensus::Transaction;
+use crate::sign_bidirectional::BidirectionalTxExt;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat,
-    SignArgs, SignId,
+    BidirectionalTx, Chain, IndexedSignRequest, RespondBidirectionalSerializedOutput,
+    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
-use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
-// Use Abi as this is what we are using for ethereum
-pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -120,81 +114,6 @@ impl CompletedTx {
             },
         ))
     }
-
-    pub async fn extract_success_tx_output(
-        &self,
-        client: &Arc<EthereumClient>,
-    ) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
-        let tx = &self.tx;
-        let tx_id = self.tx.id.0;
-        let Some(tx_info) = client
-            .as_ref()
-            .get_transaction_by_hash(tx_id.into())
-            .await?
-        else {
-            anyhow::bail!("Failed to fetch transaction {tx_id:?}");
-        };
-
-        // A deployment transaction has no `to`. For a CREATE the trace's
-        // `output` is the deployed runtime bytecode, not ABI return data, so it
-        // cannot be decoded against the output schema — reject it up front.
-        // TODO(#808): support contract deployments.
-        if tx_info.inner.to().is_none() {
-            anyhow::bail!("unsupported contract deployment (CREATE): {tx_id:?}");
-        }
-
-        let data = tx_info.inner.input().clone();
-        let is_contract_call = is_contract_call(&data);
-
-        let trace_output = if is_contract_call {
-            tracing::info!(
-                ?tx_id,
-                "Extracting transaction output via debug_traceTransaction"
-            );
-            Some(client.trace_transaction_output(tx_id.into()).await?)
-        } else {
-            None
-        };
-
-        build_serialized_output(
-            is_contract_call,
-            &tx.output_deserialization_schema,
-            trace_output.as_ref(),
-            tx.source_chain.respond_serialization_format(),
-            &tx.respond_serialization_schema,
-        )
-    }
-}
-
-/// Whether a transaction's calldata represents a contract call.
-fn is_contract_call(input: &Bytes) -> bool {
-    input.len() > 2 && input != &Bytes::from("0x")
-}
-
-/// Decode a transaction's output and re-serialize it for the respond chain.
-///
-/// `trace_output` is the `debug_traceTransaction` return data, required when
-/// `is_contract_call` is true.
-fn build_serialized_output(
-    is_contract_call: bool,
-    output_deserialization_schema: &[u8],
-    trace_output: Option<&Bytes>,
-    respond_serialization_format: SerDeserFormat,
-    respond_serialization_schema: &[u8],
-) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
-    let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
-        SerDeserFormat::Abi if is_contract_call => {
-            let trace_output = trace_output.ok_or_else(|| {
-                anyhow::anyhow!("contract-call output extraction requires trace output")
-            })?;
-            TransactionOutput::from_call_result(output_deserialization_schema, trace_output)?
-        }
-        _ => TransactionOutput::non_contract_call_output(),
-    };
-
-    transaction_output
-        .output
-        .serialize(respond_serialization_format, respond_serialization_schema)
 }
 
 pub fn calculate_respond_bidirectional_hash_message(
@@ -238,67 +157,6 @@ mod tests {
             from_address: **Address::ZERO,
             nonce: 0,
         }
-    }
-
-    /// ABI-encoded `uint256` (32-byte big-endian).
-    fn abi_uint256(value: u64) -> Bytes {
-        let mut buf = [0u8; 32];
-        buf[24..].copy_from_slice(&value.to_be_bytes());
-        Bytes::from(buf.to_vec())
-    }
-
-    #[test]
-    fn is_contract_call_detects_calldata() {
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(!is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
-    }
-
-    #[test]
-    fn build_serialized_output_decodes_contract_call() {
-        // A contract-call tx whose function returned `uint256` 12345; `trace`
-        // is that ABI-encoded return value from debug_traceTransaction.
-        let trace = abi_uint256(12_345);
-        let out = build_serialized_output(
-            true,
-            UINT256_SCHEMA,
-            Some(&trace),
-            SerDeserFormat::Abi,
-            UINT256_SCHEMA,
-        )
-        .unwrap();
-        assert_eq!(out, trace.to_vec());
-    }
-
-    #[test]
-    fn build_serialized_output_non_contract_call_uses_defaults() {
-        // `default_output_for_non_contract_call` only supports `bool`/`string`.
-        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
-        let out =
-            build_serialized_output(false, bool_schema, None, SerDeserFormat::Abi, bool_schema)
-                .unwrap();
-        // A plain transfer synthesizes a default: bool -> true, ABI-encoded as
-        // a 32-byte word.
-        let mut expected = vec![0u8; 32];
-        expected[31] = 1;
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn build_serialized_output_requires_trace_for_contract_call() {
-        let err = build_serialized_output(
-            true,
-            UINT256_SCHEMA,
-            None,
-            SerDeserFormat::Abi,
-            UINT256_SCHEMA,
-        );
-        assert!(
-            err.is_err(),
-            "contract call without trace output must error"
-        );
     }
 
     #[tokio::test]
