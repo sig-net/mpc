@@ -6,7 +6,8 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignCommand, SignId,
+    SignKind,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -706,6 +707,45 @@ impl Backlog {
             Ok(latest)
         }
     }
+
+    pub async fn get_pending_checkpoints(&self, chain: Chain) -> Vec<Checkpoint> {
+        let cache = self.pending_checkpoints(&chain).read().await;
+        cache.values().cloned().collect()
+    }
+
+    pub async fn queue_pending_checkpoints_signing(
+        &self,
+        chain: Chain,
+        sign_tx: &tokio::sync::mpsc::Sender<SignCommand>,
+    ) -> anyhow::Result<()> {
+        let pending_checkpoints = self.get_pending_checkpoints(chain).await;
+        for checkpoint in pending_checkpoints {
+            let digest = checkpoint.digest();
+            let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
+            let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
+                chain,
+                height: checkpoint.block_height,
+                digest,
+            };
+            let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
+            if let Err(err) = sign_tx.send(sign).await {
+                tracing::error!(
+                    ?chain,
+                    height = checkpoint.block_height,
+                    %err,
+                    "failed to queue signing task for hydrated pending checkpoint"
+                );
+            } else {
+                tracing::info!(
+                    ?chain,
+                    height = checkpoint.block_height,
+                    "queued signing task for hydrated pending checkpoint"
+                );
+            }
+        }
+        Ok(())
+    }
+
 
     /// Check if the chain backlog has an available checkpoint slot.
     pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
@@ -2640,5 +2680,46 @@ mod tests {
         let pending_in_storage = backlog.storage.load_all_pending(chain).await.unwrap();
         assert_eq!(pending_in_storage.len(), 1);
         assert_eq!(pending_in_storage[0].block_height, interval * 3);
+    }
+
+    #[tokio::test]
+    async fn test_queue_pending_checkpoints_signing() {
+        let backlog = Backlog::new();
+        let chain = Chain::Solana;
+        let interval = 100;
+
+        let cp1 = Checkpoint {
+            chain,
+            block_height: interval,
+            pending_requests: vec![],
+        };
+        let cp2 = Checkpoint {
+            chain,
+            block_height: interval * 2,
+            pending_requests: vec![],
+        };
+
+        // Cache them
+        let mut cache = backlog.pending_checkpoints(&chain).write().await;
+        cache.insert(cp1.block_height, cp1.clone());
+        cache.insert(cp2.block_height, cp2.clone());
+        drop(cache);
+
+        let (sign_tx, mut sign_rx) = tokio::sync::mpsc::channel(10);
+        backlog.queue_pending_checkpoints_signing(chain, &sign_tx).await.unwrap();
+
+        let mut received = vec![];
+        while let Ok(cmd) = sign_rx.try_recv() {
+            if let SignCommand::Checkpoint(req) = cmd {
+                if let SignKind::Checkpoint(digest) = req.kind {
+                    received.push(digest.height);
+                }
+            }
+        }
+
+        // Both cp1 and cp2 should have been queued for signing
+        assert_eq!(received.len(), 2);
+        assert!(received.contains(&interval));
+        assert!(received.contains(&(interval * 2)));
     }
 }

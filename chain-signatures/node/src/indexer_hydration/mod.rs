@@ -346,6 +346,14 @@ pub async fn run<T: ChainTelemetry>(
         }
     }
 
+    // Queue signing tasks for any hydrated pending checkpoints
+    if let Err(err) = backlog
+        .queue_pending_checkpoints_signing(Chain::Hydration, &sign_tx)
+        .await
+    {
+        tracing::warn!(chain = ?Chain::Hydration, %err, "failed to queue pending checkpoint signing tasks");
+    }
+
     // Align with consensus
     crate::backlog::consensus::align_backlog_with_consensus(
         Chain::Hydration,

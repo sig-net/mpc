@@ -187,6 +187,15 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     tracing::warn!(?chain, %err, "failed to load local checkpoint");
                 }
             }
+
+            // Queue signing tasks for any hydrated pending checkpoints
+            if let Err(err) = self
+                .backlog
+                .queue_pending_checkpoints_signing(chain, &self.sign_tx)
+                .await
+            {
+                tracing::warn!(?chain, %err, "failed to queue pending checkpoint signing tasks");
+            }
         }
 
         // Perform consensus checkpoint alignment. Returns None when no alignment is
