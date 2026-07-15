@@ -607,8 +607,22 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
-        if let Err(err) = self.storage.persist_pending(&checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to persist pending checkpoint");
+        let mut interval = std::time::Duration::from_millis(100);
+        loop {
+            match self.storage.persist_pending(&checkpoint).await {
+                Ok(_) => break,
+                Err(err) => {
+                    tracing::error!(
+                        ?chain,
+                        height = checkpoint.block_height,
+                        %err,
+                        ?interval,
+                        "failed to persist pending checkpoint, retrying..."
+                    );
+                    tokio::time::sleep(interval).await;
+                    interval = std::cmp::min(interval * 2, std::time::Duration::from_secs(5));
+                }
+            }
         }
 
         let len = {
