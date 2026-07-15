@@ -150,8 +150,10 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(pool, _) => {
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-                let mut interval = std::time::Duration::from_millis(100);
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
+                    interval.tick().await;
                     match pool.get().await {
                         Ok(mut conn) => {
                             let key = self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height);
@@ -162,7 +164,6 @@ impl CheckpointStorage {
                                         chain = ?checkpoint.chain,
                                         height = checkpoint.block_height,
                                         %err,
-                                        ?interval,
                                         "failed to persist pending checkpoint to redis, retrying..."
                                     );
                                 }
@@ -173,13 +174,10 @@ impl CheckpointStorage {
                                 chain = ?checkpoint.chain,
                                 height = checkpoint.block_height,
                                 %err,
-                                ?interval,
                                 "failed to get redis connection for pending checkpoint, retrying..."
                             );
                         }
                     }
-                    tokio::time::sleep(interval).await;
-                    interval = std::cmp::min(interval * 2, std::time::Duration::from_secs(5));
                 }
             }
             CheckpointStorage::InMemory { pending, .. } => {

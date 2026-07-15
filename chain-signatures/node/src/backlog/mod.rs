@@ -607,7 +607,10 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
-        self.storage.persist_pending(&checkpoint).await.expect("failed to persist pending checkpoint");
+        if let Err(err) = self.storage.persist_pending(&checkpoint).await {
+            tracing::error!(%chain, height = checkpoint.block_height, %err, "failed to persist pending checkpoint");
+            return None;
+        };
 
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
