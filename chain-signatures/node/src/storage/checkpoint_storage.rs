@@ -189,13 +189,20 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let pattern = self.pending_checkpoints_pattern(chain);
-                let keys: Vec<String> = redis::cmd("KEYS").arg(pattern).query_async(&mut conn).await?;
-                if keys.is_empty() {
-                    return Ok(vec![]);
-                }
-                let values: Vec<Option<String>> = redis::cmd("MGET").arg(&keys).query_async(&mut conn).await?;
+                let script = redis::Script::new(r#"
+                    local keys = redis.call('KEYS', ARGV[1])
+                    if #keys == 0 then
+                        return {}
+                    end
+                    return redis.call('MGET', unpack(keys))
+                "#);
+                let values: Vec<String> = script
+                    .arg(pattern)
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to execute load_all_pending script")?;
                 let mut checkpoints = Vec::new();
-                for value in values.into_iter().flatten() {
+                for value in values {
                     let checkpoint: Checkpoint = serde_json::from_str(&value).context("failed to deserialize pending checkpoint")?;
                     checkpoints.push(checkpoint);
                 }
