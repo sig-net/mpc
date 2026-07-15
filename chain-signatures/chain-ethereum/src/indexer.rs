@@ -460,7 +460,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 let current_nonce = self
                     .client
                     .get_nonce(
-                        sender.into(),
+                        sender,
                         BlockId::Number(BlockNumberOrTag::Number(block_number)),
                     )
                     .await;
