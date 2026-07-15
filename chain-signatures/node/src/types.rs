@@ -85,7 +85,7 @@ impl ReshareProtocol {
             &old_participants,
             contract_state.threshold,
             &new_participants,
-            contract_state.threshold,
+            contract_state.new_threshold,
             me,
             private_share,
             contract_state.public_key,

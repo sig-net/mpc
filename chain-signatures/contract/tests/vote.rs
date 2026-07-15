@@ -455,6 +455,8 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_failure());
 
+    // Completion is gated by the old threshold (2), so the second old-participant
+    // vote finishes resharing even though the new committee has 4 participants.
     let execution = accounts[1]
         .call(contract.id(), "vote_reshared")
         .args_json(json!({
@@ -472,6 +474,9 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
         mpc_contract::ProtocolContractState::Running(r) => {
             assert!(r.epoch == 1);
             assert!(r.participants.contains_key(alice.id()));
+            // The reshared key adopts the new threshold for 4 participants.
+            assert_eq!(r.threshold, mpc_contract::utils::compute_threshold(4));
+            assert_eq!(r.threshold, 3);
         }
         _ => panic!("should be in running state"),
     };
@@ -539,6 +544,8 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let cancel_pass: bool = execution.json().unwrap();
     assert!(!cancel_pass);
 
+    // Cancellation is gated by the old threshold (2), so the second vote reverts
+    // the network to running.
     let execution = accounts[1]
         .call(contract.id(), "vote_cancel_resharing")
         .args_json(json!({}))
@@ -553,6 +560,8 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     match state {
         mpc_contract::ProtocolContractState::Running(running_state) => {
             assert_eq!(running_state.epoch, initial_state.epoch);
+            // Cancelling leaves the key shares untouched, so the threshold is the
+            // exact original value.
             assert_eq!(running_state.threshold, initial_state.threshold);
             assert_eq!(running_state.public_key, initial_state.public_key);
             assert_eq!(
@@ -566,6 +575,128 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
         }
         _ => panic!("should be back in running state"),
     }
+
+    Ok(())
+}
+
+/// The threshold is recomputed on every resharing, so adding and then removing a
+/// participant should move it in lockstep with the participant count.
+#[tokio::test]
+async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    async fn running(contract: &near_workspaces::Contract) -> mpc_contract::RunningContractState {
+        let state: mpc_contract::ProtocolContractState =
+            contract.view("state").await.unwrap().json().unwrap();
+        match state {
+            mpc_contract::ProtocolContractState::Running(r) => r,
+            other => panic!("expected running state, got {}", other.name()),
+        }
+    }
+
+    // Initially there are 3 participants: threshold = compute_threshold(3) = 2.
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 3);
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "initial threshold should match the formula"
+    );
+    assert_eq!(state.threshold, 2);
+
+    // --- Add a 4th participant -------------------------------------------------
+    let alice = worker.dev_create_account().await?;
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Two votes (the current threshold) move the network into resharing.
+    for voter in &accounts[0..2] {
+        let execution = voter
+            .call(contract.id(), "vote_join")
+            .args_json(json!({ "candidate": alice.id() }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    // Completion is gated by the old threshold (2), so the 2nd old-participant
+    // vote finishes resharing.
+    for (i, voter) in accounts.iter().enumerate().take(2) {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 1,
+            "reshare should complete on the 2nd vote (old threshold 2)"
+        );
+    }
+
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 4);
+    assert!(state.participants.participants.contains_key(alice.id()));
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(4),
+        "threshold should grow after adding a participant"
+    );
+    assert_eq!(state.threshold, 3);
+
+    // --- Remove a participant --------------------------------------------------
+    // Kick alice; three votes (the current threshold) trigger resharing.
+    for (i, voter) in accounts.iter().enumerate() {
+        let execution = voter
+            .call(contract.id(), "vote_leave")
+            .args_json(json!({ "kick": alice.id() }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 2,
+            "leave should trigger resharing only on the 3rd vote"
+        );
+    }
+
+    // The old committee had 4 participants (old threshold 3), so completion is
+    // gated by 3 votes even though the new committee shrinks to 3.
+    for (i, voter) in accounts.iter().enumerate() {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 2 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 2,
+            "reshare should complete on the 3rd vote (old threshold 3)"
+        );
+    }
+
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 3);
+    assert!(!state.participants.participants.contains_key(alice.id()));
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "threshold should shrink back after removing a participant"
+    );
+    assert_eq!(state.threshold, 2);
 
     Ok(())
 }

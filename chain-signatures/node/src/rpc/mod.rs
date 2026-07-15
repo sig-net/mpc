@@ -582,6 +582,7 @@ mod tests {
             old_participants: participants.clone(),
             new_participants: participants.clone(),
             threshold: 2,
+            new_threshold: 2,
             public_key: AffinePoint::default(),
             finished_votes: Default::default(),
             cancel_votes: Default::default(),

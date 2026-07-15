@@ -366,6 +366,7 @@ mod tests {
             old_participants: participants.clone(),
             new_participants: participants.clone(),
             threshold: 1,
+            new_threshold: 1,
             public_key: k256::AffinePoint::default(),
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
