@@ -442,6 +442,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         // a failed extraction stays pending for retry, not flagged Failed.
         let mut observed_tx_ids = HashSet::new();
 
+        // TODO: submit as batch or parallelize the per-watcher `eth_getTransactionReceipt` calls once
+        // we have a way to track rate-limits and backoff for all requests (right now we just retry individually on failure)
         // Per-watcher `eth_getTransactionReceipt`
         for (tx_id, (sign_id, pending_tx)) in watchers {
             tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
