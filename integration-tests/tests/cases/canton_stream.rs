@@ -65,15 +65,18 @@ async fn stream_canton(
             state_rx
                 .changed()
                 .await
-                .context("Canton pipeline state channel closed before Live")?;
+                .context("Canton pipeline state channel closed before stream readiness")?;
 
-            if matches!(*state_rx.borrow_and_update(), ChainStreaming::Live) {
+            if matches!(
+                *state_rx.borrow_and_update(),
+                ChainStreaming::Catchup { .. } | ChainStreaming::Live
+            ) {
                 return Ok::<_, anyhow::Error>(());
             }
         }
     })
     .await
-    .context("timeout waiting for Canton pipeline readiness")??;
+    .context("timeout waiting for Canton stream readiness")??;
 
     Ok((stream, cp_tx))
 }
