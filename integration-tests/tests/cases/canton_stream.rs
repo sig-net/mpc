@@ -17,7 +17,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
-use mpc_node::stream::ChainPipeline;
+use mpc_node::stream::{ChainPipeline, ChainStreaming};
 use mpc_primitives::{
     ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
 };
@@ -47,7 +47,7 @@ async fn stream_canton(
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
-    let (pipeline, _state_rx) = ChainPipeline::new(
+    let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
@@ -59,6 +59,22 @@ async fn stream_canton(
         Arc::new(AtomicBool::new(false)),
     );
     tokio::spawn(pipeline.run());
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            state_rx
+                .changed()
+                .await
+                .context("Canton pipeline state channel closed before Live")?;
+
+            if matches!(*state_rx.borrow_and_update(), ChainStreaming::Live) {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for Canton pipeline readiness")??;
+
     Ok((stream, cp_tx))
 }
 
