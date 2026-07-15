@@ -1,7 +1,7 @@
 use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
-use alloy::primitives::Address;
+use alloy::primitives::{Address, Bloom};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use std::sync::Arc;
@@ -196,17 +196,75 @@ pub fn live_block(number: u64) -> CatchupItem {
     CatchupItem::LiveBlock(block)
 }
 
-pub fn batch_block(
-    number: u64,
-    receipts: Vec<alloy::rpc::types::TransactionReceipt>,
-) -> CatchupItem {
+pub fn batch_block(number: u64, logs: Vec<alloy::rpc::types::Log>) -> CatchupItem {
     let value = block_response(1, number)
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
     let block: alloy::rpc::types::Block =
         serde_json::from_value(value).expect("block fixture should deserialize");
-    CatchupItem::BatchBlock { block, receipts }
+    CatchupItem::BatchBlock { block, logs }
+}
+
+/// Build a `Bloom` marked as potentially containing logs from `address`.
+pub fn bloom_containing_address(address: Address) -> Bloom {
+    let mut bloom = Bloom::default();
+    bloom.accrue_raw_log(address, &[]);
+    bloom
+}
+
+fn bloom_hex(bloom: &Bloom) -> String {
+    use alloy::primitives::hex::encode;
+    format!("0x{}", encode(bloom.as_slice()))
+}
+
+/// Like [`block_response`] but with the `logsBloom` set to a bloom that
+/// marks `address` as potentially present.
+pub fn block_response_with_bloom(request_id: u64, number: u64, bloom: &Bloom) -> serde_json::Value {
+    let mut value = block_response(request_id, number);
+    value
+        .get_mut("result")
+        .expect("block_response has a result envelope")
+        .as_object_mut()
+        .expect("result is an object")
+        .insert(
+            "logsBloom".to_string(),
+            serde_json::Value::String(bloom_hex(bloom)),
+        );
+    value
+}
+
+/// A minimal `eth_getLogs` result entry for `address` in `block_number`,
+/// suitable for `eth_getLogs` batch responses consumed by `get_logs_batch`.
+pub fn log_value(address: Address, block_number: u64, log_index: u64) -> serde_json::Value {
+    let block_hash = format!("0x{:064x}", block_number);
+    let tx_hash = format!("0x{:064x}", block_number);
+    serde_json::json!({
+        "logIndex": format!("0x{log_index:x}"),
+        "blockNumber": format!("0x{block_number:x}"),
+        "blockHash": block_hash,
+        "transactionHash": tx_hash,
+        "transactionIndex": "0x0",
+        "address": format!("{:#x}", address),
+        "topics": [],
+        "data": "0x",
+    })
+}
+
+/// Build a JSON array of `eth_getLogs` batch responses (one per input
+/// `(request_id, logs)` pair)
+pub fn logs_batch_response(ids_and_logs: &[(u64, Vec<serde_json::Value>)]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = ids_and_logs
+        .iter()
+        .map(|(id, logs)| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": logs,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items)
 }
 
 pub fn receipt_value(tx_hash: &str, block_number: u64) -> serde_json::Value {
@@ -226,20 +284,4 @@ pub fn receipt_value(tx_hash: &str, block_number: u64) -> serde_json::Value {
         "type": "0x2",
         "effectiveGasPrice": "0x1"
     })
-}
-
-pub fn receipts_batch_response(
-    ids_and_receipts: &[(u64, Option<serde_json::Value>)],
-) -> serde_json::Value {
-    let items: Vec<serde_json::Value> = ids_and_receipts
-        .iter()
-        .map(|(id, result)| {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result
-            })
-        })
-        .collect();
-    serde_json::Value::Array(items)
 }
