@@ -327,6 +327,9 @@ impl Backlog {
         let mut cache = self.pending_checkpoints(&chain).write().await;
         cache.clear();
         self.observe_pending_checkpoints(chain, 0);
+        if let Err(err) = self.storage.clear_pending_up_to(chain, u64::MAX).await {
+            tracing::warn!(?chain, %err, "failed to clear storage pending checkpoints");
+        }
     }
 
     fn observe_pending_checkpoints(&self, chain: Chain, len: usize) {
@@ -661,31 +664,47 @@ impl Backlog {
     }
 
     /// Loads the local state on startup. Hydrates pending checkpoints from storage
-    /// and returns the highest pending checkpoint. If none exist, returns the latest confirmed checkpoint.
-    pub async fn load_local_state(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+    /// and returns the highest pending checkpoint or latest consensus checkpoint.
+    /// Removes stale pending checkpoints that are older than latest consensus.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        let latest = self.storage.load_latest(chain).await.ok().flatten();
+        let latest_height = latest.as_ref().map(|cp| cp.block_height).unwrap_or(0);
+
         let mut highest_pending: Option<Checkpoint> = None;
         if let Ok(pending_checkpoints) = self.storage.load_all_pending(chain).await {
             let mut cache = self.pending_checkpoints(&chain).write().await;
             for cp in pending_checkpoints {
-                if let Some(ref current_highest) = highest_pending {
-                    if cp.block_height > current_highest.block_height {
+                if cp.block_height > latest_height {
+                    if let Some(ref current_highest) = highest_pending {
+                        if cp.block_height > current_highest.block_height {
+                            highest_pending = Some(cp.clone());
+                        }
+                    } else {
                         highest_pending = Some(cp.clone());
                     }
+                    cache.insert(cp.block_height, cp);
                 } else {
-                    highest_pending = Some(cp.clone());
+                    tracing::info!(
+                        latest_height,
+                        pending_checkpoint = ?cp,
+                        "cleaning up stale pending checkpoint from storage"
+                    );
+                    let storage = self.storage.clone();
+                    tokio::spawn(async move {
+                        let _ = storage.clear_pending_up_to(chain, cp.block_height).await;
+                    });
                 }
-                cache.insert(cp.block_height, cp);
             }
             let len = cache.len();
             drop(cache);
             self.observe_pending_checkpoints(chain, len);
         }
-        
-        if highest_pending.is_some() {
-            return Ok(highest_pending);
+
+        if let Some(highest) = highest_pending {
+            Ok(Some(highest))
+        } else {
+            Ok(latest)
         }
-        
-        self.storage.load_latest(chain).await
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
@@ -2562,7 +2581,7 @@ mod tests {
         // The memory cache should be empty initially
         backlog.pending_checkpoints(&chain).write().await.clear();
 
-        let loaded = backlog.load_local_state(chain).await.unwrap().unwrap();
+        let loaded = backlog.load_local(chain).await.unwrap().unwrap();
         assert_eq!(loaded.block_height, interval * 3);
 
         // Cache should be hydrated
@@ -2570,5 +2589,56 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(cache.contains_key(&(interval * 2)));
         assert!(cache.contains_key(&(interval * 3)));
+    }
+
+    #[tokio::test]
+    async fn test_load_local_state_filters_stale_pending_checkpoints() {
+        let backlog = Backlog::new();
+        let chain = Chain::Solana;
+        let interval = 100;
+
+        let confirmed = Checkpoint {
+            chain,
+            block_height: interval * 2,
+            pending_requests: vec![],
+        };
+        let stale_pending = Checkpoint {
+            chain,
+            block_height: interval,
+            pending_requests: vec![],
+        };
+        let valid_pending = Checkpoint {
+            chain,
+            block_height: interval * 3,
+            pending_requests: vec![],
+        };
+
+        // Persist confirmed latest at height 200
+        backlog.storage.persist(&confirmed).await.unwrap();
+        // Persist stale pending at height 100
+        backlog.storage.persist_pending(&stale_pending).await.unwrap();
+        // Persist valid pending at height 300
+        backlog.storage.persist_pending(&valid_pending).await.unwrap();
+
+        // The memory cache should be empty initially
+        backlog.pending_checkpoints(&chain).write().await.clear();
+
+        let loaded = backlog.load_local(chain).await.unwrap().unwrap();
+        // It should return the valid pending at height 300
+        assert_eq!(loaded.block_height, interval * 3);
+
+        // Cache should only contain valid pending
+        let cache = backlog.pending_checkpoints(&chain).read().await;
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.contains_key(&(interval)));
+        assert!(cache.contains_key(&(interval * 3)));
+
+        // Give async clean up a chance to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The stale pending should be gone from storage
+        let pending_in_storage = backlog.storage.load_all_pending(chain).await.unwrap();
+        assert_eq!(pending_in_storage.len(), 1);
+        assert_eq!(pending_in_storage[0].block_height, interval * 3);
     }
 }

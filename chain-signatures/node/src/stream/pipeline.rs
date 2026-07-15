@@ -169,7 +169,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
         if load_local {
             // Load local state from storage first, hydrating pending checkpoints
-            match self.backlog.load_local_state(chain).await {
+            match self.backlog.load_local(chain).await {
                 Ok(Some(checkpoint)) => {
                     tracing::info!(
                         ?chain,

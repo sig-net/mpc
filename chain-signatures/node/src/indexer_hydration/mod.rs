@@ -327,7 +327,7 @@ pub async fn run<T: ChainTelemetry>(
     crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
 
     // Load local state from storage first, hydrating pending checkpoints
-    match backlog.load_local_state(Chain::Hydration).await {
+    match backlog.load_local(Chain::Hydration).await {
         Ok(Some(checkpoint)) => {
             tracing::info!(
                 chain = ?Chain::Hydration,
