@@ -41,7 +41,7 @@ pub enum RpcAction {
     Publish(PublishAction),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceInfo {
     pub me: Participant,
     pub threshold: usize,
