@@ -7,8 +7,8 @@ use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 use std::sync::Arc;
 
 const CHECKPOINT_VERSION: &str = "v12";
@@ -150,7 +150,8 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(pool, _) => {
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
