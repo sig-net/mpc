@@ -13,6 +13,7 @@ pub mod nodes;
 pub mod protocols;
 pub mod requests;
 pub mod storage;
+pub mod telemetry;
 
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
 static VERSION: OnceLock<String> = OnceLock::new();

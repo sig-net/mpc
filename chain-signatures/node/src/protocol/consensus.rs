@@ -10,7 +10,7 @@ use crate::protocol::state::GeneratingState;
 use crate::protocol::triple::TripleSpawnerTask;
 use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, SecretKeyShare};
-use crate::util::AffinePointExt;
+use crate::util::NearPublicKeyFromAffineExt;
 
 use rand::random;
 

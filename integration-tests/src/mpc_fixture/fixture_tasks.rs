@@ -5,15 +5,16 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
+use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
-use mpc_node::protocol::Sign;
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use mpc_node::stream::run_stream;
+use mpc_node::stream::{run_stream, StreamContext};
+use mpc_primitives::SignCommand;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -51,7 +52,7 @@ pub(super) fn test_mock_network(
                     // (might want to add MessageOutbox, too, but for now this is easier)
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active().clone();
-                    let (msg, (from, to, _ts)) = &send_message;
+                    let SendMessage { message: msg, from, to, .. } = &send_message;
                     let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
                     match SignedMessage::encrypt(
                         &[msg],
@@ -79,7 +80,7 @@ pub(super) fn test_mock_network(
                         RpcAction::Publish(publish_action) => {
                             format!(
                                 "RpcAction::Publish({:?})",
-                                publish_action.indexed,
+                                publish_action.request,
                             )
                         },
                     };
@@ -105,22 +106,26 @@ pub(super) fn test_mock_network(
 
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: &watch::Receiver<MeshState>,
+    checkpoints_rx: mpc_node::types::CheckpointWatcher,
 ) {
     for stream in mock_streams {
         tokio::spawn(run_stream(
             stream.clone(),
-            sign_tx.clone(),
-            rpc.clone(),
-            backlog.clone(),
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            // Only used for backlog recovery - not implemented in component tests yet
-            NodeClient::new(&Default::default()),
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                NodeClient::new(&Default::default()),
+                checkpoints_rx.clone(),
+            ),
+            NoopChainTelemetry,
         ));
     }
 }

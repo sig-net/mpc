@@ -31,8 +31,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
-use mpc_node::rpc::ContractStateWatcher;
-use mpc_node::rpc::RpcChannel;
+use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
@@ -327,7 +326,7 @@ impl MpcFixtureBuilder {
                 .unwrap();
             routing_table.insert(
                 Participant::from(*participant),
-                node.messaging.channel.inbox.clone(),
+                node.messaging.channel.inbox_sender(),
             );
         }
         routing_table
@@ -587,6 +586,7 @@ impl MpcFixtureNodeBuilder {
         let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
+        let (_cp_tx, checkpoints_rx) = watch::channel(None);
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),
@@ -594,6 +594,7 @@ impl MpcFixtureNodeBuilder {
             backlog.clone(),
             context.contract_state.clone(),
             &mesh_rx,
+            checkpoints_rx,
         );
 
         // handle outbox messages manually, we want them before they are
@@ -636,7 +637,8 @@ impl MpcFixtureNodeBuilder {
             web_handle: None,
         };
 
-        node.start_web_interface(self.participant_info.account_id)
+        let _ = node
+            .start_web_interface(self.participant_info.account_id)
             .await;
 
         node

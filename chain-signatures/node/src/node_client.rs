@@ -268,4 +268,39 @@ impl NodeClient {
             Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
+
+    pub async fn fetch_checkpoint_by_digest(
+        &self,
+        base: impl IntoUrl,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<Option<Checkpoint>, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("checkpoint");
+        url.set_query(Some(&format!(
+            "query={}:0x{}",
+            chain.as_str(),
+            hex::encode(digest)
+        )));
+
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let request_id = Self::extract_request_id(&resp);
+        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+
+        if status.is_success() {
+            let checkpoints: HashMap<Chain, Checkpoint> = ciborium::from_reader(body.as_ref())
+                .map_err(|err| RequestError::Conversion(err.to_string()))?;
+            Ok(checkpoints.get(&chain).cloned())
+        } else {
+            let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
+        }
+    }
 }

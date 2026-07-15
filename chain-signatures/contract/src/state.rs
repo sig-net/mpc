@@ -6,14 +6,14 @@ use near_sdk::{AccountId, PublicKey};
 
 use crate::primitives::{Candidates, Participants, PkVotes, Votes};
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct InitializingContractState {
     pub candidates: Candidates,
     pub threshold: usize,
     pub pk_votes: PkVotes,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -24,18 +24,25 @@ pub struct RunningContractState {
     pub leave_votes: Votes,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
     pub old_participants: Participants,
     pub new_participants: Participants,
+    /// Threshold of the current key shares held by `old_participants`. The node
+    /// needs this to reconstruct the existing secret during resharing, and it is
+    /// what the network reverts to if the resharing is cancelled.
     pub threshold: usize,
+    /// Threshold that will be baked into the reshared key shares for
+    /// `new_participants`, recomputed from the new participant count. It becomes
+    /// the running threshold once the resharing finishes.
+    pub new_threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
     pub cancel_votes: HashSet<AccountId>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub enum ProtocolContractState {
     NotInitialized,
     Initializing(InitializingContractState),

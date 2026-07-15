@@ -3069,9 +3069,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -3079,9 +3079,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -6021,6 +6021,11 @@ dependencies = [
  "hex",
  "hyper 0.14.32",
  "k256",
+ "mpc-chain-canton",
+ "mpc-chain-ethereum",
+ "mpc-chain-integration-core",
+ "mpc-chain-near",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
@@ -7311,6 +7316,127 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-chain-canton"
+version = "1.16.7"
+dependencies = [
+ "alloy",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "oauth2",
+ "reqwest 0.11.27",
+ "serde",
+ "serde-aux",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-ethereum"
+version = "1.16.7"
+dependencies = [
+ "alloy",
+ "alloy-dyn-abi",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "helios",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
+name = "mpc-chain-integration-core"
+version = "1.16.7"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "backon",
+ "cait-sith",
+ "futures-util",
+ "k256",
+ "mpc-crypto",
+ "mpc-primitives",
+ "rand 0.8.5",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-near"
+version = "1.16.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hex",
+ "k256",
+ "mpc-chain-integration-core",
+ "mpc-contract",
+ "mpc-primitives",
+ "near-account-id",
+ "near-crypto",
+ "near-fetch",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-solana"
+version = "1.16.7"
+dependencies = [
+ "alloy-sol-types",
+ "anchor-client",
+ "anchor-lang",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "signet-program",
+ "solana-client",
+ "solana-sdk",
+ "solana-transaction-status",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.16.7"
 dependencies = [
@@ -7339,9 +7465,11 @@ dependencies = [
  "alloy",
  "anyhow",
  "getrandom 0.2.16",
+ "hkdf",
  "k256",
  "mpc-primitives",
  "near-account-id",
+ "near-primitives",
  "near-sdk",
  "sha3",
 ]
@@ -7365,15 +7493,11 @@ dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
  "alloy-primitives",
- "alloy-signer-local",
  "alloy-sol-types",
- "anchor-client",
- "anchor-lang",
  "anyhow",
  "async-trait",
  "axum",
  "axum-extra",
- "backon",
  "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",
@@ -7382,13 +7506,12 @@ dependencies = [
  "clap",
  "deadpool-redis",
  "ed25519-zebra",
+ "enum-map",
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",
- "helios",
  "hex",
  "highway",
- "hkdf",
  "http 1.3.1",
  "hyper 0.14.32",
  "hyper-rustls 0.24.2",
@@ -7398,6 +7521,11 @@ dependencies = [
  "maud",
  "mime",
  "mockito",
+ "mpc-chain-canton",
+ "mpc-chain-ethereum",
+ "mpc-chain-integration-core",
+ "mpc-chain-near",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
@@ -7407,7 +7535,6 @@ dependencies = [
  "near-fetch",
  "near-primitives",
  "near-sdk",
- "oauth2",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -7421,14 +7548,9 @@ dependencies = [
  "secrecy 0.10.3",
  "semver 1.0.26",
  "serde",
- "serde-aux",
  "serde_bytes",
  "serde_json",
  "sha3",
- "signet-program",
- "solana-client",
- "solana-sdk",
- "solana-transaction-status",
  "sp-core",
  "sp-runtime",
  "sp-state-machine",
@@ -7440,7 +7562,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-stackdriver",
@@ -7454,6 +7575,7 @@ version = "1.16.7"
 dependencies = [
  "borsh 1.5.7",
  "ciborium",
+ "enum-map",
  "getrandom 0.2.16",
  "hex",
  "k256",

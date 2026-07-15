@@ -3,23 +3,25 @@
 
 [advisories]
 ignore = [
-	"RUSTSEC-2025-0111",  # tokio-tar parses PAX extended headers incorrectly, allows file smuggling; package unmaintained, only used for testing
-	"RUSTSEC-2024-0344",  # curve25519-dalek pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x
-	"RUSTSEC-2022-0093",  # ed25519-dalek 2.x unavailable in Solana 2.x dependency tree
-	"RUSTSEC-2024-0421",  # idna >=1.0 incompatible with google-apis + libp2p stacks we cannot yet bump
-	"RUSTSEC-2025-0009",  # ring 0.17+ incompatible with rustls 0.20 required by libp2p
-	"RUSTSEC-2024-0336",  # rustls >=0.21 not yet adopted in libp2p-quic 0.7 alpha series
-	"RUSTSEC-2025-0055",  # tracing-subscriber 0.3 requires arkworks 0.5+ updates upstream
-	"RUSTSEC-2021-0145",  # atty removed from our binaries but still pulled in by solana-logger transitively
-	"RUSTSEC-2026-0009",  # time pinned pre-edition2024 to keep Rust 1.81/Cargo stable builds working
-						  # we will likely need to fix this once we have a more recent near smart contract version.
-    "RUSTSEC-2026-0002",  # lru (0.12.5, 0.13.0) `IterMut` violates Stacked Borrows (unsound); pulled in by alloy/smoldot-light downstreams.
-    "RUSTSEC-2026-0037",  # quinn-proto 0.9.x Denial of service; blocked on libp2p bumps.
-    "RUSTSEC-2026-0049",  # rustls-webpki 0.101.7/0.102.8 faulty CRL matching; no fix in those series, pinned by rustls 0.21/0.22 (reqwest 0.11, google-secretmanager).
-    "RUSTSEC-2026-0098",  # rustls-webpki 0.101.7/0.102.8 URI name constraints incorrectly accepted; same dependency chain as RUSTSEC-2026-0049.
-    "RUSTSEC-2026-0099",  # rustls-webpki 0.101.7/0.102.8 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
-	"RUSTSEC-2026-0104",  # rustls-webpki CRL parsing panic; we do not use CRLs, so this is not reachable in our current TLS usage.
-	"RUSTSEC-2026-0119",  # CPU exhaustion via O(n²) name compression in hickory-proto; transitively locked through reqwest 0.12/helios, blocked on upstream updates
-	"RUSTSEC-2026-0118",  # hickory-proto NSEC3 closest-encloser proof validation enters unbounded loop on cross-zone responses;
-						  # no fixed upgrade is available, transitively pulled by reqwest 0.12 consumers (helios, near-jsonrpc-client, solana-rpc-client)
+	"RUSTSEC-2025-0111", # tokio-tar parses PAX extended headers incorrectly, allows file smuggling; package unmaintained, only used for testing
+	"RUSTSEC-2024-0344", # curve25519-dalek pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x
+	"RUSTSEC-2022-0093", # ed25519-dalek 2.x unavailable in Solana 2.x dependency tree
+	"RUSTSEC-2024-0421", # idna >=1.0 incompatible with google-apis + libp2p stacks we cannot yet bump
+	"RUSTSEC-2025-0009", # ring 0.17+ incompatible with rustls 0.20 required by libp2p
+	"RUSTSEC-2024-0336", # rustls >=0.21 not yet adopted in libp2p-quic 0.7 alpha series
+	"RUSTSEC-2025-0055", # tracing-subscriber 0.3 requires arkworks 0.5+ updates upstream
+	"RUSTSEC-2021-0145", # atty removed from our binaries but still pulled in by solana-logger transitively
+	"RUSTSEC-2026-0009", # time pinned pre-edition2024 to keep Rust 1.81/Cargo stable builds working
+	# we will likely need to fix this once we have a more recent near smart contract version.
+	"RUSTSEC-2026-0002", # lru (0.12.5, 0.13.0) `IterMut` violates Stacked Borrows (unsound); pulled in by alloy/smoldot-light downstreams.
+	"RUSTSEC-2026-0037", # quinn-proto 0.9.x Denial of service; blocked on libp2p bumps.
+	"RUSTSEC-2026-0049", # rustls-webpki 0.101.7/0.102.8 faulty CRL matching; no fix in those series, pinned by rustls 0.21/0.22 (reqwest 0.11, google-secretmanager).
+	"RUSTSEC-2026-0098", # rustls-webpki 0.101.7/0.102.8 URI name constraints incorrectly accepted; same dependency chain as RUSTSEC-2026-0049.
+	"RUSTSEC-2026-0099", # rustls-webpki 0.101.7/0.102.8 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
+	"RUSTSEC-2026-0104", # rustls-webpki CRL parsing panic; we do not use CRLs, so this is not reachable in our current TLS usage.
+	"RUSTSEC-2026-0119", # CPU exhaustion via O(n²) name compression in hickory-proto; transitively locked through reqwest 0.12/helios, blocked on upstream updates
+	"RUSTSEC-2026-0118", # hickory-proto NSEC3 closest-encloser proof validation enters unbounded loop on cross-zone responses;
+	# no fixed upgrade is available, transitively pulled by reqwest 0.12 consumers (helios, near-jsonrpc-client, solana-rpc-client)
+	"RUSTSEC-2026-0185", # quinn-proto 0.11.14 remote memory exhaustion via unbounded out-of-order stream reassembly;
+	# blocked on Anchor 1.0.x upgrade (anchor-client 1.0.2 has a build bug against solana-rpc-client 3.x, no patch yet).
 ]

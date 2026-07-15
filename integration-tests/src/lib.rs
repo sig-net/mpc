@@ -19,12 +19,13 @@ use crate::containers::DockerClient;
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
+use mpc_chain_canton::CantonConfig;
+use mpc_chain_ethereum::EthConfig;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
-use mpc_node::indexer_eth::EthConfig;
 use mpc_node::indexer_hydration::HydrationConfig;
-use mpc_node::indexer_sol::SolConfig;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
@@ -63,7 +64,7 @@ pub struct NodeConfig {
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
-    pub canton: Option<mpc_node::indexer_canton::CantonConfig>,
+    pub canton: Option<CantonConfig>,
 }
 
 impl Default for NodeConfig {

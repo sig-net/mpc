@@ -1,0 +1,22 @@
+[package]
+name = "mpc-chain-near"
+edition = "2021"
+version.workspace = true
+description = "NEAR chain integration for the MPC node: contract polling indexer and signature publisher."
+
+[dependencies]
+# TODO: replace anyhow with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-contract.workspace = true
+mpc-primitives.workspace = true
+near-account-id.workspace = true
+near-crypto.workspace = true
+near-fetch.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
