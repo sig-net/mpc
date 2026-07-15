@@ -62,7 +62,7 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 /// a subset after this timeout, if above the minimum threshold.
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Metric channel label shared by every entry in `SignatureSpawner.inboxes`.
+/// Metric channel label shared by every entry in `SignatureSpawner.posit_inboxes`.
 const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
@@ -79,7 +79,7 @@ pub struct SignatureSpawner {
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Posit inboxes, buffering messages that arrive before a task spawns.
-    inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    posit_inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
     /// Watchers that increment the delayed metric when response time exceeds expected.
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
@@ -150,12 +150,12 @@ impl SignatureSpawner {
 
         // Subscribe to (or create) the posit inbox for this sign request
         let inbox = self
-            .inboxes
+            .posit_inboxes
             .entry(sign_id)
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let mut rx: mpsc::Receiver<SignTaskMessage> = inbox.subscribe();
         inbox.report_capacity();
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.posit_inboxes.len());
 
         // Keep draining the channel as long as the Subscriber is alive and move
         // the messages to a specialized work item queue.
@@ -210,7 +210,7 @@ impl SignatureSpawner {
         if self.dead_ids.contains(&sign_id) {
             return;
         }
-        let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
+        let inbox = self.posit_inboxes.entry(sign_id).or_insert_with(|| {
             Subscriber::unsubscribed_with_capacity(
                 SIGN_POSIT_INBOX_LABEL,
                 crate::protocol::message::POSIT_INBOX_CHANNEL_SIZE,
@@ -281,10 +281,10 @@ impl SignatureSpawner {
     fn retire_task(&mut self, sign_id: SignId, reason: &str) {
         self.mark_dead(sign_id);
         self.task_chains.remove(&sign_id);
-        if let Some(inbox) = self.inboxes.remove(&sign_id) {
+        if let Some(inbox) = self.posit_inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.posit_inboxes.len());
         self.abort_delayed_watcher(sign_id, reason);
     }
 
@@ -390,8 +390,8 @@ impl SignatureSpawner {
         self.dead_ids.contains(sign_id)
     }
 
-    fn test_inboxes_contains(&self, sign_id: &SignId) -> bool {
-        self.inboxes.contains_key(sign_id)
+    fn test_posit_inboxes_contains(&self, sign_id: &SignId) -> bool {
+        self.posit_inboxes.contains_key(sign_id)
     }
 
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
@@ -430,7 +430,7 @@ impl SignatureSpawnerTask {
         let spawner = SignatureSpawner {
             contract,
             tasks: JoinMap::new(),
-            inboxes: HashMap::new(),
+            posit_inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             task_chains: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
@@ -509,7 +509,7 @@ mod tests {
             contract,
             presignatures,
             tasks: JoinMap::new(),
-            inboxes: HashMap::new(),
+            posit_inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             task_chains: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
@@ -535,14 +535,14 @@ mod tests {
         // Step 1: Spawn → inbox created, task_chains populated, not dead
         spawner.spawn_task(&governance, request.clone(), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_inboxes_contains(&sign_id));
+        assert!(spawner.test_posit_inboxes_contains(&sign_id));
         assert!(spawner.test_task_chains_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_inboxes_contains(&sign_id));
+        assert!(!spawner.test_posit_inboxes_contains(&sign_id));
         assert!(!spawner.test_task_chains_contains(&sign_id));
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
@@ -555,7 +555,7 @@ mod tests {
             Participant::from(1),
             PositAction::Propose,
         );
-        assert!(!spawner.test_inboxes_contains(&sign_id));
+        assert!(!spawner.test_posit_inboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, task_chains repopulated
         spawner.spawn_task(&governance, request, cfg.clone());
@@ -571,6 +571,6 @@ mod tests {
             Participant::from(1),
             PositAction::Propose,
         );
-        assert!(spawner.test_inboxes_contains(&sign_id));
+        assert!(spawner.test_posit_inboxes_contains(&sign_id));
     }
 }

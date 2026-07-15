@@ -236,6 +236,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
             crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
+            // SignCommand channel: chain sign events (requests, completions,
+            // chain aborts) from the indexers/streams into the SignatureSpawner.
             let (sign_tx, sign_rx) = mpsc::channel(16384);
 
             let StorageHandles {

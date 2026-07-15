@@ -9,7 +9,7 @@ use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{run_stream, StreamContext};
 use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
-use k256::{AffinePoint, Scalar};
+use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainStream, NoopChainTelemetry};
@@ -119,6 +119,50 @@ pub fn signature_responded_event(
 pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
     let (tx, rx) = mpsc::channel(buffer);
     (RpcChannel { tx }, rx)
+}
+
+/// Build a [`StreamContext`] for unit tests, wiring the given `backlog`,
+/// `sign_tx` and `caught_up` flag into it
+pub fn make_test_stream_context(
+    backlog: Backlog,
+    sign_tx: mpsc::Sender<SignCommand>,
+    caught_up: bool,
+    root_pk: AffinePoint,
+) -> StreamContext {
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, _rpc_rx) = test_rpc_channel(8);
+    let mut ctx = StreamContext::new(
+        backlog,
+        sign_tx,
+        rpc,
+        contract_watcher,
+        mesh_rx,
+        node_client,
+        cp_rx,
+    );
+    ctx.caught_up = caught_up;
+    ctx.pipeline_caught_up
+        .store(caught_up, std::sync::atomic::Ordering::Release);
+    ctx
+}
+
+/// Convenience wrapper around [`make_test_stream_context`] for tests that don't need a specific root public key.
+pub fn make_test_stream_context_with_generator_pk(
+    backlog: Backlog,
+    sign_tx: mpsc::Sender<SignCommand>,
+    caught_up: bool,
+) -> StreamContext {
+    make_test_stream_context(
+        backlog,
+        sign_tx,
+        caught_up,
+        ProjectivePoint::GENERATOR.to_affine(),
+    )
 }
 
 /// Drive `run_stream` against a two-node mesh backed by in-memory Mockito HTTP

@@ -111,6 +111,37 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         (this, state_rx)
     }
 
+    /// Evaluate the outcome of a regression check and transition to Recovery if needed.
+    fn evaluate_regression_outcome(
+        &self,
+        result: RegressionOutcome,
+    ) -> Option<Option<ChainStreaming>> {
+        match result {
+            RegressionOutcome::Recovery => {
+                let new_state = ChainStreaming::Recovery { load_local: false };
+                let _ = self.state_tx.send(new_state);
+                Some(Some(new_state))
+            }
+            RegressionOutcome::Aligned => None,
+            RegressionOutcome::Shutdown => Some(None),
+        }
+    }
+
+    /// Watchdog-timeout handler shared by `handle_catchup` and `handle_live`.
+    async fn handle_watchdog_timeout(&mut self, context: &str) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        let timeout = self.watchdog_timeout;
+        let has_slot = self.backlog.has_checkpoint_slot(chain).await;
+        let pending = self.backlog.pending_checkpoint_count(chain).await;
+        tracing::warn!(
+            %chain, ?timeout, has_checkpoint_slot = has_slot,
+            pending_checkpoints = pending, "{} processing timed out; restarting pipeline", context
+        );
+        let new_state = ChainStreaming::Recovery { load_local: false };
+        let _ = self.state_tx.send(new_state);
+        Some(new_state)
+    }
+
     pub async fn run(mut self) {
         let chain = I::CHAIN;
         tracing::info!(%chain, "starting ChainStream pipeline");
@@ -241,21 +272,9 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                                 tokio::time::sleep(I::RETRY_DELAY).await;
                             }
                             Err(_) => {
-                                let has_slot =
-                                    self.backlog.has_checkpoint_slot(chain).await;
-                                let pending =
-                                    self.backlog.pending_checkpoint_count(chain).await;
-                                tracing::warn!(
-                                    %chain,
-                                    ?timeout,
-                                    has_checkpoint_slot = has_slot,
-                                    pending_checkpoints = pending,
-                                    "catchup block processing timed out; restarting pipeline"
-                                );
-                                let new_state =
-                                    ChainStreaming::Recovery { load_local: false };
-                                let _ = self.state_tx.send(new_state);
-                                return Some(new_state);
+                                return self
+                                    .handle_watchdog_timeout("catchup block")
+                                    .await;
                             }
                         }
                     }
@@ -265,28 +284,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match self.handle_regression_outcome(result) {
-                        PipelineAction::Continue => {}
-                        PipelineAction::Transition(state) => {
-                            let _ = self.state_tx.send(state);
-                            return Some(state);
-                        }
-                        PipelineAction::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
                 }
                 _ = tokio::time::sleep(timeout) => {
-                    let has_slot = self.backlog.has_checkpoint_slot(chain).await;
-                    let pending = self.backlog.pending_checkpoint_count(chain).await;
-                    tracing::warn!(
-                        %chain,
-                        ?timeout,
-                        has_checkpoint_slot = has_slot,
-                        pending_checkpoints = pending,
-                        "catchup stalled; no block processed within timeout; restarting pipeline"
-                    );
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return self.handle_watchdog_timeout("catchup").await;
                 }
             }
         }
@@ -322,28 +325,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match self.handle_regression_outcome(result) {
-                        PipelineAction::Continue => {}
-                        PipelineAction::Transition(state) => {
-                            let _ = self.state_tx.send(state);
-                            return Some(state);
-                        }
-                        PipelineAction::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(result) {
+                        return ret;
                     }
                 }
                 _ = tokio::time::sleep(timeout) => {
-                    let has_slot = self.backlog.has_checkpoint_slot(chain).await;
-                    let pending = self.backlog.pending_checkpoint_count(chain).await;
-                    tracing::warn!(
-                        %chain,
-                        ?timeout,
-                        has_checkpoint_slot = has_slot,
-                        pending_checkpoints = pending,
-                        "live block processing timed out; restarting pipeline"
-                    );
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return self.handle_watchdog_timeout("live block").await;
                 }
             }
         }
@@ -393,14 +380,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match self.handle_regression_outcome(regression_outcome) {
-                        PipelineAction::Continue => false,
-                        PipelineAction::Transition(state) => {
-                            let _ = self.state_tx.send(state);
-                            return Some(state);
-                        }
-                        PipelineAction::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(regression_outcome) {
+                        return ret;
                     }
+                    false
                 }
             };
 
@@ -415,26 +398,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match self.handle_regression_outcome(regression_outcome) {
-                        PipelineAction::Continue => {}
-                        PipelineAction::Transition(state) => {
-                            let _ = self.state_tx.send(state);
-                            return Some(state);
-                        }
-                        PipelineAction::Shutdown => return None,
+                    if let Some(ret) = self.evaluate_regression_outcome(regression_outcome) {
+                        return ret;
                     }
                 }
             }
-        }
-    }
-
-    fn handle_regression_outcome(&self, outcome: RegressionOutcome) -> PipelineAction {
-        match outcome {
-            RegressionOutcome::Recovery => {
-                PipelineAction::Transition(ChainStreaming::Recovery { load_local: false })
-            }
-            RegressionOutcome::Aligned => PipelineAction::Continue,
-            RegressionOutcome::Shutdown => PipelineAction::Shutdown,
         }
     }
 
@@ -447,13 +415,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let _ = self.state_tx.send(next_state);
         Some(next_state)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PipelineAction {
-    Continue,
-    Transition(ChainStreaming),
-    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
