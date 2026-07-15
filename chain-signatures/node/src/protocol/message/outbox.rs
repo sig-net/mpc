@@ -74,23 +74,29 @@ impl MessageOutbox {
     }
 
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
+    ///
+    /// Messages to unknown participants or that fail to encrypt are intentionally dropped.
     pub fn encrypt(
         &mut self,
         sign_sk: &near_crypto::SecretKey,
         participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
     ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
-        // failed for when a participant is not active, so keep this message for next round.
         let mut errors = Vec::new();
 
         let mut encrypted = HashMap::new();
-        for ((from, to), compacted) in compacted {
+        for ((from, to), partitions) in compacted {
             let Some(info) = participants.get(&to) else {
-                tracing::warn!(?to, "outbox: participant not found in all participants");
+                // Should never happen, since we pass full list of participants; dropping also keeps the outbox from accumulating
+                // messages for recipients that will never receive them.
+                tracing::warn!(
+                    ?to,
+                    "outbox: participant not found in all participants, dropping messages"
+                );
                 continue;
             };
 
-            for partition in compacted {
+            for partition in partitions {
                 let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
@@ -99,6 +105,8 @@ impl MessageOutbox {
                 ) {
                     Ok(encrypted) => encrypted,
                     Err(err) => {
+                        // Encryption failure is deterministic, so a retry would fail
+                        // the same way. Drop the partition.
                         errors.push(err);
                         continue;
                     }
