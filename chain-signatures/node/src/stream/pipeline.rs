@@ -168,8 +168,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
 
         if load_local {
-            // Load local checkpoint from storage first
-            match self.backlog.storage.load_latest(chain).await {
+            // Load local state from storage first, hydrating pending checkpoints
+            match self.backlog.load_local_state(chain).await {
                 Ok(Some(checkpoint)) => {
                     tracing::info!(
                         ?chain,
