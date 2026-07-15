@@ -18,7 +18,7 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
     SignId,
 };
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -425,92 +425,89 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         block_number: u64,
     ) -> anyhow::Result<Vec<ChainEvent>> {
         let mut events = Vec::new();
-        let mut resolved_tx_ids = HashSet::new();
+        // let mut resolved_tx_ids = HashSet::new();
 
         let watchers = self
             .state_manager
             .get_execution_watchers(Chain::Ethereum)
             .await;
+
+        // If there are no watchers return early.
+        if watchers.is_empty() {
+            return Ok(events);
+        }
+
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
             "collect_execution_confirmations checking watchers"
         );
 
-        // Watchers whose receipt we saw this call, even if no event was
-        // emitted. The staleness check below skips these so a mined tx with
-        // a failed extraction stays pending for retry, not flagged Failed.
-        let mut observed_tx_ids = HashSet::new();
-
-        // TODO: submit as batch or parallelize the per-watcher `eth_getTransactionReceipt` calls once
-        // we have a way to track rate-limits and backoff for all requests (right now we just retry individually on failure)
-        // Per-watcher `eth_getTransactionReceipt`
+        // Group watchers by from_address to deduplicate nonce fetching
+        let mut watchers_by_sender: HashMap<Address, Vec<_>> = HashMap::new();
         for (tx_id, (sign_id, pending_tx)) in watchers {
-            tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
-            match self
-                .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                .await?
-            {
-                BackfillOutcome::Observed { event } => {
-                    observed_tx_ids.insert(tx_id);
-                    if let Some(event) = event {
-                        events.push(event);
-                        resolved_tx_ids.insert(tx_id);
-                    }
-                    // `None` means extraction failed — leave pending for retry.
-                    // `observed_tx_ids` above exempts it from the staleness check.
-                }
-                BackfillOutcome::NotObserved => {}
-            }
+            watchers_by_sender
+                .entry(pending_tx.from_address.into())
+                .or_default()
+                .push((tx_id, sign_id, pending_tx));
         }
 
-        // Staleness checks (nonce too low)
-        let remaining_pending = self
-            .state_manager
-            .get_execution_watchers(Chain::Ethereum)
-            .await;
-
-        for (tx_id, (sign_id, tx)) in remaining_pending {
-            if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
-                continue;
-            }
-
+        for (sender, pending_txs) in watchers_by_sender {
+            // Fetch the nonce for this sender at the exact current block
             let current_nonce = match self
                 .client
-                .as_ref()
                 .get_nonce(
-                    tx.from_address.into(),
+                    sender,
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
             {
                 Ok(nonce) => nonce,
                 Err(err) => {
-                    tracing::warn!(
-                        ?tx_id,
-                        ?sign_id,
-                        ?err,
-                        "Failed to fetch nonce for bidirectional tx"
-                    );
+                    tracing::warn!(?sender, ?err, "Failed to fetch nonce for sender");
                     continue;
                 }
             };
 
-            if tx.nonce < current_nonce {
-                tracing::warn!(
-                    ?sign_id,
-                    "Nonce too low for tx {:?}: expected {}, got {}",
-                    tx_id,
-                    tx.nonce,
-                    current_nonce
-                );
-                events.push(ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    sign_id,
-                    source_chain: tx.source_chain,
-                    block_height: block_number,
-                    result: ExecutionOutcome::Failed,
-                });
+            // Iterate over the pending transactions for this sender and check if their nonce has been consumed
+            for (tx_id, sign_id, pending_tx) in pending_txs {
+                if current_nonce <= pending_tx.nonce {
+                    // Nonce hasn't been reached yet. Still pending. 0 RPC calls needed!
+                    continue;
+                }
+
+                // TODO: submit as batch or parallelize the per-watcher `eth_getTransactionReceipt` calls once
+                // we have a way to track rate-limits and backoff for all requests (right now we just retry individually on failure)
+                // The nonce has been consumed by the network. The tx was either mined or replaced.
+                match self
+                    .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                    .await?
+                {
+                    BackfillOutcome::Observed { event } => {
+                        if let Some(event) = event {
+                            events.push(event);
+                        }
+                        // If event is None, extraction failed — leave pending for retry
+                    }
+                    BackfillOutcome::NotObserved => {
+                        // Nonce consumed, but our specific tx_hash isn't mined.
+                        // This means the transaction was replaced or dropped.
+                        tracing::warn!(
+                            ?tx_id,
+                            ?sign_id,
+                            expected_nonce = pending_tx.nonce,
+                            current_nonce,
+                            "transaction replaced or dropped (nonce consumed by another tx)"
+                        );
+                        events.push(ChainEvent::ExecutionConfirmed {
+                            tx_id,
+                            sign_id,
+                            source_chain: pending_tx.source_chain,
+                            block_height: block_number,
+                            result: ExecutionOutcome::Failed,
+                        });
+                    }
+                }
             }
         }
 
@@ -1517,6 +1514,20 @@ mod tests {
             "status": "0x0"
         });
 
+        // Mock the eth_getTransactionCount
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x5"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .create_async()
+            .await;
+
+        // Mock the eth_getTransactionReceipt
         server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
