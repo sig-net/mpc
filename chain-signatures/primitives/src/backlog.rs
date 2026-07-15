@@ -39,7 +39,6 @@ impl fmt::Debug for PendingTx {
     BorshSerialize,
     Serialize,
     Deserialize,
-    Debug,
     Clone,
     PartialEq,
     Eq,
@@ -51,6 +50,16 @@ pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<PendingTx>,
+}
+
+impl fmt::Debug for Checkpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Checkpoint")
+            .field("chain", &self.chain)
+            .field("block_height", &self.block_height)
+            .field("pending_requests", &self.pending_requests.len())
+            .finish()
+    }
 }
 
 impl Checkpoint {

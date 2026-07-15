@@ -154,29 +154,23 @@ impl CheckpointStorage {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
-                    match pool.get().await {
-                        Ok(mut conn) => {
-                            let key = self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height);
-                            match conn.set::<_, _, ()>(key, &value).await {
-                                Ok(_) => break,
-                                Err(err) => {
-                                    tracing::error!(
-                                        chain = ?checkpoint.chain,
-                                        height = checkpoint.block_height,
-                                        %err,
-                                        "failed to persist pending checkpoint to redis, retrying..."
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                chain = ?checkpoint.chain,
-                                height = checkpoint.block_height,
-                                %err,
-                                "failed to get redis connection for pending checkpoint, retrying..."
-                            );
-                        }
+                    let Ok(mut conn) = pool.get().await else {
+                        tracing::error!(
+                            ?checkpoint,
+                            "failed to get redis connection for pending checkpoint, retrying..."
+                        );
+                        continue;
+                    };
+
+                    let key = self.pending_checkpoint_key(checkpoint.chain, checkpoint.block_height);
+                    if let Err(err) = conn.set::<_, _, ()>(key, &value).await {
+                        tracing::error!(
+                            ?checkpoint,
+                            %err,
+                            "failed to persist pending checkpoint to redis, retrying..."
+                        );
+                    } else {
+                        break;
                     }
                 }
             }
