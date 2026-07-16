@@ -58,6 +58,9 @@ impl Config {
         })
     }
 
+    /// Returns whether the merged protocol config actually changed, so that the
+    /// surrounding `watch::Sender::send_if_modified` only notifies receivers on
+    /// real changes instead of every contract poll.
     pub fn update(&mut self, mut contract: ContractConfig) -> bool {
         let Some(mut protocol) = contract.remove("protocol") else {
             tracing::warn!("unable to find protocol in contract config");
@@ -69,6 +72,9 @@ impl Config {
             return false;
         };
 
+        if self.protocol == protocol {
+            return false;
+        }
         self.protocol = protocol;
         true
     }
@@ -163,7 +169,60 @@ pub fn merge(base: &mut Value, new: &Value) {
 mod tests {
     use serde::Deserialize;
 
-    use super::merge;
+    use super::{merge, Config, ContractConfig, LocalConfig, OverrideConfig};
+    use mpc_contract::config::ProtocolConfig;
+
+    fn contract_config(protocol: &ProtocolConfig) -> ContractConfig {
+        ContractConfig::from([(
+            "protocol".to_string(),
+            serde_json::to_value(protocol).unwrap(),
+        )])
+    }
+
+    #[test]
+    fn test_update_returns_whether_protocol_changed() {
+        let mut config = Config::new(LocalConfig::default());
+
+        // Same config as current => no change, no notification.
+        assert!(!config.update(contract_config(&ProtocolConfig::default())));
+
+        // An actual change => updated and notified.
+        let mut changed = ProtocolConfig::default();
+        changed.message_timeout += 1;
+        assert!(config.update(contract_config(&changed)));
+        assert_eq!(config.protocol.message_timeout, changed.message_timeout);
+
+        // The same value again => no change.
+        assert!(!config.update(contract_config(&changed)));
+
+        // Missing protocol section => rejected, no change.
+        assert!(!config.update(ContractConfig::new()));
+    }
+
+    #[test]
+    fn test_update_local_override_wins_and_dedups() {
+        let over = OverrideConfig::new(serde_json::json!({ "message_timeout": 42 }));
+        let mut config = Config::new(LocalConfig {
+            over,
+            ..LocalConfig::default()
+        });
+        assert_eq!(config.protocol.message_timeout, 42);
+
+        // The contract disagrees on the overridden field only: the override wins,
+        // so the merged result equals the current config => no change.
+        let mut contract = ProtocolConfig {
+            message_timeout: 1000,
+            ..ProtocolConfig::default()
+        };
+        assert!(!config.update(contract_config(&contract)));
+        assert_eq!(config.protocol.message_timeout, 42);
+
+        // A change in a non-overridden field still propagates.
+        contract.garbage_timeout += 1;
+        assert!(config.update(contract_config(&contract)));
+        assert_eq!(config.protocol.garbage_timeout, contract.garbage_timeout);
+        assert_eq!(config.protocol.message_timeout, 42);
+    }
 
     #[test]
     fn test_merge() {
