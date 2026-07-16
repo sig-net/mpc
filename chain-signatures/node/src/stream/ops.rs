@@ -224,6 +224,23 @@ pub(crate) async fn process_respond_bidirectional_event(
     };
 
     if !matches!(entry.request.kind, SignKind::RespondBidirectional(_)) {
+        // A RespondBidirectionalEvent landed on an entry that is not in the
+        // bidirectional-response phase. On Canton this is expected and benign: the indexer
+        // resumes from offset 0 on restart and re-delivers an old, already-settled
+        // RespondBidirectionalEvent onto a request that replay just re-inserted as a fresh
+        // phase-1 SignBidirectional entry (ExecutionConfirmed comes from the target chain,
+        // not the ledger, so replay never re-advances it to phase 2). Skip it as stale.
+        //
+        // Scope this tolerance to Canton: no other chain is known to replay this way, so
+        // for them a mismatch here is not an expected artifact and must still surface.
+        if matches!(source_chain, Chain::Canton) {
+            tracing::warn!(
+                ?sign_id,
+                kind = ?entry.request.kind,
+                "canton: RespondBidirectionalEvent for a non-bidirectional-phase entry — replayed/stale event; skipping"
+            );
+            return Ok(());
+        }
         anyhow::bail!(
             "unexpected sign type for RespondBidirectionalEvent: {:?}",
             entry.request.kind

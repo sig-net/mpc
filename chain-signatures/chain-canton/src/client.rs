@@ -258,6 +258,52 @@ impl CantonClient {
             .await?;
         Ok(())
     }
+
+    /// Returns whether the `SignBidirectionalEvent` at `contract_id` is still active
+    /// (created and not yet archived) and visible to our party. A stale or duplicate
+    /// publish — e.g. after an indexer replay from offset 0 — targets a sign event the
+    /// Vault has already consumed; checking this up front lets us skip the respond
+    /// instead of exercising a choice whose `fetch signEventCid` would only fail with
+    /// CONTRACT_NOT_FOUND.
+    async fn is_sign_event_active(&self, contract_id: &str) -> anyhow::Result<bool> {
+        let mut filters = serde_json::Map::new();
+        filters.insert(
+            self.config.party_id.clone(),
+            serde_json::json!({ "cumulative": [] }),
+        );
+        let req = serde_json::json!({
+            "contractId": contract_id,
+            "eventFormat": {
+                "filtersByParty": serde_json::Value::Object(filters),
+                "verbose": false,
+            },
+        });
+        retry_rpc!(
+            CANTON_RPC_TIMEOUT,
+            self.retry_strategy,
+            "events-by-contract-id",
+            {
+                let resp = self
+                    .auth_post("/v2/events/events-by-contract-id")
+                    .await?
+                    .json(&req)
+                    .send()
+                    .await?;
+                // 404 CONTRACT_EVENTS_NOT_FOUND: the contract's events are gone
+                // (archived then pruned, or not visible) — treat as no longer active.
+                if resp.status().as_u16() == 404 {
+                    Ok(false)
+                } else {
+                    let resp = check_response(resp, "events-by-contract-id").await?;
+                    let body: serde_json::Value = resp.json().await?;
+                    // Active iff we saw its creation and no (consuming) archival.
+                    let created = body.get("created").is_some_and(|v| !v.is_null());
+                    let archived = body.get("archived").is_some_and(|v| !v.is_null());
+                    Ok(created && !archived)
+                }
+            }
+        )
+    }
 }
 
 async fn check_response(
@@ -294,7 +340,7 @@ impl ChainPublisher for CantonClient {
             recovery_id: signature.recovery_id,
         }))?;
 
-        let (choice, command_id, choice_argument) = match &action.request.kind {
+        let (choice, command_id, choice_argument, sign_event_cid) = match &action.request.kind {
             SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
                 let chain_ctx_bytes = event
                     .chain_ctx
@@ -302,14 +348,16 @@ impl ChainPublisher for CantonClient {
                     .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton sign request"))?;
                 let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
                     .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+                let sign_event_cid = ctx.sign_event_contract_id;
                 (
                     "Respond",
                     format!("mpc-respond-{request_id_hex}"),
                     serde_json::json!({
-                        "signEventCid": ctx.sign_event_contract_id,
+                        "signEventCid": sign_event_cid.clone(),
                         "requestId": request_id_hex,
                         "signature": canton_signature,
                     }),
+                    sign_event_cid,
                 )
             }
             SignKind::RespondBidirectional(respond_tx) => {
@@ -319,21 +367,36 @@ impl ChainPublisher for CantonClient {
                     .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton response"))?;
                 let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
                     .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+                let sign_event_cid = ctx.sign_event_contract_id;
                 (
                     "RespondBidirectional",
                     format!("mpc-respond-bidir-{request_id_hex}"),
                     serde_json::json!({
-                        "signEventCid": ctx.sign_event_contract_id,
+                        "signEventCid": sign_event_cid.clone(),
                         "requestId": request_id_hex,
                         "serializedOutput": hex::encode(&respond_tx.output),
                         "signature": canton_signature,
                     }),
+                    sign_event_cid,
                 )
             }
             _ => anyhow::bail!(
                 "Canton supports only Canton SignBidirectional or RespondBidirectional"
             ),
         };
+
+        // Skip a stale/duplicate publish: if the Vault already consumed the sign event
+        // there is nothing left to respond to (see `is_sign_event_active`).
+        if !self.is_sign_event_active(&sign_event_cid).await? {
+            tracing::info!(
+                ?sign_id,
+                choice,
+                request_id = %request_id_hex,
+                sign_event_cid = %sign_event_cid,
+                "canton: sign event already consumed — request already settled; skipping duplicate respond"
+            );
+            return Ok(());
+        }
 
         self.exercise_choice(&command_id, choice, choice_argument)
             .await
@@ -413,6 +476,18 @@ mod tests {
         server
     }
 
+    /// Mock the sign-event existence check (`events-by-contract-id`) as ACTIVE
+    /// (created, not archived) so `publish_signature` proceeds to exercise the choice.
+    async fn mock_sign_event_active(server: &mut ServerGuard) -> mockito::Mock {
+        server
+            .mock("POST", "/v2/events/events-by-contract-id")
+            .with_status(200)
+            .with_body(json!({ "created": { "createdEvent": {} } }).to_string())
+            .expect_at_least(0)
+            .create_async()
+            .await
+    }
+
     #[tokio::test]
     async fn test_publish_canton_sign_bidirectional_success() {
         let mut server = setup_mock_server_with_auth().await;
@@ -424,6 +499,7 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let _event_check = mock_sign_event_active(&mut server).await;
 
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
@@ -469,6 +545,7 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let _event_check = mock_sign_event_active(&mut server).await;
 
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
@@ -526,6 +603,7 @@ mod tests {
             .expect(3) // 1 attempt + 2 retries
             .create_async()
             .await;
+        let _event_check = mock_sign_event_active(&mut server).await;
 
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
@@ -570,6 +648,7 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let _event_check = mock_sign_event_active(&mut server).await;
 
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
@@ -604,6 +683,7 @@ mod tests {
             .expect(1) // should not retry
             .create_async()
             .await;
+        let _event_check = mock_sign_event_active(&mut server).await;
 
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
@@ -625,6 +705,99 @@ mod tests {
 
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("400"));
+        submit_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_skips_when_sign_event_consumed() {
+        let mut server = setup_mock_server_with_auth().await;
+        // The SignBidirectionalEvent has been consumed by the Vault (created + archived) —
+        // a stale/duplicate publish. publish_signature must skip (Ok) WITHOUT exercising.
+        server
+            .mock("POST", "/v2/events/events-by-contract-id")
+            .with_status(200)
+            .with_body(
+                json!({
+                    "created": { "createdEvent": {} },
+                    "archived": { "archivedEvent": {} },
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // The submit endpoint must NOT be called.
+        let submit_mock = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+        let chain_ctx = borsh::to_vec(&CantonChainCtx {
+            sign_event_contract_id: "00signeventcidconsumed".to_string(),
+        })
+        .unwrap();
+        let tx = RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
+            output: vec![],
+            chain_ctx: Some(chain_ctx),
+        };
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+
+        assert!(
+            client.publish_signature(&action).await.is_ok(),
+            "a consumed sign event should be treated as already-settled"
+        );
+        submit_mock.assert_async().await; // expect(0): never submitted
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_skips_when_sign_event_not_found() {
+        let mut server = setup_mock_server_with_auth().await;
+        // events-by-contract-id 404s (CONTRACT_EVENTS_NOT_FOUND) — the sign event is gone.
+        // publish_signature must skip (Ok) WITHOUT exercising.
+        server
+            .mock("POST", "/v2/events/events-by-contract-id")
+            .with_status(404)
+            .with_body(json!({ "code": "CONTRACT_EVENTS_NOT_FOUND" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let submit_mock = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+        let chain_ctx = borsh::to_vec(&CantonChainCtx {
+            sign_event_contract_id: "00signeventcidgone".to_string(),
+        })
+        .unwrap();
+        let tx = RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
+            output: vec![],
+            chain_ctx: Some(chain_ctx),
+        };
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+
+        assert!(
+            client.publish_signature(&action).await.is_ok(),
+            "a not-found sign event should be treated as already-settled"
+        );
         submit_mock.assert_async().await;
     }
 }

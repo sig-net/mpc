@@ -8,8 +8,9 @@ use crate::sign_bidirectional::SignStatus;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
-    make_test_stream_context_with_generator_pk, respond_event, test_bidirectional_tx,
-    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
+    make_test_stream_context_with_generator_pk, respond_event, respond_event_on_chain,
+    test_bidirectional_tx, test_canton_sign_bidirectional_request, test_indexed_request,
+    test_sign_args,
 };
 use crate::util::current_unix_timestamp;
 
@@ -656,6 +657,117 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
         .await
         .expect_err("invalid signature should be rejected");
     assert!(err.to_string().contains("invalid signature"));
+    assert!(ctx.backlog.get(Chain::Solana, &sign_id).await.is_some());
+}
+
+#[tokio::test]
+async fn process_respond_bidirectional_event_skips_non_bidirectional_entry_on_canton() {
+    // On Canton, a replayed already-settled RespondBidirectionalEvent can land on a request
+    // that offset-0 replay just re-inserted as a fresh phase-1 SignBidirectional entry.
+    // This must be skipped (Ok) — not a hard error — and must not remove/advance the entry
+    // or emit a completion. The tolerance is Canton-scoped (see the sibling _bails test).
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([21u8; 32]);
+    let args = test_sign_args(21);
+
+    backlog
+        .insert(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args.clone(),
+            Chain::Canton,
+            current_unix_timestamp(),
+            SignBidirectionalEvent {
+                sender: Default::default(),
+                serialized_transaction: vec![],
+                dest: "0x1234567890123456789012345678901234567890".to_string(),
+                caip2_id: "eip155:1".to_string(),
+                key_version: 0,
+                deposit: 0,
+                path: "m/0".to_string(),
+                algo: "ECDSA".to_string(),
+                params: "{}".to_string(),
+                chain: Chain::Canton,
+                chain_ctx: Some(vec![0u8; 4]),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+            },
+        ))
+        .await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let event = respond_event_on_chain(sign_id, signature, Chain::Canton);
+
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let public_key = root_sk.public_key().into();
+    let (_contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    process_respond_bidirectional_event(event, &ctx, public_key)
+        .await
+        .expect("a wrong-phase (replayed) Canton event should be skipped, not error");
+
+    // Entry left untouched (not removed/advanced) and no completion emitted.
+    assert!(ctx.backlog.get(Chain::Canton, &sign_id).await.is_some());
+    let no_completion = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+    assert!(matches!(no_completion, Err(_) | Ok(None)));
+}
+
+#[tokio::test]
+async fn process_respond_bidirectional_event_non_canton_mismatch_still_bails() {
+    // The wrong-phase tolerance above is Canton-only. For every other chain a
+    // RespondBidirectionalEvent landing on a phase-1 SignBidirectional entry is not a known
+    // replay artifact, so it must still surface as a hard error (unchanged behavior).
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([22u8; 32]);
+    let args = test_sign_args(22);
+
+    backlog
+        .insert(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+            SignBidirectionalEvent {
+                sender: Default::default(),
+                serialized_transaction: vec![],
+                dest: "0x1234567890123456789012345678901234567890".to_string(),
+                caip2_id: "eip155:1".to_string(),
+                key_version: 0,
+                deposit: 0,
+                path: "m/0".to_string(),
+                algo: "ECDSA".to_string(),
+                params: "{}".to_string(),
+                chain: Chain::Solana,
+                chain_ctx: Some(vec![0u8; 4]),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+            },
+        ))
+        .await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let event = respond_event_on_chain(sign_id, signature, Chain::Solana);
+
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let public_key = root_sk.public_key().into();
+    let (_contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    let err = process_respond_bidirectional_event(event, &ctx, public_key)
+        .await
+        .expect_err("a non-Canton wrong-phase event must still error");
+    assert!(err
+        .to_string()
+        .contains("unexpected sign type for RespondBidirectionalEvent"));
+    // Entry left untouched (not removed/advanced).
     assert!(ctx.backlog.get(Chain::Solana, &sign_id).await.is_some());
 }
 
