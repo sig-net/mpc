@@ -45,6 +45,9 @@ use tokio::sync::{mpsc, watch};
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
+/// Capacity of the SignCommand channel that feeds chain sign events from the
+/// indexers/streams into the SignatureSpawner.
+const MAX_SIGN_COMMANDS: usize = 16384;
 
 #[derive(Parser, Debug)]
 pub enum Cli {
@@ -238,7 +241,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // SignCommand channel: chain sign events (requests, completions,
             // chain aborts) from the indexers/streams into the SignatureSpawner.
-            let (sign_tx, sign_rx) = mpsc::channel(16384);
+            let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
 
             let StorageHandles {
                 key_storage,
