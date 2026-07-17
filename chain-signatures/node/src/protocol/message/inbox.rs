@@ -421,8 +421,18 @@ mod tests {
     use mpc_keys::hpke;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn test_inbox() {
+    struct InboxTestSetup {
+        epoch: u64,
+        from: Participant,
+        sign_sk: near_crypto::SecretKey,
+        cipher_pk: hpke::PublicKey,
+        channel: MessageChannel,
+        inbox: tokio::task::JoinHandle<()>,
+        _config_tx: watch::Sender<Config>,
+        _contract_tx: watch::Sender<Option<crate::protocol::ProtocolState>>,
+    }
+
+    fn inbox_setup() -> InboxTestSetup {
         let epoch = 299;
         let from = Participant::from(0);
         let (cipher_sk, cipher_pk) = hpke::generate();
@@ -462,136 +472,159 @@ mod tests {
         let (inbox, _outbox, channel) = MessageChannel::new();
         let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
-        // Case 1:
-        // Check that the inbox received our messages correctly:
-        {
-            let batch = vec![
-                Message::Triple(TripleMessage {
-                    id: 1,
-                    epoch,
-                    from,
-                    data: vec![128u8; 1024],
-                    timestamp: 1,
-                }),
-                Message::Triple(crate::protocol::message::TripleMessage {
-                    id: 2,
-                    epoch,
-                    from,
-                    data: vec![255u8; 2048],
-                    timestamp: 2,
-                }),
-                Message::Triple(TripleMessage {
-                    id: 3,
-                    epoch,
-                    from,
-                    data: vec![101u8; 1337],
-                    timestamp: 3,
-                }),
-            ];
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.send_inbox(encrypted).await;
-
-            let mut recv1 = channel.subscribe_triple(1).await;
-            let mut recv2 = channel.subscribe_triple(2).await;
-            let mut recv3 = channel.subscribe_triple(3).await;
-
-            let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
-                (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
-                _ => panic!("failed to join on inbox"),
-            };
-
-            assert_eq!(m1.id, 1);
-            assert_eq!(m2.id, 2);
-            assert_eq!(m3.id, 3);
-
-            channel.unsubscribe_triple(1).await;
-            channel.unsubscribe_triple(2).await;
-            channel.unsubscribe_triple(3).await;
+        InboxTestSetup {
+            epoch,
+            from,
+            sign_sk,
+            cipher_pk,
+            channel,
+            inbox,
+            _config_tx,
+            _contract_tx,
         }
+    }
 
-        // Case 2:
-        // Check that inbox filters work correctly, and that the first message did not make it through:
-        let filter_id = 2;
-        let batch = vec![
+    fn triple_batch(epoch: u64, from: Participant) -> Vec<Message> {
+        vec![
             Message::Triple(TripleMessage {
                 id: 1,
                 epoch,
                 from,
-                data: vec![129u8; 1024],
+                data: vec![128u8; 1024],
                 timestamp: 1,
             }),
             Message::Triple(TripleMessage {
-                id: filter_id,
+                id: 2,
                 epoch,
                 from,
-                data: vec![229u8; 2048],
+                data: vec![255u8; 2048],
                 timestamp: 2,
             }),
             Message::Triple(TripleMessage {
                 id: 3,
                 epoch,
                 from,
-                data: vec![121u8; 1337],
+                data: vec![101u8; 1337],
                 timestamp: 3,
             }),
-        ];
-        {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        ]
+    }
 
-            let mut recv1 = channel.subscribe_triple(1).await;
-            let mut recv2 = channel.subscribe_triple(filter_id).await;
-            let mut recv3 = channel.subscribe_triple(3).await;
+    /// Check that the inbox receives our messages correctly.
+    #[tokio::test]
+    async fn test_inbox_receives_messages() {
+        let setup = inbox_setup();
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
 
-            channel.filter_triple(filter_id).await;
-            channel.send_inbox(encrypted).await;
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(2).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
 
-            let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
-                (Some(m1), Some(m3)) => (m1, m3),
-                _ => panic!("failed to join on inbox"),
-            };
+        let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
+            (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
+            _ => panic!("failed to join on inbox"),
+        };
 
-            assert_eq!(m1.id, 1);
-            assert_eq!(m3.id, 3);
+        assert_eq!(m1.id, 1);
+        assert_eq!(m2.id, 2);
+        assert_eq!(m3.id, 3);
 
-            // Expect to timeout here since the message gets filtered out.
-            let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-            assert!(result.is_err());
+        setup.inbox.abort();
+    }
 
-            channel.unsubscribe_triple(1).await;
-            channel.unsubscribe_triple(2).await;
-            channel.unsubscribe_triple(3).await;
+    /// Check that inbox filters work correctly, and that the filtered message
+    /// does not make it through.
+    #[tokio::test]
+    async fn test_inbox_filters_messages() {
+        let setup = inbox_setup();
+        let filter_id = 2;
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(filter_id).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
+
+        setup.channel.filter_triple(filter_id).await;
+        setup.channel.send_inbox(encrypted).await;
+
+        let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
+            (Some(m1), Some(m3)) => (m1, m3),
+            _ => panic!("failed to join on inbox"),
+        };
+
+        assert_eq!(m1.id, 1);
+        assert_eq!(m3.id, 3);
+
+        // Expect to timeout here since the message gets filtered out.
+        let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+        assert!(result.is_err());
+
+        setup.inbox.abort();
+    }
+
+    /// Check idempotency. The same set of messages encrypted and signed again
+    /// should produce the same signature. Thus sending the same encrypted
+    /// message should be idempotent and no new messages should be received by
+    /// the subscribers.
+    #[tokio::test]
+    async fn test_inbox_idempotency() {
+        let setup = inbox_setup();
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
+
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(2).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
+
+        match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
+            (Some(_), Some(_), Some(_)) => {}
+            _ => panic!("failed to join on inbox"),
         }
 
-        // Case 3:
-        // Check idempotentcy. The same set of messages (from case 2) encrypted and signed again should produce
-        // the same signature. Thus sending the same encrypted message should be idempotent and no new messages
-        // should be received by the subscribers.
-        {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.send_inbox(encrypted).await;
-            let mut recv1 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
-                    .await
-                    .unwrap();
-            let mut recv2 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(2))
-                    .await
-                    .unwrap();
-            let mut recv3 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(3))
-                    .await
-                    .unwrap();
+        setup.channel.unsubscribe_triple(1).await;
+        setup.channel.unsubscribe_triple(2).await;
+        setup.channel.unsubscribe_triple(3).await;
 
-            let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
-            let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-            let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
+        // Encrypting the same batch again produces the same signature, so the
+        // inbox should drop it as a duplicate.
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
+        let mut recv1 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(1),
+        )
+        .await
+        .unwrap();
+        let mut recv2 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(2),
+        )
+        .await
+        .unwrap();
+        let mut recv3 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(3),
+        )
+        .await
+        .unwrap();
 
-            assert!(result1.is_err());
-            assert!(result2.is_err());
-            assert!(result3.is_err());
-        }
+        let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
+        let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+        let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
 
-        inbox.abort();
+        assert!(result1.is_err());
+        assert!(result2.is_err());
+        assert!(result3.is_err());
+
+        setup.inbox.abort();
     }
 
     #[tokio::test]

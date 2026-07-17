@@ -25,9 +25,7 @@ pub struct SignedMessage {
 
 impl SignedMessage {
     pub const ASSOCIATED_DATA: &'static [u8] = b"";
-}
 
-impl SignedMessage {
     pub fn encrypt<T: Serialize>(
         msg: &T,
         from: Participant,
@@ -45,9 +43,7 @@ impl SignedMessage {
             })?;
         Ok(ciphered)
     }
-}
 
-impl SignedMessage {
     pub fn decrypt<T: DeserializeOwned>(
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
@@ -346,7 +342,7 @@ mod tests {
                 data: vec![128u8; 1024],
                 timestamp: 1,
             }),
-            Message::Triple(crate::protocol::message::TripleMessage {
+            Message::Triple(TripleMessage {
                 id: 2,
                 epoch,
                 from,
@@ -363,18 +359,15 @@ mod tests {
         ];
 
         let batch_bytesize = batch.iter().map(|msg| msg.size()).sum::<usize>();
-        dbg!(batch_bytesize);
 
         let (_cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
         let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
         let ciphered_bytesize = ciphered.text.len();
-        dbg!(ciphered_bytesize);
 
         let margin_percent = 0.05;
         let margin_of_err = (batch_bytesize as f64 * margin_percent) as usize;
-        dbg!(margin_of_err);
         assert!(
             ((batch_bytesize - margin_of_err)..(batch_bytesize + margin_of_err))
                 .contains(&ciphered_bytesize),
