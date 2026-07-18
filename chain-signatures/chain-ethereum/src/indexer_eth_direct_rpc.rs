@@ -243,6 +243,7 @@ impl RpcEthereumClient {
         });
 
         let response = self.http.post(&self.url).json(&request).send().await?;
+        let response = ensure_http_success(response, &format!("rpc {method}")).await?;
         let value: serde_json::Value = response.json().await?;
 
         if let Some(error) = value.get("error") {
@@ -279,6 +280,7 @@ impl RpcEthereumClient {
 
         // Send the batch request and parse the response. The response is expected to be an array of JSON-RPC response objects.
         let response = self.http.post(&self.url).json(&payload).send().await?;
+        let response = ensure_http_success(response, "batch rpc").await?;
         let value: serde_json::Value = response.json().await?;
         let items = if let serde_json::Value::Array(items) = value {
             items
@@ -447,6 +449,26 @@ fn trace_output_to_bytes(
     }
 
     Ok(Bytes::from(hex::decode(stripped)?))
+}
+
+/// Bails with the HTTP status and a truncated body when the response is not
+/// successful, keeping status codes (e.g. 429) visible to retry classification.
+async fn ensure_http_success(
+    response: reqwest::Response,
+    label: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body: String = response
+        .text()
+        .await
+        .unwrap_or_default()
+        .chars()
+        .take(256)
+        .collect();
+    anyhow::bail!("{label} HTTP error {status}: {body}")
 }
 
 fn format_address(address: Address) -> String {

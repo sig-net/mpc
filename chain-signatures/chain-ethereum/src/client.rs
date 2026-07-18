@@ -243,6 +243,13 @@ impl EthereumClient {
         })
     }
 
+    /// Overrides the shared 429 cooldown gate
+    #[cfg(test)]
+    pub(crate) fn with_shared_backoff(mut self, shared_backoff: SharedBackoff) -> Self {
+        self.shared_backoff = shared_backoff;
+        self
+    }
+
     fn client_name(&self) -> &str {
         match &self.inner {
             #[cfg(feature = "helios")]
@@ -531,6 +538,40 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
+    }
+
+    #[tokio::test]
+    async fn shared_backoff_gates_concurrent_calls_on_429() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // 1 initial + max_times(2) retries per op, 2 concurrent ops.
+            // Ungated, all 6 would fire within ~25ms of local backoff.
+            .expect(6)
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url())
+            .await
+            .with_shared_backoff(SharedBackoff::with_cooldowns(
+                Duration::from_millis(50),
+                Duration::from_millis(200),
+            ));
+
+        let start = std::time::Instant::now();
+        let (r1, r2) = tokio::join!(
+            client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1))),
+            client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(2))),
+        );
+
+        // HTTP status surfaces in the error (retry classification relies on
+        // this string match) and retries are exhausted.
+        assert!(r1.is_err() && r2.is_err());
+        assert!(r1.unwrap_err().to_string().contains("429"));
+        // The gate forces retries into separate >= 50ms cooldown windows.
+        assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
     #[tokio::test]
