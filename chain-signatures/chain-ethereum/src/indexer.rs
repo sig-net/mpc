@@ -11,7 +11,7 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 /// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
@@ -31,6 +32,16 @@ const MAX_FINALIZED_FAILURES: u32 = 20;
 
 fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
+}
+
+/// Aborts the wrapped task on drop, so a cancelled `run()` takes its live
+/// block producer down with it instead of leaking it across restarts.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub struct BlockAndRequests {
@@ -70,6 +81,8 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     state_manager: S,
     telemetry: T,
     client: Arc<EthereumClient>,
+    /// Legacy `ChainStream` path only: `run()` receives the sender from the
+    /// supervisor on every spawn instead.
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
     catchup_complete: Arc<Notify>,
@@ -114,6 +127,18 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         })
     }
 
+    /// Construct an indexer for the supervised `run()` path. The construction-time
+    /// events channel is a placeholder: `run()` receives the real sender from
+    /// the supervisor on every spawn.
+    pub async fn new_supervised(
+        eth: EthConfig,
+        state_manager: S,
+        telemetry: T,
+    ) -> anyhow::Result<Self> {
+        let (events_tx, _events_rx) = chain_event_channel();
+        Self::new(eth, state_manager, telemetry, events_tx).await
+    }
+
     /// Construct an `EthereumIndexer` for tests with a pre-built `EthereumClient`
     /// (so a mockito URL can be injected) and a parsed `contract_address`.
     ///
@@ -143,14 +168,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
     async fn index_live_blocks(
         client: Arc<EthereumClient>,
-        catchup_complete: Arc<Notify>,
         start_block_number: u64,
         live_blocks: mpsc::Sender<MaybeBlock>,
     ) {
         tracing::info!("indexing ethereum live blocks");
-
-        // Wait for catchup to complete before starting to index live blocks
-        catchup_complete.notified().await;
 
         let mut current_block_number = start_block_number;
 
@@ -216,6 +237,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// For the live path, `is_finalized` is always `false`
     async fn process_block(
         &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
         block: &Block,
         relevant_logs: &[Log],
         is_finalized: bool,
@@ -224,7 +246,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         self.telemetry.block_indexed(block.header.number);
 
         let processed = self.parse_block(block, relevant_logs).await?;
-        self.emit_processed_block(processed, is_finalized).await?;
+        self.emit_processed_block(events_tx, processed, is_finalized)
+            .await?;
 
         Ok(())
     }
@@ -523,6 +546,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// (see `process_block`).
     async fn emit_processed_block(
         &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
         BlockAndRequests {
             block_number,
             block_hash,
@@ -558,14 +582,14 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         for event in execution_events {
-            self.events_tx
+            events_tx
                 .send(event)
                 .await
                 .context("failed to emit ExecutionConfirmed event")?;
         }
 
         for request in indexed_requests {
-            self.events_tx
+            events_tx
                 .send(ChainEvent::SignRequest {
                     request,
                     block_timestamp: Some(block_timestamp),
@@ -575,14 +599,115 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         if !respond_logs.is_empty() {
-            emit_respond_events(&respond_logs, self.events_tx.clone()).await;
+            emit_respond_events(&respond_logs, events_tx.clone()).await;
         }
 
-        self.events_tx
+        events_tx
             .send(ChainEvent::Block(block_number))
             .await
             .context("failed to emit block event")?;
 
+        Ok(())
+    }
+
+    /// Shared body of the legacy `process_catchup` and the `run()` catchup loop.
+    async fn process_catchup_item(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        item: &CatchupItem,
+    ) -> anyhow::Result<()> {
+        // NOTE: oh rust: needed otherwise the block gets dropped before we can use
+        // it, since it `block` is of reference type. Maybe the language will let
+        // us elide this in the future, but for now we need to introduce a new var.
+        let _block;
+        let _logs;
+
+        let (block, logs) = match item {
+            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
+            CatchupItem::Missing(block_id) => {
+                tracing::warn!(
+                    ?block_id,
+                    "ethereum catchup block missing from batch; refetching"
+                );
+
+                #[cfg(feature = "bench")]
+                let start = std::time::Instant::now();
+
+                // Refetch the block, then bloom-gate a single-block `eth_getLogs`.
+                let Some(block) = self.client.get_block(*block_id).await else {
+                    anyhow::bail!(
+                        "ethereum catchup block {block_id:?} is still unavailable after refetch"
+                    )
+                };
+                let l = self.fetch_block_logs(&block).await?;
+
+                #[cfg(feature = "bench")]
+                crate::bench::add_refetch_time(start.elapsed());
+
+                _block = block;
+                _logs = l;
+                (&_block, _logs.as_slice())
+            }
+            CatchupItem::LiveBlock(block) => {
+                _logs = self.fetch_block_logs(block).await?;
+                (block, _logs.as_slice())
+            }
+        };
+
+        let height = block.header.number;
+        if height.is_multiple_of(10) {
+            tracing::info!(height, "processed ethereum catchup block attempt");
+        }
+
+        #[cfg(feature = "bench")]
+        let start_process = std::time::Instant::now();
+
+        // Determine if the block is finalized based on the sampled finalized head at catchup start
+        let f0 = self.catchup_finalized_head.load(Ordering::Relaxed);
+        let is_finalized = block.header.number <= f0;
+        self.process_block(events_tx, block, logs, is_finalized)
+            .await?;
+
+        #[cfg(feature = "bench")]
+        {
+            crate::bench::add_process_time(start_process.elapsed());
+            if crate::bench::inc_block() % 100 == 0 {
+                crate::bench::report_metrics("catchup_progress");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Shared body of the legacy `process` and the `run()` live loop.
+    async fn process_live_item(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        item: &CatchupItem,
+    ) -> anyhow::Result<()> {
+        let _block;
+        let _logs;
+
+        let (block, logs) = match item {
+            CatchupItem::LiveBlock(block) => {
+                _logs = self.fetch_block_logs(block).await?;
+                (block, _logs.as_slice())
+            }
+            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
+            CatchupItem::Missing(block_id) => {
+                let Some(b) = self.client.get_block(*block_id).await else {
+                    anyhow::bail!(
+                        "ethereum live stream yielded missing block {block_id:?} and refetch failed"
+                    )
+                };
+                _logs = self.fetch_block_logs(&b).await?;
+                _block = b;
+                (&_block, _logs.as_slice())
+            }
+        };
+
+        // Live blocks are not yet finalized, so keep the reorg hash check
+        self.process_block(events_tx, block, logs, false).await?;
         Ok(())
     }
 
@@ -692,12 +817,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         };
 
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(Self::index_live_blocks(
-            self.client.clone(),
-            self.catchup_complete.clone(),
-            start_block_number,
-            live_blocks_tx,
-        ));
+        let client = self.client.clone();
+        let catchup_complete = self.catchup_complete.clone();
+        tokio::spawn(async move {
+            // Wait for catchup to complete before starting to index live blocks
+            catchup_complete.notified().await;
+            Self::index_live_blocks(client, start_block_number, live_blocks_tx).await;
+        });
 
         self.live_blocks_rx = Some(live_blocks_rx);
         Ok(Some(start_block_number))
@@ -766,93 +892,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     }
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
-        // NOTE: oh rust: needed otherwise the block gets dropped before we can use
-        // it, since it `block` is of reference type. Maybe the language will let
-        // us elide this in the future, but for now we need to introduce a new var.
-        let _block;
-        let _logs;
-
-        let (block, logs) = match item {
-            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
-            CatchupItem::Missing(block_id) => {
-                tracing::warn!(
-                    ?block_id,
-                    "ethereum catchup block missing from batch; refetching"
-                );
-
-                #[cfg(feature = "bench")]
-                let start = std::time::Instant::now();
-
-                // Refetch the block, then bloom-gate a single-block `eth_getLogs`.
-                let Some(block) = self.client.get_block(*block_id).await else {
-                    anyhow::bail!(
-                        "ethereum catchup block {block_id:?} is still unavailable after refetch"
-                    )
-                };
-                let l = self.fetch_block_logs(&block).await?;
-
-                #[cfg(feature = "bench")]
-                crate::bench::add_refetch_time(start.elapsed());
-
-                _block = block;
-                _logs = l;
-                (&_block, _logs.as_slice())
-            }
-            CatchupItem::LiveBlock(block) => {
-                _logs = self.fetch_block_logs(block).await?;
-                (block, _logs.as_slice())
-            }
-        };
-
-        let height = block.header.number;
-        if height.is_multiple_of(10) {
-            tracing::info!(height, "processed ethereum catchup block attempt");
-        }
-
-        #[cfg(feature = "bench")]
-        let start_process = std::time::Instant::now();
-
-        // Determine if the block is finalized based on the sampled finalized head at catchup start
-        let f0 = self.catchup_finalized_head.load(Ordering::Relaxed);
-        let is_finalized = block.header.number <= f0;
-        self.process_block(block, logs, is_finalized).await?;
-
-        #[cfg(feature = "bench")]
-        {
-            crate::bench::add_process_time(start_process.elapsed());
-            if crate::bench::inc_block() % 100 == 0 {
-                crate::bench::report_metrics("catchup_progress");
-            }
-        }
-
-        Ok(())
+        self.process_catchup_item(&self.events_tx, item).await
     }
 
     async fn process(&mut self, item: &Self::Block) -> anyhow::Result<()> {
-        let _block;
-        let _logs;
-
-        let (block, logs) = match item {
-            CatchupItem::LiveBlock(block) => {
-                _logs = self.fetch_block_logs(block).await?;
-                (block, _logs.as_slice())
-            }
-            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
-            CatchupItem::Missing(block_id) => {
-                let Some(b) = self.client.get_block(*block_id).await else {
-                    anyhow::bail!(
-                        "ethereum live stream yielded missing block {block_id:?} and refetch failed"
-                    )
-                };
-                _logs = self.fetch_block_logs(&b).await?;
-                _block = b;
-                (&_block, _logs.as_slice())
-            }
-        };
-
-        // Live blocks are not yet finalized, so keep the reorg hash check
-        self.process_block(block, logs, false).await?;
-        Ok(())
+        self.process_live_item(&self.events_tx, item).await
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -865,6 +909,97 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .context("failed to send catchup completed event")?;
         self.catchup_complete.notify_one();
         Ok(())
+    }
+
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // Anchor: the live task starts here once catchup reaches it.
+        let anchor_height = loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            if let Some(latest) = self.client.get_latest_block_number().await {
+                break latest.saturating_add(1);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = sleep(Self::RETRY_DELAY) => {}
+            }
+        };
+
+        let mut catchup_iter = self.catchup_range(anchor_height).await;
+        loop {
+            let item = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                item = catchup_iter.next() => item,
+            };
+            let Some(item) = item else { break };
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    result = self.process_catchup_item(&events_tx, &item) => {
+                        match result {
+                            Ok(()) => break,
+                            Err(err) => {
+                                tracing::warn!(?err, "ethereum catchup block processing failed; retrying");
+                            }
+                        }
+                    }
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = sleep(Self::RETRY_DELAY) => {}
+                }
+            }
+        }
+
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("failed to send catchup completed event")?;
+
+        // Spawned only after catchup: no catchup/live coordination needed, and
+        // the abort-on-drop guard ties the task's lifetime to this `run()`.
+        let (live_blocks_tx, mut live_blocks_rx) = live_blocks_channel();
+        let _live_task = AbortOnDrop(tokio::spawn(Self::index_live_blocks(
+            self.client.clone(),
+            anchor_height,
+            live_blocks_tx,
+        )));
+
+        loop {
+            let maybe = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                maybe = live_blocks_rx.recv() => maybe,
+            };
+            let Some(maybe) = maybe else {
+                anyhow::bail!("ethereum live block producer terminated");
+            };
+            let item = match maybe {
+                MaybeBlock::Block(block) => CatchupItem::LiveBlock(block),
+                MaybeBlock::Missing(id) => CatchupItem::Missing(id),
+            };
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    result = self.process_live_item(&events_tx, &item) => {
+                        match result {
+                            Ok(()) => break,
+                            Err(err) => {
+                                tracing::warn!(?err, "ethereum live block processing failed; retrying");
+                            }
+                        }
+                    }
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = sleep(Self::RETRY_DELAY) => {}
+                }
+            }
+        }
     }
 }
 
@@ -1586,5 +1721,172 @@ mod tests {
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
+    }
+
+    /// JSON-RPC response for a single `eth_getBlockByNumber` request, echoing
+    /// the request id.
+    fn block_reply(req: &mockito::Request, number: u64) -> Vec<u8> {
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body().expect("request body")).expect("json body");
+        let id = body["id"].as_u64().expect("request id");
+        test_utils::block_response(id, number)
+            .to_string()
+            .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn run_processes_catchup_then_goes_live_and_stops_on_cancel() {
+        use mpc_chain_integration_core::utils::stream::chain_event_channel;
+        use mpc_chain_integration_core::StateManager;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+        use tokio::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let mut server = Server::new_async().await;
+        let latest = Arc::new(AtomicU64::new(9));
+
+        // Anchor sampling + live head polling.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["latest", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request({
+                let latest = latest.clone();
+                move |req| block_reply(req, latest.load(Ordering::Relaxed))
+            })
+            .create_async()
+            .await;
+
+        // Finalized head sampled once at catchup start; blocks <= 9 skip the
+        // catchup reorg refetch.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| block_reply(req, 9))
+            .create_async()
+            .await;
+
+        // Catchup batch for blocks 6..=9 (processed block seeded at 5). Derive
+        // ids and block numbers from the request so alloy's id assignment and
+        // response pairing don't matter.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r"^\[".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let items = body
+                    .as_array()
+                    .expect("batch body")
+                    .iter()
+                    .map(|r| {
+                        let id = r["id"].as_u64().expect("request id");
+                        let hex = r["params"][0].as_str().expect("block number param");
+                        let number = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+                            .expect("hex block number");
+                        test_utils::block_response(id, number)
+                    })
+                    .collect();
+                serde_json::Value::Array(items).to_string().into_bytes()
+            })
+            .create_async()
+            .await;
+
+        // Live block 10: fetched by the live task and re-fetched for the reorg check.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xa", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|req| block_reply(req, 10))
+            .create_async()
+            .await;
+
+        // Post-cancel leak check: block 11 must never be requested.
+        let block_11_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xb", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 11).to_string())
+            .expect(0)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .set_processed_block(Chain::Ethereum, 5)
+            .await;
+        let indexer = builder.build().await;
+
+        let (events_tx, mut events_rx) = chain_event_channel();
+        let cancel = CancellationToken::new();
+        let run_handle = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { indexer.run(events_tx, cancel).await }
+        });
+
+        for n in 6..=9 {
+            let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                .await
+                .expect("catchup block event timed out")
+                .expect("events channel closed");
+            assert!(
+                matches!(event, ChainEvent::Block(b) if b == n),
+                "expected Block({n}), got {event:?}"
+            );
+        }
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("catchup completed event timed out")
+            .expect("events channel closed");
+        assert!(
+            matches!(event, ChainEvent::CatchupCompleted),
+            "expected CatchupCompleted, got {event:?}"
+        );
+
+        // Advance the head; the live task should pick up block 10.
+        latest.store(10, Ordering::Relaxed);
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("live block event timed out")
+            .expect("events channel closed");
+        assert!(
+            matches!(event, ChainEvent::Block(10)),
+            "expected Block(10), got {event:?}"
+        );
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), run_handle)
+            .await
+            .expect("run() should stop promptly after cancel")
+            .expect("run task panicked")
+            .expect("run() should exit Ok on cancel");
+
+        // The cancelled run must take its live producer down with it: the live
+        // task ticks every RETRY_DELAY (500ms), so it would request block 11
+        // well within this window if it were still alive.
+        latest.store(11, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        block_11_mock.assert_async().await;
     }
 }

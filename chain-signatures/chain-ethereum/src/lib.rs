@@ -18,4 +18,4 @@ mod util;
 
 pub use client::MaybeBlock;
 pub use config::EthConfig;
-pub use indexer::EthereumStream;
+pub use indexer::{EthereumIndexer, EthereumStream};
