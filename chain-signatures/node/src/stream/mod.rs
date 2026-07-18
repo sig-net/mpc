@@ -1,5 +1,6 @@
 pub mod ops;
 pub mod pipeline;
+pub(crate) mod recovery;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;

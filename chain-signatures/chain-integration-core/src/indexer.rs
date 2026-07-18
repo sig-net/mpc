@@ -1,3 +1,4 @@
+use std::ops::AsyncFnMut;
 use std::time::Duration;
 
 use futures_util::Stream;
@@ -48,6 +49,17 @@ pub trait ChainIndexer: Send + 'static {
             tokio::time::sleep(Self::RETRY_DELAY).await;
         }
         true
+    }
+}
+
+/// Retries `process` indefinitely with a fixed delay between attempts.
+pub async fn process_with_retry<F>(mut process: F, retry_delay: Duration)
+where
+    F: AsyncFnMut() -> anyhow::Result<()>,
+{
+    while let Err(err) = process().await {
+        tracing::warn!(?err, "block processing failed; retrying");
+        tokio::time::sleep(retry_delay).await;
     }
 }
 

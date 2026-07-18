@@ -1,3 +1,4 @@
+use super::recovery::recover_backlog;
 use super::ChainStreaming;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
@@ -164,49 +165,18 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
     async fn handle_recovery(&mut self, load_local: bool) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
-        tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
-        crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
-
-        if load_local {
-            // Load local checkpoint from storage first
-            match self.backlog.storage.load_latest(chain).await {
-                Ok(Some(checkpoint)) => {
-                    tracing::info!(
-                        ?chain,
-                        height = checkpoint.block_height,
-                        "loaded local checkpoint"
-                    );
-                    if let Err(err) = self.backlog.recover_by_checkpoint(checkpoint).await {
-                        tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!(?chain, "no local checkpoint found");
-                }
-                Err(err) => {
-                    tracing::warn!(?chain, %err, "failed to load local checkpoint");
-                }
-            }
-        }
-
-        // Perform consensus checkpoint alignment. Returns None when no alignment is
-        // needed (the normal case); returns Some(height) when the backlog was regressed.
-        // When regression occurs, abort all in-flight signature tasks for this chain
-        // so stale tasks don't complete and publish abandoned signatures/checkpoints.
-        if crate::backlog::consensus::align_backlog_with_consensus(
+        recover_backlog(
             chain,
+            load_local,
             &self.backlog,
             &mut self.checkpoints_rx,
             &mut self.mesh_state,
             &self.node_client,
+            &self.sign_tx,
+            self.threshold,
             &self.my_account_id,
         )
-        .await
-        .is_some()
-        {
-            tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting in-flight tasks");
-            let _ = self.sign_tx.send(SignCommand::AbortChain(chain)).await;
-        }
+        .await;
 
         // Determine anchor height
         let anchor_height = loop {
