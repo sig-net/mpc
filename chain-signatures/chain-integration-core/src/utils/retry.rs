@@ -502,7 +502,7 @@ mod tests {
         }
 
         // (1 initial + max_times retries) per op
-        assert_eq!(calls.load(Ordering::Relaxed), 6); 
+        assert_eq!(calls.load(Ordering::Relaxed), 6);
         // Without the gate, 6 calls with 1-5ms backoff finish in ~20ms.
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
