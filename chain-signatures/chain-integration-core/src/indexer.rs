@@ -3,11 +3,13 @@ use std::time::Duration;
 
 use futures_util::Stream;
 use mpc_primitives::{Chain, ChainEvent};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // TODO: Consider removing default implementations from the trait and force to implement (also removes dependency for `tokio` and `tracing` in this crate)
 /// Interface for a chain indexer that can catch up and livestream events from a specific chain.
 #[async_trait::async_trait]
-pub trait ChainIndexer: Send + 'static {
+pub trait ChainIndexer: Send + Sync + 'static {
     const CHAIN: Chain;
     type Block: Send;
     type Iter: Stream<Item = Self::Block> + Send + Unpin + 'static;
@@ -36,6 +38,24 @@ pub trait ChainIndexer: Send + 'static {
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
         let _ = block;
         Ok(())
+    }
+
+    /// Owns the full catchup + live loop: emits catchup events, then
+    /// [`ChainEvent::CatchupCompleted`], then live events on `events_tx`, resuming
+    /// from the chain's persisted progress and its own current tip. Must honour
+    /// `cancel` — the supervisor cancels and respawns `run()` on regression or
+    /// watchdog stall. Returning `Err` triggers a supervised restart; returning
+    /// `Ok(())` shuts the chain down.
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        let _ = (events_tx, cancel);
+        Err(anyhow::anyhow!(
+            "run() not implemented for {}",
+            Self::CHAIN.as_str()
+        ))
     }
 
     /// Process the next block, return true for success, false for shutdown.

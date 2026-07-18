@@ -20,7 +20,7 @@ use tokio::time::Duration;
 /// RPC rate-limiting is handled separately by `MAX_FINALIZED_FAILURES` in
 /// `wait_for_finalized_block`, which bails after ~200s — faster than this
 /// watchdog for any chain.
-fn live_block_timeout(chain: Chain) -> Duration {
+pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
     const FLOOR_SECS: u64 = 300;
     const BUFFER_SECS: u64 = 300;
     Duration::from_secs(
@@ -289,7 +289,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegressionOutcome {
+pub(crate) enum RegressionOutcome {
     /// Consensus digest mismatches local backlog — transition to Recovery.
     Recovery,
     /// Local backlog is aligned with consensus, continue current state.
@@ -299,7 +299,7 @@ enum RegressionOutcome {
 }
 
 /// Waits for a consensus checkpoint digest change, then checks for regression.
-async fn wait_detected_regression(
+pub(crate) async fn wait_detected_regression(
     checkpoints_rx: &mut CheckpointWatcher,
     backlog: &Backlog,
     chain: Chain,
