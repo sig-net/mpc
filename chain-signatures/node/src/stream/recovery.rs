@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, consensus};
+use crate::backlog::{consensus, Backlog};
 use crate::mesh::{self, MeshState};
 use crate::node_client::NodeClient;
 use crate::types::CheckpointWatcher;
