@@ -23,6 +23,7 @@ pub trait ChainIndexer: Send + Sync + 'static {
         Ok(())
     }
 
+    // TODO: this is only used in the legacy ChainStream pipeline, remove it once possible
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
         let _ = anchor_height;
         unimplemented!("catchup_range is only driven by the legacy ChainStream pipeline")
@@ -42,12 +43,10 @@ pub trait ChainIndexer: Send + Sync + 'static {
         Ok(())
     }
 
+    // TODO: remove default method implementation once all indexers implement it
     /// Owns the full catchup + live loop: emits catchup events, then
     /// [`ChainEvent::CatchupCompleted`], then live events on `events_tx`, resuming
-    /// from the chain's persisted progress and its own current tip. Must honour
-    /// `cancel` — the supervisor cancels and respawns `run()` on regression or
-    /// watchdog stall. Returning `Err` triggers a supervised restart; returning
-    /// `Ok(())` shuts the chain down.
+    /// from the chain's persisted progress and its own current tip.
     async fn run(
         &self,
         events_tx: mpsc::Sender<ChainEvent>,

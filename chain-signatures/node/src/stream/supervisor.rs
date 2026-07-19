@@ -1,3 +1,4 @@
+// TODO: this should eventually become part of ChainPipeline, keep separate for now to avoid breaking the existing ChainStream pipeline
 use super::pipeline::{live_block_timeout, wait_detected_regression, RegressionOutcome};
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
@@ -338,6 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_events_reset_watchdog() {
+        /// Emits 5 block events, then exits Ok.
         struct TrickleIndexer {
             attempts: Arc<AtomicUsize>,
         }

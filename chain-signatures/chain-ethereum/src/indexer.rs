@@ -33,8 +33,8 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
-/// Aborts the wrapped task on drop, so a cancelled `run()` takes its live
-/// block producer down with it instead of leaking it across restarts.
+/// Aborts the wrapped task on drop, prevents leaking a background task
+/// if the indexer is dropped while the live block fetcher is still running.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -634,10 +634,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Catchup blocks in `[processed + 1, anchor_height)` fetched in batches.
     /// Samples the finalized head once at catchup start, so blocks at or below
     /// it can skip the per-block re-fetch + reorg hash check.
-    // TODO: start from genesis block of contract deployment instead of
-    // anchor_height so that we can start from the very beginning of
-    // the history of the network in case where we do not have a checkpoint.
-    // https://github.com/sig-net/mpc/issues/777
+
     pub async fn catchup_blocks(
         &self,
         anchor_height: u64,
@@ -645,6 +642,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         #[cfg(feature = "bench")]
         crate::bench::rpc_reset();
 
+        // TODO: start from genesis block of contract deployment instead of
+        // anchor_height so that we can start from the very beginning of
+        // the history of the network in case where we do not have a checkpoint.
+        // https://github.com/sig-net/mpc/issues/777
         let current_block = self
             .state_manager
             .get_processed_block(Chain::Ethereum)
@@ -962,11 +963,11 @@ mod tests {
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::ChainIndexer;
+    use mpc_chain_integration_core::StateManager;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
-    use mpc_chain_integration_core::StateManager;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -1753,9 +1754,7 @@ mod tests {
             // Single-block fetches by number (live fetch + reorg refetch).
             server
                 .mock("POST", "/")
-                .match_body(Matcher::Regex(
-                    r#"^\{.*"params":\["0x"#.to_string(),
-                ))
+                .match_body(Matcher::Regex(r#"^\{.*"params":\["0x"#.to_string()))
                 .with_status(200)
                 .with_header("content-type", "application/json")
                 .with_body_from_request({
@@ -1841,10 +1840,7 @@ mod tests {
     #[tokio::test]
     async fn run_emits_live_blocks_after_catchup_completed() {
         let mut f = RunFixture::spawn(9, 9).await;
-        assert!(matches!(
-            f.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
         f.latest.store(10, Ordering::Relaxed);
         let event = f.next_event().await;
@@ -1859,10 +1855,7 @@ mod tests {
     #[tokio::test]
     async fn run_stops_promptly_on_cancel_while_live() {
         let mut f = RunFixture::spawn(9, 9).await;
-        assert!(matches!(
-            f.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
         f.cancel_and_join().await;
     }
 
@@ -1875,16 +1868,10 @@ mod tests {
     #[tokio::test]
     async fn cancel_aborts_live_block_producer() {
         let mut f = RunFixture::spawn(9, 9).await;
-        assert!(matches!(
-            f.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
         f.latest.store(10, Ordering::Relaxed);
-        assert!(matches!(
-            f.next_event().await,
-            ChainEvent::Block(10)
-        ));
+        assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
 
         f.cancel_and_join().await;
 
