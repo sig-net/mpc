@@ -634,7 +634,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Catchup blocks in `[processed + 1, anchor_height)` fetched in batches.
     /// Samples the finalized head once at catchup start, so blocks at or below
     /// it can skip the per-block re-fetch + reorg hash check.
-
     pub async fn catchup_blocks(
         &self,
         anchor_height: u64,
