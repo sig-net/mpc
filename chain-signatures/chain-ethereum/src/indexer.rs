@@ -966,8 +966,13 @@ mod tests {
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
+    use mpc_chain_integration_core::StateManager;
     use serde_json::json;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tokio::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
@@ -1665,158 +1670,233 @@ mod tests {
             .into_bytes()
     }
 
-    #[tokio::test]
-    async fn run_processes_catchup_then_goes_live_and_stops_on_cancel() {
-        use mpc_chain_integration_core::StateManager;
-        use std::sync::atomic::AtomicU64;
-        use std::sync::Arc;
-        use tokio::time::Duration;
-        use tokio_util::sync::CancellationToken;
+    /// Fixture for running the indexer in a test with a mock JSON-RPC server.
+    /// Holds the mock server, latest block, and other state for running the indexer in tests.
+    struct RunFixture {
+        _server: mockito::ServerGuard,
+        latest: Arc<AtomicU64>,
+        /// Highest block number fetched by number, used to detect producer
+        /// activity after cancellation.
+        max_requested_block: Arc<AtomicU64>,
+        cancel: CancellationToken,
+        run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+        events_rx: mpsc::Receiver<ChainEvent>,
+    }
 
-        let mut server = Server::new_async().await;
-        let latest = Arc::new(AtomicU64::new(9));
+    impl RunFixture {
+        async fn spawn(processed: u64, latest: u64) -> Self {
+            let mut server = Server::new_async().await;
+            let latest = Arc::new(AtomicU64::new(latest));
+            let max_requested_block = Arc::new(AtomicU64::new(0));
 
-        // Anchor sampling + live head polling.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["latest", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request({
-                let latest = latest.clone();
-                move |req| block_reply(req, latest.load(Ordering::Relaxed))
-            })
-            .create_async()
-            .await;
+            // Anchor sampling + live head polling.
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": ["latest", false]
+                })))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request({
+                    let latest = latest.clone();
+                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                })
+                .create_async()
+                .await;
 
-        // Finalized head sampled once at catchup start; blocks <= 9 skip the
-        // catchup reorg refetch.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["finalized", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request(|req| block_reply(req, 9))
-            .create_async()
-            .await;
+            // Finalized head sampled once at catchup start; tracking `latest`
+            // means catchup blocks skip the reorg refetch.
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": ["finalized", false]
+                })))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request({
+                    let latest = latest.clone();
+                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                })
+                .create_async()
+                .await;
 
-        // Catchup batch for blocks 6..=9 (processed block seeded at 5). Derive
-        // ids and block numbers from the request so alloy's id assignment and
-        // response pairing don't matter.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r"^\[".to_string()))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request(|req| {
-                let body: serde_json::Value =
-                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
-                let items = body
-                    .as_array()
-                    .expect("batch body")
-                    .iter()
-                    .map(|r| {
-                        let id = r["id"].as_u64().expect("request id");
-                        let hex = r["params"][0].as_str().expect("block number param");
+            // Catchup batches (JSON-RPC array body): derive ids and block
+            // numbers from the request.
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::Regex(r"^\[".to_string()))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request(|req| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(req.body().expect("request body"))
+                            .expect("json body");
+                    let items = body
+                        .as_array()
+                        .expect("batch body")
+                        .iter()
+                        .map(|r| {
+                            let id = r["id"].as_u64().expect("request id");
+                            let hex = r["params"][0].as_str().expect("block number param");
+                            let number = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+                                .expect("hex block number");
+                            test_utils::block_response(id, number)
+                        })
+                        .collect();
+                    serde_json::Value::Array(items).to_string().into_bytes()
+                })
+                .create_async()
+                .await;
+
+            // Single-block fetches by number (live fetch + reorg refetch).
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::Regex(
+                    r#"^\{.*"params":\["0x"#.to_string(),
+                ))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request({
+                    let max_requested_block = max_requested_block.clone();
+                    move |req| {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(req.body().expect("request body"))
+                                .expect("json body");
+                        let id = body["id"].as_u64().expect("request id");
+                        let hex = body["params"][0].as_str().expect("block number param");
                         let number = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
                             .expect("hex block number");
+                        max_requested_block.fetch_max(number, Ordering::Relaxed);
                         test_utils::block_response(id, number)
-                    })
-                    .collect();
-                serde_json::Value::Array(items).to_string().into_bytes()
-            })
-            .create_async()
-            .await;
+                            .to_string()
+                            .into_bytes()
+                    }
+                })
+                .create_async()
+                .await;
 
-        // Live block 10: fetched by the live task and re-fetched for the reorg check.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["0xa", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request(|req| block_reply(req, 10))
-            .create_async()
-            .await;
+            let builder = test_utils::TestIndexerBuilder::new(server.url());
+            builder
+                .state_manager
+                .set_processed_block(Chain::Ethereum, processed)
+                .await;
+            let indexer = builder.build().await;
 
-        // Post-cancel leak check: block 11 must never be requested.
-        let block_11_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["0xb", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::block_response(1, 11).to_string())
-            .expect(0)
-            .create_async()
-            .await;
+            let (events_tx, events_rx) = chain_event_channel();
+            let cancel = CancellationToken::new();
+            let run_handle = tokio::spawn({
+                let cancel = cancel.clone();
+                async move { indexer.run(events_tx, cancel).await }
+            });
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
-            .state_manager
-            .set_processed_block(Chain::Ethereum, 5)
-            .await;
-        let indexer = builder.build().await;
+            Self {
+                _server: server,
+                latest,
+                max_requested_block,
+                cancel,
+                run_handle,
+                events_rx,
+            }
+        }
 
-        let (events_tx, mut events_rx) = chain_event_channel();
-        let cancel = CancellationToken::new();
-        let run_handle = tokio::spawn({
-            let cancel = cancel.clone();
-            async move { indexer.run(events_tx, cancel).await }
-        });
+        async fn next_event(&mut self) -> ChainEvent {
+            tokio::time::timeout(Duration::from_secs(5), self.events_rx.recv())
+                .await
+                .expect("timed out waiting for chain event")
+                .expect("events channel closed")
+        }
+
+        async fn cancel_and_join(&mut self) {
+            self.cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), &mut self.run_handle)
+                .await
+                .expect("run() should stop promptly after cancel")
+                .expect("run task panicked")
+                .expect("run() should exit Ok on cancel");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_processes_catchup_range_in_order() {
+        let mut f = RunFixture::spawn(5, 9).await;
 
         for n in 6..=9 {
-            let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
-                .await
-                .expect("catchup block event timed out")
-                .expect("events channel closed");
+            let event = f.next_event().await;
             assert!(
                 matches!(event, ChainEvent::Block(b) if b == n),
                 "expected Block({n}), got {event:?}"
             );
         }
-        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
-            .await
-            .expect("catchup completed event timed out")
-            .expect("events channel closed");
+        let event = f.next_event().await;
         assert!(
             matches!(event, ChainEvent::CatchupCompleted),
             "expected CatchupCompleted, got {event:?}"
         );
 
-        // Advance the head; the live task should pick up block 10.
-        latest.store(10, Ordering::Relaxed);
-        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
-            .await
-            .expect("live block event timed out")
-            .expect("events channel closed");
+        f.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_emits_live_blocks_after_catchup_completed() {
+        let mut f = RunFixture::spawn(9, 9).await;
+        assert!(matches!(
+            f.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+
+        f.latest.store(10, Ordering::Relaxed);
+        let event = f.next_event().await;
         assert!(
             matches!(event, ChainEvent::Block(10)),
             "expected Block(10), got {event:?}"
         );
 
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), run_handle)
-            .await
-            .expect("run() should stop promptly after cancel")
-            .expect("run task panicked")
-            .expect("run() should exit Ok on cancel");
+        f.cancel_and_join().await;
+    }
 
-        // The cancelled run must take its live producer down with it: the live
-        // task ticks every RETRY_DELAY (500ms), so it would request block 11
-        // well within this window if it were still alive.
-        latest.store(11, Ordering::Relaxed);
+    #[tokio::test]
+    async fn run_stops_promptly_on_cancel_while_live() {
+        let mut f = RunFixture::spawn(9, 9).await;
+        assert!(matches!(
+            f.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        f.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_stops_promptly_on_cancel_during_catchup() {
+        let mut f = RunFixture::spawn(0, 500).await;
+        f.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_live_block_producer() {
+        let mut f = RunFixture::spawn(9, 9).await;
+        assert!(matches!(
+            f.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+
+        f.latest.store(10, Ordering::Relaxed);
+        assert!(matches!(
+            f.next_event().await,
+            ChainEvent::Block(10)
+        ));
+
+        f.cancel_and_join().await;
+
+        // The live producer ticks every RETRY_DELAY (500ms); if it survived
+        // run() it would fetch block 11 well within this window.
+        let max_at_cancel = f.max_requested_block.load(Ordering::Relaxed);
+        f.latest.store(11, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        block_11_mock.assert_async().await;
+        assert_eq!(
+            f.max_requested_block.load(Ordering::Relaxed),
+            max_at_cancel,
+            "live block producer survived run() cancellation"
+        );
     }
 }
