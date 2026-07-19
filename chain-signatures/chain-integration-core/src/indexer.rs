@@ -23,7 +23,10 @@ pub trait ChainIndexer: Send + Sync + 'static {
         Ok(())
     }
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter;
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        let _ = anchor_height;
+        unimplemented!("catchup_range is only driven by the legacy ChainStream pipeline")
+    }
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
         let _ = item;

@@ -788,9 +788,7 @@ async fn spawn_indexers(
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new_supervised(eth_config, backlog.clone(), eth_telemetry.clone())
-            .await
-        {
+        match EthereumIndexer::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
                 tokio::spawn(run_supervised(
