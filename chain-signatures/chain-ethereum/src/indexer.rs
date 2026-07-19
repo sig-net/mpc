@@ -761,7 +761,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Shared body of the legacy `process` and the `run()` live loop.
+    /// Process a single live item and emit its events, keeping the reorg hash
+    /// check (live blocks are not yet finalized).
     async fn process_live_item(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
