@@ -22,13 +22,16 @@ use mpc_primitives::{
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, Duration, Instant};
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
 const MAX_CONCURRENT_WATCHER_RPCS: usize = 8;
+/// Cadence (in blocks) of the full nonce sweep over long-pending watchers.
+/// Backstop only: consumption by a tx with no local watcher shouldn't happen.
+const WATCHER_SLOW_SWEEP_INTERVAL: u64 = 10;
 /// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
 const MAX_FINALIZED_FAILURES: u32 = 20;
 
@@ -79,7 +82,29 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     live_blocks_rx: Option<mpsc::Receiver<MaybeBlock>>,
     /// The block number of the latest finalized block at the time catchup started. Used to determine which blocks are finalized during catchup.
     catchup_finalized_head: AtomicU64,
+    /// Watcher nonce-gate scheduling state (first-appearance checks + retries).
+    watcher_gate: Mutex<WatcherGateState>,
 }
+
+/// Scheduling state for the watcher nonce gate
+#[derive(Default)]
+struct WatcherGateState {
+    /// Watchers present at the previous block, for first-appearance detection.
+    prev: HashSet<BidirectionalTxId>,
+    /// Watchers whose last RPC resolution attempt failed; retried every block.
+    retry: HashSet<BidirectionalTxId>,
+}
+
+/// A pending execution watcher entry from the state manager.
+type WatcherEntry = (BidirectionalTxId, (SignId, BidirectionalTx));
+
+/// Per-watcher receipt resolution result.
+type WatcherReceipt = (
+    BidirectionalTxId,
+    SignId,
+    BidirectionalTx,
+    anyhow::Result<BackfillOutcome>,
+);
 
 /// Result of a `backfill_execution_confirmation`. `Observed` carries an
 /// optional event; the staleness check skips observed watchers so a mined tx
@@ -114,6 +139,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
             catchup_finalized_head: AtomicU64::new(0),
+            watcher_gate: Mutex::new(WatcherGateState::default()),
         })
     }
 
@@ -141,6 +167,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
             catchup_finalized_head: AtomicU64::new(0),
+            watcher_gate: Mutex::new(WatcherGateState::default()),
         }
     }
 
@@ -423,7 +450,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(BackfillOutcome::Observed { event })
     }
 
-    /// Collects execution confirmations for all watchers at the given block number.
+    /// Collects execution confirmations for all watchers at the given block
     async fn collect_execution_confirmations(
         &self,
         block: &Block,
@@ -444,6 +471,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             "collect_execution_confirmations checking watchers"
         );
 
+        let (new_watchers, retry) = self.schedule_watcher_gates(&watchers);
+
         // Extract hashes from the block
         let block_tx_hashes: HashSet<_> = match &block.transactions {
             BlockTransactions::Hashes(hashes) => hashes.iter().copied().collect(),
@@ -456,22 +485,124 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .into_iter()
             .partition(|(tx_id, _)| block_tx_hashes.contains(&B256::from(tx_id.0)));
 
-        // Fetch receipts for transactions mined in this block, failures are
-        // logged and skipped: the watcher stays pending and the nonce gate
-        // picks it up again.
-        let mut events: Vec<ChainEvent> = stream::iter(mined_in_block.into_iter().map(
-            |(tx_id, (sign_id, pending_tx))| async move {
-                let result = self
-                    .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                    .await;
-                (tx_id, sign_id, result)
-            },
-        ))
+        // Receipts for watched txs mined in this block
+        let (mut events, consumed_slots, mut failed) = self
+            .resolve_mined_watchers(mined_in_block, block_number)
+            .await;
+
+        // Fail pending watchers replaced by a sibling tx mined in this block
+        let (sibling_events, unmined_watchers) =
+            Self::resolve_replaced_siblings(unmined_watchers, &consumed_slots, block_number);
+
+        events.extend(sibling_events);
+
+        // Nonce gate: one-shot for new watchers, every block for retries,
+        // every WATCHER_SLOW_SWEEP_INTERVAL blocks for edge-case consumption by a tx with no local watcher.
+        let sweep_all = block_number % WATCHER_SLOW_SWEEP_INTERVAL == 0;
+        let gated: Vec<_> = unmined_watchers
+            .into_iter()
+            .filter(|(tx_id, _)| sweep_all || new_watchers.contains(tx_id) || retry.contains(tx_id))
+            .collect();
+
+        let (gated_events, gated_failed) = self.resolve_gated_watchers(gated, block_number).await;
+        events.extend(gated_events);
+        failed.extend(gated_failed);
+
+        // Failed watchers are retried on the next block.
+        self.watcher_gate.lock().unwrap().retry = failed;
+
+        Ok(events)
+    }
+
+    /// Updates gate scheduling state, returning the watchers to nonce-check
+    /// this block: newly appeared ones (one-shot) and previously failed ones
+    /// (retried every block).
+    fn schedule_watcher_gates(
+        &self,
+        watchers: &HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>,
+    ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
+        let mut gate = self.watcher_gate.lock().unwrap();
+        gate.retry.retain(|id| watchers.contains_key(id));
+        let new_watchers = watchers
+            .keys()
+            .filter(|id| !gate.prev.contains(*id))
+            .copied()
+            .collect();
+        gate.prev = watchers.keys().copied().collect();
+        (new_watchers, gate.retry.clone())
+    }
+
+    /// Fetches receipts for a batch of watchers with bounded concurrency,
+    /// keeping per-watcher results so one failure doesn't abort the batch.
+    async fn fetch_watcher_receipts(
+        &self,
+        watchers: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> Vec<WatcherReceipt> {
+        stream::iter(
+            watchers
+                .into_iter()
+                .map(|(tx_id, (sign_id, pending_tx))| async move {
+                    let result = self
+                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                        .await;
+                    (tx_id, sign_id, pending_tx, result)
+                }),
+        )
         .buffer_unordered(MAX_CONCURRENT_WATCHER_RPCS)
-        .filter_map(|(tx_id, sign_id, result)| async move {
+        .collect()
+        .await
+    }
+
+    /// Fetches nonces for the given senders with bounded concurrency.
+    async fn fetch_sender_nonces(
+        &self,
+        senders: HashSet<Address>,
+        block_number: u64,
+    ) -> Vec<(Address, anyhow::Result<u64>)> {
+        stream::iter(senders.into_iter().map(|sender| async move {
+            let result = self
+                .client
+                .get_nonce(
+                    sender,
+                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
+                )
+                .await;
+            (sender, result)
+        }))
+        .buffer_unordered(MAX_CONCURRENT_WATCHER_RPCS)
+        .collect()
+        .await
+    }
+
+    /// Resolves watched txs whose hash appears in this block. Returns emitted
+    /// events, the (sender, nonce) slots consumed by observed txs (input to
+    /// sibling correlation), and watchers whose RPC attempt failed.
+    async fn resolve_mined_watchers(
+        &self,
+        mined: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> (
+        Vec<ChainEvent>,
+        HashSet<(Address, u64)>,
+        HashSet<BidirectionalTxId>,
+    ) {
+        let mut events = Vec::new();
+        let mut consumed_slots = HashSet::new();
+        let mut failed = HashSet::new();
+
+        for (tx_id, sign_id, pending_tx, result) in
+            self.fetch_watcher_receipts(mined, block_number).await
+        {
             match result {
-                Ok(BackfillOutcome::Observed { event }) => event,
-                Ok(BackfillOutcome::NotObserved) => None,
+                Ok(BackfillOutcome::Observed { event }) => {
+                    consumed_slots
+                        .insert((Address::from(pending_tx.from_address), pending_tx.nonce));
+                    if let Some(event) = event {
+                        events.push(event);
+                    }
+                }
+                Ok(BackfillOutcome::NotObserved) => {}
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
@@ -479,109 +610,135 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                         ?err,
                         "failed to fetch receipt for bidirectional tx mined in block"
                     );
-                    None
+                    failed.insert(tx_id);
                 }
             }
-        })
-        .collect()
-        .await;
-
-        // Throttle the nonce check to every 10 blocks (Detects replaced/dropped txs)
-        if block_number % 10 == 0 && !unmined_watchers.is_empty() {
-            // Extract unique senders functionally
-            let unique_senders: HashSet<_> = unmined_watchers
-                .iter()
-                .map(|(_, (_, tx))| Address::from(tx.from_address))
-                .collect();
-
-            // Fetch nonces, failed senders are skipped, leaving
-            // their watchers pending for the next throttled check.
-            let nonces: HashMap<_, _> =
-                stream::iter(unique_senders.into_iter().map(|sender| async move {
-                    let result = self
-                        .client
-                        .get_nonce(
-                            sender,
-                            BlockId::Number(BlockNumberOrTag::Number(block_number)),
-                        )
-                        .await;
-                    (sender, result)
-                }))
-                .buffer_unordered(MAX_CONCURRENT_WATCHER_RPCS)
-                .filter_map(|(sender, result)| async move {
-                    match result {
-                        Ok(nonce) => Some((sender, nonce)),
-                        Err(err) => {
-                            tracing::warn!(
-                                ?sender,
-                                ?err,
-                                "failed to fetch nonce for bidirectional tx"
-                            );
-                            None
-                        }
-                    }
-                })
-                .collect()
-                .await;
-
-            // Filter unmined watchers down to ONLY those whose nonces were consumed
-            let consumed_txs: Vec<_> = unmined_watchers
-                .into_iter()
-                .filter(|(_, (_, tx))| {
-                    nonces
-                        .get(&Address::from(tx.from_address))
-                        .is_some_and(|&current_nonce| tx.nonce < current_nonce)
-                })
-                .collect();
-
-            // Fetch receipts for consumed txs, failures are
-            // logged and skipped: the watcher stays pending for the next
-            // throttled check.
-            let consumed_events: Vec<_> = stream::iter(consumed_txs.into_iter().map(
-                |(tx_id, (sign_id, pending_tx))| async move {
-                    let result = self
-                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                        .await;
-                    (tx_id, sign_id, pending_tx, result)
-                },
-            ))
-            .buffer_unordered(MAX_CONCURRENT_WATCHER_RPCS)
-            .filter_map(|(tx_id, sign_id, pending_tx, result)| async move {
-                match result {
-                    Ok(BackfillOutcome::Observed { event }) => event, // Late watcher pickup
-                    Ok(BackfillOutcome::NotObserved) => {
-                        tracing::warn!(
-                            ?tx_id,
-                            ?sign_id,
-                            expected_nonce = pending_tx.nonce,
-                            "transaction replaced or dropped (nonce consumed by another tx)"
-                        );
-                        Some(ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain: pending_tx.source_chain,
-                            block_height: block_number,
-                            result: ExecutionOutcome::Failed,
-                        })
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?tx_id,
-                            ?sign_id,
-                            ?err,
-                            "failed to fetch receipt for nonce-consumed bidirectional tx"
-                        );
-                        None
-                    }
-                }
-            })
-            .collect()
-            .await;
-
-            events.extend(consumed_events);
         }
 
-        Ok(events)
+        (events, consumed_slots, failed)
+    }
+
+    /// Fails pending watchers whose (sender, nonce) slot was consumed by a
+    /// different tx mined in this block: since only the network can sign for
+    /// these sender addresses, the consuming tx is necessarily another
+    /// watcher, making replacement a pure function of block content + local
+    /// watcher state (no RPC, deterministic `block_height` across nodes).
+    /// Returns the events and the remaining unmined watchers.
+    fn resolve_replaced_siblings(
+        unmined: Vec<WatcherEntry>,
+        consumed_slots: &HashSet<(Address, u64)>,
+        block_number: u64,
+    ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
+        let (replaced, remaining): (Vec<_>, Vec<_>) =
+            unmined.into_iter().partition(|(_, (_, tx))| {
+                consumed_slots.contains(&(Address::from(tx.from_address), tx.nonce))
+            });
+
+        let events = replaced
+            .into_iter()
+            .map(|(tx_id, (sign_id, tx))| {
+                tracing::warn!(
+                    ?tx_id,
+                    ?sign_id,
+                    nonce = tx.nonce,
+                    "transaction replaced by sibling tx mined in this block"
+                );
+                ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    sign_id,
+                    source_chain: tx.source_chain,
+                    block_height: block_number,
+                    result: ExecutionOutcome::Failed,
+                }
+            })
+            .collect();
+
+        (events, remaining)
+    }
+
+    /// Nonce-gates unmined watchers: fetches deduped sender nonces, then
+    /// resolves watchers whose nonce was consumed. Returns emitted events and
+    /// watchers whose RPC attempt failed.
+    async fn resolve_gated_watchers(
+        &self,
+        gated: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> (Vec<ChainEvent>, HashSet<BidirectionalTxId>) {
+        let unique_senders: HashSet<_> = gated
+            .iter()
+            .map(|(_, (_, tx))| Address::from(tx.from_address))
+            .collect();
+
+        // Failed senders are skipped: their watchers stay pending and are
+        // retried on the next block.
+        let mut nonces = HashMap::new();
+        let mut failed = HashSet::new();
+        for (sender, result) in self.fetch_sender_nonces(unique_senders, block_number).await {
+            match result {
+                Ok(nonce) => {
+                    nonces.insert(sender, nonce);
+                }
+                Err(err) => {
+                    tracing::warn!(?sender, ?err, "failed to fetch nonce for bidirectional tx");
+                    failed.extend(
+                        gated
+                            .iter()
+                            .filter(|(_, (_, tx))| Address::from(tx.from_address) == sender)
+                            .map(|(tx_id, _)| *tx_id),
+                    );
+                }
+            }
+        }
+
+        // Keep ONLY watchers whose nonces were consumed
+        let consumed_txs: Vec<_> = gated
+            .into_iter()
+            .filter(|(_, (_, tx))| {
+                nonces
+                    .get(&Address::from(tx.from_address))
+                    .is_some_and(|&current_nonce| tx.nonce < current_nonce)
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        for (tx_id, sign_id, pending_tx, result) in self
+            .fetch_watcher_receipts(consumed_txs, block_number)
+            .await
+        {
+            match result {
+                Ok(BackfillOutcome::Observed { event }) => {
+                    if let Some(event) = event {
+                        events.push(event); // Late watcher pickup
+                    }
+                }
+                Ok(BackfillOutcome::NotObserved) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        expected_nonce = pending_tx.nonce,
+                        "transaction replaced or dropped (nonce consumed by another tx)"
+                    );
+                    events.push(ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        sign_id,
+                        source_chain: pending_tx.source_chain,
+                        block_height: block_number,
+                        result: ExecutionOutcome::Failed,
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        ?err,
+                        "failed to fetch receipt for nonce-consumed bidirectional tx"
+                    );
+                    failed.insert(tx_id);
+                }
+            }
+        }
+
+        (events, failed)
     }
 
     /// Emits the processed block in-order once we reach finality for it.
