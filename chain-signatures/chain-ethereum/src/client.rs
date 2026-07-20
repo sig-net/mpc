@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::indexer_eth_direct_rpc;
 use crate::EthConfig;
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
@@ -198,6 +198,8 @@ fn default_eth_retry_strategy() -> RetryConfig {
 pub struct EthereumClient {
     inner: EthereumClientInner,
     retry_strategy: RetryConfig,
+    /// Global 429 cooldown gate shared by all RPC calls through this client
+    shared_backoff: SharedBackoff,
 }
 
 #[derive(Clone)]
@@ -237,7 +239,15 @@ impl EthereumClient {
         Ok(Self {
             inner,
             retry_strategy,
+            shared_backoff: SharedBackoff::new(),
         })
+    }
+
+    /// Overrides the shared 429 cooldown gate
+    #[cfg(test)]
+    pub(crate) fn with_shared_backoff(mut self, shared_backoff: SharedBackoff) -> Self {
+        self.shared_backoff = shared_backoff;
+        self
     }
 
     fn client_name(&self) -> &str {
@@ -250,9 +260,10 @@ impl EthereumClient {
 
     pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
         let max_attempts = self.retry_strategy.max_times;
-        let res = retry_rpc!(
+        let res = retry_rpc_gated!(
             ETH_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     client = self.client_name(),
@@ -292,9 +303,10 @@ impl EthereumClient {
         let max_attempts = self.retry_strategy.max_times;
         let num_blocks = block_ids.len();
 
-        let res = retry_rpc!(
+        let res = retry_rpc_gated!(
             ETH_RPC_BATCH_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     client = self.client_name(),
@@ -331,9 +343,10 @@ impl EthereumClient {
         &self,
         tx_hash: B256,
     ) -> anyhow::Result<Option<TransactionReceipt>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             ETH_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "get_transaction_receipt",
             {
                 match &self.inner {
@@ -352,13 +365,21 @@ impl EthereumClient {
     /// Fetch all logs emitted by `address` within `block_id` via a single
     /// server-filtered `eth_getLogs`.
     pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
-        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_logs", {
-            match &self.inner {
-                #[cfg(feature = "helios")]
-                EthereumClientInner::Helios(client) => client.get_logs(address, block_id).await,
-                EthereumClientInner::DirectRpc(client) => client.get_logs(address, block_id).await,
+        retry_rpc_gated!(
+            ETH_RPC_TIMEOUT,
+            self.retry_strategy,
+            self.shared_backoff,
+            "get_logs",
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => client.get_logs(address, block_id).await,
+                    EthereumClientInner::DirectRpc(client) => {
+                        client.get_logs(address, block_id).await
+                    }
+                }
             }
-        })
+        )
     }
 
     /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
@@ -369,9 +390,10 @@ impl EthereumClient {
         address: Address,
         block_ids: &[BlockId],
     ) -> anyhow::Result<Vec<Vec<Log>>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             ETH_RPC_BATCH_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "get_logs_batch",
             {
                 match &self.inner {
@@ -388,22 +410,33 @@ impl EthereumClient {
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
-        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_nonce", {
-            match &self.inner {
-                #[cfg(feature = "helios")]
-                EthereumClientInner::Helios(client) => client.get_nonce(address, block_id).await,
-                EthereumClientInner::DirectRpc(client) => client.get_nonce(address, block_id).await,
+        retry_rpc_gated!(
+            ETH_RPC_TIMEOUT,
+            self.retry_strategy,
+            self.shared_backoff,
+            "get_nonce",
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => {
+                        client.get_nonce(address, block_id).await
+                    }
+                    EthereumClientInner::DirectRpc(client) => {
+                        client.get_nonce(address, block_id).await
+                    }
+                }
             }
-        })
+        )
     }
 
     pub async fn get_transaction_by_hash(
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             ETH_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "get_transaction_by_hash",
             {
                 match &self.inner {
@@ -424,9 +457,10 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<alloy::primitives::Bytes> {
         // TODO: trace_transaction_output can be slow, consider a longer timeout than ETH_RPC_TIMEOUT if necessary
-        retry_rpc!(
+        retry_rpc_gated!(
             ETH_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "trace_transaction_output",
             {
                 match &self.inner {
@@ -504,6 +538,40 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
+    }
+
+    #[tokio::test]
+    async fn shared_backoff_gates_concurrent_calls_on_429() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // 1 initial + max_times(2) retries per op, 2 concurrent ops.
+            // Ungated, all 6 would fire within ~25ms of local backoff.
+            .expect(6)
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url())
+            .await
+            .with_shared_backoff(SharedBackoff::with_cooldowns(
+                Duration::from_millis(50),
+                Duration::from_millis(200),
+            ));
+
+        let start = std::time::Instant::now();
+        let (r1, r2) = tokio::join!(
+            client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1))),
+            client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(2))),
+        );
+
+        // HTTP status surfaces in the error (retry classification relies on
+        // this string match) and retries are exhausted.
+        assert!(r1.is_err() && r2.is_err());
+        assert!(r1.unwrap_err().to_string().contains("429"));
+        // The gate forces retries into separate >= 50ms cooldown windows.
+        assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
     #[tokio::test]
