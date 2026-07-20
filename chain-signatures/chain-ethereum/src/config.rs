@@ -16,7 +16,8 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
-    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    /// Emit requests without waiting for block finality. Only for dev chains
+    /// (anvil never reports finalized blocks); unsafe on live networks.
     pub optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
     pub light_client: bool,
