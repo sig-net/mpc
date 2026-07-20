@@ -389,7 +389,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             consensus_rpc_http_url: rpc_endpoint.clone(),
             execution_rpc_http_url: rpc_endpoint,
             contract_address: contract_address_hex.clone(),
-            network: "sepolia".to_string(),
+            network: "anvil".to_string(),
             helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,

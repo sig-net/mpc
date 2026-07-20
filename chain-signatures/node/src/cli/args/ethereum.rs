@@ -42,13 +42,15 @@ pub struct EthArgs {
         requires = "eth_account_sk"
     )]
     pub eth_consensus_rpc_http_url: Option<String>,
-    /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
+    /// The network that the eth indexer is running on: "sepolia"/"mainnet",
+    /// or "anvil" for local dev chains (anvil never reports finalized blocks,
+    /// so requests are emitted without waiting for finality).
     #[clap(
         long,
         env("MPC_ETH_NETWORK"),
         requires = "eth_account_sk",
         default_value = "sepolia",
-        value_parser = ["sepolia", "mainnet"],
+        value_parser = ["sepolia", "mainnet", "anvil"],
     )]
     pub eth_network: Option<String>,
     /// Helios light client data path
@@ -68,10 +70,6 @@ pub struct EthArgs {
         default_value = "10000"
     )]
     pub eth_refresh_finalized_interval: u64,
-    /// Enable the indexer to just send requests optimistically instead waiting for final.
-    /// Useful for testing where we do not want to reach finality due to how long it takes.
-    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
-    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
@@ -108,9 +106,6 @@ impl EthArgs {
             "--eth-refresh-finalized-interval".to_string(),
             self.eth_refresh_finalized_interval.to_string(),
         ]);
-        if self.eth_optimistic_requests {
-            args.push("--eth-optimistic-requests".to_string());
-        }
         if self.eth_light_client {
             args.push("--eth-light-client".to_string());
         }
@@ -125,15 +120,16 @@ impl EthArgs {
             );
         }
 
+        let network = self.eth_network.unwrap_or_default();
         Some(EthConfig {
             account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
             execution_rpc_http_url: self.eth_execution_rpc_http_url?,
             contract_address: self.eth_contract_address?,
-            network: self.eth_network.unwrap_or_default(),
+            optimistic_requests: network == "anvil", // anvil never reports finalized blocks
+            network,
             helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
             refresh_finalized_interval: self.eth_refresh_finalized_interval,
-            optimistic_requests: self.eth_optimistic_requests,
             #[cfg(feature = "helios")]
             light_client: self.eth_light_client,
             #[cfg(not(feature = "helios"))]
@@ -151,7 +147,6 @@ impl EthArgs {
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: config.refresh_finalized_interval,
-                eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
             },
             _ => Self {
@@ -162,7 +157,6 @@ impl EthArgs {
                 eth_network: None,
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: 0,
-                eth_optimistic_requests: false,
                 eth_light_client: false,
             },
         }
