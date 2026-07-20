@@ -23,6 +23,13 @@ pub struct PendingTx {
     pub sign_id: SignId,
     #[serde(with = "serde_bytes")]
     pub transaction: Vec<u8>,
+    /// Stable checkpoint status bytes for this request, used for consensus.
+    ///
+    /// Kept separate from `transaction` (the full CBOR-serialized entry) so
+    /// that nodes can agree on cross-node request progress without hashing
+    /// node-local fields such as indexing timestamps or proposer state.
+    #[serde(default, with = "serde_bytes")]
+    pub checkpoint_status: Vec<u8>,
 }
 
 impl fmt::Debug for PendingTx {
@@ -68,6 +75,7 @@ impl Checkpoint {
         hasher.update(self.block_height.to_le_bytes());
         for pending in &self.pending_requests {
             hasher.update(pending.sign_id.request_id);
+            hasher.update(&pending.checkpoint_status);
         }
         hasher.finalize().into()
     }

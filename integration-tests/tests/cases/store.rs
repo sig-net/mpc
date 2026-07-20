@@ -323,6 +323,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let tx1 = mpc_primitives::PendingTx {
         sign_id: mpc_primitives::SignId::new([1u8; 32]),
         transaction: vec![1, 2, 3],
+        checkpoint_status: vec![0],
     };
     let cp1 = Checkpoint {
         chain: Chain::Solana,
@@ -341,6 +342,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let tx2 = mpc_primitives::PendingTx {
         sign_id: mpc_primitives::SignId::new([2u8; 32]),
         transaction: vec![4, 5, 6],
+        checkpoint_status: vec![0],
     };
     let cp2 = Checkpoint {
         chain: Chain::Solana,

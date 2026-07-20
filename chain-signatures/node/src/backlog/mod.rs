@@ -114,6 +114,7 @@ impl PendingRequests {
                 PendingTx {
                     sign_id,
                     transaction,
+                    checkpoint_status: entry.status().checkpoint_consensus_bytes(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1325,7 +1326,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("738255e17ab2381a43ebf0f691d31b9f06faca7c1533028cfe77e831d98d7f72")
+            digest_hex("88b6ad7c782dfd1208b980ee296f493594f55e5cbca879d8f8fd19032ca3ac65")
         );
     }
 
@@ -1388,7 +1389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_digest_ignores_status() {
+    async fn test_checkpoint_digest_differs_for_different_status() {
         let tx = create_test_tx(7);
 
         let mut pending1 = PendingRequests::new();
@@ -1418,7 +1419,83 @@ mod tests {
         let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
-        // Digest should be identical: only request_id matters, not local status.
+        // The same request observed in different sign statuses must produce
+        // different digests, so nodes don't reach consensus on a checkpoint
+        // while disagreeing on the progress of a request.
+        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_digest_differs_for_generation_vs_publish() {
+        let tx = create_test_tx(12);
+
+        let mut pending1 = PendingRequests::new();
+        pending1.insert(
+            SignId::new(tx.request_id),
+            create_execution_entry(
+                tx.clone(),
+                Chain::Ethereum,
+                SignStatus::PendingGeneration,
+                "ethereum",
+            ),
+        );
+        pending1.set_processed_block(100);
+
+        let mut pending2 = PendingRequests::new();
+        pending2.insert(
+            SignId::new(tx.request_id),
+            create_execution_entry(
+                tx.clone(),
+                Chain::Ethereum,
+                SignStatus::PendingPublish {
+                    publish: test_publish_state(true),
+                },
+                "ethereum",
+            ),
+        );
+        pending2.set_processed_block(100);
+
+        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
+        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
+
+        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_digest_ignores_publish_local_state() {
+        let tx = create_test_tx(9);
+
+        let mut pending1 = PendingRequests::new();
+        pending1.insert(
+            SignId::new(tx.request_id),
+            create_execution_entry(
+                tx.clone(),
+                Chain::Ethereum,
+                SignStatus::PendingPublish {
+                    publish: test_publish_state(true),
+                },
+                "ethereum",
+            ),
+        );
+        pending1.set_processed_block(100);
+
+        let mut pending2 = PendingRequests::new();
+        pending2.insert(
+            SignId::new(tx.request_id),
+            create_execution_entry(
+                tx.clone(),
+                Chain::Ethereum,
+                SignStatus::PendingPublish {
+                    publish: test_publish_state(false),
+                },
+                "ethereum",
+            ),
+        );
+        pending2.set_processed_block(100);
+
+        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
+        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
+
         assert_eq!(checkpoint1.digest(), checkpoint2.digest());
     }
 
@@ -1520,7 +1597,7 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("dd0a1abf9f1e21e50b830db334487ab2feeb091d081ae652e013d1f2b420f3f3")
+            digest_hex("6e26d056e08d96f04d2474aa716f44999397168cfad77472e9265b1c254381dc")
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 

@@ -395,6 +395,7 @@ mod tests {
                         vec![PendingTx {
                             sign_id: SignId::new([1u8; 32]),
                             transaction: vec![1, 2, 3],
+                            checkpoint_status: vec![0],
                         }]
                     } else {
                         vec![]
@@ -478,19 +479,17 @@ mod tests {
                         case.name
                     );
                 }
+            } else if case.local_checkpoints.is_empty() {
+                assert!(persisted.is_none(), "Test case failed: {}", case.name);
             } else {
-                if case.local_checkpoints.is_empty() {
-                    assert!(persisted.is_none(), "Test case failed: {}", case.name);
-                } else {
-                    let latest = fixture.backlog.latest_checkpoint(chain).await;
-                    assert!(latest.is_some(), "Test case failed: {}", case.name);
-                    assert_eq!(
-                        latest.unwrap().block_height,
-                        *case.local_checkpoints.last().unwrap(),
-                        "Test case failed: {}",
-                        case.name
-                    );
-                }
+                let latest = fixture.backlog.latest_checkpoint(chain).await;
+                assert!(latest.is_some(), "Test case failed: {}", case.name);
+                assert_eq!(
+                    latest.unwrap().block_height,
+                    *case.local_checkpoints.last().unwrap(),
+                    "Test case failed: {}",
+                    case.name
+                );
             }
 
             // 7. Assert mock peer requests matched
