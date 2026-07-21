@@ -41,37 +41,37 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
             continue;
         };
 
-        let data = &log.data().data;
-        if data.len() < 160 {
-            tracing::warn!(
-                ?sign_id,
-                data_len = data.len(),
-                "signature event data too short to parse full signature: skipping..."
-            );
-            continue;
-        }
+        let event = match ChainSignatures::SignatureResponded::decode_log_data(log.data()) {
+            Ok(event) => event,
+            Err(err) => {
+                tracing::warn!(
+                    ?sign_id,
+                    ?err,
+                    "failed to decode SignatureResponded event data"
+                );
+                continue;
+            }
+        };
+        let signature = event.signature;
 
-        // signature struct encoding layout:
-        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
-        let big_r_x = &data[32..64];
-        let big_r_y = &data[64..96];
-        let s_bytes: [u8; 32] = data[96..128].try_into().unwrap();
-        let recovery_id = data[159];
-
-        let x_field = FieldBytes::from_slice(big_r_x);
-        let y_field = FieldBytes::from_slice(big_r_y);
-        let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
+        let x_bytes: [u8; 32] = signature.bigR.x.to_be_bytes();
+        let y_bytes: [u8; 32] = signature.bigR.y.to_be_bytes();
+        let encoded_r = EncodedPoint::from_affine_coordinates(
+            FieldBytes::from_slice(&x_bytes),
+            FieldBytes::from_slice(&y_bytes),
+            false,
+        );
         let Some(big_r) = K256AffinePoint::from_encoded_point(&encoded_r).into_option() else {
             tracing::warn!(?sign_id, "ethereum respond event, invalid big_r point");
             continue;
         };
 
-        let Some(s) = Scalar::from_bytes(s_bytes) else {
+        let Some(s) = Scalar::from_bytes(signature.s.to_be_bytes()) else {
             tracing::warn!(?sign_id, "ethereum respond event, invalid s scalar");
             continue;
         };
 
-        let signature = MpcSignature::new(big_r, s, recovery_id);
+        let signature = MpcSignature::new(big_r, s, signature.recoveryId);
 
         let respond_event = SignatureRespondedEvent {
             request_id: sign_id.request_id,
@@ -296,6 +296,88 @@ mod tests {
         };
         let expected: [u8; 32] = alloy::primitives::keccak256(encoding.encode_data()).into();
         assert_eq!(parsed.generate_request_id(), expected);
+    }
+
+    fn responded_log(request_id: [u8; 32], data: Vec<u8>) -> Log {
+        Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![
+                    ChainSignatures::SignatureResponded::SIGNATURE_HASH,
+                    request_id.into(),
+                ],
+                data.into(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn sample_responded_event(
+        request_id: [u8; 32],
+    ) -> (ChainSignatures::SignatureResponded, K256AffinePoint) {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let big_r = K256AffinePoint::GENERATOR;
+        let encoded = big_r.to_encoded_point(false);
+        let event = ChainSignatures::SignatureResponded {
+            requestId: request_id.into(),
+            responder: Address::from([0x33; 20]),
+            signature: ChainSignatures::Signature {
+                bigR: ChainSignatures::AffinePoint {
+                    x: U256::from_be_slice(encoded.x().unwrap()),
+                    y: U256::from_be_slice(encoded.y().unwrap()),
+                },
+                s: U256::from(12345u64),
+                recoveryId: 1,
+            },
+        };
+        (event, big_r)
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_emits_valid_signature() {
+        let request_id = [0x42u8; 32];
+        let (event, big_r) = sample_responded_event(request_id);
+        let log = responded_log(request_id, event.encode_data());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&[log], tx).await;
+
+        let Some(ChainEvent::Respond(respond)) = rx.recv().await else {
+            panic!("expected a Respond event");
+        };
+        assert_eq!(respond.request_id, request_id);
+        assert_eq!(respond.chain, Chain::Ethereum);
+        assert_eq!(respond.signature.big_r, big_r);
+        assert_eq!(
+            respond.signature.s,
+            Scalar::from_bytes(U256::from(12345u64).to_be_bytes()).unwrap()
+        );
+        assert_eq!(respond.signature.recovery_id, 1);
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_skips_malformed_data() {
+        let logs = vec![
+            responded_log([1u8; 32], vec![]),
+            responded_log([2u8; 32], vec![0u8; 100]),
+            responded_log([3u8; 32], vec![0u8; 159]),
+        ];
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&logs, tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_skips_invalid_signature_values() {
+        // decodes fine, but bigR = (0, 0) is not on the curve
+        let (mut event, _) = sample_responded_event([4u8; 32]);
+        event.signature.bigR.x = U256::ZERO;
+        event.signature.bigR.y = U256::ZERO;
+        let log = responded_log([4u8; 32], event.encode_data());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&[log], tx).await;
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
