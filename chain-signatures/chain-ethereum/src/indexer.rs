@@ -33,6 +33,7 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
+// TODO: Move this to some common crate so it can be shared across workspace
 /// Aborts the wrapped task on drop, prevents leaking a background task
 /// if the indexer is dropped while the live block fetcher is still running.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
