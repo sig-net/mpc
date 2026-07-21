@@ -381,6 +381,40 @@ mod tests {
     }
 
     #[test]
+    fn sign_id_from_responded_log_extracts_request_id() {
+        let request_id = [0xabu8; 32];
+        let log = responded_log(request_id, vec![]);
+        let sign_id = sign_id_from_signature_responded_log(&log).expect("well-formed log");
+        assert_eq!(sign_id.request_id, request_id);
+    }
+
+    #[test]
+    fn sign_id_from_responded_log_rejects_wrong_topic0() {
+        let mut log = responded_log([0xabu8; 32], vec![]);
+        log.topics_mut()[0] = ChainSignatures::SignatureRequested::SIGNATURE_HASH;
+        assert!(sign_id_from_signature_responded_log(&log).is_none());
+    }
+
+    #[test]
+    fn sign_id_from_responded_log_rejects_missing_topics() {
+        let no_topics = Log {
+            inner: PrimitiveLog::new_unchecked(Address::ZERO, vec![], vec![].into()),
+            ..Default::default()
+        };
+        assert!(sign_id_from_signature_responded_log(&no_topics).is_none());
+
+        let only_topic0 = Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![ChainSignatures::SignatureResponded::SIGNATURE_HASH],
+                vec![].into(),
+            ),
+            ..Default::default()
+        };
+        assert!(sign_id_from_signature_responded_log(&only_topic0).is_none());
+    }
+
+    #[test]
     fn parse_event_rejects_malformed_data() {
         // empty data
         assert!(parse_event(&requested_log(vec![])).is_none());
