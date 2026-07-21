@@ -374,10 +374,8 @@ impl SignatureSpawner {
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
-                Some(state) = contract_watcher.next_state() => {
-                    if let Some(new_governance) = state.governance(&self.node_account_id) {
-                        governance = new_governance;
-                    }
+                Some(new_governance) = contract_watcher.next_governance(governance.clone()) => {
+                    governance = new_governance;
                 }
             }
         }
