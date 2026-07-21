@@ -132,10 +132,11 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     );
 
     // Use transaction hash as entropy
-    let entropy = log.transaction_hash.unwrap_or_default();
+    let tx_hash = log.transaction_hash.unwrap_or_default();
+    let entropy = tx_hash;
 
     let sign_id = SignId::new(event.generate_request_id());
-    tracing::info!(?sign_id, "eth signature requested");
+    tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
         sign_id,
