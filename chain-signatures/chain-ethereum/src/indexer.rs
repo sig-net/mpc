@@ -734,6 +734,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             catchup_start,
             anchor_height,
             self.contract_address,
+            self.eth.indexer.catchup_block_batch_size,
         );
 
         // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
@@ -1004,6 +1005,7 @@ mod tests {
             1,
             33,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
         for n in 1..=32 {
             let item = iter.next().await.expect("expected item");
@@ -1063,6 +1065,7 @@ mod tests {
             10,
             12,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
 
         let item1 = iter.next().await.unwrap();
@@ -1172,6 +1175,7 @@ mod tests {
             42,
             43,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
         let item = iter.next().await.unwrap();
 

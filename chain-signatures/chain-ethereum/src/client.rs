@@ -2,17 +2,16 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::config::RpcConfig;
 use crate::indexer_eth_direct_rpc;
 use crate::EthConfig;
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+#[cfg(test)]
+use mpc_chain_integration_core::utils::retry::RetryConfig;
+use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, SharedBackoff};
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
-
-/// Catchup batch size for [`CatchupIter`]
-pub const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
@@ -56,6 +55,7 @@ enum BlockSlot {
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
     contract_address: Address,
+    batch_size: u64,
     next_block: BlockNumber,
     end_block: BlockNumber,
     buffered_blocks: std::vec::IntoIter<CatchupItem>,
@@ -67,10 +67,12 @@ impl CatchupIter {
         start_block: BlockNumber,
         end_block: BlockNumber,
         contract_address: Address,
+        batch_size: u64,
     ) -> Self {
         Self {
             client,
             contract_address,
+            batch_size,
             next_block: start_block,
             end_block,
             buffered_blocks: Vec::new().into_iter(),
@@ -84,7 +86,7 @@ impl CatchupIter {
 
         let batch_end = self
             .next_block
-            .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
+            .saturating_add(self.batch_size)
             .min(self.end_block);
 
         let batch_block_ids: Vec<BlockId> = (self.next_block..batch_end)
@@ -177,27 +179,10 @@ impl CatchupIter {
     }
 }
 
-// Constants for Ethereum RPC client retry behavior
-const ETH_RPC_TIMEOUT: Duration = Duration::from_secs(2);
-const ETH_RPC_BATCH_TIMEOUT: Duration = Duration::from_secs(5);
-const ETH_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
-const ETH_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
-const ETH_RPC_MAX_RETRIES: usize = 5;
-
-/// Helper for consistent config
-fn default_eth_retry_strategy() -> RetryConfig {
-    RetryConfig {
-        min_delay: ETH_RPC_MIN_DELAY,
-        max_delay: ETH_RPC_MAX_DELAY,
-        max_times: ETH_RPC_MAX_RETRIES,
-        jitter: true,
-    }
-}
-
 #[derive(Clone)]
 pub struct EthereumClient {
     inner: EthereumClientInner,
-    retry_strategy: RetryConfig,
+    rpc: RpcConfig,
     /// Global 429 cooldown gate shared by all RPC calls through this client
     shared_backoff: SharedBackoff,
 }
@@ -211,14 +196,6 @@ pub enum EthereumClientInner {
 
 impl EthereumClient {
     pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
-        Self::new_with_strategy(eth, default_eth_retry_strategy()).await
-    }
-
-    /// Creates a new Ethereum client with the specified retry strategy.
-    pub async fn new_with_strategy(
-        eth: EthConfig,
-        retry_strategy: RetryConfig,
-    ) -> anyhow::Result<Self> {
         let inner = if eth.light_client {
             #[cfg(feature = "helios")]
             {
@@ -238,9 +215,20 @@ impl EthereumClient {
 
         Ok(Self {
             inner,
-            retry_strategy,
+            rpc: eth.rpc.clone(),
             shared_backoff: SharedBackoff::new(),
         })
+    }
+
+    /// Overrides the RPC retry strategy
+    #[cfg(test)]
+    pub(crate) async fn new_with_strategy(
+        eth: EthConfig,
+        retry_strategy: RetryConfig,
+    ) -> anyhow::Result<Self> {
+        let mut client = Self::new(eth).await?;
+        client.rpc.retry = retry_strategy;
+        Ok(client)
     }
 
     /// Overrides the shared 429 cooldown gate
@@ -259,10 +247,10 @@ impl EthereumClient {
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
-        let max_attempts = self.retry_strategy.max_times;
+        let max_attempts = self.rpc.retry.max_times;
         let res = retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
@@ -300,12 +288,12 @@ impl EthereumClient {
             return Vec::new();
         }
 
-        let max_attempts = self.retry_strategy.max_times;
+        let max_attempts = self.rpc.retry.max_times;
         let num_blocks = block_ids.len();
 
         let res = retry_rpc_gated!(
-            ETH_RPC_BATCH_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.batch_timeout,
+            self.rpc.retry,
             self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
@@ -344,8 +332,8 @@ impl EthereumClient {
         tx_hash: B256,
     ) -> anyhow::Result<Option<TransactionReceipt>> {
         retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "get_transaction_receipt",
             {
@@ -366,8 +354,8 @@ impl EthereumClient {
     /// server-filtered `eth_getLogs`.
     pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
         retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "get_logs",
             {
@@ -391,8 +379,8 @@ impl EthereumClient {
         block_ids: &[BlockId],
     ) -> anyhow::Result<Vec<Vec<Log>>> {
         retry_rpc_gated!(
-            ETH_RPC_BATCH_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.batch_timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "get_logs_batch",
             {
@@ -411,8 +399,8 @@ impl EthereumClient {
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "get_nonce",
             {
@@ -434,8 +422,8 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
         retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "get_transaction_by_hash",
             {
@@ -456,10 +444,10 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<alloy::primitives::Bytes> {
-        // TODO: trace_transaction_output can be slow, consider a longer timeout than ETH_RPC_TIMEOUT if necessary
+        // TODO: trace_transaction_output can be slow, consider a longer timeout than the configured RPC timeout if necessary
         retry_rpc_gated!(
-            ETH_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc.timeout,
+            self.rpc.retry,
             self.shared_backoff,
             "trace_transaction_output",
             {
@@ -524,6 +512,7 @@ mod tests {
     use alloy::primitives::Bloom;
     use mockito::{Matcher, Server};
     use serde_json::json;
+    use std::time::Duration;
 
     // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
 
@@ -699,7 +688,7 @@ mod tests {
         let contract_address = Address::with_last_byte(0x42);
 
         let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 43, contract_address);
+        let mut iter = CatchupIter::new(client, 10, 43, contract_address, 32);
 
         for expected_number in 10..42 {
             let next = iter.next().await;
@@ -785,7 +774,7 @@ mod tests {
         let contract_address = Address::with_last_byte(0x42);
 
         let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 0, 65, contract_address);
+        let mut iter = CatchupIter::new(client, 0, 65, contract_address, 32);
 
         for expected_number in 0..65 {
             let next = iter.next().await;
@@ -961,7 +950,7 @@ mod tests {
             .await;
 
         let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 12, contract_address);
+        let mut iter = CatchupIter::new(client, 10, 12, contract_address, 32);
 
         let item1 = iter.next().await.unwrap();
         let item2 = iter.next().await.unwrap();
@@ -1017,7 +1006,7 @@ mod tests {
             .await;
 
         let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 12, contract_address);
+        let mut iter = CatchupIter::new(client, 10, 12, contract_address, 32);
 
         for expected_number in [10u64, 11] {
             let item = iter.next().await.expect("expected item");
