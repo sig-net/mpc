@@ -48,6 +48,10 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
         refresh_finalized_interval: 1,
         optimistic_requests: env_bool("OPTIMISTIC", true)?,
         light_client: false,
+        gas: Default::default(),
+        rpc: Default::default(),
+        publisher: Default::default(),
+        indexer: Default::default(),
     })
 }
 

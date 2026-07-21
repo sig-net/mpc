@@ -1,4 +1,5 @@
 use crate::abi::ChainSignatures;
+use crate::config::{GasConfig, PublisherConfig};
 use crate::EthConfig;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256, U256};
@@ -12,8 +13,7 @@ use alloy::rpc::types::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
-    ChainPublisher, PublishAction, PublisherTelemetry,
+    utils::retry::retry_rpc, ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
@@ -32,42 +32,6 @@ type EthContractFillProvider = FillProvider<
     >,
     RootProvider,
 >;
-
-// Send Ethereum tx retry constants
-const ETH_SEND_MAX_ATTEMPTS: usize = 3;
-const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-const ETH_SEND_MIN_DELAY: Duration = Duration::from_millis(500);
-const ETH_SEND_MAX_DELAY: Duration = Duration::from_secs(10);
-
-// Polling Receipt
-const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
-const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
-const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
-
-// TODO: these should be configurable (create GasConfig struct) if we add other EVM chains in the future
-// Ethereum gas limits
-const ETH_BASE_GAS_LIMIT: u64 = 40_000;
-const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
-/// The maximum gas limit per transaction.
-const ETH_MAX_GAS_LIMIT: u64 = 16_777_216;
-/// Fractional buffer applied on top of the dynamically estimated gas.
-/// Absorbs variance between estimation and execution so transactions
-/// don't revert on chain.
-const ETH_GAS_ESTIMATION_BUFFER_PERCENT: u64 = 20;
-
-/// The maximum number of attempts to fetch eth tx and its receipt
-const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
-
-/// The interval to batch send Ethereum responses
-const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
-/// The batch size for Ethereum responses
-const ETH_RESPOND_BATCH_SIZE: usize = 10;
-
-const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
-const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
-
-/// The maximum number of concurrent RPC requests the system can make
-const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 
 /// Convert MPC Signature to ChainSignatures::Signature
 impl From<&Signature> for ChainSignatures::Signature {
@@ -93,6 +57,10 @@ pub struct EthClient {
     batch_tx: mpsc::Sender<PublishAction>,
     /// Telemetry interface for recording metrics related to publishing signatures
     telemetry: Arc<dyn PublisherTelemetry>,
+    /// Gas configuration for estimating and clamping gas limits
+    gas: GasConfig,
+    /// Publisher configuration for controlling batching and retry behavior
+    publisher: PublisherConfig,
 }
 
 impl EthClient {
@@ -110,12 +78,14 @@ impl EthClient {
         let address = Address::from_str(&format!("0x{}", eth.contract_address)).unwrap();
         let contract = ChainSignatures::new(address, provider);
 
-        let (batch_tx, batch_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
+        let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
 
         let client = Self {
             contract,
             batch_tx,
             telemetry,
+            gas: eth.gas.clone(),
+            publisher: eth.publisher.clone(),
         };
 
         // Spawn the background batching loop
@@ -134,8 +104,8 @@ impl EthClient {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            if (start.elapsed() > ETH_RESPOND_BATCH_INTERVAL
-                || actions_batch.len() >= ETH_RESPOND_BATCH_SIZE)
+            if (start.elapsed() > self.publisher.batch_flush_interval
+                || actions_batch.len() >= self.publisher.max_batch_size)
                 && !actions_batch.is_empty()
             {
                 tracing::info!(
@@ -158,16 +128,9 @@ impl EthClient {
             .map(|action| (action.request.id, action.signature))
             .collect();
 
-        let retry_config = RetryConfig {
-            max_times: usize::MAX,
-            min_delay: BATCH_PUBLISH_MIN_DELAY,
-            max_delay: BATCH_PUBLISH_MAX_DELAY,
-            jitter: true,
-        };
-
         let res = retry_rpc!(
             Duration::MAX, // Prevent from timing out
-            retry_config,
+            self.publisher.batch_publish_retry,
             |attempt, err, sleep| {
                 tracing::warn!(
                     "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
@@ -188,22 +151,15 @@ impl EthClient {
         actions.clear();
     }
 
-    /// Wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
+    /// Wait for transaction receipt with the configured attempts and exponential delay backoff
     async fn wait_for_transaction_receipt(
         &self,
         tx_hash: B256,
         sign_ids: &[SignId],
     ) -> anyhow::Result<TransactionReceipt> {
-        let retry_config = RetryConfig {
-            max_times: ETH_TX_RECEIPT_MAX_ATTEMPTS,
-            min_delay: ETH_RECEIPT_MIN_DELAY,
-            max_delay: ETH_RECEIPT_MAX_DELAY,
-            jitter: true,
-        };
-
         retry_rpc!(
-            ETH_RECEIPT_TIMEOUT,
-            retry_config,
+            self.publisher.receipt_timeout,
+            self.publisher.receipt_retry,
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
@@ -240,16 +196,9 @@ impl EthClient {
         gas: u64,
         sign_ids: &[SignId],
     ) -> anyhow::Result<B256> {
-        let send_retry = RetryConfig {
-            max_times: ETH_SEND_MAX_ATTEMPTS,
-            min_delay: ETH_SEND_MIN_DELAY,
-            max_delay: ETH_SEND_MAX_DELAY,
-            jitter: true,
-        };
-
         retry_rpc!(
-            ETH_SEND_TIMEOUT,
-            send_retry,
+            self.publisher.send_timeout,
+            self.publisher.send_retry,
             |attempt, err, sleep| {
                 tracing::warn!(
                     ?sign_ids,
@@ -311,9 +260,9 @@ impl EthClient {
 
     /// Estimate the gas limit for a batch of responses.
     ///
-    /// Uses the node's `eth_estimateGas` then applies a 20% buffer to absorb variance.
-    ///
-    /// On failure fallsback to a conservative static heuristic based on the batch size.
+    /// Uses the node's `eth_estimateGas` then applies the configured buffer to
+    /// absorb variance. On failure falls back to a conservative static
+    /// heuristic based on the batch size.
     async fn estimate_batch_gas(
         &self,
         responses: &[ChainSignatures::Response],
@@ -321,19 +270,14 @@ impl EthClient {
     ) -> u64 {
         let call = self.contract.respond(responses.to_vec());
         match call.estimate_gas().await {
-            Ok(est) => {
-                // Add a buffer, capped at the per-tx block gas limit, never below the configured base limit
-                let buffered = est + (est / 100).saturating_mul(ETH_GAS_ESTIMATION_BUFFER_PERCENT);
-                let capped = buffered.min(ETH_MAX_GAS_LIMIT);
-                std::cmp::max(capped, ETH_BASE_GAS_LIMIT)
-            }
+            Ok(est) => self.gas.clamp_estimate(est),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     num_requests,
                     "dynamic gas estimation failed, falling back to static heuristic"
                 );
-                std::cmp::max(ETH_BASE_GAS_LIMIT, ETH_BATCH_GAS_PER_REQUEST * num_requests)
+                self.gas.fallback_gas(num_requests)
             }
         }
     }
@@ -406,6 +350,10 @@ mod tests {
             refresh_finalized_interval: 1000,
             optimistic_requests: false,
             light_client: false,
+            rpc: Default::default(),
+            gas: Default::default(),
+            publisher: Default::default(),
+            indexer: Default::default(),
         }
     }
 
@@ -759,7 +707,7 @@ mod tests {
         let mut server = Server::new_async().await;
         mock_alloy_background_rpcs(&mut server).await;
 
-        // A suspiciously tiny estimate (well below ETH_BASE_GAS_LIMIT) should be
+        // A suspiciously tiny estimate (well below the configured base gas limit) should be
         // lifted to the base limit so the tx is never under-funded.
         server
             .mock("POST", "/")
@@ -776,7 +724,7 @@ mod tests {
         );
 
         let gas = client.estimate_batch_gas(&[], 1).await;
-        assert_eq!(gas, ETH_BASE_GAS_LIMIT);
+        assert_eq!(gas, GasConfig::default().base_gas_limit);
     }
 
     #[tokio::test]

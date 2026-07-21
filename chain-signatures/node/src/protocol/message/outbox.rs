@@ -74,23 +74,29 @@ impl MessageOutbox {
     }
 
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
+    ///
+    /// Messages to unknown participants or that fail to encrypt are intentionally dropped.
     pub fn encrypt(
         &mut self,
         sign_sk: &near_crypto::SecretKey,
         participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
     ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
-        // failed for when a participant is not active, so keep this message for next round.
         let mut errors = Vec::new();
 
         let mut encrypted = HashMap::new();
-        for ((from, to), compacted) in compacted {
+        for ((from, to), partitions) in compacted {
             let Some(info) = participants.get(&to) else {
-                tracing::warn!(?to, "outbox: participant not found in all participants");
+                // Should never happen, since we pass full list of participants; dropping also keeps the outbox from accumulating
+                // messages for recipients that will never receive them.
+                tracing::warn!(
+                    ?to,
+                    "outbox: participant not found in all participants, dropping messages"
+                );
                 continue;
             };
 
-            for partition in compacted {
+            for partition in partitions {
                 let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
@@ -99,6 +105,8 @@ impl MessageOutbox {
                 ) {
                     Ok(encrypted) => encrypted,
                     Err(err) => {
+                        // Encryption failure is deterministic, so a retry would fail
+                        // the same way. Drop the partition.
                         errors.push(err);
                         continue;
                     }
@@ -267,4 +275,83 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
     }
 
     partitions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::message::types::TripleMessage;
+
+    fn triple_message(id: u64, data_size: usize) -> Message {
+        Message::Triple(TripleMessage {
+            id,
+            epoch: 0,
+            from: Participant::from(0),
+            data: vec![0u8; data_size],
+            timestamp: 1,
+        })
+    }
+
+    fn triple_ids(partition: &Partition) -> Vec<u64> {
+        partition
+            .messages
+            .iter()
+            .map(|msg| match msg {
+                Message::Triple(msg) => msg.id,
+                other => panic!("expected triple message, got {}", other.typename()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_partition_256kb_empty() {
+        let partitions = partition_256kb(Vec::new());
+        assert!(partitions.is_empty());
+    }
+
+    #[test]
+    fn test_partition_256kb_single_partition() {
+        let outgoing = vec![
+            (triple_message(1, 1024), Instant::now()),
+            (triple_message(2, 2048), Instant::now()),
+        ];
+        let partitions = partition_256kb(outgoing);
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(triple_ids(&partitions[0]), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_partition_256kb_splits_over_limit() {
+        // Each message is ~100kb, so the first two fit into one 256kb
+        // partition and the third starts a new one.
+        let outgoing = (1..=3)
+            .map(|id| (triple_message(id, 100 * 1024), Instant::now()))
+            .collect::<Vec<_>>();
+        let partitions = partition_256kb(outgoing);
+
+        assert_eq!(partitions.len(), 2);
+        assert_eq!(triple_ids(&partitions[0]), vec![1, 2]);
+        assert_eq!(triple_ids(&partitions[1]), vec![3]);
+        for partition in &partitions {
+            let bytesize = partition
+                .messages
+                .iter()
+                .map(|msg| msg.size())
+                .sum::<usize>();
+            assert!(bytesize <= 256 * 1024);
+        }
+    }
+
+    #[test]
+    fn test_partition_256kb_drops_unknown_messages() {
+        let outgoing = vec![
+            (Message::Unknown(HashMap::new()), Instant::now()),
+            (triple_message(1, 1024), Instant::now()),
+        ];
+        let partitions = partition_256kb(outgoing);
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(triple_ids(&partitions[0]), vec![1]);
+    }
 }

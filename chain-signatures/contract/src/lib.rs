@@ -3,6 +3,7 @@ pub mod errors;
 pub mod primitives;
 pub mod state;
 pub mod update;
+pub mod utils;
 
 use errors::{
     CheckpointError, ConversionError, InitError, InvalidParameters, InvalidState, JoinError,
@@ -32,6 +33,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::config::Config;
 use crate::errors::Error;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
+use crate::utils::compute_threshold;
 
 pub use state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -391,8 +393,9 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        new_participants,
                         threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
+                        new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -438,8 +441,9 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        new_participants,
                         threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
+                        new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -505,6 +509,7 @@ impl VersionedMpcContract {
                 old_epoch,
                 new_participants,
                 threshold,
+                new_threshold,
                 public_key,
                 finished_votes,
                 ..
@@ -513,11 +518,13 @@ impl VersionedMpcContract {
                     return Err(InvalidState::EpochMismatch.into());
                 }
                 finished_votes.insert(voter);
+                // Completion is attested by the old participants, so it is gated by
+                // the old threshold. The reshared key adopts the new threshold.
                 if finished_votes.len() >= *threshold {
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch + 1,
                         participants: new_participants.clone(),
-                        threshold: *threshold,
+                        threshold: *new_threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
