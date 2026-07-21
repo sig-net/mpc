@@ -84,13 +84,11 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         // Err (or panic) is treated as a crash and restarted.
                         break match (&mut run_handle).await {
                             Ok(Ok(())) => Exit::Shutdown,
-                            Ok(Err(err)) => {
-                                tracing::warn!(?err, %chain, "chain run() failed; restarting");
+                            result => {
+                                // anyhow error or JoinError::Panic — both can
+                                // hot-loop, so back off before restarting.
+                                tracing::warn!(?result, %chain, "chain run() failed; restarting");
                                 tokio::time::sleep(ERROR_RESTART_DELAY).await;
-                                Exit::Restart
-                            }
-                            Err(err) => {
-                                tracing::warn!(?err, %chain, "chain run() panicked; restarting");
                                 Exit::Restart
                             }
                         };
