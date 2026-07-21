@@ -320,9 +320,11 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
     // 2. Persist first checkpoint (simulates consensus confirmation)
-    let tx1 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([1u8; 32]),
-        transaction: vec![1, 2, 3],
+    let tx1 = mpc_primitives::PendingCheckpointRequest {
+        pending: mpc_primitives::PendingTx {
+            sign_id: mpc_primitives::SignId::new([1u8; 32]),
+            transaction: vec![1, 2, 3],
+        },
         checkpoint_status: vec![0],
     };
     let cp1 = Checkpoint {
@@ -336,12 +338,17 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![1, 2, 3]);
+    assert_eq!(
+        latest.pending_requests[0].pending.transaction,
+        vec![1, 2, 3]
+    );
 
     // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
-    let tx2 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([2u8; 32]),
-        transaction: vec![4, 5, 6],
+    let tx2 = mpc_primitives::PendingCheckpointRequest {
+        pending: mpc_primitives::PendingTx {
+            sign_id: mpc_primitives::SignId::new([2u8; 32]),
+            transaction: vec![4, 5, 6],
+        },
         checkpoint_status: vec![0],
     };
     let cp2 = Checkpoint {
@@ -355,7 +362,10 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![4, 5, 6]);
+    assert_eq!(
+        latest.pending_requests[0].pending.transaction,
+        vec![4, 5, 6]
+    );
 
     Ok(())
 }

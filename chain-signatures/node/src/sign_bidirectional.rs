@@ -17,19 +17,6 @@ pub struct PublishState {
     pub is_proposer: bool,
 }
 
-impl PublishState {
-    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
-        let mut bytes = vec![tag];
-        bytes.extend_from_slice(&self.signature.to_bytes());
-        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
-        for participant in &self.participants {
-            bytes.extend_from_slice(&participant.bytes());
-        }
-        bytes.push(u8::from(self.is_proposer));
-        bytes
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
@@ -49,21 +36,6 @@ impl SignStatus {
 
     pub fn is_pending_execution(&self) -> bool {
         matches!(self, SignStatus::PendingExecution { .. })
-    }
-
-    pub fn digest_bytes(&self) -> Vec<u8> {
-        match self {
-            SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
-            SignStatus::PendingExecution { tx } => {
-                let mut bytes = vec![2];
-                bytes.extend_from_slice(tx.id.0.as_slice());
-                bytes.extend_from_slice(&tx.target_chain.to_bytes());
-                bytes
-            }
-            SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
-        }
     }
 
     pub fn checkpoint_consensus_bytes(&self) -> Vec<u8> {

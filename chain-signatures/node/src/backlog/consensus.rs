@@ -204,7 +204,9 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
+    use mpc_primitives::{
+        CheckpointDigest, IndexedSignRequest, PendingCheckpointRequest, PendingTx, SignArgs, SignId,
+    };
     use std::collections::HashMap;
 
     struct AlignFixture {
@@ -392,9 +394,11 @@ mod tests {
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests: if case.peer_checkpoint_has_pending_tx {
-                        vec![PendingTx {
-                            sign_id: SignId::new([1u8; 32]),
-                            transaction: vec![1, 2, 3],
+                        vec![PendingCheckpointRequest {
+                            pending: PendingTx {
+                                sign_id: SignId::new([1u8; 32]),
+                                transaction: vec![1, 2, 3],
+                            },
                             checkpoint_status: vec![0],
                         }]
                     } else {

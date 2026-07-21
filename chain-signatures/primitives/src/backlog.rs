@@ -23,13 +23,6 @@ pub struct PendingTx {
     pub sign_id: SignId,
     #[serde(with = "serde_bytes")]
     pub transaction: Vec<u8>,
-    /// Stable checkpoint status bytes for this request, used for consensus.
-    ///
-    /// Kept separate from `transaction` (the full CBOR-serialized entry) so
-    /// that nodes can agree on cross-node request progress without hashing
-    /// node-local fields such as indexing timestamps or proposer state.
-    #[serde(default, with = "serde_bytes")]
-    pub checkpoint_status: Vec<u8>,
 }
 
 impl fmt::Debug for PendingTx {
@@ -38,6 +31,33 @@ impl fmt::Debug for PendingTx {
             .field("sign_id", &self.sign_id)
             .finish()
     }
+}
+
+/// A pending request as it appears in a checkpoint: the recovery payload plus
+/// the consensus fingerprint of its sign status.
+///
+/// Bundling the two structurally guarantees the digest can never pair a
+/// request with the wrong status. `PendingTx` stays a pure recovery payload
+/// (`transaction` is the full CBOR-serialized entry); `checkpoint_status` is
+/// the stable status bytes used only for the checkpoint digest, deliberately
+/// excluding node-local fields such as indexing timestamps or proposer state.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+pub struct PendingCheckpointRequest {
+    pub pending: PendingTx,
+    #[serde(with = "serde_bytes")]
+    pub checkpoint_status: Vec<u8>,
 }
 
 /// A checkpoint represents the backlog state at a specific block height.
@@ -57,7 +77,7 @@ impl fmt::Debug for PendingTx {
 pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
-    pub pending_requests: Vec<PendingTx>,
+    pub pending_requests: Vec<PendingCheckpointRequest>,
 }
 
 impl Checkpoint {
@@ -73,9 +93,9 @@ impl Checkpoint {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(self.chain.caip2_chain_id().as_bytes());
         hasher.update(self.block_height.to_le_bytes());
-        for pending in &self.pending_requests {
-            hasher.update(pending.sign_id.request_id);
-            hasher.update(&pending.checkpoint_status);
+        for request in &self.pending_requests {
+            hasher.update(request.pending.sign_id.request_id);
+            hasher.update(&request.checkpoint_status);
         }
         hasher.finalize().into()
     }

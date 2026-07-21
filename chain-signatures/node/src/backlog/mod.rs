@@ -6,7 +6,8 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingCheckpointRequest,
+    PendingTx, SignId, SignKind,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -111,14 +112,16 @@ impl PendingRequests {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                PendingTx {
-                    sign_id,
-                    transaction,
+                PendingCheckpointRequest {
+                    pending: PendingTx {
+                        sign_id,
+                        transaction,
+                    },
                     checkpoint_status: entry.status().checkpoint_consensus_bytes(),
                 }
             })
             .collect::<Vec<_>>();
-        encoded.sort_by_key(|pending| pending.sign_id);
+        encoded.sort_by_key(|request| request.pending.sign_id);
 
         Checkpoint {
             chain,
@@ -140,8 +143,8 @@ impl PendingRequests {
         }
 
         let mut requests = HashMap::new();
-        for pending_tx in &checkpoint.pending_requests {
-            let (sign_id, tx) = decode(pending_tx)?;
+        for request in &checkpoint.pending_requests {
+            let (sign_id, tx) = decode(&request.pending)?;
             requests.insert(sign_id, tx);
         }
         Ok(Self {
@@ -1602,7 +1605,7 @@ mod tests {
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
         let (sign_id, restored_tx) = {
-            let pending = &deserialized.pending_requests[0];
+            let pending = &deserialized.pending_requests[0].pending;
             let backlog_entry: BacklogEntry =
                 ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
             let tx = backlog_entry
