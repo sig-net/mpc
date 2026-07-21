@@ -893,9 +893,17 @@ async fn emit_events(
 ) -> anyhow::Result<()> {
     match SolanaEvents::parse(tx, program_id, logs)? {
         SolanaEvents::Sign(events) => {
-            let signature = signature.as_ref().to_vec();
+            let sig_bytes = signature.as_ref().to_vec();
             for ev in events {
-                if let Some(request) = ev.build_sign_request(&signature) {
+                if let Some(request) = ev.build_sign_request(&sig_bytes) {
+                    // `signature` is the Solana transaction signature, i.e. the tx hash
+                    // shown in explorers and used as the getTransaction lookup key. Log it
+                    // next to the sign_id so a given tx can be matched to its request.
+                    tracing::info!(
+                        tx_hash = %signature,
+                        sign_id = ?request.id,
+                        "solana sign request parsed",
+                    );
                     events_tx
                         .send(ChainEvent::SignRequest {
                             request,
