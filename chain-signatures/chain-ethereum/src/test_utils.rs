@@ -31,6 +31,10 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
         helios_data_path: "".to_string(),
         refresh_finalized_interval: 0,
         optimistic_requests: false,
+        rpc: Default::default(),
+        gas: Default::default(),
+        publisher: Default::default(),
+        indexer: Default::default(),
     };
 
     EthereumClient::new_with_strategy(eth, retry_strategy)
@@ -66,6 +70,10 @@ impl TestIndexerBuilder {
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
                 optimistic_requests: true,
                 light_client: false,
+                rpc: Default::default(),
+                gas: Default::default(),
+                publisher: Default::default(),
+                indexer: Default::default(),
             },
             state_manager: MockStateManager::new(),
             optimistic_requests: true,

@@ -162,6 +162,10 @@ impl EthereumTestEnvironment {
             refresh_finalized_interval: 500,
             optimistic_requests,
             light_client: false,
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         }
     }
 

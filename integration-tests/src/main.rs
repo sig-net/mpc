@@ -76,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
                     helios_data_path: eth_helios_data_path,
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     light_client: false,
+                    gas: Default::default(),
+                    indexer: Default::default(),
+                    publisher: Default::default(),
+                    rpc: Default::default(),
                 }),
                 ..Default::default()
             };
