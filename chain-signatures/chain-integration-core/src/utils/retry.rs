@@ -115,7 +115,7 @@ pub fn is_rate_limited(e: &anyhow::Error) -> bool {
 }
 
 /// Configuration for retrying RPC calls with exponential backoff.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
     pub min_delay: Duration,
     pub max_delay: Duration,

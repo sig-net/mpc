@@ -147,6 +147,12 @@ impl EthArgs {
             light_client: self.eth_light_client,
             #[cfg(not(feature = "helios"))]
             light_client: false,
+            // TODO: currently we only have Ethereum and Sepolia, so defaults
+            // are fine. Make these configurable when we add more chains.
+            rpc: Default::default(),
+            gas: Default::default(),
+            publisher: Default::default(),
+            indexer: Default::default(),
         })
     }
 

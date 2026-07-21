@@ -406,6 +406,10 @@ mod tests {
             refresh_finalized_interval: 1000,
             optimistic_requests: false,
             light_client: false,
+            rpc: Default::default(),
+            gas: Default::default(),
+            publisher: Default::default(),
+            indexer: Default::default(),
         }
     }
 
