@@ -1,0 +1,33 @@
+name: Reset Dev Contract Checkpoint
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: 'Chain whose checkpoint to reset'
+        required: true
+        type: choice
+        options:
+          - NEAR
+          - Ethereum
+          - Solana
+          - Hydration
+          - Canton
+
+jobs:
+  reset-checkpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: add JSON contract
+        run: mkdir -p ~/.near-credentials/testnet && echo '${{ secrets.DEV_CONTRACT_JSON }}' > ~/.near-credentials/testnet/dev.sig-net.testnet.json
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'latest'
+
+      - name: Install near-cli
+        run: 'npm install -g near-cli'
+
+      - name: Reset Checkpoint
+        run: |
+          near call dev.sig-net.testnet reset_checkpoint '{"chains":["${{ inputs.chain }}"]}' --accountId dev.sig-net.testnet --gas 300000000000000
