@@ -220,7 +220,7 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
 /// ## Full form (custom retry logging)
 /// ```ignore
 /// let block = retry_rpc!(
-///     ETH_RPC_TIMEOUT,
+///     RPC_TIMEOUT,
 ///     self.retry_strategy,
 ///     "get_block",
 ///     |attempt, err, sleep| {

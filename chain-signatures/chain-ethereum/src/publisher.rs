@@ -707,7 +707,7 @@ mod tests {
         let mut server = Server::new_async().await;
         mock_alloy_background_rpcs(&mut server).await;
 
-        // A suspiciously tiny estimate (well below ETH_BASE_GAS_LIMIT) should be
+        // A suspiciously tiny estimate (well below the configured base gas limit) should be
         // lifted to the base limit so the tx is never under-funded.
         server
             .mock("POST", "/")
