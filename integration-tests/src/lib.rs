@@ -20,7 +20,7 @@ use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
-use mpc_chain_ethereum::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
+use mpc_chain_ethereum::EthConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
@@ -394,10 +394,10 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             light_client: false,
-            gas: GasConfig::default(),
-            indexer: IndexerConfig::default(),
-            publisher: PublisherConfig::default(),
-            rpc: RpcConfig::default(),
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         });
 
         ethereum = Some(EthereumContext {

@@ -10,9 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
-use mpc_chain_ethereum::{
-    EthConfig, EthereumStream, GasConfig, IndexerConfig, PublisherConfig, RpcConfig,
-};
+use mpc_chain_ethereum::{EthConfig, EthereumStream};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
@@ -164,10 +162,10 @@ impl EthereumTestEnvironment {
             refresh_finalized_interval: 500,
             optimistic_requests,
             light_client: false,
-            gas: GasConfig::default(),
-            indexer: IndexerConfig::default(),
-            publisher: PublisherConfig::default(),
-            rpc: RpcConfig::default(),
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         }
     }
 

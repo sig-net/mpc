@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-use mpc_chain_ethereum::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
+use mpc_chain_ethereum::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -76,10 +76,10 @@ async fn main() -> anyhow::Result<()> {
                     helios_data_path: eth_helios_data_path,
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     light_client: false,
-                    gas: GasConfig::default(),
-                    indexer: IndexerConfig::default(),
-                    publisher: PublisherConfig::default(),
-                    rpc: RpcConfig::default(),
+                    gas: Default::default(),
+                    indexer: Default::default(),
+                    publisher: Default::default(),
+                    rpc: Default::default(),
                 }),
                 ..Default::default()
             };
