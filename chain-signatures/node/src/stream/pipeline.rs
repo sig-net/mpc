@@ -17,9 +17,9 @@ use tokio::time::Duration;
 /// their finality cadence to avoid false restarts. We derive it from the chain's
 /// `expected_finality_time_secs` with a buffer, flooring at 300s for fast chains.
 ///
-/// RPC rate-limiting is handled separately by `MAX_FINALIZED_FAILURES` in
-/// `wait_for_finalized_block`, which bails after ~200s — faster than this
-/// watchdog for any chain.
+/// RPC rate-limiting is handled separately by the `max_finalized_failures`
+/// budget in `wait_for_finalized_block`, which bails after ~200s — faster
+/// than this watchdog for any chain.
 pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
     const FLOOR_SECS: u64 = 300;
     const BUFFER_SECS: u64 = 300;

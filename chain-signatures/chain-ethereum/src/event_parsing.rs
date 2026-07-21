@@ -2,7 +2,7 @@
 //! the Ethereum indexer.
 
 use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
-use alloy::primitives::hex::{self, ToHexExt};
+use alloy::primitives::hex::ToHexExt;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
@@ -41,37 +41,37 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
             continue;
         };
 
-        let data = &log.data().data;
-        if data.len() < 160 {
-            tracing::warn!(
-                ?sign_id,
-                data_len = data.len(),
-                "signature event data too short to parse full signature: skipping..."
-            );
-            continue;
-        }
+        let event = match ChainSignatures::SignatureResponded::decode_log_data(log.data()) {
+            Ok(event) => event,
+            Err(err) => {
+                tracing::warn!(
+                    ?sign_id,
+                    ?err,
+                    "failed to decode SignatureResponded event data"
+                );
+                continue;
+            }
+        };
+        let signature = event.signature;
 
-        // signature struct encoding layout:
-        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
-        let big_r_x = &data[32..64];
-        let big_r_y = &data[64..96];
-        let s_bytes: [u8; 32] = data[96..128].try_into().unwrap();
-        let recovery_id = data[159];
-
-        let x_field = FieldBytes::from_slice(big_r_x);
-        let y_field = FieldBytes::from_slice(big_r_y);
-        let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
+        let x_bytes: [u8; 32] = signature.bigR.x.to_be_bytes();
+        let y_bytes: [u8; 32] = signature.bigR.y.to_be_bytes();
+        let encoded_r = EncodedPoint::from_affine_coordinates(
+            FieldBytes::from_slice(&x_bytes),
+            FieldBytes::from_slice(&y_bytes),
+            false,
+        );
         let Some(big_r) = K256AffinePoint::from_encoded_point(&encoded_r).into_option() else {
             tracing::warn!(?sign_id, "ethereum respond event, invalid big_r point");
             continue;
         };
 
-        let Some(s) = Scalar::from_bytes(s_bytes) else {
+        let Some(s) = Scalar::from_bytes(signature.s.to_be_bytes()) else {
             tracing::warn!(?sign_id, "ethereum respond event, invalid s scalar");
             continue;
         };
 
-        let signature = MpcSignature::new(big_r, s, recovery_id);
+        let signature = MpcSignature::new(big_r, s, signature.recoveryId);
 
         let respond_event = SignatureRespondedEvent {
             request_id: sign_id.request_id,
@@ -99,7 +99,7 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 }
 
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
-    let event = parse_event(&log);
+    let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
         tracing::warn!("deposit is 0, skipping sign request");
@@ -132,10 +132,11 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     );
 
     // Use transaction hash as entropy
-    let entropy = log.transaction_hash.unwrap_or_default();
+    let tx_hash = log.transaction_hash.unwrap_or_default();
+    let entropy = tx_hash;
 
     let sign_id = SignId::new(event.generate_request_id());
-    tracing::info!(?sign_id, "eth signature requested");
+    tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
         sign_id,
@@ -151,65 +152,38 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     ))
 }
 
-// Helper function to parse event logs
-fn parse_event(log: &Log) -> SignatureRequestedEvent {
-    // Parse data fields
-    let data = log.data().data.clone();
-
-    // Parse requester address (20 bytes)
-    let requester = Address::from_slice(&data[12..32]);
-
-    // Parse payload hash (32 bytes)
-    let mut payload_hash = [0u8; 32];
-    payload_hash.copy_from_slice(&data[32..64]);
-
-    let key_version: u32 = U256::from_be_slice(&data[64..96]).to::<u32>();
-
-    let deposit = U256::from_be_slice(&data[96..128]);
-
-    let chain_id = U256::from_be_slice(&data[128..160]);
-
-    let path = parse_string_args(&data, 160);
-
-    let algo = parse_string_args(&data, 192);
-
-    let dest = parse_string_args(&data, 224);
-
-    let params = parse_string_args(&data, 256);
+fn parse_event(log: &Log) -> Option<SignatureRequestedEvent> {
+    let event = match ChainSignatures::SignatureRequested::decode_log_data(log.data()) {
+        Ok(event) => event,
+        Err(err) => {
+            tracing::warn!(?err, "failed to decode SignatureRequested event data");
+            return None;
+        }
+    };
 
     tracing::info!(
         "Parsed event: requester={}, payload_hash={}, path={}, deposit={}, chain_id={}, algo={}, dest={}, params={}",
-        requester,
-        hex::encode(payload_hash),
-        path,
-        deposit,
-        chain_id,
-        algo,
-        dest,
-        params
+        event.sender,
+        event.payload,
+        event.path,
+        event.deposit,
+        event.chainId,
+        event.algo,
+        event.dest,
+        event.params
     );
 
-    SignatureRequestedEvent {
-        requester,
-        payload_hash,
-        path,
-        key_version,
-        deposit,
-        chain_id,
-        algo,
-        dest,
-        params,
-    }
-}
-
-fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
-    let offset: usize = U256::from_be_slice(&data[offset_start..offset_start + 32]).to::<usize>();
-    let length: usize = U256::from_be_slice(&data[offset..offset + 32]).to::<usize>();
-    if length == 0 {
-        return String::new();
-    }
-    let bytes = &data[offset + 32..offset + 32 + length];
-    String::from_utf8(bytes.to_vec()).unwrap_or_default()
+    Some(SignatureRequestedEvent {
+        requester: event.sender,
+        payload_hash: event.payload.into(),
+        path: event.path,
+        key_version: event.keyVersion,
+        deposit: event.deposit,
+        chain_id: event.chainId,
+        algo: event.algo,
+        dest: event.dest,
+        params: event.params,
+    })
 }
 
 #[derive(Debug)]
@@ -248,8 +222,35 @@ impl SignatureRequestedEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::is_contract_call;
-    use alloy::primitives::Bytes;
+    use super::*;
+    use crate::abi::ChainSignatures;
+    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
+    use alloy::sol_types::SolEvent;
+
+    fn sample_requested_event() -> ChainSignatures::SignatureRequested {
+        ChainSignatures::SignatureRequested {
+            sender: Address::from([0x11; 20]),
+            payload: FixedBytes::from([0x22; 32]),
+            keyVersion: 1,
+            deposit: U256::from(1000u64),
+            chainId: U256::from(31337u64),
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "ecdsa".to_string(),
+            dest: String::new(),
+            params: "{}".to_string(),
+        }
+    }
+
+    fn requested_log(data: Vec<u8>) -> Log {
+        Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![ChainSignatures::SignatureRequested::SIGNATURE_HASH],
+                data.into(),
+            ),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn is_contract_call_detects_calldata() {
@@ -260,5 +261,171 @@ mod tests {
         ])));
     }
 
-    // TODO: Add more tests for event parsing
+    #[test]
+    fn parse_event_decodes_valid_log() {
+        let event = sample_requested_event();
+        let log = requested_log(event.encode_data());
+
+        let parsed = parse_event(&log).expect("valid log should parse");
+        assert_eq!(parsed.requester, event.sender);
+        assert_eq!(parsed.payload_hash, event.payload.0);
+        assert_eq!(parsed.key_version, event.keyVersion);
+        assert_eq!(parsed.deposit, event.deposit);
+        assert_eq!(parsed.chain_id, event.chainId);
+        assert_eq!(parsed.path, event.path);
+        assert_eq!(parsed.algo, event.algo);
+        assert_eq!(parsed.dest, event.dest);
+        assert_eq!(parsed.params, event.params);
+    }
+
+    #[test]
+    fn parse_event_generates_expected_request_id() {
+        let event = sample_requested_event();
+        let log = requested_log(event.encode_data());
+
+        let parsed = parse_event(&log).expect("valid log should parse");
+        let encoding = SignatureRequestedEncoding {
+            sender: event.sender,
+            payload: Bytes::from(event.payload.to_vec()),
+            path: event.path.clone(),
+            keyVersion: event.keyVersion,
+            chainId: event.chainId,
+            algo: event.algo.clone(),
+            dest: event.dest.clone(),
+            params: event.params.clone(),
+        };
+        let expected: [u8; 32] = alloy::primitives::keccak256(encoding.encode_data()).into();
+        assert_eq!(parsed.generate_request_id(), expected);
+    }
+
+    fn responded_log(request_id: [u8; 32], data: Vec<u8>) -> Log {
+        Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![
+                    ChainSignatures::SignatureResponded::SIGNATURE_HASH,
+                    request_id.into(),
+                ],
+                data.into(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn sample_responded_event(
+        request_id: [u8; 32],
+    ) -> (ChainSignatures::SignatureResponded, K256AffinePoint) {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let big_r = K256AffinePoint::GENERATOR;
+        let encoded = big_r.to_encoded_point(false);
+        let event = ChainSignatures::SignatureResponded {
+            requestId: request_id.into(),
+            responder: Address::from([0x33; 20]),
+            signature: ChainSignatures::Signature {
+                bigR: ChainSignatures::AffinePoint {
+                    x: U256::from_be_slice(encoded.x().unwrap()),
+                    y: U256::from_be_slice(encoded.y().unwrap()),
+                },
+                s: U256::from(12345u64),
+                recoveryId: 1,
+            },
+        };
+        (event, big_r)
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_emits_valid_signature() {
+        let request_id = [0x42u8; 32];
+        let (event, big_r) = sample_responded_event(request_id);
+        let log = responded_log(request_id, event.encode_data());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&[log], tx).await;
+
+        let Some(ChainEvent::Respond(respond)) = rx.recv().await else {
+            panic!("expected a Respond event");
+        };
+        assert_eq!(respond.request_id, request_id);
+        assert_eq!(respond.chain, Chain::Ethereum);
+        assert_eq!(respond.signature.big_r, big_r);
+        assert_eq!(
+            respond.signature.s,
+            Scalar::from_bytes(U256::from(12345u64).to_be_bytes()).unwrap()
+        );
+        assert_eq!(respond.signature.recovery_id, 1);
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_skips_malformed_data() {
+        let logs = vec![
+            responded_log([1u8; 32], vec![]),
+            responded_log([2u8; 32], vec![0u8; 100]),
+            responded_log([3u8; 32], vec![0u8; 159]),
+        ];
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&logs, tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn emit_respond_events_skips_invalid_signature_values() {
+        // decodes fine, but bigR = (0, 0) is not on the curve
+        let (mut event, _) = sample_responded_event([4u8; 32]);
+        event.signature.bigR.x = U256::ZERO;
+        event.signature.bigR.y = U256::ZERO;
+        let log = responded_log([4u8; 32], event.encode_data());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        emit_respond_events(&[log], tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sign_id_from_responded_log_extracts_request_id() {
+        let request_id = [0xabu8; 32];
+        let log = responded_log(request_id, vec![]);
+        let sign_id = sign_id_from_signature_responded_log(&log).expect("well-formed log");
+        assert_eq!(sign_id.request_id, request_id);
+    }
+
+    #[test]
+    fn sign_id_from_responded_log_rejects_wrong_topic0() {
+        let mut log = responded_log([0xabu8; 32], vec![]);
+        log.topics_mut()[0] = ChainSignatures::SignatureRequested::SIGNATURE_HASH;
+        assert!(sign_id_from_signature_responded_log(&log).is_none());
+    }
+
+    #[test]
+    fn sign_id_from_responded_log_rejects_missing_topics() {
+        let no_topics = Log {
+            inner: PrimitiveLog::new_unchecked(Address::ZERO, vec![], vec![].into()),
+            ..Default::default()
+        };
+        assert!(sign_id_from_signature_responded_log(&no_topics).is_none());
+
+        let only_topic0 = Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![ChainSignatures::SignatureResponded::SIGNATURE_HASH],
+                vec![].into(),
+            ),
+            ..Default::default()
+        };
+        assert!(sign_id_from_signature_responded_log(&only_topic0).is_none());
+    }
+
+    #[test]
+    fn parse_event_rejects_malformed_data() {
+        // empty data
+        assert!(parse_event(&requested_log(vec![])).is_none());
+        // truncated below the 160-byte head
+        assert!(parse_event(&requested_log(vec![0u8; 100])).is_none());
+        // truncated mid-string-tail
+        let valid = sample_requested_event().encode_data();
+        assert!(parse_event(&requested_log(valid[..200].to_vec())).is_none());
+        // out-of-bounds offset for the `path` string head word (bytes 160..192)
+        let mut corrupt = sample_requested_event().encode_data();
+        corrupt[160..192].fill(0xff);
+        assert!(parse_event(&requested_log(corrupt)).is_none());
+    }
 }

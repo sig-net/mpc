@@ -25,14 +25,6 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
-/// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
-const MAX_FINALIZED_FAILURES: u32 = 20;
-
-fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
-    mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
-}
-
 // TODO: Move this to some common crate so it can be shared across workspace
 /// Aborts the wrapped task on drop, prevents leaking a background task
 /// if the indexer is dropped while the live block fetcher is still running.
@@ -661,6 +653,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             catchup_start,
             anchor_height,
             self.contract_address,
+            self.eth.indexer.catchup_block_batch_size,
         );
 
         // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
@@ -798,13 +791,14 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Blocks until the specified block number has been finalized on the Ethereum chain.
     async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
         let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
+        let max_finalized_failures = self.eth.indexer.max_finalized_failures;
         let mut last_final_block_number: Option<BlockNumber> = None;
         let mut consecutive_failures = 0u32;
 
         // Warn if the finalized block number has not advanced for this long
         let stall_warn_secs = Chain::Ethereum.expected_finality_time_secs();
         // Re-warn on this heartbeat interval if the finalized block number has not advanced
-        const STALL_REWARN_SECS: u64 = 300;
+        let stall_rewarn_secs = self.eth.indexer.stall_rewarn_secs;
         let mut last_advanced_at = Instant::now();
         let mut last_stall_warn_at = Instant::now();
 
@@ -816,16 +810,16 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .await
             else {
                 consecutive_failures += 1;
-                if consecutive_failures >= MAX_FINALIZED_FAILURES {
+                if consecutive_failures >= max_finalized_failures {
                     // Propagate error to the outer ChainIndexer loop to catch it,
                     // sleep for RETRY_DELAY, and attempt the entire block process again.
                     anyhow::bail!(
-                        "get_block(Finalized) failed {MAX_FINALIZED_FAILURES} times consecutively; aborting wait"
+                        "get_block(Finalized) failed {max_finalized_failures} times consecutively; aborting wait"
                     );
                 }
                 tracing::warn!(
                     block_number,
-                    "finalized ethereum block not found (failure {consecutive_failures}/{MAX_FINALIZED_FAILURES}); retrying"
+                    "finalized ethereum block not found (failure {consecutive_failures}/{max_finalized_failures}); retrying"
                 );
                 sleep(retry_interval).await;
                 continue;
@@ -858,7 +852,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     let now = Instant::now();
                     let secs_since_advance = now.duration_since(last_advanced_at).as_secs();
                     if secs_since_advance >= stall_warn_secs
-                        && now.duration_since(last_stall_warn_at).as_secs() >= STALL_REWARN_SECS
+                        && now.duration_since(last_stall_warn_at).as_secs() >= stall_rewarn_secs
                     {
                         tracing::warn!(
                             block_number,
@@ -929,7 +923,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         // Spawned only after catchup: no catchup/live coordination needed, and
         // the abort-on-drop guard ties the task's lifetime to this `run()`.
-        let (live_blocks_tx, mut live_blocks_rx) = live_blocks_channel();
+        let (live_blocks_tx, mut live_blocks_rx) =
+            mpsc::channel(self.eth.indexer.live_block_buffer);
         let _live_task = AbortOnDrop(tokio::spawn(Self::index_live_blocks(
             self.client.clone(),
             anchor_height,
@@ -956,7 +951,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use crate::client::CatchupItem;
-    use crate::test_utils;
+    use crate::{test_utils, IndexerConfig};
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256};
     use alloy::rpc::types::BlockId;
@@ -1061,6 +1056,7 @@ mod tests {
             1,
             33,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
         for n in 1..=32 {
             let item = iter.next().await.expect("expected item");
@@ -1121,6 +1117,7 @@ mod tests {
             10,
             12,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
 
         let item1 = iter.next().await.unwrap();
@@ -1238,6 +1235,7 @@ mod tests {
             42,
             43,
             indexer.contract_address,
+            indexer.eth.indexer.catchup_block_batch_size,
         );
         let item = iter.next().await.unwrap();
 
@@ -1535,7 +1533,7 @@ mod tests {
         let mut server = Server::new_async().await;
 
         // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
-        // Should be called MAX_FINALIZED_FAILURES times
+        // Should be called max_finalized_failures times
         server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
@@ -1545,7 +1543,7 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(test_utils::missing_block_response(1).to_string())
-            .expect(super::MAX_FINALIZED_FAILURES as usize)
+            .expect(IndexerConfig::default().max_finalized_failures as usize)
             .create_async()
             .await;
 
