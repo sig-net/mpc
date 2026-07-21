@@ -194,17 +194,12 @@ impl SignatureSpawner {
     /// Handle a posit message - routes to existing task or buffers if task not yet created
     fn handle_posit(
         &mut self,
-        me: Participant,
         sign_id: SignId,
         presignature_id: PresignatureId,
         round: usize,
         from: Participant,
         action: PositAction,
     ) {
-        // Ignore messages from ourselves
-        if from == me {
-            return;
-        }
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan inboxes.
         if self.dead_ids.contains(&sign_id) {
@@ -366,7 +361,7 @@ impl SignatureSpawner {
                     self.handle_sign(&governance, sign, &protocol);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action);
+                    self.handle_posit(sign_id, presignature_id, round, from, action);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -547,14 +542,7 @@ mod tests {
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
         // Step 3: Late posit → dropped (dead_id check), inbox NOT recreated
-        spawner.handle_posit(
-            Participant::from(0),
-            sign_id,
-            0,
-            0,
-            Participant::from(1),
-            PositAction::Propose,
-        );
+        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(!spawner.test_posit_inboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, task_chains repopulated
@@ -563,14 +551,7 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 5: Posit after re-spawn → accepted, inbox re-created
-        spawner.handle_posit(
-            Participant::from(0),
-            sign_id,
-            0,
-            0,
-            Participant::from(1),
-            PositAction::Propose,
-        );
+        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(spawner.test_posit_inboxes_contains(&sign_id));
     }
 }
