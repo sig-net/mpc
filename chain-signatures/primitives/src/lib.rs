@@ -5,9 +5,7 @@ mod crypto;
 mod events;
 mod requests;
 
-pub use backlog::{
-    Checkpoint, CheckpointDigest, ConsensusCheckpointDigest, PendingCheckpointRequest, PendingTx,
-};
+pub use backlog::{Checkpoint, CheckpointDigest, ConsensusCheckpointDigest, PendingTx};
 pub use bidirectional::{
     BidirectionalTx, BidirectionalTxId, RespondBidirectionalEvent,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SignBidirectionalEvent,

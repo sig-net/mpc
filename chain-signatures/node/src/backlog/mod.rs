@@ -6,9 +6,9 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingCheckpointRequest,
-    PendingTx, SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
 };
+use sha3::Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -112,21 +112,34 @@ impl PendingRequests {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                PendingCheckpointRequest {
-                    pending: PendingTx {
+                let status = entry.status().checkpoint_consensus_bytes();
+                (
+                    PendingTx {
                         sign_id,
                         transaction,
                     },
-                    checkpoint_status: entry.status().checkpoint_consensus_bytes(),
-                }
+                    status,
+                )
             })
             .collect::<Vec<_>>();
-        encoded.sort_by_key(|request| request.pending.sign_id);
+        encoded.sort_by_key(|(pending, _)| pending.sign_id);
+
+        let mut cumulative = sha3::Sha3_256::new();
+        for (_, status) in &encoded {
+            cumulative.update(status);
+        }
+        let cumulative_digest = cumulative.finalize().into();
+
+        let pending_requests = encoded
+            .into_iter()
+            .map(|(pending, _)| pending)
+            .collect::<Vec<_>>();
 
         Checkpoint {
             chain,
             block_height: self.processed_block_height.unwrap_or(0),
-            pending_requests: encoded,
+            pending_requests,
+            cumulative_digest,
         }
     }
 
@@ -143,8 +156,8 @@ impl PendingRequests {
         }
 
         let mut requests = HashMap::new();
-        for request in &checkpoint.pending_requests {
-            let (sign_id, tx) = decode(&request.pending)?;
+        for pending_tx in &checkpoint.pending_requests {
+            let (sign_id, tx) = decode(pending_tx)?;
             requests.insert(sign_id, tx);
         }
         Ok(Self {
@@ -1329,7 +1342,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("88b6ad7c782dfd1208b980ee296f493594f55e5cbca879d8f8fd19032ca3ac65")
+            digest_hex("303f69437253715e486f272e60a1176db272e018241aecf88af0f1c1197670b9")
         );
     }
 
@@ -1600,12 +1613,12 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("6e26d056e08d96f04d2474aa716f44999397168cfad77472e9265b1c254381dc")
+            digest_hex("0a516bf905dd18465b558748d84a9d14c2d36a32427252ea67b9218d1aaa263f")
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
         let (sign_id, restored_tx) = {
-            let pending = &deserialized.pending_requests[0].pending;
+            let pending = &deserialized.pending_requests[0];
             let backlog_entry: BacklogEntry =
                 ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
             let tx = backlog_entry
