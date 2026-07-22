@@ -1,0 +1,45 @@
+# Isolated nested workspace: quarantines the midnight-node-toolkit dependency
+# universe (polkadot-sdk / subxt / midnight-ledger) from the main mpc workspace,
+# which cannot share a lockfile with it (see MIDNIGHT_PINS.md). Excluded from the
+# root workspace; carries its own lockfile and its own ledger [patch.crates-io].
+[workspace]
+
+[package]
+name = "midnight-publisher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "midnight-publisher"
+path = "src/main.rs"
+
+[dependencies]
+# Kept so `cargo build --locked -p midnight-node-toolkit` co-builds the CLI
+# from this same seeded lockfile (the binary the service shells out to).
+midnight-node-toolkit = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.3" }
+# Ledger-9 type facade (same git+tag as the toolkit, already in the lockfile):
+# re-exports ContractState / StateValue / AlignedValue / DefaultDB / deserialize,
+# the exact `serialize(&ContractState)` path the toolkit's `contract-state`
+# command writes, so `state::decode_contract_state` round-trips the `.mn` bytes.
+midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.3" }
+anyhow = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+
+[patch.crates-io]
+# Replicated from midnight-node @ node-2.0.0-rc.3 (patches don't propagate transitively).
+midnight-ledger-v9            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "crate-ledger-9.1.0.0-rc.3" }
+midnight-zswap                = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zswap-9.0.0-rc.3" }
+midnight-coin-structure       = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "coin-structure-3.0.0-rc.1" }
+midnight-base-crypto          = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-1.1.0-rc.2" }
+midnight-base-crypto-derive   = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-derive-1.1.0-rc.2" }
+midnight-transient-crypto     = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-3.0.0-rc.2" }
+midnight-transient-crypto-old = { package = "midnight-transient-crypto", git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1" }
+midnight-onchain-vm           = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-vm-4.0.0-rc.2" }
+midnight-onchain-state        = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-state-4.0.0-rc.3" }
+midnight-onchain-runtime      = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-runtime-4.0.0-rc.2" }
+midnight-zkir                 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zkir-2.2.0-rc.3" }
+midnight-serialize            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "serialize-1.2.0-rc.1" }
