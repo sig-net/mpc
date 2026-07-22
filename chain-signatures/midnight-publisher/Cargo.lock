@@ -1117,7 +1117,7 @@ checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
 [[package]]
 name = "byte-string-derive"
 version = "1.8.1"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "quote 1.0.45",
  "syn 2.0.117",
@@ -4437,7 +4437,7 @@ dependencies = [
 [[package]]
 name = "midnight-node-ledger-helpers"
 version = "0.1.0"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4485,7 +4485,7 @@ dependencies = [
 [[package]]
 name = "midnight-node-metadata"
 version = "2.0.0"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "subxt",
  "walkdir",
@@ -4494,7 +4494,7 @@ dependencies = [
 [[package]]
 name = "midnight-node-toolkit"
 version = "2.0.0"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -4741,7 +4741,7 @@ dependencies = [
 [[package]]
 name = "midnight-primitives-ics-observation"
 version = "0.1.0"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "serde",
  "sidechain-domain",
@@ -4751,7 +4751,7 @@ dependencies = [
 [[package]]
 name = "midnight-primitives-reserve-observation"
 version = "0.1.0"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "serde",
  "sidechain-domain",
@@ -5463,7 +5463,7 @@ dependencies = [
 [[package]]
 name = "ogmios-client"
 version = "1.8.1"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "fraction",
  "hex",
@@ -5898,7 +5898,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "plutus"
 version = "1.8.1"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "hex",
  "minicbor 2.2.1",
@@ -5909,7 +5909,7 @@ dependencies = [
 [[package]]
 name = "plutus-datum-derive"
 version = "1.8.1"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "quote 1.0.45",
  "syn 2.0.117",
@@ -7644,7 +7644,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "sidechain-domain"
 version = "1.8.1"
-source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.3#30f081e802bed06d72d6aee8eada5e7384172c66"
+source = "git+https://github.com/midnightntwrk/midnight-node?tag=node-2.0.0-rc.4#651e043b61ed445bf7a5066c60c87ea7bd606073"
 dependencies = [
  "blake2b_simd",
  "byte-string-derive",

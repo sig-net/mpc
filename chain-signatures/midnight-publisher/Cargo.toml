@@ -17,12 +17,12 @@ path = "src/main.rs"
 [dependencies]
 # Kept so `cargo build --locked -p midnight-node-toolkit` co-builds the CLI
 # from this same seeded lockfile (the binary the service shells out to).
-midnight-node-toolkit = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.3" }
+midnight-node-toolkit = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.4" }
 # Ledger-9 type facade (same git+tag as the toolkit, already in the lockfile):
 # re-exports ContractState / StateValue / AlignedValue / DefaultDB / deserialize,
 # the exact `serialize(&ContractState)` path the toolkit's `contract-state`
 # command writes, so `state::decode_contract_state` round-trips the `.mn` bytes.
-midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.3" }
+midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.4" }
 anyhow = "1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +30,7 @@ serde_json = "1"
 tiny_http = "0.12"
 
 [patch.crates-io]
-# Replicated from midnight-node @ node-2.0.0-rc.3 (patches don't propagate transitively).
+# Replicated from midnight-node @ node-2.0.0-rc.4 (patches don't propagate transitively).
 midnight-ledger-v9            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "crate-ledger-9.1.0.0-rc.3" }
 midnight-zswap                = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zswap-9.0.0-rc.3" }
 midnight-coin-structure       = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "coin-structure-3.0.0-rc.1" }
