@@ -112,7 +112,17 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
 
-        let slots = self.client.fetch_slots(start_slot, end_slot).await?;
+        // TODO: double-check if we should propagate or keep as is
+        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
+            Ok(slots) => slots,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch slots for catchup, returning empty stream"
+                );
+                return Ok(Box::pin(futures_util::stream::empty()));
+            }
+        };
         let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
 
         let client = self.client.clone();
