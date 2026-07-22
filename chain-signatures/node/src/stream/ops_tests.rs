@@ -1164,7 +1164,7 @@ async fn live_block_votes_for_checkpoint() {
         .expect("checkpoint vote should be queued")
         .expect("rpc channel should remain open");
     match action {
-        crate::rpc::RpcAction::VoteCheckpoint(checkpoint) => {
+        crate::rpc::RpcAction::VoteCheckpoint { checkpoint, .. } => {
             assert_eq!(checkpoint.chain, chain);
             assert_eq!(checkpoint.height, interval);
         }

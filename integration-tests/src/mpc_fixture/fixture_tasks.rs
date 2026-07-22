@@ -83,7 +83,7 @@ pub(super) fn test_mock_network(
                                 publish_action.request,
                             )
                         },
-                        RpcAction::VoteCheckpoint(checkpoint) => {
+                        RpcAction::VoteCheckpoint { checkpoint, .. } => {
                             format!("RpcAction::VoteCheckpoint({checkpoint:?})")
                         },
                         RpcAction::AbortChain(chain) => {
