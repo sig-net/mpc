@@ -40,6 +40,9 @@ pub struct RespondRequest {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
+    /// Interface to bind the HTTP server to. Defaults to 127.0.0.1 (a
+    /// co-located sidecar; never 0.0.0.0). Overridable for tests.
+    pub bind_host: String,
     pub work_dir: PathBuf,
     pub node_url: String,
     pub node_url_docker: String,
@@ -74,7 +77,7 @@ fn env_required(key: &str) -> anyhow::Result<String> {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let intent_mode = match env_or("MIDNIGHT_PUB_INTENT_MODE", "docker").as_str() {
+        let intent_mode = match env_or("MIDNIGHT_PUB_INTENT_MODE", "native").as_str() {
             "docker" => IntentMode::Docker,
             "native" => IntentMode::Native,
             other => anyhow::bail!("MIDNIGHT_PUB_INTENT_MODE must be docker|native, got {other}"),
@@ -82,6 +85,7 @@ impl Config {
         let node_url = env_required("MIDNIGHT_PUB_NODE_URL")?;
         Ok(Self {
             port: env_or("MIDNIGHT_PUB_PORT", "8790").parse()?,
+            bind_host: env_or("MIDNIGHT_PUB_BIND_HOST", "127.0.0.1"),
             work_dir: PathBuf::from(env_required("MIDNIGHT_PUB_WORK_DIR")?),
             node_url_docker: env_or("MIDNIGHT_PUB_NODE_URL_DOCKER", &node_url),
             node_url,
@@ -477,10 +481,11 @@ fn handle_state(cfg: &Config, url: &str) -> (u16, String) {
 }
 
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
-    let server = tiny_http::Server::http(("0.0.0.0", cfg.port))
-        .map_err(|e| anyhow::anyhow!("bind :{}: {e}", cfg.port))?;
+    let server = tiny_http::Server::http((cfg.bind_host.as_str(), cfg.port))
+        .map_err(|e| anyhow::anyhow!("bind {}:{}: {e}", cfg.bind_host, cfg.port))?;
     println!(
-        "midnight-publisher listening on :{} (work dir {})",
+        "midnight-publisher listening on {}:{} (work dir {})",
+        cfg.bind_host,
         cfg.port,
         cfg.work_dir.display()
     );
@@ -572,6 +577,7 @@ mod tests {
     fn state_config(curl_bin: PathBuf) -> Config {
         Config {
             port: 0,
+            bind_host: "127.0.0.1".into(),
             work_dir: std::env::temp_dir(),
             node_url: "ws://node:9944".into(),
             node_url_docker: "ws://node:9944".into(),
@@ -701,6 +707,7 @@ mod tests {
 
         let cfg = Config {
             port: 0,
+            bind_host: "127.0.0.1".into(),
             work_dir: work.clone(),
             node_url: "ws://node:9944".into(),
             node_url_docker: "ws://node:9944".into(),
@@ -828,5 +835,27 @@ mod tests {
         );
         assert_eq!(code, 502, "undecodable blob is a 502");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn config_defaults_localhost_bind_and_native_intent() {
+        let _guard = RPC_ENV_LOCK.lock().unwrap();
+        for (k, v) in [
+            ("MIDNIGHT_PUB_NODE_URL", "ws://node:9944"),
+            ("MIDNIGHT_PUB_WORK_DIR", "/tmp"),
+            ("MIDNIGHT_PUB_TOOLKIT_BIN", "toolkit"),
+            ("MIDNIGHT_PUB_FUNDING_SEED", "00"),
+            ("MIDNIGHT_PUB_COIN_PUBLIC", "aa"),
+        ] {
+            std::env::set_var(k, v);
+        }
+        std::env::remove_var("MIDNIGHT_PUB_BIND_HOST");
+        std::env::remove_var("MIDNIGHT_PUB_INTENT_MODE");
+        let cfg = Config::from_env().expect("from_env with required vars set");
+        assert_eq!(cfg.bind_host, "127.0.0.1", "defaults to localhost bind");
+        assert!(
+            matches!(cfg.intent_mode, IntentMode::Native),
+            "defaults to native intent"
+        );
     }
 }
