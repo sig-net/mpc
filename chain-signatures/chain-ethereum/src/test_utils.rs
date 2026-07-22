@@ -6,7 +6,6 @@ use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 /// Dummy signer for tests; the read-side client never signs.
 fn test_signer() -> alloy_signer_local::PrivateKeySigner {
@@ -50,10 +49,8 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
 }
 
 /// Builder for constructing an `EthereumIndexer<MockStateManager, NoopChainTelemetry>`
-/// in tests against a mockito server.
-///
-/// Use [`TestIndexerBuilder::build()`] when you don't need the event receiver, or [`TestIndexerBuilder::build_with_rx()`] when
-/// you do.
+/// in tests against a mockito server. Tests supply their own events channel to
+/// the processing methods they drive.
 pub struct TestIndexerBuilder {
     server_url: String,
     pub eth: EthConfig,
@@ -117,46 +114,16 @@ impl TestIndexerBuilder {
         self
     }
 
-    async fn build_inner(self) -> EthereumIndexer<MockStateManager, NoopChainTelemetry> {
+    /// Build the indexer.
+    pub async fn build(self) -> EthereumIndexer<MockStateManager, NoopChainTelemetry> {
         let client = Arc::new(create_test_ethereum_client(&self.server_url).await);
-        let (events_tx, events_rx) = mpsc::channel::<mpc_primitives::ChainEvent>(1);
-        // events_rx is dropped by `.build()`; returned by `.build_with_rx()`.
-        let _ = events_rx;
         EthereumIndexer::new_for_test(
             self.eth,
             self.state_manager,
             NoopChainTelemetry,
             client,
-            events_tx,
             Address::ZERO,
         )
-    }
-
-    /// Build the indexer without exposing its event receiver. The receiver
-    /// is dropped.
-    pub async fn build(self) -> EthereumIndexer<MockStateManager, NoopChainTelemetry> {
-        self.build_inner().await
-    }
-
-    /// Build the indexer and return it together with a receiver for the events
-    /// channel wired into it.
-    pub async fn build_with_rx(
-        self,
-    ) -> (
-        EthereumIndexer<MockStateManager, NoopChainTelemetry>,
-        mpsc::Receiver<mpc_primitives::ChainEvent>,
-    ) {
-        let client = Arc::new(create_test_ethereum_client(&self.server_url).await);
-        let (events_tx, events_rx) = mpsc::channel::<mpc_primitives::ChainEvent>(1);
-        let indexer = EthereumIndexer::new_for_test(
-            self.eth,
-            self.state_manager,
-            NoopChainTelemetry,
-            client,
-            events_tx,
-            Address::ZERO,
-        );
-        (indexer, events_rx)
     }
 }
 

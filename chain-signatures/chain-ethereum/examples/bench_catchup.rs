@@ -31,9 +31,9 @@
 
 use anyhow::anyhow;
 use futures_util::StreamExt;
-use mpc_chain_ethereum::{EthConfig, EthereumStream};
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainStream, MockStateManager, NoopChainTelemetry, StateManager,
+    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry, StateManager,
 };
 use mpc_primitives::Chain;
 
@@ -123,37 +123,29 @@ async fn main() -> anyhow::Result<()> {
     let state = MockStateManager::new();
     state.set_processed_block(Chain::Ethereum, start - 1).await;
 
-    // Build the stream. `EthereumStream` creates the bounded event channel
-    // internally
-    let mut stream = EthereumStream::new(config, state, NoopChainTelemetry).await?;
-    let mut indexer = stream.start().await?;
+    let indexer = EthereumIndexer::new(config, state, NoopChainTelemetry).await?;
+    let (events_tx, mut events_rx) = chain_event_channel();
 
     tracing::info!("bench_catchup: starting catchup over [{start}..{end})");
 
-    // Drain emitted events in parallel so process_catchup never blocks on a
-    // full channel.
+    // Drain emitted events in parallel so processing never blocks on a full channel.
     let drain = tokio::spawn(async move {
-        loop {
-            match stream.next_event().await {
-                Some(ev) => tracing::debug!(?ev, "bench_catchup drained event"),
-                None => {
-                    tracing::warn!("bench_catchup: event channel closed during catchup");
-                    return;
-                }
-            }
+        while let Some(ev) = events_rx.recv().await {
+            tracing::debug!(?ev, "bench_catchup drained event");
         }
     });
 
-    let blocks_stream = indexer.catchup_range(end).await;
+    let blocks_stream = indexer.catchup_blocks(end).await;
     let mut blocks = std::pin::pin!(blocks_stream);
     let mut count: u64 = 0;
     while let Some(block) = blocks.next().await {
-        indexer.process_catchup(&block).await?;
+        indexer.process_catchup_item(&events_tx, &block).await?;
         count += 1;
     }
 
     // Fires the final `report_metrics("catchup_completed")` log under `bench`.
-    indexer.notify_catchup_completed().await?;
+    #[cfg(feature = "bench")]
+    mpc_chain_ethereum::bench::report_metrics("catchup_completed");
 
     drain.abort();
     let _ = drain.await;
