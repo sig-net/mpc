@@ -740,8 +740,7 @@ impl VersionedMpcContract {
     pub fn migrate() -> Result<Self, Error> {
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
-        let deployment = migration::deployment_for_account(&env::current_account_id())?;
-        migration::migrater_for(deployment).migrate(&state_bytes)
+        migration::migrate(&state_bytes)
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -1281,6 +1280,31 @@ mod tests {
             config: Config::default(),
         };
         let old_bytes = borsh::to_vec(&VersionedOldMpcContractTest::V0(old_contract)).unwrap();
+        env::storage_write(b"STATE", &old_bytes);
+
+        let migrated = VersionedMpcContract::migrate().unwrap();
+        match migrated {
+            VersionedMpcContract::V0(contract) => {
+                assert!(contract.latest_checkpoints.is_empty());
+                assert!(contract.checkpoint_votes.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_migrate_unversioned_state_to_mainnet() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let old_contract = OldMpcContractTest {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+        };
+        let old_bytes = borsh::to_vec(&old_contract).unwrap();
         env::storage_write(b"STATE", &old_bytes);
 
         let migrated = VersionedMpcContract::migrate().unwrap();
