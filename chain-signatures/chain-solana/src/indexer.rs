@@ -18,8 +18,11 @@ use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::hashing::{compute_request_id, hash_payload},
-    ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+    utils::{
+        hashing::{compute_request_id, hash_payload},
+        task::AbortOnDrop,
+    },
+    ChainIndexer, ChainTelemetry, StateManager,
 };
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
@@ -42,6 +45,7 @@ use solana_transaction_status::{
     UiParsedInstruction,
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::client::{SolanaCatchupBlock, MAX_CONCURRENT_CHUNK_SIZE};
 use crate::utils::current_unix_timestamp;
@@ -57,41 +61,14 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-/// Solana stream that implements the new ChainStream abstraction
-pub struct SolanaStream<S: StateManager, T: ChainTelemetry> {
-    rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<SolanaStreamStartState<S, T>>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
-    pub program_id: Pubkey,
-    pub client: SolanaClient,
-    pub events_tx: mpsc::Sender<ChainEvent>,
-    pub state_manager: S,
-    pub telemetry: T,
-    pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
-    live_task: Option<tokio::task::JoinHandle<()>>,
-}
-
-struct SolanaStreamStartState<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
-    rpc_http_url: String,
-    rpc_ws_url: String,
+    client: SolanaClient,
     state_manager: S,
     telemetry: T,
-    tx: mpsc::Sender<ChainEvent>,
 }
 
-impl<S: StateManager, T: ChainTelemetry> Drop for SolanaStream<S, T> {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
-
-impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
+impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
             format!(
@@ -100,93 +77,28 @@ impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
             )
         })?;
 
-        let (tx, rx) = chain_event_channel();
-
-        Ok(SolanaStream {
-            rx: Some(rx),
-            start_state: Some(SolanaStreamStartState {
-                program_id,
-                rpc_http_url: sol.rpc_http_url.clone(),
-                rpc_ws_url: sol.rpc_ws_url.clone(),
-                state_manager,
-                telemetry,
-                tx,
-            }),
-            tasks: Vec::new(),
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager, T: ChainTelemetry> ChainStream for SolanaStream<S, T> {
-    type Indexer = SolanaIndexer<S, T>;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        let Some(start_state) = self.start_state.take() else {
-            anyhow::bail!("solana stream already started");
-        };
-
         let client = SolanaClient::for_indexer(
-            start_state.rpc_http_url.clone(),
-            start_state.rpc_ws_url.clone(),
-            start_state.program_id,
+            sol.rpc_http_url.clone(),
+            sol.rpc_ws_url.clone(),
+            program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
 
-        let indexer = SolanaIndexer {
-            program_id: start_state.program_id,
+        Ok(Self {
+                program_id,
             client,
-            events_tx: start_state.tx.clone(),
-            state_manager: start_state.state_manager,
-            telemetry: start_state.telemetry,
-            live_rx: None,
-            live_task: None,
-        };
-
-        Ok(indexer)
+                state_manager,
+                telemetry,
+        })
     }
 
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        match self.rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
-    }
-}
-
-#[async_trait]
-impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
-    const CHAIN: Chain = Chain::Solana;
-    type Block = (u64, SolanaCatchupBlock);
-    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        if let Some(prev) = self.live_task.take() {
-            tracing::info!("aborting previous solana live subscription task");
-            prev.abort();
-        }
-
-        let (live_tx, live_rx) = chain_event_channel();
-        self.live_rx = Some(live_rx);
-
-        let program_id = self.program_id;
-
-        // Oneshot to receive the first observed slot from the live subscription.
-        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
-
-        self.live_task = Some(tokio::spawn(subscribe_and_buffer_live_events(
-            program_id,
-            self.client.clone(),
-            live_tx,
-            anchor_tx,
-            self.telemetry.clone(),
-        )));
-
-        // Wait for the first slot observed on the live feed to use as anchor.
-        Ok(Some(anchor_rx.await?))
-    }
-
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+    /// Catchup items in `[processed + 1, anchor)` fetched in chunks.
+    /// `fetch_slots` failures are propagated so the supervisor can restart.
+    async fn catchup_blocks(
+        &self,
+        anchor_height: u64,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = (u64, SolanaCatchupBlock)> + Send + 'static>>>
+    {
         // Get the last persisted processed block height from backlog
         // TODO: https://github.com/sig-net/mpc/issues/777
         let start_slot = self
@@ -197,20 +109,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return Box::pin(futures_util::stream::empty());
+            return Ok(Box::pin(futures_util::stream::empty()));
         }
 
-        // TODO: should probably propagate the error, but it would require updating the ChainIndexer trait
-        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
-            Ok(slots) => slots,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to fetch slots for catchup, returning empty stream"
-                );
-                return Box::pin(futures_util::stream::empty());
-            }
-        };
+        let slots = self.client.fetch_slots(start_slot, end_slot).await?;
         let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
 
         let client = self.client.clone();
@@ -236,54 +138,86 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             },
         );
 
-        Box::pin(stream)
+        Ok(Box::pin(stream))
     }
 
-    async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
+    async fn process_catchup_item(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        slot: u64,
+        block: &SolanaCatchupBlock,
+    ) -> anyhow::Result<()> {
         match block {
-            SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
+            SolanaCatchupBlock::Block(block) => self.process_block(events_tx, slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.client.get_block(*slot).await?;
-                self.process_block(*slot, &block).await
+                let block = self.client.get_block(slot).await?;
+                self.process_block(events_tx, slot, &block).await
             }
         }
     }
 
-    async fn process_next_block(&mut self) -> bool {
-        let Some(rx) = self.live_rx.as_mut() else {
-            return false;
-        };
-        let Some(event) = rx.recv().await else {
-            return false;
-        };
-        if let Err(err) = self.events_tx.send(event).await {
-            tracing::warn!(?err, "failed to forward live solana event");
-            return false;
+    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
+    /// succeeds or `cancel` fires.
+    async fn process_catchup_retrying(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        slot: u64,
+        block: &SolanaCatchupBlock,
+        cancel: &CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = self.process_catchup_item(events_tx, slot, block) => {
+                    match result {
+                        Ok(()) => return,
+                        Err(err) => {
+                            tracing::warn!(?err, slot, "solana catchup block processing failed; retrying");
+                        }
+                    }
+                }
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Self::RETRY_DELAY) => {}
+            }
         }
-        true
     }
 
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::CatchupCompleted).await?;
-        Ok(())
-    }
-}
-
-impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {
-    fn drop(&mut self) {
-        if let Some(task) = self.live_task.take() {
-            task.abort();
+    /// Live phase: forward events produced by the live subscription until
+    /// `cancel` fires or the producer terminates.
+    async fn forward_live_events(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        live_rx: &mut mpsc::Receiver<ChainEvent>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                event = live_rx.recv() => event,
+            };
+            let Some(event) = event else {
+                anyhow::bail!("solana live event producer terminated");
+            };
+            events_tx
+                .send(event)
+                .await
+                .context("failed to forward live solana event")?;
         }
     }
-}
 
-impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
-    async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
+    async fn process_block(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        height: u64,
+        block: &UiConfirmedBlock,
+    ) -> anyhow::Result<()> {
         // Update indexed block metrics
         self.telemetry.block_indexed(height);
 
         let Some(transactions) = &block.transactions else {
-            self.events_tx.send(ChainEvent::Block(height)).await?;
+            events_tx.send(ChainEvent::Block(height)).await?;
             return Ok(());
         };
 
@@ -300,11 +234,62 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             };
 
             let signature = extract_tx_signature(&tx.transaction)?;
-            emit_events(&self.events_tx, &self.program_id, signature, tx, logs).await?;
+            emit_events(events_tx, &self.program_id, signature, tx, logs).await?;
         }
 
-        self.events_tx.send(ChainEvent::Block(height)).await?;
+        events_tx.send(ChainEvent::Block(height)).await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
+    const CHAIN: Chain = Chain::Solana;
+    type Block = (u64, SolanaCatchupBlock);
+    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
+
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // Start the live subscription first: it buffers events while catchup
+        // runs, and resolves the anchor slot once the WS is live so catchup
+        // covers `[persisted_block, anchor)` with no gaps. The abort-on-drop
+        // guard ties the task's lifetime to this `run()`.
+        let (live_tx, mut live_rx) = chain_event_channel();
+        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
+        let _live_task = AbortOnDrop(tokio::spawn(subscribe_and_buffer_live_events(
+            self.program_id,
+            self.client.clone(),
+            live_tx,
+            anchor_tx,
+            self.telemetry.clone(),
+        )));
+
+        let anchor = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            anchor = anchor_rx => anchor.context("solana live subscription ended before resolving anchor slot")?,
+        };
+
+        let mut catchup_iter = self.catchup_blocks(anchor).await?;
+        loop {
+            let item = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                item = catchup_iter.next() => item,
+            };
+            let Some((slot, block)) = item else { break };
+            self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
+                .await;
+        }
+
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("failed to send catchup completed event")?;
+
+        self.forward_live_events(&events_tx, &mut live_rx, &cancel)
+            .await
     }
 }
 
@@ -451,7 +436,7 @@ impl SolanaSignEvent {
 
 /// Subscribe to the live WS feed, preprocess events into `ChainEvent`s, and buffer them
 /// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
-/// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
+/// via `anchor_tx` so that `run()` can bound catchup with it.
 ///
 /// The anchor is resolved inside `subscribe_to_program_events` immediately after the WS
 /// subscription is established — ensuring the subscription is live before we anchor, so
