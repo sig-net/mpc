@@ -1167,22 +1167,19 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
 
-        let mut indexer = SolanaIndexer {
+        let indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
-            events_tx,
             state_manager,
             telemetry: NoopChainTelemetry,
-            live_rx: None,
-            live_task: None,
         };
 
-        // Initialize livestream (resolves anchor slot via get_slot and starts WS)
+        // Resolve anchor slot 
         let anchor_height = indexer
-            .livestream()
+            .client
+            .get_slot()
             .await
-            .expect("Failed to initialize livestream")
-            .expect("Anchor height missing");
+            .expect("Failed to fetch current slot");
 
         tracing::debug!("Resolved anchor slot: {anchor_height}");
 
@@ -1195,23 +1192,26 @@ mod tests {
             .set_processed_block(Chain::Solana, start_slot.saturating_sub(1))
             .await;
 
-        // Run catchup range
-        let catchup_stream = indexer.catchup_range(anchor_height).await;
-        tokio::pin!(catchup_stream);
-        let mut processed_any = false;
-        while let Some(item) = catchup_stream.next().await {
-            indexer
-                .process_catchup(&item)
-                .await
-                .expect("Failed to process catchup block");
-            processed_any = true;
+        // Start the indexer in a separate task
+        let cancel = CancellationToken::new();
+        let run_handle = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { indexer.run(events_tx, cancel).await }
+        });
+
+        // Drain events until catchup completes
+        loop {
+            match events_rx.recv().await {
+                Some(ChainEvent::CatchupCompleted) => {
+                    tracing::debug!("Solana catchup complete");
+                    break;
+                }
+                Some(event) => tracing::debug!("Received event: {:?}", event),
+                None => break,
+        }
         }
 
-        tracing::debug!("Solana catchup complete. Processed blocks: {processed_any}");
-
-        // Check if any events were received in the channel
-        while let Ok(event) = events_rx.try_recv() {
-            tracing::debug!("Received event: {:?}", event);
-        }
+        cancel.cancel();
+        run_handle.abort();
     }
 }
