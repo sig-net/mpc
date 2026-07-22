@@ -21,7 +21,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::{run_stream, StreamContext};
+use crate::stream::{run_stream, supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
@@ -32,7 +32,7 @@ use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
-use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
+use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
@@ -788,11 +788,11 @@ async fn spawn_indexers(
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumStream::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
-            Ok(eth_stream) => {
-                tracing::info!("ethereum indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    eth_stream,
+        match EthereumIndexer::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
+            Ok(eth_indexer) => {
+                tracing::info!("ethereum indexer created successfully");
+                tokio::spawn(run_supervised(
+                    eth_indexer,
                     StreamContext::new(
                         backlog.clone(),
                         sign_tx.clone(),
@@ -806,7 +806,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create ethereum indexer stream");
+                tracing::error!(?err, "failed to create ethereum indexer");
             }
         }
     }
