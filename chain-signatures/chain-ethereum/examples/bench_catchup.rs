@@ -63,12 +63,17 @@ fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 
 fn make_config() -> anyhow::Result<EthConfig> {
     Ok(EthConfig {
-        account_sk: String::new(),
+        // The bench only indexes; the signer is never used.
+        account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .parse()
+            .unwrap(),
         consensus_rpc_http_url: String::new(),
-        execution_rpc_http_url: opt_env("RPC_URL")?,
+        execution_rpc_http_url: opt_env("RPC_URL")?
+            .parse()
+            .map_err(|e| anyhow!("invalid RPC_URL: {e}"))?,
         contract_address: opt_env("CONTRACT_ADDRESS")?
-            .trim_start_matches("0x")
-            .to_string(),
+            .parse()
+            .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
         network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
         helios_data_path: "/tmp/helios-bench".to_string(),
         refresh_finalized_interval: 1,

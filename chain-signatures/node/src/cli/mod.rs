@@ -282,7 +282,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
+            let chains = ChainConfigs::from_args(eth, sol, hydration, canton)?;
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
 
@@ -469,13 +469,18 @@ struct ChainConfigs {
 }
 
 impl ChainConfigs {
-    fn from_args(eth: EthArgs, sol: SolArgs, hydration: HydrationArgs, canton: CantonArgs) -> Self {
-        Self {
-            eth: eth.into_config(),
+    fn from_args(
+        eth: EthArgs,
+        sol: SolArgs,
+        hydration: HydrationArgs,
+        canton: CantonArgs,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            eth: eth.into_config()?,
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
-        }
+        })
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -545,7 +550,7 @@ fn log_startup(
         git_commit_hash = %crate::metrics::git_commit_hash(),
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_url = %near_client.rpc_addr(),
-        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.as_str()).unwrap_or("None"),
+        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),

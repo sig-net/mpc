@@ -18,7 +18,6 @@ use mpc_primitives::{
     SignId,
 };
 use std::collections::HashSet;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -91,10 +90,7 @@ enum BackfillOutcome {
 impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
-        let contract_address = format!("0x{}", eth.contract_address);
-        let contract_address = Address::from_str(&contract_address).with_context(|| {
-            format!("failed to parse ethereum contract address: {contract_address}")
-        })?;
+        let contract_address = eth.contract_address;
 
         Ok(Self {
             eth,
@@ -1308,7 +1304,7 @@ mod tests {
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
         let indexer = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
             .client_url("http://127.0.0.1:1")
-            .rpc_urls("", "")
+            .rpc_urls("", "http://127.0.0.1:1")
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();

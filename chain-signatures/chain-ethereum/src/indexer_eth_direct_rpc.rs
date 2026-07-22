@@ -21,15 +21,15 @@ pub const MAX_CATCHUP_BLOCKS: u64 = u64::MAX;
 #[derive(Clone)]
 pub struct RpcEthereumClient {
     http: reqwest::Client,
-    url: String,
+    url: reqwest::Url,
     id: Arc<AtomicU64>,
 }
 
 impl RpcEthereumClient {
-    pub fn new(endpoint: &str) -> Self {
+    pub fn new(url: reqwest::Url) -> Self {
         Self {
             http: reqwest::Client::new(),
-            url: endpoint.to_owned(),
+            url,
             id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -242,7 +242,12 @@ impl RpcEthereumClient {
             "params": params,
         });
 
-        let response = self.http.post(&self.url).json(&request).send().await?;
+        let response = self
+            .http
+            .post(self.url.clone())
+            .json(&request)
+            .send()
+            .await?;
         let response = ensure_http_success(response, &format!("rpc {method}")).await?;
         let value: serde_json::Value = response.json().await?;
 
@@ -279,7 +284,12 @@ impl RpcEthereumClient {
         let payload: Vec<serde_json::Value> = requests.into_iter().map(|(_, body)| body).collect();
 
         // Send the batch request and parse the response. The response is expected to be an array of JSON-RPC response objects.
-        let response = self.http.post(&self.url).json(&payload).send().await?;
+        let response = self
+            .http
+            .post(self.url.clone())
+            .json(&payload)
+            .send()
+            .await?;
         let response = ensure_http_success(response, "batch rpc").await?;
         let value: serde_json::Value = response.json().await?;
         let items = if let serde_json::Value::Array(items) = value {
@@ -533,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn get_blocks_keeps_request_order_when_rpc_responses_are_reordered() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let block_ids = vec![
             BlockId::Number(BlockNumberOrTag::Number(7)),
             BlockId::Number(BlockNumberOrTag::Number(8)),
@@ -619,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn get_logs_issues_address_filtered_eth_getlogs_for_number() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let addr = Address::with_last_byte(0x42);
 
         server
@@ -647,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn get_logs_empty_array_maps_to_empty_vec() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let addr = Address::with_last_byte(0x07);
 
         server
@@ -670,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn get_logs_uses_block_hash_filter_for_hash_block_id() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let addr = Address::with_last_byte(0x99);
         let block_hash = B256::with_last_byte(0xab);
 
@@ -697,7 +707,7 @@ mod tests {
     #[tokio::test]
     async fn get_logs_batch_preserves_request_order_when_responses_reordered() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let addr = Address::with_last_byte(0x42);
         let block_ids = vec![
             BlockId::Number(BlockNumberOrTag::Number(10)),
@@ -741,7 +751,7 @@ mod tests {
     #[tokio::test]
     async fn get_transaction_receipt_returns_receipt_for_mined_tx() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let tx_hash = B256::with_last_byte(0x42);
 
         server
@@ -775,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn get_transaction_receipt_returns_none_on_null_result() {
         let mut server = Server::new_async().await;
-        let client = RpcEthereumClient::new(&server.url());
+        let client = RpcEthereumClient::new(server.url().parse().unwrap());
         let tx_hash = B256::with_last_byte(0x07);
 
         server
