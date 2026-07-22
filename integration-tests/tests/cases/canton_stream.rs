@@ -13,6 +13,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
+use mpc_node::rpc::RpcChannel;
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
 use mpc_node::stream::{ChainPipeline, ChainStreaming};
 use mpc_primitives::{
@@ -43,12 +44,12 @@ async fn stream_canton(
     let (cp_tx, cp_rx) = tokio::sync::watch::channel(None);
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
-    let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
+    let (rpc_tx, _rpc_rx) = tokio::sync::mpsc::channel(1);
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
-        sign_tx,
+        RpcChannel { tx: rpc_tx },
         mesh_rx,
         node_client,
         0,

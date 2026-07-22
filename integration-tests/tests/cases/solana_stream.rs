@@ -66,12 +66,12 @@ async fn stream_solana_with_backlog(
     // Start from Recovery so that handle_recovery() calls livestream(), which
     // spawns the live event subscription and initializes the live_rx channel.
     // Starting in Live would skip this initialization and produce no events.
-    let (sign_tx, _sign_rx) = mpsc::channel(1);
+    let (rpc_tx, _rpc_rx) = mpsc::channel(1);
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
-        sign_tx,
+        RpcChannel { tx: rpc_tx },
         mesh_rx,
         node_client,
         0,
@@ -565,6 +565,9 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         }
         RpcAction::VoteCheckpoint { checkpoint, .. } => {
             panic!("unexpected checkpoint vote: {checkpoint:?}");
+        }
+        RpcAction::AbortChain(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
         }
     }
 
