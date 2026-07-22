@@ -153,10 +153,10 @@ impl EthereumTestEnvironment {
 
     fn config(&self, optimistic_requests: bool) -> EthConfig {
         EthConfig {
-            account_sk: self.sandbox.secret_key.clone(),
+            account_sk: self.sandbox.secret_key.parse().unwrap(),
             consensus_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            execution_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            contract_address: format!("{:x}", self.contract_address),
+            execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
+            contract_address: self.contract_address,
             network: "sepolia".to_string(),
             helios_data_path: "/tmp/helios".to_string(),
             refresh_finalized_interval: 500,

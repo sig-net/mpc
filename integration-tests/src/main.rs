@@ -67,10 +67,16 @@ async fn main() -> anyhow::Result<()> {
                 nodes,
                 threshold,
                 eth: Some(EthConfig {
-                    account_sk: eth_account_sk,
+                    account_sk: eth_account_sk
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth account sk: {e}"))?,
                     consensus_rpc_http_url: eth_consensus_rpc_http_url,
-                    execution_rpc_http_url: eth_execution_rpc_http_url,
-                    contract_address: eth_contract_address,
+                    execution_rpc_http_url: eth_execution_rpc_http_url
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth execution rpc url: {e}"))?,
+                    contract_address: eth_contract_address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
                     optimistic_requests: eth_network == "anvil",
                     network: eth_network,
                     helios_data_path: eth_helios_data_path,

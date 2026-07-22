@@ -950,13 +950,10 @@ pub struct EthSignAction<'a> {
 impl<'a> EthSignAction<'a> {
     pub fn new(sign_action: SignAction<'a>) -> Self {
         let eth = sign_action.nodes.cfg.eth.as_ref().unwrap().clone();
-        let signer = PrivateKeySigner::from_str(eth.account_sk.as_ref())
-            .with_context(|| "invalid private key")
-            .unwrap();
         Self {
             sign_action,
-            contract_addr: eth.contract_address.clone(),
-            signer,
+            contract_addr: format!("{:x}", eth.contract_address),
+            signer: eth.account_sk,
             deposit_amount: U256::from(1), // 1 wei
             algo: "ECDSA".to_string(),
             dest: "ethereum".to_string(),
