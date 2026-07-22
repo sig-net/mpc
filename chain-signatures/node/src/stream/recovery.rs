@@ -48,9 +48,15 @@ pub(crate) async fn recover_backlog(
         }
     }
 
+    // A recovery without local loading is triggered by a regression or watchdog
+    // restart. Abort stale RPC work before alignment so failed peer lookup or
+    // backlog recovery cannot leave retries running indefinitely.
+    if !load_local {
+        rpc.abort_chain(chain).await;
+    }
+
     // Returns None when no alignment is needed (the normal case); Some(height) when
-    // the backlog was regressed. On regression, abort all in-flight RPC tasks for
-    // this chain so stale publishes and checkpoint votes are cancelled.
+    // the backlog was regressed.
     if consensus::align_backlog_with_consensus(
         chain,
         backlog,
@@ -62,7 +68,6 @@ pub(crate) async fn recover_backlog(
     .await
     .is_some()
     {
-        tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting RPC tasks");
-        rpc.abort_chain(chain).await;
+        tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
 }
