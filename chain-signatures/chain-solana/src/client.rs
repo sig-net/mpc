@@ -231,6 +231,7 @@ impl SolanaClient {
         )
     }
 
+    // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
         retry_rpc!(

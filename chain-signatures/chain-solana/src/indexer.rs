@@ -112,7 +112,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
 
-        // TODO: double-check if we should propagate or keep as is
+        // TODO: The error should be propagated, otherwise an empty stream is returned,
+        // catchup finishes without processing missing blocks and ChainEvent::CatchupCompleted is emitted.
+        // Let supervisor restart on error.
         let slots = match self.client.fetch_slots(start_slot, end_slot).await {
             Ok(slots) => slots,
             Err(err) => {
@@ -267,6 +269,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         // runs, and resolves the anchor slot once the WS is live so catchup
         // covers `[persisted_block, anchor)` with no gaps. The abort-on-drop
         // guard ties the task's lifetime to this `run()`.
+        
+        // TODO: live channel is bounded, if catchup takes too long live 
+        // channel will fill up and block subscription task, websocket connection will be closed.
+        // Consider better solution.
         let (live_tx, mut live_rx) = chain_event_channel();
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
         let _live_task = AbortOnDrop(tokio::spawn(subscribe_and_buffer_live_events(
@@ -480,6 +486,8 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     }
 }
 
+// TODO: move this to an events.rs file
+// TODO: enhance to handle malformed events and prevent panic
 fn parse_cpi_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
@@ -593,6 +601,8 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     // with no gaps. We do not wait for the first WS event because that could deadlock if
     // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
     if let Some(anchor_tx) = anchor_tx.take() {
+        // TODO: this should probably use client.get_slot with retry strategy,
+        // otherwise if RPC fails the anchor will not be sent and catchup will not run
         match client
             .rpc_client
             .get_slot_with_commitment(CommitmentConfig::confirmed())
@@ -629,6 +639,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     let program_invoke_log = format!("Program {program_id} invoke [");
 
     loop {
+        // TODO: this might introduce CPU overhead if the WS is busy, consider a more efficient alternative
         cleanup_seen_cache(&mut seen, ttl);
         tokio::select! {
             // Receive WS logs
@@ -746,6 +757,8 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
     logs.iter().any(|l| l.starts_with(start_with))
 }
 
+// TODO: move this to an events.rs file
+// TODO: enhance to handle malformed events and prevent panic
 fn parse_cpi_respond_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
@@ -850,6 +863,7 @@ fn parse_cpi_respond_events(
     Ok((respond_bidirectional_events, signature_responded_events))
 }
 
+// TODO: move this to an events.rs file
 enum SolanaEvents {
     Sign(Vec<SolanaSignEvent>),
     Respond {
