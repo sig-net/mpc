@@ -112,19 +112,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
 
-        // TODO: The error should be propagated, otherwise an empty stream is returned,
-        // catchup finishes without processing missing blocks and ChainEvent::CatchupCompleted is emitted.
-        // Let supervisor restart on error.
-        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
-            Ok(slots) => slots,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to fetch slots for catchup, returning empty stream"
-                );
-                return Ok(Box::pin(futures_util::stream::empty()));
-            }
-        };
+        // The error should be propagated, to let supervisor restart on error, otherwise
+        // an empty stream is returned and catchup finishes without processing missing blocks.
+        let slots = self.client.fetch_slots(start_slot, end_slot).await?;
         let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
 
         let client = self.client.clone();
