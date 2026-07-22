@@ -85,10 +85,10 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         );
 
         Ok(Self {
-                program_id,
+            program_id,
             client,
-                state_manager,
-                telemetry,
+            state_manager,
+            telemetry,
         })
     }
 
@@ -259,8 +259,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         // runs, and resolves the anchor slot once the WS is live so catchup
         // covers `[persisted_block, anchor)` with no gaps. The abort-on-drop
         // guard ties the task's lifetime to this `run()`.
-        
-        // TODO: live channel is bounded, if catchup takes too long live 
+
+        // TODO: live channel is bounded, if catchup takes too long live
         // channel will fill up and block subscription task, websocket connection will be closed.
         // Consider better solution.
         let (live_tx, mut live_rx) = chain_event_channel();
@@ -1009,6 +1009,65 @@ mod tests {
         TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
     };
 
+    /// Create a test indexer with a mock state manager and a given RPC URL.
+    fn test_indexer(
+        url: &str,
+        state_manager: MockStateManager,
+    ) -> SolanaIndexer<MockStateManager, NoopChainTelemetry> {
+        let program_id = Pubkey::new_unique();
+        let client = SolanaClient::for_indexer(
+            url.to_string(),
+            url.replace("http", "ws"),
+            program_id,
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .with_fast_retry();
+        SolanaIndexer {
+            program_id,
+            client,
+            state_manager,
+            telemetry: NoopChainTelemetry,
+        }
+    }
+
+    /// Create a mock signature entry for testing, with a given slot.
+    fn signature_entry(slot: u64) -> serde_json::Value {
+        serde_json::json!({
+            "signature": Signature::new_unique().to_string(),
+            "slot": slot,
+            "err": null,
+            "memo": null,
+            "blockTime": null,
+            "confirmationStatus": "confirmed"
+        })
+    }
+
+    /// Create a mock JSON-RPC response for a list of signature entries.
+    fn signatures_response(entries: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": entries
+        })
+        .to_string()
+    }
+
+    /// Create a mock JSON-RPC response for a block at a given slot.
+    fn block_response(id: usize, slot: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "result": {
+                "blockHeight": slot,
+                "blockTime": null,
+                "blockhash": "11111111111111111111111111111111",
+                "parentSlot": slot.saturating_sub(1),
+                "previousBlockhash": "11111111111111111111111111111111",
+                "transactions": [],
+                "rewards": []
+            }
+        })
+    }
+
     #[test]
     fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
@@ -1141,6 +1200,148 @@ mod tests {
         assert!(meta.err.is_some(), "expected err to be set");
     }
 
+    #[tokio::test]
+    async fn catchup_blocks_empty_when_up_to_date() {
+        let server = mockito::Server::new_async().await;
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        const ANCHOR_SLOT: u64 = 10;
+
+        // No processed block persisted: start == anchor, so no catchup and no RPC calls.
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn catchup_blocks_propagates_fetch_slots_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(3) // 1 attempt + 2 retries (fast retry config)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        let result = indexer.catchup_blocks(10).await;
+        assert!(result.is_err(), "fetch_slots error should propagate");
+    }
+
+    #[tokio::test]
+    async fn catchup_processes_slots_in_order() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Signatures walk back from the anchor: slots 9..=6 are in range,
+        // slot 5 (< start_slot 6) terminates the walk.
+        let entries: Vec<_> = [9, 8, 7, 6, 5].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([
+            block_response(0, 6),
+            block_response(1, 7),
+            block_response(2, 8),
+            block_response(3, 9),
+        ])
+        .to_string();
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let mut stream = indexer.catchup_blocks(10).await.unwrap();
+        while let Some((slot, block)) = stream.next().await {
+            indexer
+                .process_catchup_retrying(&events_tx, slot, &block, &cancel)
+                .await;
+        }
+
+        // Verify that the events were emitted in order
+        for expected in 6..=9 {
+            let event = events_rx.recv().await.unwrap();
+            assert!(
+                matches!(event, ChainEvent::Block(slot) if slot == expected),
+                "expected Block({expected}), got {event:?}"
+            );
+        }
+    }
+
+    // TODO: do we need live event channel?
+    #[tokio::test]
+    async fn forward_live_events_forwards_until_cancel() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let (live_tx, mut live_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        live_tx.send(ChainEvent::Block(42)).await.unwrap();
+
+        let mut forward = Box::pin(indexer.forward_live_events(&events_tx, &mut live_rx, &cancel));
+        tokio::select! {
+            result = &mut forward => panic!("forwarding ended early: {result:?}"),
+            event = events_rx.recv() => {
+                assert!(matches!(event, Some(ChainEvent::Block(42))));
+            }
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), &mut forward)
+            .await
+            .expect("forwarding should stop promptly on cancel")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forward_live_events_bails_when_producer_drops() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+        let (live_tx, mut live_rx) = mpsc::channel::<ChainEvent>(16);
+        drop(live_tx);
+
+        let result = indexer
+            .forward_live_events(&events_tx, &mut live_rx, &CancellationToken::new())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_catchup_retrying_stops_on_cancel() {
+        // No mock: any RPC attempt fails after fast retries; cancel must
+        // interrupt the retry loop without waiting for it.
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_catchup_retrying(&events_tx, 7, &SolanaCatchupBlock::Missing, &cancel),
+        )
+        .await
+        .expect("process_catchup_retrying should stop promptly on cancel");
+    }
+
     // Very expensive test in terms of RPC usage.
     #[tokio::test]
     #[ignore]
@@ -1178,7 +1379,7 @@ mod tests {
             telemetry: NoopChainTelemetry,
         };
 
-        // Resolve anchor slot 
+        // Resolve anchor slot
         let anchor_height = indexer
             .client
             .get_slot()
@@ -1212,7 +1413,7 @@ mod tests {
                 }
                 Some(event) => tracing::debug!("Received event: {:?}", event),
                 None => break,
-        }
+            }
         }
 
         cancel.cancel();
