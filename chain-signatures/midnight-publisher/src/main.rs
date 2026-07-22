@@ -5,6 +5,7 @@
 //! requests here; this service drives the toolkit CLI (contract-state →
 //! generate-intent → send-intent) exactly like the Phase-3 driver scripts.
 
+mod block;
 mod service;
 mod state;
 

@@ -28,6 +28,15 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
+# Block fetch (Step 1 of GET /block): drive the toolkit's fetcher lib in-process
+# to unwrap a finalized block's extrinsics down to ledger `Transaction` bytes.
+# `subxt` only names the block-hash type (`subxt::utils::H256`) that
+# `fetch_single_block` takes; `tokio` runs that async fetch from the sync
+# tiny_http handler. Both crates are already in the lockfile transitively via
+# midnight-node-toolkit; default-features = false keeps these edges from adding
+# any new features.
+subxt = { version = "0.50", default-features = false }
+tokio = { version = "1", default-features = false }
 
 [patch.crates-io]
 # Replicated from midnight-node @ node-2.0.0-rc.4 (patches don't propagate transitively).

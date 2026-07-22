@@ -480,6 +480,58 @@ fn handle_state(cfg: &Config, url: &str) -> (u16, String) {
     }
 }
 
+// ---- GET /block: finalized-block decode ----------------------------------
+
+/// Fetch a finalized block by hash and decode it into notify inserts plus
+/// cross-contract-call provenance. Step 1 (extrinsics → ledger `Transaction`
+/// bytes) is metadata-aware SCALE decoding, so it drives the toolkit's fetcher
+/// lib in-process (not the curl RPC path `/state` uses); Steps 2–3 (`block.rs`)
+/// then decode each transaction the same way `state.rs` decodes STATE.
+fn fetch_block_response(cfg: &Config, hash_hex: &str) -> anyhow::Result<String> {
+    use midnight_node_toolkit::client::MidnightNodeClient;
+    use midnight_node_toolkit::fetcher::{fetch_single_block, fetch_storage::InMemory};
+    use subxt::utils::H256;
+
+    let hash_bytes = hex::decode(hash_hex).context("decoding block hash")?;
+    anyhow::ensure!(hash_bytes.len() == 32, "block hash must be 32 bytes");
+    let block_hash = H256::from_slice(&hash_bytes);
+
+    // The toolkit fetcher is async; drive it from this sync handler on a
+    // throwaway single-threaded runtime (one block fetch per request).
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for block fetch")?;
+
+    let raw = runtime.block_on(async {
+        let client = MidnightNodeClient::new(&cfg.node_url, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("connect to node {}: {e}", cfg.node_url))?;
+        // chain_id and block_number are only cache keys for this per-request,
+        // discarded InMemory store; the block itself is fetched purely by hash.
+        fetch_single_block(H256::zero(), 0, block_hash, Some(&client), &InMemory::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("fetch block 0x{hash_hex}: {e}"))
+    })?;
+
+    let response = crate::block::decode_block(&raw.transactions)?;
+    Ok(serde_json::to_string(&response)?)
+}
+
+/// `GET /block?hash=<0xhash>` → 200 `{calls}` / 400 bad hash / 502 fetch or
+/// decode failure.
+fn handle_block(cfg: &Config, url: &str) -> (u16, String) {
+    let hash = match query_param(url, "hash") {
+        Some(h) if h.starts_with("0x") && is_hex(&h[2..], 32) => &h[2..],
+        Some(_) => return (400, "hash must be `0x` followed by 64 lowercase hex".into()),
+        None => return (400, "missing `hash` query param".into()),
+    };
+    match fetch_block_response(cfg, hash) {
+        Ok(body) => (200, body),
+        Err(e) => (502, format!("{e:#}")),
+    }
+}
+
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
     let server = tiny_http::Server::http((cfg.bind_host.as_str(), cfg.port))
         .map_err(|e| anyhow::anyhow!("bind {}:{}: {e}", cfg.bind_host, cfg.port))?;
@@ -502,6 +554,10 @@ pub fn serve(cfg: Config) -> anyhow::Result<()> {
             ("GET", "/health") => respond(request, 200, "ok".into()),
             ("GET", "/state") => {
                 let (code, body) = handle_state(&cfg, &url);
+                respond(request, code, body);
+            }
+            ("GET", "/block") => {
+                let (code, body) = handle_block(&cfg, &url);
                 respond(request, code, body);
             }
             ("POST", "/respond") => {
@@ -766,6 +822,30 @@ mod tests {
             400,
             "uppercase hex rejected"
         );
+    }
+
+    #[test]
+    fn block_rejects_bad_hash() {
+        // Hash validation happens before any fetch, so no node is contacted.
+        let cfg = state_config(PathBuf::from("/bin/false"));
+        assert_eq!(handle_block(&cfg, "/block").0, 400, "missing hash");
+        assert_eq!(
+            handle_block(&cfg, "/block?hash=abc").0,
+            400,
+            "missing 0x prefix"
+        );
+        assert_eq!(
+            handle_block(&cfg, &format!("/block?hash=0x{}", "ab".repeat(31))).0,
+            400,
+            "too short (62 hex)"
+        );
+        assert_eq!(
+            handle_block(&cfg, &format!("/block?hash=0x{}", "AB".repeat(32))).0,
+            400,
+            "uppercase hex rejected"
+        );
+        // A well-formed hash would proceed to the node fetch, which needs a live
+        // node, so it is exercised only in integration, not here.
     }
 
     #[test]

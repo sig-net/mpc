@@ -4809,7 +4809,9 @@ dependencies = [
  "midnight-node-toolkit",
  "serde",
  "serde_json",
+ "subxt",
  "tiny_http",
+ "tokio",
 ]
 
 [[package]]

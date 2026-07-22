@@ -43,11 +43,11 @@ pub fn decode_contract_state(raw: &[u8]) -> anyhow::Result<Node> {
 /// The field-aligned atoms of a cell/key value, hex-encoded. Each atom is stored
 /// trailing-zero-trimmed by the runtime; we pass that through untouched (empty
 /// string means zero/default) — the consumer re-pads to the declared width.
-fn value_atoms(av: &AlignedValue) -> Vec<String> {
+pub(crate) fn value_atoms(av: &AlignedValue) -> Vec<String> {
     av.value.0.iter().map(|atom| hex::encode(&atom.0)).collect()
 }
 
-fn walk(sv: &StateValue<DefaultDB>) -> anyhow::Result<Node> {
+pub(crate) fn walk(sv: &StateValue<DefaultDB>) -> anyhow::Result<Node> {
     match sv {
         StateValue::Null => Ok(Node::Null),
         StateValue::Cell(av) => Ok(Node::Cell {
