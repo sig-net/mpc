@@ -86,7 +86,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         indexer,
         ctx.checkpoints_rx.clone(),
         ctx.backlog.clone(),
-        ctx.sign_tx.clone(),
+        ctx.rpc.clone(),
         ctx.mesh_state.clone(),
         ctx.node_client.clone(),
         threshold,

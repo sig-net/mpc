@@ -27,6 +27,7 @@ use near_account_id::AccountId;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
@@ -41,6 +42,7 @@ const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so 
 pub enum RpcAction {
     Publish(PublishAction),
     VoteCheckpoint(ConsensusCheckpointDigest),
+    AbortChain(Chain),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,12 @@ impl RpcChannel {
                 tracing::error!(%err, ?checkpoint, "failed to send checkpoint vote");
             }
         });
+    }
+
+    pub async fn abort_chain(&self, chain: Chain) {
+        if let Err(err) = self.tx.send(RpcAction::AbortChain(chain)).await {
+            tracing::error!(%err, ?chain, "failed to send RPC chain abort");
+        }
     }
 
     pub fn publish(
@@ -391,6 +399,8 @@ impl RpcExecutor {
         near: Option<NearGovernanceClient>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
+        let mut cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
+
         loop {
             let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -407,8 +417,15 @@ impl RpcExecutor {
                     };
 
                     let publisher = publisher.clone();
+                    let sign_id = action.request.id;
+                    let cancellation = cancellation_tokens.entry(chain).or_default().clone();
                     tokio::spawn(async move {
-                        execute_publish(publisher, action).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                tracing::info!(?chain, ?sign_id, "cancelled RPC publish");
+                            }
+                            _ = execute_publish(publisher, action) => {}
+                        }
                     });
                 }
                 RpcAction::VoteCheckpoint(checkpoint) => {
@@ -417,9 +434,21 @@ impl RpcExecutor {
                         continue;
                     };
 
+                    let chain = checkpoint.chain;
+                    let cancellation = cancellation_tokens.entry(chain).or_default().clone();
                     tokio::spawn(async move {
-                        execute_vote_checkpoint(near, checkpoint).await;
+                        tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                tracing::info!(?chain, ?checkpoint, "cancelled checkpoint vote");
+                            }
+                            _ = execute_vote_checkpoint(near, checkpoint) => {}
+                        }
                     });
+                }
+                RpcAction::AbortChain(chain) => {
+                    cancellation_tokens.entry(chain).or_default().cancel();
+                    cancellation_tokens.insert(chain, CancellationToken::new());
+                    tracing::info!(?chain, "cancelled RPC tasks for chain");
                 }
             }
         }
@@ -612,6 +641,18 @@ mod tests {
     #[async_trait::async_trait]
     impl ChainPublisher for FailingPublisher {
         async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            anyhow::bail!("publisher failed")
+        }
+    }
+
+    struct CountingFailingPublisher {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for CountingFailingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("publisher failed")
         }
     }
@@ -839,5 +880,47 @@ mod tests {
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
         assert_eq!(sol_count.load(Ordering::SeqCst), SOL_ACTION_COUNT);
+    }
+
+    #[tokio::test]
+    async fn executor_aborts_publish_on_chain_abort() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingFailingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let dispatch = tokio::spawn(async move {
+            RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        });
+
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while call_count.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("publish task should start");
+
+        tx.send(RpcAction::AbortChain(Chain::Ethereum))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        drop(tx);
+        dispatch.await.unwrap();
     }
 }

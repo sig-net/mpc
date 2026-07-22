@@ -1,16 +1,17 @@
 use crate::backlog::{consensus, Backlog};
 use crate::mesh::{self, MeshState};
 use crate::node_client::NodeClient;
+use crate::rpc::RpcChannel;
 use crate::types::CheckpointWatcher;
 
-use mpc_primitives::{Chain, SignCommand};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 /// Node-side checkpoint recovery:
 /// waits for an active mesh, optionally loads the latest local checkpoint into the
 /// backlog, then aligns the backlog with the consensus checkpoint feed, aborting
-/// in-flight signature tasks for this chain if a regression occurred.
+/// in-flight RPC tasks for this chain if a regression occurred.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     chain: Chain,
@@ -19,7 +20,7 @@ pub(crate) async fn recover_backlog(
     checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
-    sign_tx: &mpsc::Sender<SignCommand>,
+    rpc: &RpcChannel,
     threshold: usize,
     my_account_id: &AccountId,
 ) {
@@ -48,9 +49,8 @@ pub(crate) async fn recover_backlog(
     }
 
     // Returns None when no alignment is needed (the normal case); Some(height) when
-    // the backlog was regressed. On regression, abort all in-flight signature tasks
-    // for this chain so stale tasks don't complete and publish abandoned
-    // signatures/checkpoints.
+    // the backlog was regressed. On regression, abort all in-flight RPC tasks for
+    // this chain so stale publishes and checkpoint votes are cancelled.
     if consensus::align_backlog_with_consensus(
         chain,
         backlog,
@@ -62,7 +62,7 @@ pub(crate) async fn recover_backlog(
     .await
     .is_some()
     {
-        tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting in-flight tasks");
-        let _ = sign_tx.send(SignCommand::AbortChain(chain)).await;
+        tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting RPC tasks");
+        rpc.abort_chain(chain).await;
     }
 }

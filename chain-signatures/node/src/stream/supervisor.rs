@@ -54,7 +54,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &mut ctx.checkpoints_rx,
             &mut ctx.mesh_state,
             &ctx.node_client,
-            &ctx.sign_tx,
+            &ctx.rpc,
             threshold,
             &my_account_id,
         )

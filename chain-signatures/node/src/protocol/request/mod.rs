@@ -82,8 +82,6 @@ pub struct SignatureSpawner {
     posit_inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
     /// Watchers that increment the delayed metric when response time exceeds expected.
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
-    /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
-    task_chains: HashMap<SignId, Chain>,
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan inboxes.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
@@ -112,7 +110,6 @@ impl SignatureSpawner {
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.dead_ids.pop(&sign_id);
-        self.task_chains.insert(sign_id, request.chain);
         tracing::info!(?sign_id, "spawning signature task");
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
@@ -277,7 +274,6 @@ impl SignatureSpawner {
     /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
     fn retire_task(&mut self, sign_id: SignId, reason: &str) {
         self.mark_dead(sign_id);
-        self.task_chains.remove(&sign_id);
         if let Some(inbox) = self.posit_inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
@@ -315,22 +311,6 @@ impl SignatureSpawner {
                 );
 
                 self.spawn_task(governance, request, cfg.clone());
-            }
-            SignCommand::AbortChain(chain) => {
-                tracing::warn!(
-                    ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
-                );
-                let to_abort: Vec<SignId> = self
-                    .task_chains
-                    .iter()
-                    .filter(|(_, c)| **c == chain)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for sign_id in to_abort {
-                    self.retire_task(sign_id, "chain aborted");
-                    self.tasks.abort(sign_id);
-                }
             }
         }
 
@@ -394,10 +374,6 @@ impl SignatureSpawner {
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
         self.tasks.contains_key(&sign_id)
     }
-
-    fn test_task_chains_contains(&self, sign_id: &SignId) -> bool {
-        self.task_chains.contains_key(sign_id)
-    }
 }
 
 impl Drop for SignatureSpawner {
@@ -429,7 +405,6 @@ impl SignatureSpawnerTask {
             tasks: JoinMap::new(),
             posit_inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
-            task_chains: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
             mesh_state,
@@ -474,7 +449,7 @@ mod tests {
     use deadpool_redis::Runtime;
 
     #[tokio::test]
-    async fn test_abort_chain_dead_ids_lifecycle() {
+    async fn test_completion_dead_ids_lifecycle() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -508,7 +483,6 @@ mod tests {
             tasks: JoinMap::new(),
             posit_inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
-            task_chains: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state: mesh_rx,
             limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
@@ -529,18 +503,16 @@ mod tests {
         };
         let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
 
-        // Step 1: Spawn → inbox created, task_chains populated, not dead
+        // Step 1: Spawn → inbox created, not dead
         spawner.spawn_task(&governance, request.clone(), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_inboxes_contains(&sign_id));
-        assert!(spawner.test_task_chains_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
-        spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
+        // Step 2: Completion → inbox removed and marked dead
+        spawner.handle_sign(&governance, SignCommand::Completion(sign_id), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_posit_inboxes_contains(&sign_id));
-        assert!(!spawner.test_task_chains_contains(&sign_id));
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
         // Step 3: Late posit → dropped (dead_id check), inbox NOT recreated
@@ -554,7 +526,7 @@ mod tests {
         );
         assert!(!spawner.test_posit_inboxes_contains(&sign_id));
 
-        // Step 4: Re-spawn → dead cleared, task_chains repopulated
+        // Step 4: Re-spawn → dead cleared
         spawner.spawn_task(&governance, request, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));

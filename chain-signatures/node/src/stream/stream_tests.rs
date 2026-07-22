@@ -244,13 +244,12 @@ async fn test_run_linearized_source_orders_catchup_before_live() {
     indexer.livestream().await.unwrap();
     let (_cp_tx, cp_rx) = watch::channel(None);
     let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (_sign_tx, _sign_rx) = mpsc::channel(1);
     let (pipeline, _state_rx) = ChainPipeline::from_state(
         ChainStreaming::Catchup { anchor_height: 4 },
         indexer,
         cp_rx,
         Backlog::new(),
-        _sign_tx,
+        test_rpc_channel(1).0,
         m_rx,
         NodeClient::new(&Default::default()),
         0,
@@ -285,13 +284,12 @@ async fn test_run_linearized_source_retries_without_reordering() {
     indexer.livestream().await.unwrap();
     let (_cp_tx, cp_rx) = watch::channel(None);
     let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (_stx, _srx) = mpsc::channel(1);
     let (pipeline, _state_rx) = ChainPipeline::from_state(
         ChainStreaming::Catchup { anchor_height: 4 },
         indexer,
         cp_rx,
         Backlog::new(),
-        _stx,
+        test_rpc_channel(1).0,
         m_rx,
         NodeClient::new(&Default::default()),
         0,
@@ -857,6 +855,9 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         RpcAction::VoteCheckpoint(checkpoint) => {
             panic!("unexpected checkpoint vote: {checkpoint:?}");
         }
+        RpcAction::AbortChain(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
+        }
     }
 
     run_handle.abort();
@@ -984,7 +985,6 @@ async fn test_recovery_transitions_to_catchup() {
     }));
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
-    let (_stx, _srx) = mpsc::channel(1);
     let (catchup_tx, catchup_rx) = oneshot::channel();
     let indexer = MockCatchupIndexer {
         catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
@@ -994,7 +994,7 @@ async fn test_recovery_transitions_to_catchup() {
         indexer,
         cp_rx,
         backlog,
-        _stx,
+        test_rpc_channel(1).0,
         mesh_rx,
         NodeClient::new(&Default::default()),
         0,
@@ -1061,7 +1061,6 @@ async fn test_runtime_regression_triggers_recovery() {
     let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest { height: 10, digest }));
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (next_called_tx, next_called_rx) = oneshot::channel();
-    let (_stx, _srx) = mpsc::channel(1);
     let indexer = MockLiveIndexer {
         next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
     };
@@ -1071,7 +1070,7 @@ async fn test_runtime_regression_triggers_recovery() {
         indexer,
         cp_rx,
         backlog,
-        _stx,
+        test_rpc_channel(1).0,
         mesh_rx,
         NodeClient::new(&Default::default()),
         1,
@@ -1143,13 +1142,11 @@ async fn test_regression_triggers_full_recovery_cycle() {
     }));
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let indexer = E2EIndexer;
-    let (sign_tx, _sign_rx) = mpsc::channel(1);
-
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
-        sign_tx,
+        test_rpc_channel(1).0,
         mesh_rx,
         NodeClient::new(&Default::default()),
         0,

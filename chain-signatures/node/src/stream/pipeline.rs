@@ -3,13 +3,14 @@ use super::ChainStreaming;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
+use crate::rpc::RpcChannel;
 use crate::types::CheckpointWatcher;
 
 use futures_util::StreamExt;
 use mpc_chain_integration_core::ChainIndexer;
-use mpc_primitives::{Chain, SignCommand};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::Duration;
 
 /// Per-chain watchdog timeout. Chains whose `process_next_block` synchronously
@@ -37,7 +38,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     state_rx: watch::Receiver<ChainStreaming>,
     checkpoints_rx: CheckpointWatcher,
     backlog: Backlog,
-    sign_tx: mpsc::Sender<SignCommand>,
+    rpc: RpcChannel,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
@@ -52,7 +53,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<SignCommand>,
+        rpc: RpcChannel,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -63,7 +64,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             indexer,
             checkpoints_rx,
             backlog,
-            sign_tx,
+            rpc,
             mesh_state,
             node_client,
             threshold,
@@ -77,7 +78,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<SignCommand>,
+        rpc: RpcChannel,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -90,7 +91,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             state_rx: state_rx.clone(),
             backlog,
             checkpoints_rx,
-            sign_tx,
+            rpc,
             mesh_state,
             node_client,
             threshold,
@@ -172,7 +173,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             &mut self.checkpoints_rx,
             &mut self.mesh_state,
             &self.node_client,
-            &self.sign_tx,
+            &self.rpc,
             self.threshold,
             &self.my_account_id,
         )
@@ -371,6 +372,7 @@ async fn detect_regression(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use crate::stream::test_utils::test_rpc_channel;
     use async_trait::async_trait;
     use mpc_primitives::CheckpointDigest;
     use std::time::Duration;
@@ -582,14 +584,12 @@ mod tests {
         let backlog = Backlog::new();
         let (_cp_tx, cp_rx) = watch::channel(None);
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (_stx, _srx) = mpsc::channel(1);
-
         let (mut pipeline, _state_rx) = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 10 },
             HungCatchupIndexer,
             cp_rx,
             backlog,
-            _stx,
+            test_rpc_channel(1).0,
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,
@@ -649,14 +649,12 @@ mod tests {
         // No consensus checkpoint changes => `wait_detected_regression` blocks.
         let (_cp_tx, cp_rx) = watch::channel(None);
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (_stx, _srx) = mpsc::channel(1);
-
         let (mut pipeline, _state_rx) = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 10 },
             EmptyCatchupIndexer,
             cp_rx,
             backlog,
-            _stx,
+            test_rpc_channel(1).0,
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,

@@ -14,7 +14,6 @@ pub enum SignKind {
 pub enum SignCommand {
     Request(IndexedSignRequest),
     Completion(SignId),
-    AbortChain(Chain),
 }
 
 /// All relevant info pertaining to an indexed sign request.
