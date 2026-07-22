@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use mpc_chain_ethereum::EthConfig;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -119,7 +120,7 @@ impl EthArgs {
         args
     }
 
-    pub fn into_config(self) -> Option<EthConfig> {
+    pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
         #[cfg(not(feature = "helios"))]
         if self.eth_light_client {
             tracing::warn!(
@@ -134,11 +135,30 @@ impl EthArgs {
                  reorg-safe; this flag is intended for dev/demo use only"
             );
         }
-        Some(EthConfig {
-            account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
+
+        let Some(account_sk) = self.eth_account_sk else {
+            return Ok(None);
+        };
+        let account_sk = account_sk
+            .expose_secret()
+            .parse()
+            .context("invalid eth account sk")?;
+        let execution_rpc_http_url = self
+            .eth_execution_rpc_http_url
+            .context("eth execution rpc http url is required")?
+            .parse()
+            .context("invalid eth execution rpc http url")?;
+        let contract_address = self
+            .eth_contract_address
+            .context("eth contract address is required")?
+            .parse()
+            .context("invalid eth contract address")?;
+
+        Ok(Some(EthConfig {
+            account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
-            execution_rpc_http_url: self.eth_execution_rpc_http_url?,
-            contract_address: self.eth_contract_address?,
+            execution_rpc_http_url,
+            contract_address,
             optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
             network,
             helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
@@ -153,16 +173,18 @@ impl EthArgs {
             gas: Default::default(),
             publisher: Default::default(),
             indexer: Default::default(),
-        })
+        }))
     }
 
     pub fn from_config(config: Option<EthConfig>) -> Self {
         match config {
-            Some(config) if !config.account_sk.is_empty() => Self {
-                eth_account_sk: Some(config.account_sk.into()),
+            Some(config) => Self {
+                eth_account_sk: Some(
+                    format!("{:x}", config.account_sk.credential().to_bytes()).into(),
+                ),
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
-                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
-                eth_contract_address: Some(config.contract_address),
+                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
+                eth_contract_address: Some(format!("{:x}", config.contract_address)),
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: config.refresh_finalized_interval,
