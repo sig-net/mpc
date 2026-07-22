@@ -14,7 +14,7 @@ pub struct EthArgs {
         requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
     pub eth_account_sk: Option<SecretString>,
-    /// The contract address to watch without the `0x` prefix
+    /// The contract address to watch, with or without the `0x` prefix
     #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
 
@@ -179,12 +179,10 @@ impl EthArgs {
     pub fn from_config(config: Option<EthConfig>) -> Self {
         match config {
             Some(config) => Self {
-                eth_account_sk: Some(
-                    format!("{:x}", config.account_sk.credential().to_bytes()).into(),
-                ),
+                eth_account_sk: Some(hex::encode(config.account_sk.credential().to_bytes()).into()),
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
-                eth_contract_address: Some(format!("{:x}", config.contract_address)),
+                eth_contract_address: Some(config.contract_address.to_string()),
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: config.refresh_finalized_interval,
