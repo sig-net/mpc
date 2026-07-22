@@ -554,13 +554,6 @@ impl ChainPublisher for SolanaClient {
                     "published respond bidirectional solana signature successfully"
                 );
             }
-            SignKind::Checkpoint(_) => {
-                tracing::error!(
-                    ?sign_id,
-                    "Solana publish signature: checkpoint signature publishing not supported on Solana"
-                );
-                anyhow::bail!("checkpoint publishing not supported on Solana")
-            }
         }
 
         self.telemetry.record_publish_metrics(action);

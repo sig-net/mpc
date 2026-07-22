@@ -20,7 +20,7 @@ use crate::util::{JoinMap, TimeoutBudget};
 use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{IndexedSignRequest, SignCommand, SignId, SignKind};
+use mpc_primitives::{IndexedSignRequest, SignCommand, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -123,10 +123,7 @@ impl SignatureSpawner {
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         let is_proposer = Arc::new(AtomicBool::new(false));
-        // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0)
-            && !matches!(request.kind, SignKind::Checkpoint(_))
-        {
+        if remaining_time > Duration::from_secs(0) {
             let is_proposer = Arc::clone(&is_proposer);
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
@@ -298,7 +295,7 @@ impl SignatureSpawner {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
+            SignCommand::Request(request) => {
                 let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.

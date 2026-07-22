@@ -8,8 +8,9 @@ use crate::sign_bidirectional::SignStatus;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
-    make_test_stream_context_with_generator_pk, respond_event, test_bidirectional_tx,
-    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
+    make_test_stream_context_with_generator_pk, make_test_stream_context_with_rpc, respond_event,
+    test_bidirectional_tx, test_canton_sign_bidirectional_request, test_indexed_request,
+    test_sign_args,
 };
 use crate::util::current_unix_timestamp;
 
@@ -1138,4 +1139,39 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );
+}
+
+#[tokio::test]
+async fn live_block_votes_for_checkpoint() {
+    let chain = Chain::Ethereum;
+    let backlog = Backlog::new();
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let telemetry = NoopChainTelemetry;
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog,
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let interval = chain.checkpoint_interval().unwrap();
+
+    process_block_event(chain, interval, &ctx, &telemetry)
+        .await
+        .unwrap();
+
+    let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .expect("checkpoint vote should be queued")
+        .expect("rpc channel should remain open");
+    match action {
+        crate::rpc::RpcAction::VoteCheckpoint(checkpoint) => {
+            assert_eq!(checkpoint.chain, chain);
+            assert_eq!(checkpoint.height, interval);
+        }
+        _ => panic!("unexpected rpc action"),
+    }
+
+    assert!(timeout(Duration::from_millis(100), sign_rx.recv())
+        .await
+        .is_err());
 }

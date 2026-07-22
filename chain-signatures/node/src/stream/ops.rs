@@ -127,11 +127,6 @@ pub(crate) async fn process_respond_event(
         SignKind::RespondBidirectional(_) => {
             anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
         }
-        SignKind::Checkpoint(_) => {
-            anyhow::bail!(
-                "unexpected sign type: Checkpoint should not be generated from a sign event"
-            );
-        }
     };
 
     if entry.execution_tx().is_some() {
@@ -371,19 +366,13 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     let digest = checkpoint.digest();
-    let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
     let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
         chain,
         height: checkpoint.block_height,
         digest,
     };
-    let sign_id = checkpoint_digest.sign_id();
-    tracing::info!(block, ?checkpoint, %chain, ?sign_id, "created checkpoint");
-    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
-    ctx.sign_tx
-        .send(sign)
-        .await
-        .with_context(|| format!("failed to enqueue checkpoint sign request for chain {chain}"))?;
+    tracing::info!(block, ?checkpoint, %chain, ?checkpoint_digest, "created checkpoint");
+    ctx.rpc.vote_checkpoint(checkpoint_digest);
 
     Ok(())
 }

@@ -129,13 +129,23 @@ pub fn make_test_stream_context(
     caught_up: bool,
     root_pk: AffinePoint,
 ) -> StreamContext {
+    let (ctx, _rpc_rx) = make_test_stream_context_with_rpc(backlog, sign_tx, caught_up, root_pk);
+    ctx
+}
+
+pub fn make_test_stream_context_with_rpc(
+    backlog: Backlog,
+    sign_tx: mpsc::Sender<SignCommand>,
+    caught_up: bool,
+    root_pk: AffinePoint,
+) -> (StreamContext, mpsc::Receiver<RpcAction>) {
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _tx) =
         ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
     let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
+    let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
         sign_tx,
@@ -146,7 +156,7 @@ pub fn make_test_stream_context(
         cp_rx,
     );
     ctx.caught_up = caught_up;
-    ctx
+    (ctx, rpc_rx)
 }
 
 /// Convenience wrapper around [`make_test_stream_context`] for tests that don't need a specific root public key.

@@ -1,6 +1,7 @@
 use crate::protocol::Governance;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
+use mpc_primitives::ConsensusCheckpointDigest;
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -56,6 +57,26 @@ impl NearGovernanceClient {
             .await?
             .json()?;
         Ok(views)
+    }
+
+    pub async fn vote_checkpoint(
+        &self,
+        checkpoint: &ConsensusCheckpointDigest,
+    ) -> anyhow::Result<bool> {
+        let result = self
+            .client
+            .call(&self.signer, &self.contract_id, "vote_checkpoint")
+            .args_json(json!({ "checkpoint": checkpoint }))
+            .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
+            .transact()
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
+            })?
+            .json()?;
+
+        Ok(result)
     }
 }
 

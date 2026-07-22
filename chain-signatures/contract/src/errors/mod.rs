@@ -23,8 +23,6 @@ pub enum RespondError {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckpointError {
-    #[error("The provided checkpoint signature is invalid.")]
-    InvalidSignature,
     #[error("A conflicting checkpoint already exists for this chain and height.")]
     ConflictingCheckpoint,
 }
@@ -105,7 +103,7 @@ pub enum ErrorKind {
     /// An error occurred while node is performing respond call.
     #[error("{0}")]
     Respond(#[from] RespondError),
-    /// An error occurred while node is publishing a checkpoint.
+    /// An error occurred while nodes are voting on a checkpoint.
     #[error("{0}")]
     Checkpoint(#[from] CheckpointError),
     /// An error occurred while node is performing join call.

@@ -21,7 +21,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, Signature};
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -37,8 +37,10 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
+#[allow(clippy::large_enum_variant)]
 pub enum RpcAction {
     Publish(PublishAction),
+    VoteCheckpoint(ConsensusCheckpointDigest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,15 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
+    pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = tx.send(RpcAction::VoteCheckpoint(checkpoint)).await {
+                tracing::error!(%err, ?checkpoint, "failed to send checkpoint vote");
+            }
+        });
+    }
+
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
@@ -366,33 +377,51 @@ impl RpcExecutor {
             }
         });
 
-        Self::dispatch_loop(&self.publishers, &mut self.action_rx).await;
+        Self::dispatch_loop(
+            &self.publishers,
+            Some(self.near.clone()),
+            &mut self.action_rx,
+        )
+        .await;
     }
 
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        near: Option<NearGovernanceClient>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
         loop {
-            let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
+            let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
 
-            let chain = action.request.chain;
+            match action {
+                RpcAction::Publish(action) => {
+                    let chain = action.request.chain;
 
-            // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
-            let Some(publisher) = publishers.get(&chain) else {
-                tracing::warn!(?chain, "no publisher configured for chain");
-                continue;
-            };
+                    let Some(publisher) = publishers.get(&chain) else {
+                        tracing::warn!(?chain, "no publisher configured for chain");
+                        continue;
+                    };
 
-            // Spawn a task to execute the publish action.
-            let publisher = publisher.clone();
-            tokio::spawn(async move {
-                execute_publish(publisher, action).await;
-            });
+                    let publisher = publisher.clone();
+                    tokio::spawn(async move {
+                        execute_publish(publisher, action).await;
+                    });
+                }
+                RpcAction::VoteCheckpoint(checkpoint) => {
+                    let Some(near) = near.clone() else {
+                        tracing::error!(?checkpoint, "checkpoint vote has no governance client");
+                        continue;
+                    };
+
+                    tokio::spawn(async move {
+                        execute_vote_checkpoint(near, checkpoint).await;
+                    });
+                }
+            }
         }
     }
 }
@@ -451,8 +480,8 @@ async fn update_contract_data(
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
             let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.checkpoint.height,
-                digest: sc.checkpoint.digest,
+                height: sc.height,
+                digest: sc.digest,
             });
             tx.send_if_modified(|old| {
                 if *old == new_digest {
@@ -509,6 +538,46 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
         );
+    }
+}
+
+async fn execute_vote_checkpoint(
+    near: NearGovernanceClient,
+    checkpoint: ConsensusCheckpointDigest,
+) {
+    let retry_config = RetryConfig {
+        max_times: usize::MAX,
+        min_delay: PUBLISH_MIN_DELAY,
+        max_delay: PUBLISH_MAX_DELAY,
+        jitter: true,
+    };
+
+    let result = retry_rpc!(
+        Duration::MAX,
+        retry_config,
+        |attempt, err, sleep| {
+            tracing::warn!(
+                ?checkpoint,
+                retry_count = attempt,
+                ?err,
+                ?sleep,
+                "failed to vote for checkpoint, retrying"
+            );
+        },
+        { near.vote_checkpoint(&checkpoint).await }
+    );
+
+    match result {
+        Ok(reached) => {
+            tracing::info!(
+                ?checkpoint,
+                threshold_reached = reached,
+                "checkpoint vote submitted"
+            );
+        }
+        Err(err) => {
+            tracing::error!(?checkpoint, ?err, "checkpoint vote failed permanently");
+        }
     }
 }
 
@@ -636,7 +705,7 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
@@ -669,7 +738,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -707,7 +776,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -765,7 +834,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);

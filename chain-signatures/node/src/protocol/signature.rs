@@ -16,7 +16,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{IndexedSignRequest, SignKind};
+use mpc_primitives::IndexedSignRequest;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -264,18 +264,16 @@ impl SignGenerator {
                         self.participants.clone(),
                         is_proposer,
                     ) {
-                        if !matches!(self.request.kind, SignKind::Checkpoint(_)) {
-                            if let Err(err) = ctx
-                                .backlog
-                                .mark_publishing(self.request.chain, &sign_id, publish)
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?err,
-                                    "failed to mark publishing for sign request"
-                                );
-                            }
+                        if let Err(err) = ctx
+                            .backlog
+                            .mark_publishing(self.request.chain, &sign_id, publish)
+                            .await
+                        {
+                            tracing::warn!(
+                                ?sign_id,
+                                ?err,
+                                "failed to mark publishing for sign request"
+                            );
                         }
                     }
 
