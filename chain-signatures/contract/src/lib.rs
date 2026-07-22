@@ -1,5 +1,6 @@
 pub mod config;
 pub mod errors;
+mod migration;
 pub mod primitives;
 pub mod state;
 pub mod update;
@@ -737,121 +738,10 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        #[derive(BorshDeserialize)]
-        struct LegacyMpcContract {
-            protocol_state: ProtocolContractState,
-            pending_requests: IterableMap<SignId, PendingRequest>,
-            proposed_updates: ProposedUpdates,
-            config: Config,
-        }
-
-        #[derive(BorshDeserialize, BorshSerialize)]
-        struct LegacySignedCheckpoint {
-            checkpoint: ConsensusCheckpointDigest,
-            signature: Signature,
-        }
-
-        #[derive(BorshDeserialize)]
-        struct LegacyCheckpointMpcContract {
-            protocol_state: ProtocolContractState,
-            pending_requests: IterableMap<SignId, PendingRequest>,
-            proposed_updates: ProposedUpdates,
-            config: Config,
-            latest_checkpoints: IterableMap<Chain, LegacySignedCheckpoint>,
-        }
-
-        #[derive(BorshDeserialize)]
-        enum VersionedLegacyMpcContract {
-            V0(LegacyMpcContract),
-        }
-
-        #[derive(BorshDeserialize)]
-        enum VersionedLegacyCheckpointMpcContract {
-            V0(LegacyCheckpointMpcContract),
-        }
-
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
-
-        let convert =
-            |protocol_state,
-             pending_requests,
-             proposed_updates,
-             config,
-             legacy_checkpoints: Option<IterableMap<Chain, LegacySignedCheckpoint>>| {
-                let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
-                if let Some(legacy_checkpoints) = legacy_checkpoints {
-                    for chain in Chain::iter() {
-                        if let Some(legacy) = legacy_checkpoints.get(&chain) {
-                            latest_checkpoints.insert(chain, legacy.checkpoint);
-                        }
-                    }
-                }
-
-                VersionedMpcContract::V0(MpcContract {
-                    protocol_state,
-                    pending_requests,
-                    proposed_updates,
-                    config,
-                    latest_checkpoints,
-                    checkpoint_votes: CheckpointVotes::new(),
-                })
-            };
-
-        // 1. Try deserializing into the current VersionedMpcContract (idempotent path)
-        if let Ok(new_contract) = VersionedMpcContract::try_from_slice(&state_bytes) {
-            log!("No migration needed: already deserialized into current VersionedMpcContract");
-            return Ok(new_contract);
-        }
-
-        // 2. Migrate the current signed-checkpoint layout while preserving its latest values.
-        if let Ok(VersionedLegacyCheckpointMpcContract::V0(old_contract)) =
-            VersionedLegacyCheckpointMpcContract::try_from_slice(&state_bytes)
-        {
-            log!("Migrating signed checkpoints to digest checkpoints");
-            return Ok(convert(
-                old_contract.protocol_state,
-                old_contract.pending_requests,
-                old_contract.proposed_updates,
-                old_contract.config,
-                Some(old_contract.latest_checkpoints),
-            ));
-        }
-
-        // 3. Migrate the pre-checkpoint versioned state.
-        if let Ok(VersionedLegacyMpcContract::V0(old_contract)) =
-            VersionedLegacyMpcContract::try_from_slice(&state_bytes)
-        {
-            log!("Migrating legacy versioned contract state");
-            return Ok(convert(
-                old_contract.protocol_state,
-                old_contract.pending_requests,
-                old_contract.proposed_updates,
-                old_contract.config,
-                None,
-            ));
-        }
-
-        // 4. Migrate the pre-checkpoint unversioned state.
-        if let Ok(old_contract) = LegacyMpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating legacy contract state");
-            return Ok(convert(
-                old_contract.protocol_state,
-                old_contract.pending_requests,
-                old_contract.proposed_updates,
-                old_contract.config,
-                None,
-            ));
-        }
-
-        // 5. Try deserializing as current MpcContract directly (just in case).
-        if let Ok(new_contract) = MpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating from MpcContract directly to VersionedMpcContract");
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        Err(InvalidState::ContractStateIsMissing
-            .message("Failed to deserialize state into any known contract format"))
+        let deployment = migration::deployment_for_account(&env::current_account_id())?;
+        migration::migrater_for(deployment).migrate(&state_bytes)
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -1088,7 +978,7 @@ impl VersionedMpcContract {
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
         match self {
-            Self::V0(ref mut mpc_contract) => &mut mpc_contract.protocol_state,
+            Self::V0(mpc_contract) => &mut mpc_contract.protocol_state,
         }
     }
 
@@ -1100,7 +990,7 @@ impl VersionedMpcContract {
 
     fn lock_request(&mut self, id: SignId, payload: Scalar, epsilon: Scalar) {
         match self {
-            Self::V0(ref mut mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
+            Self::V0(mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
         }
     }
 
@@ -1255,7 +1145,7 @@ mod tests {
     }
 
     // Seed only the lookup-map entry and intentionally do not seed the vector
-    // key entry. This reproduces the observed devnet state where
+    // key entry. This reproduces the observed deployed state where
     // `latest_checkpoint(chain)` works because it uses `.get()`, while
     // `IterableMap::iter()` returns no checkpoints.
     fn seed_checkpoint_lookup_without_iterable_key(
@@ -1332,7 +1222,7 @@ mod tests {
     #[test]
     fn test_migrate_signed_checkpoint_to_digest() {
         let context = VMContextBuilder::new()
-            .current_account_id("contract.near".parse().unwrap())
+            .current_account_id("dev.sig-net.testnet".parse().unwrap())
             .build();
         testing_env!(context);
 
@@ -1367,7 +1257,39 @@ mod tests {
         env::storage_write(b"STATE", &legacy_bytes);
 
         let migrated = VersionedMpcContract::migrate().unwrap();
-        assert_eq!(migrated.latest_checkpoint(Chain::Solana), Some(&checkpoint));
+        match migrated {
+            VersionedMpcContract::V0(contract) => {
+                assert_eq!(
+                    contract.latest_checkpoints.get(&Chain::Solana),
+                    Some(&checkpoint)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_migrate_pre_checkpoint_state_to_testnet() {
+        let context = VMContextBuilder::new()
+            .current_account_id("v1.sig-net.testnet".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let old_contract = OldMpcContractTest {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+        };
+        let old_bytes = borsh::to_vec(&VersionedOldMpcContractTest::V0(old_contract)).unwrap();
+        env::storage_write(b"STATE", &old_bytes);
+
+        let migrated = VersionedMpcContract::migrate().unwrap();
+        match migrated {
+            VersionedMpcContract::V0(contract) => {
+                assert!(contract.latest_checkpoints.is_empty());
+                assert!(contract.checkpoint_votes.is_empty());
+            }
+        }
     }
 
     #[test]
