@@ -30,6 +30,7 @@ semver.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
