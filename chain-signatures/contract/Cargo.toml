@@ -18,7 +18,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+near-primitives.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 
 # crypto dependencies
