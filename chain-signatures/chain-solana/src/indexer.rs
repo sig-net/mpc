@@ -1,7 +1,7 @@
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::stream::StreamExt;
+use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
@@ -47,7 +47,7 @@ use solana_transaction_status::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{SolanaCatchupBlock, MAX_CONCURRENT_CHUNK_SIZE};
+use crate::client::SolanaCatchupBlock;
 use crate::utils::current_unix_timestamp;
 use crate::{SolConfig, SolanaClient};
 
@@ -97,50 +97,139 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     async fn catchup_blocks(
         &self,
         anchor_height: u64,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = (u64, SolanaCatchupBlock)> + Send + 'static>>>
-    {
-        // Get the last persisted processed block height from backlog
-        // TODO: https://github.com/sig-net/mpc/issues/777
+    ) -> anyhow::Result<
+        Pin<Box<dyn Stream<Item = anyhow::Result<(u64, SolanaCatchupBlock)>> + Send + 'static>>,
+    > {
+        let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
+            return Ok(Box::pin(stream::empty()));
+        };
+
+        let pages =
+            Self::paginate_slots(self.client.clone(), self.program_id, start_slot, end_slot);
+        Ok(Self::fetch_blocks_for_pages(self.client.clone(), pages))
+    }
+
+    /// Range of slots that still need to be caught up, inclusive on both ends.
+    /// `None` means we're already caught up.
+    // TODO: https://github.com/sig-net/mpc/issues/777
+    async fn catchup_range(&self, anchor_height: u64) -> Option<(u64, u64)> {
         let start_slot = self
             .state_manager
             .get_processed_block(Chain::Solana)
             .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
-        let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
-        if start_slot > end_slot {
-            return Ok(Box::pin(futures_util::stream::empty()));
+
+        let end_slot = anchor_height.saturating_sub(1);
+        (start_slot <= end_slot).then_some((start_slot, end_slot))
+    }
+
+    /// Paginate `getSignaturesForAddress` backwards from the anchor, yielding
+    /// pages of slots within `[start_slot, end_slot]`. Stops once the cursor
+    /// walks past `start_slot` or the RPC runs dry.
+    fn paginate_slots(
+        client: SolanaClient,
+        program_id: Pubkey,
+        start_slot: u64,
+        end_slot: u64,
+    ) -> impl Stream<Item = anyhow::Result<BTreeSet<u64>>> {
+        struct PageState {
+            client: SolanaClient,
+            program_id: Pubkey,
+            start_slot: u64,
+            end_slot: u64,
+            cursor: Option<Signature>,
+            finished: bool,
         }
 
-        // The error should be propagated, to let supervisor restart on error, otherwise
-        // an empty stream is returned and catchup finishes without processing missing blocks.
-        let slots = self.client.fetch_slots(start_slot, end_slot).await?;
-        let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
-
-        let client = self.client.clone();
-        let stream = futures_util::stream::unfold(
-            (remaining_slots, client, VecDeque::new()),
-            |state| async move {
-                let (mut remaining_slots, client, mut current_chunk) = state;
-                loop {
-                    if let Some(block) = current_chunk.pop_front() {
-                        return Some((block, (remaining_slots, client, current_chunk)));
-                    }
-                    if remaining_slots.is_empty() {
-                        return None;
-                    }
-
-                    let chunk_slots: BTreeSet<u64> = remaining_slots
-                        .drain(..std::cmp::min(MAX_CONCURRENT_CHUNK_SIZE, remaining_slots.len()))
-                        .collect();
-
-                    let blocks = client.fetch_blocks_for_slots(chunk_slots).await;
-                    current_chunk = blocks.into_iter().collect();
-                }
+        stream::unfold(
+            PageState {
+                client,
+                program_id,
+                start_slot,
+                end_slot,
+                cursor: None,
+                finished: false,
             },
-        );
+            |mut state| async move {
+                if state.finished {
+                    return None;
+                }
 
-        Ok(Box::pin(stream))
+                let batch = match state
+                    .client
+                    .fetch_signatures_from_latest(&state.program_id, state.cursor)
+                    .await
+                {
+                    Ok(b) if b.is_empty() => return None,
+                    Ok(b) => b,
+                    Err(e) => {
+                        state.finished = true;
+                        return Some((Err(e), state));
+                    }
+                };
+
+                state.cursor = batch
+                    .last()
+                    .and_then(|s| Signature::from_str(&s.signature).ok());
+                if state.cursor.is_none() {
+                    state.finished = true;
+                }
+
+                let mut slots = BTreeSet::new();
+                for sig in batch {
+                    if sig.slot < state.start_slot {
+                        state.finished = true;
+                    } else if sig.slot <= state.end_slot {
+                        slots.insert(sig.slot);
+                    }
+                }
+
+                Some((Ok(slots), state))
+            },
+        )
+    }
+
+    /// Fetch blocks for each page of slots and flatten into a stream of `(slot, block)` items.
+    fn fetch_blocks_for_pages(
+        client: SolanaClient,
+        pages: impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(u64, SolanaCatchupBlock)>> + Send + 'static>>
+    {
+        let stream = pages
+            .filter_map(|res| async move {
+                match res {
+                    Ok(slots) if slots.is_empty() => None,
+                    Ok(slots) => Some(Ok(slots)),
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .then(move |res| {
+                let client = client.clone();
+                async move {
+                    let slots = res?;
+                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await;
+                    let items: Vec<(u64, SolanaCatchupBlock)> = slots
+                        .into_iter()
+                        .map(|s| {
+                            let block = blocks.remove(&s).unwrap_or(SolanaCatchupBlock::Missing);
+                            (s, block)
+                        })
+                        .collect();
+                    Ok(items)
+                }
+            })
+            .map(|res| match res {
+                Ok(items) => {
+                    let stream_items: Vec<anyhow::Result<(u64, SolanaCatchupBlock)>> =
+                        items.into_iter().map(Ok).collect();
+                    stream::iter(stream_items)
+                }
+                Err(e) => stream::iter(vec![Err(e)]),
+            })
+            .flatten();
+
+        Box::pin(stream)
     }
 
     async fn process_catchup_item(
@@ -284,7 +373,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                 _ = cancel.cancelled() => return Ok(()),
                 item = catchup_iter.next() => item,
             };
-            let Some((slot, block)) = item else { break };
+            let Some(res) = item else { break };
+            // Propagate RPC page errors so supervisor restarts cleanly
+            let (slot, block) = res?;
             self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
                 .await;
         }
@@ -1224,9 +1315,11 @@ mod tests {
         let state_manager = MockStateManager::new();
         state_manager.set_processed_block(Chain::Solana, 5).await;
         let indexer = test_indexer(&server.url(), state_manager);
+        const ANCHOR_SLOT: u64 = 10;
 
-        let result = indexer.catchup_blocks(10).await;
-        assert!(result.is_err(), "fetch_slots error should propagate");
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        let first = stream.next().await;
+        assert!(first.is_some() && first.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -1269,9 +1362,12 @@ mod tests {
 
         let (events_tx, mut events_rx) = mpsc::channel(16);
         let cancel = CancellationToken::new();
+        const ANCHOR_SLOT: u64 = 10;
 
-        let mut stream = indexer.catchup_blocks(10).await.unwrap();
-        while let Some((slot, block)) = stream.next().await {
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+
+        while let Some(res) = stream.next().await {
+            let (slot, block) = res.unwrap();
             indexer
                 .process_catchup_retrying(&events_tx, slot, &block, &cancel)
                 .await;
