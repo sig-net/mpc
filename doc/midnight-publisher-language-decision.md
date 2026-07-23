@@ -1,7 +1,7 @@
 # `midnight-publisher`: language decision and migration plan
 
-**Date:** 2026-07-23. **Status:** decision proposed, evidence complete, migration not started.
-**Scope:** the `chain-signatures/midnight-publisher` sidecar only. Nothing here changes `chain-midnight`, the trust plane, the HTTP seam, or any security-critical logic.
+**Date:** 2026-07-23. **Status:** decided, migrated, and redesigned. `chain-signatures/midnight-publisher-ts` is the implementation; the Rust crate is still in the tree pending cutover. §1 to §6 are the decision and the evidence, written before the port; **§7 is what the service actually is now** and supersedes §4's phase plan and the seam shapes in §2.3 and §2.4.
+**Scope:** the sidecar only. Nothing here changes the trust plane or any security-critical logic. §7 does move work to `chain-midnight`: every RPC call is now the caller's, and the sidecar's read seams are pure codecs over bytes it is handed.
 **Companions:** [`midnight-spec.md`](./midnight-spec.md) §5.5 (what the sidecar is), [`midnight-spec-decisions.md`](./midnight-spec-decisions.md) §B.8/§B.9/§D (why it is shaped that way), [`midnight-sgn2-mpc-tasks.md`](./midnight-sgn2-mpc-tasks.md) (the PR stack this sits inside).
 
 ## 0. TL;DR
@@ -334,6 +334,7 @@ Each of these cost real time to find. Most fail silently.
 
 ## 6. Open items
 
+- **Nothing consumes the new seam yet.** §7 moved every RPC call to the caller, and the caller does not exist on this branch: there is no `chain-signatures/chain-midnight`. The Rust side still has to unwrap block bodies with subxt (proven possible, §7.1), do the two state reads the decode seams now expect to be handed, and assert `GET /health`'s ledger tags at startup. Until that lands the Rust crate stays in the tree and the cutover in §4.8 is unfinished.
 - **Whether the deployment may reach an external indexer endpoint.** This is a decision, not a discovery, and it is the only thing that changes the migration's shape (§2.5, §4.6). Worth raising with whoever owns spec §5.5 and §5.4's trust discussion.
 - **The empty-zswap caveat.** Substituting an empty `ZswapChainState` succeeded, but only on a chain whose live zswap state is itself empty (`firstFree=0`). Untested against shielded activity. The runtime API serves the real value, so this only matters if someone tries to shortcut it.
 - **A node-RPC wallet sync backend does not exist.** Worth raising upstream with the Midnight team; it is the one addition that would remove the endpoint dependency entirely.
@@ -342,6 +343,148 @@ Each of these cost real time to find. Most fail silently.
 - **Chunk-tree state was never decoded on either side.** Only two contracts have ever existed on the test chain, with 6 and 8 top-level ledger fields, both under the cap. The TypeScript walker recurses through nested arrays generically, but that rests on a synthetic test rather than a byte-diff. Decoding a real greater-than-15-field contract remains untested in both implementations.
 - **Scope of the write-path measurements.** One chain, one transaction shape, one contract pair, and `postRespondBidirectional` is a cheap circuit. The heaviest circuit this proof server has run cost 2.9 s, so there is no sign of a cliff, but do not read 0.35 s as the cost of an arbitrary circuit.
 - **`node-2.0.0-rc.5` has no announced date.** The only open milestone is past due. Relevant only if the Rust path is retained.
+
+## 7. The codec redesign [2026-07-23]
+
+§3.4 established what this boundary is actually for: **keeping the ledger's 80-package ZK and native-crypto tree out of the mpc workspace.** That is a narrower mandate than "the Rust dependencies conflict", and it gives a sharp test for every line here. *Does this require the ledger WASM or the prover?* If not, it belongs in Rust.
+
+### 7.1 Rust can do every RPC, proven
+
+The one thing that could have blocked this was whether `chain-midnight` can unwrap a block body itself. It can. A probe using the same `subxt = "0.44"` pin as `chain-signatures/node`, dynamic API, no codegen:
+
+```
+connect + metadata: OK          pallets visible: 29
+Midnight pallet: OK             call: send_mn_transaction
+block 1366 -> 5 extrinsics, one Midnight.send_mn_transaction
+  arg bytes: 14405 (compact prefix 2B)
+  leading ascii: midnight:transaction[v12](signature[v2],proof,pedersen-schnorr
+  MATCHES the @polkadot/api extraction (14405): true
+```
+
+subxt 0.44 reads node rc.4's metadata v16 and produces byte-identical output to `@polkadot/api`. Contract-state reads need no metadata at all (`midnight_contractState` is plain JSON-RPC returning hex), and the runtime API is reached through `state_call`. So the publisher never needs a node connection to *read*.
+
+Note for anyone reproducing the probe: `subxt`'s `unstable-light-client` feature pulls `smoldot`, which calls `ed25519_zebra::batch` and only compiles because something else in the mpc graph enables that crate's `alloc` feature. In an isolated crate it fails. Drop the feature; it is irrelevant to metadata and extrinsic decoding.
+
+### 7.2 The surface
+
+```
+POST /decode/contract-state   { bytes }    -> the state tree
+POST /decode/transactions     { bytes[] }  -> calls per transaction
+POST /respond                 ...          -> prove + submit
+GET  /health                               -> {status, ledger}
+
+any failure                                -> {code, message}   (§7.5)
+```
+
+What went away is not mainly lines, it is **concepts**: the node URL for reads, `?at=`, the anchor, the notions of block, address and block hash, the `skipped` policy, and the pruning-error classifier. The publisher takes bytes and returns structure. The decoded shapes are unchanged and still byte-verified against the fixtures captured from the Rust implementation, so only *who fetches the bytes* moved.
+
+This also retires a pile of design questions that were open: the atom-tree schema (it mirrors the ledger types), round-trip counts, whether the sidecar may compute a state diff (it never sees two states), and the whole read-path error taxonomy, which collapses to two cases (§7.5) now that a pruned node and an absent contract are the caller's problem to tell apart, not this service's.
+
+### 7.3 The write path keeps its network, and why
+
+Tested rather than assumed. `finalizeRecipe` does return a serializable `FinalizedTransaction`, 7,914 bytes tagged `midnight:transaction[v12](signature[v2],proof,pedersen-schnorr[v1])`, and submitting those bytes out-of-band via `author_submitExtrinsic` works. So handing submission to Rust is mechanically possible.
+
+**But the node URL cannot be removed, though the originally stated reason was wrong.** Pointed at a dead port the facade produces nothing but a reconnect loop, which is what was observed. Reading the installed source shows balancing goes to the **indexer** (`RunningV1Variant` -> `syncService.blockData()`) and finalizing goes to the **proof server** (`provingService.prove` -> `HttpProverClient`); the only node consumer is `PolkadotNodeClient` inside the submission service, and the reconnect loop is `ApiPromise.create` retrying in a fire-and-forget `Deferred`. So the node is required for **submission**, not for balance or finalize. The conclusion stands; the mechanism in the original note did not.
+
+Three measured facts worth keeping, all from the same probe:
+
+- **The wallet tracks pending spends locally.** After `balanceUnboundTransaction`, `dustAvailable` 1→0 and `dustPending` 0→1; after `finalizeRecipe`, `pendingTxs` 0→1. A second respond attempted 0.4s later fails with `Wallet.InsufficientFunds: could not balance dust`. The dust view recovers at about **+35s**.
+- **`facade.submitTransaction` blocks for ~16.6s**, which supplies roughly half that recovery window as natural backpressure. Out-of-band submission returns immediately and removes it. Neither path can post two responds faster than dust recovery; the blocking path merely hides the limit. With one wallet the ceiling is roughly **one respond per 35 seconds**, and scaling means one wallet per worker (§2.6).
+- **An abandoned finalized transaction auto-reverts, but not on the shipped TTL.** Finalized but never submitted, the dust coin returned at +59.3s against a **60s** TTL. The service ships `RECIPE_TTL_MS = 30 minutes` (`wallet.ts`), and that value becomes the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so the measurement does not describe the shipped configuration: a respond that dies between finalize and submit plausibly strands the fee coin for up to **30 minutes**, roughly 50x the 35s the concurrency design budgets around. Lowering the TTL to a few minutes would bound it. Found by audit, not yet changed.
+
+So the publisher's network peers are the node (wallet operation and submission), the proof server (proving), and the indexer (wallet sync).
+
+**The write path also keeps three chain reads, and that is deliberate.** `/respond` reads the contract state, the zswap chain state and the live ledger parameters at one pinned finalized block. The original plan was to have `chain-midnight` supply those as blobs, on the same reasoning as the decode seams. Applying §7.1's test honestly kills that idea:
+
+- The reads must be **fresh at prove time**. Ledger parameters drift per block, and stale ones are rejected as `Transcript(Execution(OutOfGas))`. Moving the fetch to the caller inserts its queueing delay between the read and the prove, and with one wallet this service is rate-limited to roughly one post per 35 seconds (§7.3 above), so that delay is not hypothetical.
+- There is **no dependency to save**. The node connection has to exist for the wallet regardless. Three `state_call`s over a socket that is already open cost nothing, whereas shipping the blobs means a bigger envelope, a new class of caller mistake, and the staleness above.
+
+The rule stands as written: everything that needs only bytes moved to Rust. These three need a *fresh* read bound to the prove that follows it, which is a different thing.
+
+### 7.4 What is left in Rust's hands
+
+Every RPC call, and therefore every retry, endpoint-failover and caching decision, including reading from several indexers or nodes to avoid a single point of silence. That policy now lives in one place, beside the trust decisions, rather than being split across a language boundary.
+
+The publisher's remaining compatibility surface is a single question: **which ledger version its crates speak.** That is now explicit at the seam. `GET /health` answers with the ledger's own self-describing tags:
+
+```json
+{"status":"ok","ledger":{"contractState":"midnight:contract-state[v8]","zswapChainState":"midnight:zswap-ledger-state[v5]","ledgerParameters":"midnight:ledger-parameters[v8]","transaction":"midnight:transaction[v12]"}}
+```
+
+The caller asserts these against the chain it reads, at startup. Left implicit, a version skew arrives as a deserialization failure on bytes that are perfectly good, which reads as "the publisher is broken" and sends the operator to the wrong place. These are not a version scheme this package invented; they are what the ledger stamps into the leading bytes of everything it serializes, so they move exactly when the encoding moves. The write path checks the two blobs it reads against them before deserializing.
+
+`/health` is liveness only. Readiness would have to reach the node, the indexer and the proof server, and a caller that reads "a dependency is down" as "the publisher is down" restarts the wrong process.
+
+### 7.5 Errors are codes, not prose
+
+Every non-200 is `{"code":"<machine>","message":"<prose>"}`. The caller branches on the code; the message is for the human reading the log. That split is what makes a wording improvement a non-event instead of a breaking change.
+
+| code | HTTP | means | what the caller does |
+|---|---|---|---|
+| `bad_request` | 400 | malformed envelope, bad hex, failed validation | fix the request; never retry |
+| `payload_too_large` | 413 | body over the seam's cap | split the batch |
+| `not_found` | 404 | no such route | fix the client |
+| `decode_failed` | 422 | the ledger refused bytes the CALLER supplied | their blob is wrong, or from another ledger line |
+| `ledger_mismatch` | 502 | bytes read from the CHAIN carry a tag this build does not speak | version skew; compare against `/health` |
+| `contract_absent` | 409 | no contract state at that address in the pinned block | wrong address, or not deployed yet |
+| `contract_mismatch` | 409 | deployed verifier keys differ from this build's | redeploy, or repoint `MIDNIGHT_PUB_MANAGED_DIR` |
+| `state_conflict` | 409 | another post won the race for the same request id | retry as-is; the loser never entered a block and paid no fee |
+| `node_unavailable` | 502 | the node could not serve a pinned read | retry when the node is back |
+| `prove_failed` | 502 | the proof server refused or failed | retry |
+| `wallet_unfunded` | 503 | no spendable dust right now | back off; recovers in about 35 seconds |
+| `balance_failed` | 502 | balancing failed for a reason other than funds | investigate |
+| `submit_rejected` | 502 | the chain refused the submission | investigate |
+| `internal` | 500 | unclassified | the message is the only detail |
+
+Several codes share a status on purpose. A 409 that is `state_conflict` should be retried unchanged; a 409 that is `contract_mismatch` will never succeed until this service is redeployed. The status cannot carry that and the code can.
+
+**Where the fragility is concentrated**, and a defect found by auditing it. Some causes are only visible in the text a dependency threw, so `errors.ts`'s `RESPOND_STAGES` is the one table that matches on it. An adversarial pass found the two entries have very different standing:
+
+- **`Wallet.InsufficientFunds` -> `wallet_unfunded` is confirmed reachable.** `Data.TaggedError` puts the tag in `name`, `DustWallet` runs its Effect with no outer wrapper, and the message is built by template at runtime (`Balancer.js:14-19`), which is why grepping `node_modules` for the literal string finds nothing.
+- **`ReadMismatch` -> `state_conflict` was UNREACHABLE, and shipped that way.** `submissionService.js:31` flattens every node error into `new SubmissionError({message: 'Transaction submission error', cause: err})`, and Effect's `FiberFailure` stores its cause on `Symbol.for("effect/Runtime/FiberFailure/Cause")` rather than on `.cause`, so `describeFailure`'s walk terminated immediately. Every submit failure rendered as the same constant string. The same-request-id race, the one collision `/respond` is designed around, answered `submit_rejected` ("investigate") instead of `state_conflict` ("retry as-is, no fee paid").
+
+The mechanical half is fixed: `inStage` now classifies against `describeFailure(error)` plus `String(error)`, because Effect's `toString` runs `Cause.pretty` and does render the nested chain. Multi-line with stack frames, so it is used for matching only, never as a response body. Verified: with the nested cause present, `state_conflict` fires.
+
+**Still unproven is whether the node client surfaces the ledger's text at all.** `PolkadotNodeClient` reports a pre-dispatch rejection with a hardcoded `'Transaction is invalid and was rejected by the node'` and no ledger detail, and §2.6's `Transcript(Execution(ReadMismatch))` sample came from the NODE LOG, not a client error. So `state_conflict` is documented as best-effort until a live same-id race confirms it; `submit_rejected` is always correct as the fallback.
+
+Two process lessons. The original test fabricated the failure as `new Error()` with a hand-set `.name`, passed, and proved nothing — the same self-consistent-test trap `block.ts` warns about for the `Fr` tag byte. And "observed on a live chain" was written of both patterns when it was only ever true of one. The test now builds failures through a real `Effect.runPromise` rejection.
+
+### 7.6 The line count, finally
+
+Implementation only, both sides: non-blank, non-comment lines under `src/`, with the Rust crate's inline `#[cfg(test)]` modules excluded so the comparison is like for like.
+
+| | code lines |
+|---|---|
+| Rust `midnight-publisher/src` (the original) | **731** |
+| TypeScript, first working port | 1,029 |
+| after replacing hand-rolled code with the libraries' own | 862 |
+| after the cleanup pass | 847 |
+| after the codec redesign (§7.2) | 800 |
+| **final, with error codes and the ledger declaration** | **882** |
+
+| file | code lines | comment lines |
+|---|---|---|
+| `respond.ts` | 408 | 165 |
+| `server.ts` | 110 | 48 |
+| `block.ts` | 81 | 80 |
+| `errors.ts` | 68 | 37 |
+| `config.ts` | 60 | 32 |
+| `wallet.ts` | 50 | 40 |
+| `state.ts` | 44 | 23 |
+| `node.ts` | 35 | 24 |
+| `ledger.ts` | 18 | 18 |
+| `index.ts` | 8 | 8 |
+| **total** | **882** | **475** |
+
+Comments were cut from 1,049 lines to 475 in a separate pass. What survives is the traps and the decisions: the dual-WASM-instance rules, the `Fr` tag byte whose absence is silent, `@polkadot/api` treating a `Uint8Array` as pre-encoded SCALE, the little-endian `sig_r`/`sig_s` order, the `localeCompare` collation hazard, the indexer `/ws` suffix, the mnemonic-widening seed check, and the ternary in `proveCall` that looks redundant and does not compile without. What went was the long-form rationale, which is this document's job, and the `@param`/`@returns` blocks that restated type signatures.
+
+**882 against 731, and the comparison flatters Rust.** Three of those 151 lines-worth of difference are things the Rust version does not have at all: a machine-readable error vocabulary (`errors.ts`, 68 lines), a published ledger declaration (`ledger.ts`, 18), and the typed circuit-argument narrowing that makes a contract rename a compile error rather than a proving failure. Net of `errors.ts` and `ledger.ts` alone the TypeScript is 796 lines for a *smaller* surface, since the Rust crate also owns the RPC walk, the anchor, the pruning classifier and the `?at=` plumbing that §7.2 deleted.
+
+The honest reading is that this was never a line-count win and was not chosen as one. It was chosen because `compactc` emits only JavaScript, so the transcripts `ContractCallPrototype` demands can only be produced on this side (§1). The line count is roughly a wash; what changed is that the awkward parts are now in the language whose tooling is maintained for them.
+
+**The metric that actually matters here is dependencies, not lines**, because dependency isolation is the entire reason this package exists (§3.4). Direct dependencies went from **19 to 10**. Nine were declared but never imported: six `@midnightntwrk/wallet-sdk-*` packages left over from when `wallet.ts` wired the facade by hand rather than going through `@sig-net/midnight-contract-deploy`, plus `@midnight-ntwrk/compact-runtime`, `@midnight-ntwrk/midnight-js-contracts` and `@midnightntwrk/onchain-runtime-v4`, all of which arrive transitively.
+
+Removing exact-version pins from a Midnight package is not obviously safe — the dual-WASM-instance failure mode (§5) is what those pins guard against — so it was tested rather than assumed. In a clean tree with the nine dropped and no lockfile, npm resolves **every** version-critical package to the identical version, with exactly one copy of `ledger-v9` and one of `onchain-runtime-v4` on disk. `tsc` clean, 135/135. The pins were redundant with what the remaining ten already require.
 
 ## Appendix A: measured numbers
 

@@ -222,7 +222,7 @@ The discovery pipeline (§5.1) consumes four inputs. In V1 each is *trusted* fro
 
 **Responsibilities — exactly the operations needing the ledger crates or the toolkit:**
 
-1. **Write path — prove & submit responses.** Encode the MPC's already-computed signature into circuit args, validate, fetch current contract state, generate the circuit-call intent, prove + fund + submit to finality. Owns: arg serialization, ZK proving (compute + prover keys + caches), fee/gas custody (the funding wallet), submission + finality confirmation.
+1. **Write path — prove & submit responses.** Encode the MPC's already-computed signature into circuit args, validate, fetch current contract state, generate the circuit-call intent, prove + fund + submit to finality. Owns: arg serialization, prover-key custody + caches, driving proving, fee/gas custody (the funding wallet), submission + finality confirmation. The proving *compute* is offloaded to a proof server (`--proof-server`), which for these contracts is mandatory rather than an optimisation: they are compiled with `--feature-zkir-v3` (the floor for in-circuit `secp256k1EcdsaVerify`, §G.9), and the ledger the toolkit links pins `midnight-zkir` 2.2.0, which accepts only `ir-source[v2]`. Local proving of a zkir-v3 contract aborts outright; the 9.x proof server handles it. The publisher still holds the prover keys — it reads them via the resolver and ships them with each proving request.
 2. **Read path — decode contract state** for the anchored authority reads (versioned-binary `ContractState`/`StateValue` → the JSON tree the crate walks).
 3. **Read path — decode block bodies** for cross-call provenance (finalized block → per transaction, each call's address, its own `communication_commitment`, and the calls it claims). Deliberately NOT the values a transaction wrote: those come from a state diff via seam 2, because a transcript has no insert record and reconstructing writes from one would mean hand-modelling the ledger VM.
 
@@ -230,17 +230,23 @@ Cross-cutting: the dependency firewall, toolkit orchestration, funding-seed cust
 
 **Not pure Rust.** Thin Rust glue over a Node + Compact toolchain, all bundled into the image: a native node-toolkit binary (prove+submit), Node.js + toolkit-js + a per-contract TS config (intent generation), compactc, prover keys. **Native intent mode — no docker-in-docker at serve time.**
 
+**Circuit-arg codec — dictated by the contract, not chosen by us.** `generate-intent circuit` reflects over the Compact-generated `contract/index.d.ts` (`ImpureCircuits`) and parses each argv entry as JSON5 against the declared parameter type. Both respond circuits therefore take exactly **two** arguments: the request id, then the whole event struct as ONE JSON object keyed by the Compact field names — `postSignatureResponse` takes `{bigRx, bigRy, s, recoveryId}`, `postRespondBidirectional` takes `{serializedOutput, outputLen, r, s, recoveryId}`. `Bytes<N>` is declared `Uint8Array` and takes bare lowercase hex; `Uint<N>` is declared `bigint` and must be a JSON *number*, because struct members are re-serialized before conversion and a quoted `"1"` would reach `BigInt("'1'")` and throw. Flattening a struct into separate argv entries fails the toolkit's arity check before any proving happens, so the publisher's encoder is pinned to this shape by test.
+
+**Work-dir contract — what the publisher consumes but does not create.** Four inputs, all supplied by the image build or the operator: `managed/`, the compiled-contract asset root (`contract/`, `compiler/`, `keys/`, `zkir/`); `signer.config.ts`, the per-contract toolkit-js binding, which names that same `managed/` in its `withCompiledFileAssets`; `.run/private-state.json` (the respond circuits take no witnesses, so `{}` is correct); and a toolkit-js build whose `COMPACTC_VERSION` variant matches the contract's compiler (0.33.0 here) — `compactc-resolver.ts` selects the variant, and a build lacking it fails before the circuit is invoked.
+
+`managed/` serves both halves of the write path, and both resolve by convention rather than configuration: toolkit-js reflects over `contract/index.d.ts` to type the circuit args, and the toolkit's Rust-side Resolver loads `keys/<circuit>.{prover,verifier}` and `zkir/<circuit>.bzkir` to prove. A resolver root that lacks those files does not fail cleanly — proving panics inside the toolkit ("prover key not created"), which surfaces as a 502 after the state fetch has already run.
+
 **Trust plane:** the publisher is a **mechanism, never an authority** — every security decision (rid recompute, proof verification) lives in the `chain-midnight` crate over raw bytes, never in the publisher, so a publisher decode bug is a dropped request, never a wrong signature. (Full reasoning + the honest V1 limit: decisions doc §D.)
 
 **Transport:** a **localhost-bound sidecar** — binds `127.0.0.1` only (or a unix socket on a shared pod volume), reached by the co-located `mpc-node`; **never `0.0.0.0` / published**. A separate **sidecar container** (not an in-node `Command::new` child) is preferred so a proving OOM or a toolkit RCE is isolated to the sidecar, never the keyholding node. (Alternatives weighed: decisions doc §B.)
 
-**Deployment — TWO containers we own, plus an external RPC dependency.** The Midnight node is not part of our deployment; it is an RPC URL both containers point at.
+**Deployment — THREE containers we own, plus an external RPC dependency.** The Midnight node is not part of our deployment; it is an RPC URL both our containers point at.
 
 ```
-┌─ we deploy (co-located, localhost) ──────────────┐
-│  mpc-node ──http(127.0.0.1)──> midnight-publisher │
-│     │                                │            │
-└─────┼────────────────────────────────┼───────────┘
+┌─ we deploy (co-located, localhost) ──────────────────────────────┐
+│  mpc-node ──http(127.0.0.1)──> midnight-publisher ──> proof-server │
+│     │                                │                            │
+└─────┼────────────────────────────────┼───────────────────────────┘
       │ (heads sub / raw RPC)           │ (RPC: state, send-intent)
       ▼                                 ▼
    ╔══════════════════════════════════════════════╗
@@ -252,6 +258,7 @@ Cross-cutting: the dependency firewall, toolkit orchestration, funding-seed cust
 
 - **mpc-node** — the keyholder (threshold shares); does light RPC itself (finalized-heads subscription, raw fetch), calls the publisher for decode/prove/submit.
 - **midnight-publisher** — the bundled toolchain sidecar.
+- **proof-server** — upstream's `midnightntwrk/proof-server`, localhost-bound beside the publisher and pointed at by `MIDNIGHT_PUB_PROOF_SERVER_URL`. Not optional: it is the only component in the deployment that can prove a zkir-v3 circuit. It receives prover key + inputs per request and returns a proof; it holds no secret of ours (the funding seed and the threshold shares never reach it), so it is a compute peer, not a trust boundary. Sizing it, not the publisher, is what absorbs proving's memory spikes.
 - **Midnight RPC** — external, consumed like any chain's RPC. Self-run today keeps its own container (large stateful DB, `archive-canonical` bodies, own release cadence — never fused into the publisher); a public endpoint later is a config change, not a deployment change.
 
 Baked into the publisher image: toolkit binary, Node/toolkit-js, compactc, prover keys (~GB, reproducible), compiled central-contract artifacts (public). Injected at runtime, NEVER baked: the `funding_seed` (a hot gas-wallet secret — k8s Secret/env) and the Midnight RPC URL. Precedent in-repo: the root `Dockerfile` is already multi-stage multi-language (a `node:20` build stage + the Rust build) and co-locates redis beside `mpc-node`.
