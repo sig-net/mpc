@@ -779,8 +779,42 @@ impl VersionedMpcContract {
         views
     }
 
-    /// Vote for a checkpoint digest. Once the protocol threshold is reached,
-    /// the digest becomes the latest consensus checkpoint for its chain.
+    /// Vote for a checkpoint digest.
+    ///
+    /// Checkpoints are ordered by `(chain, height)`. The latest checkpoint is
+    /// advanced only after votes from at least the protocol threshold of
+    /// participants have been collected.
+    ///
+    /// The submitted checkpoint is handled as follows:
+    ///
+    /// - If the contract already has a checkpoint at a greater height, the
+    ///   request is rejected with [`CheckpointError::CheckpointBehind`]. No
+    ///   vote is recorded or removed.
+    /// - If the contract already has a checkpoint at the same height with the
+    ///   same digest, the request is an idempotent no-op. No vote is recorded
+    ///   or removed.
+    /// - If the contract already has a checkpoint at the same height with a
+    ///   different digest, the request is rejected as conflicting.
+    /// - If the submitted height is greater than the current checkpoint, the
+    ///   caller's previous vote for any digest at the same chain and height is
+    ///   removed, then the caller votes for the submitted digest.
+    /// - If the resulting vote count is below the threshold, the vote remains
+    ///   stored and the latest checkpoint is unchanged.
+    /// - If the resulting vote count reaches the threshold, the submitted
+    ///   checkpoint becomes the latest checkpoint. Votes for that chain at
+    ///   this height or any lower height are removed; votes for higher heights
+    ///   are retained.
+    ///
+    /// The return value is `Ok(true)` when the submitted checkpoint is already
+    /// settled at the same height or becomes settled during this call. It is
+    /// `Ok(false)` when the vote was recorded but more votes are still
+    /// required. A checkpoint behind the latest checkpoint returns the
+    /// [`CheckpointError::CheckpointBehind`] error instead of a boolean result.
+    ///
+    /// Returns an error if the protocol is not running, the caller is not an
+    /// eligible participant, the submitted checkpoint is behind the latest
+    /// checkpoint, or the caller submits a different digest for an already
+    /// finalized height.
     #[handle_result]
     pub fn vote_checkpoint(
         &mut self,
@@ -794,10 +828,12 @@ impl VersionedMpcContract {
 
         if let Some(existing) = self.checkpoints().get(&checkpoint.chain) {
             if existing.height > checkpoint.height {
-                return Ok(true);
+                // checkpoint is behind, reject.
+                return Err(CheckpointError::CheckpointBehind.into());
             }
             if existing.height == checkpoint.height {
                 if existing.digest == checkpoint.digest {
+                    // checkpoint is already settled, no-op.
                     return Ok(true);
                 }
                 return Err(CheckpointError::ConflictingCheckpoint.into());

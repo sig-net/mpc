@@ -23,6 +23,8 @@ pub enum RespondError {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckpointError {
+    #[error("The checkpoint is behind the latest checkpoint for this chain.")]
+    CheckpointBehind,
     #[error("A conflicting checkpoint already exists for this chain and height.")]
     ConflictingCheckpoint,
 }
