@@ -10,14 +10,13 @@
  * versus absent, unknown fields, check ordering).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
 import type { NodeClient } from "../src/node.js";
 import {
-  backoffMs,
+  describeFailure,
   handleRespond,
-  isRetryableSubmission,
   respondCall,
   validateRespondRequest,
   parseRespondRequest,
@@ -375,78 +374,69 @@ describe("handleRespond: the 400 path never touches the chain", () => {
 });
 
 /**
- * Retry policy. A loser in the ledger-level race is rejected at pre-dispatch
- * and never charged, so retrying is free; retrying in lockstep is not, because
- * the retries re-collide.
+ * Nothing is retried in process, so the 502 body is the whole answer a caller
+ * gets and must name the failure. The shapes below are the ones the write path
+ * actually throws: an Effect `FiberFailure`, whose `name` carries the failing
+ * class and whose `message` carries only the bare text (a live same-id race
+ * returned `(FiberFailure) Wallet.InsufficientFunds: Insufficient Funds: could
+ * not balance dust`); a wrapper with a `cause`; and a tagged value that is not
+ * an `Error` at all.
  */
-const NON_RETRYABLE: [string, unknown][] = [
-  ["a proof-server failure", new Error("prove failed: 500 Internal Server Error")],
-  ["a dropped transaction", { _tag: "TransactionDroppedError" }],
-  ["a usurped transaction", { _tag: "TransactionUsurpedError" }],
-  ["a connection failure", { _tag: "ConnectionError" }],
-  ["a plain string", "boom"],
-  ["nothing", undefined],
-];
-
-describe("isRetryableSubmission", () => {
-  it("recognises the node client's tagged invalid-transaction error", () => {
-    expect(isRetryableSubmission({ _tag: "TransactionInvalidError", message: "rejected" })).toBe(true);
+describe("describeFailure", () => {
+  it("keeps the tag the node's rejection carries in its name", () => {
+    const rejected = new Error("Transaction is invalid and was rejected by the node");
+    rejected.name = "(FiberFailure) TransactionInvalidError";
+    expect(describeFailure(rejected)).toBe(
+      "(FiberFailure) TransactionInvalidError: Transaction is invalid and was rejected by the node",
+    );
   });
 
-  it("recognises it through a cause chain", () => {
-    const wrapped = new Error("balancing failed", { cause: { _tag: "TransactionInvalidError" } });
-    expect(isRetryableSubmission(wrapped)).toBe(true);
+  it("leaves a plain Error's message unadorned", () => {
+    expect(describeFailure(new Error("prove failed: 500 Internal Server Error"))).toBe(
+      "prove failed: 500 Internal Server Error",
+    );
   });
 
-  it("recognises it when only the message survives the wrapping", () => {
-    expect(isRetryableSubmission(new Error("submit failed: TransactionInvalidError"))).toBe(true);
+  it("appends a cause instead of dropping it", () => {
+    const wrapped = new Error("balancing failed", { cause: { _tag: "TransactionInvalidError", message: "rejected" } });
+    expect(describeFailure(wrapped)).toBe("balancing failed: TransactionInvalidError: rejected");
   });
 
-  it.each(NON_RETRYABLE)("does not retry %s", (_label, error) => {
-    expect(isRetryableSubmission(error)).toBe(false);
+  it("does not repeat a cause the wrapper already quoted", () => {
+    expect(describeFailure(new Error("submit failed: rejected", { cause: new Error("rejected") }))).toBe(
+      "submit failed: rejected",
+    );
   });
 
-  it("finds the tag at the deepest level the walk reaches", () => {
-    let chain: unknown = { _tag: "TransactionInvalidError" };
-    for (let depth = 0; depth < 7; depth += 1) chain = { cause: chain };
-    expect(isRetryableSubmission(chain)).toBe(true);
+  it("renders a thrown non-Error rather than [object Object]", () => {
+    expect(describeFailure({ _tag: "ConnectionError", message: "socket hang up" })).toBe(
+      "ConnectionError: socket hang up",
+    );
+    expect(describeFailure({ code: -32000 })).toBe(`{"code":-32000}`);
+    expect(describeFailure("boom")).toBe("boom");
+    expect(describeFailure(undefined)).toBe("undefined");
   });
 
-  it("stops walking rather than following an unbounded cause chain", () => {
-    let chain: unknown = { _tag: "TransactionInvalidError" };
-    for (let depth = 0; depth < 8; depth += 1) chain = { cause: chain };
-    expect(isRetryableSubmission(chain)).toBe(false);
+  it("never throws itself, whatever it is handed", () => {
+    // Renders inside the 502 path, where a second failure would replace the
+    // real one. Neither an object that cannot be serialized nor one that
+    // serializes to nothing may escape.
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    expect(describeFailure(circular)).toBe("[object Object]");
+    expect(describeFailure({ toJSON: () => undefined })).toBe("[object Object]");
+  });
+
+  it("stops walking, so a pathological chain cannot become the response body", () => {
+    let chain: unknown = { message: "innermost" };
+    for (let depth = 0; depth < 8; depth += 1) chain = { message: `link${depth}`, cause: chain };
+    expect(describeFailure(chain)).not.toContain("innermost");
   });
 
   it("does not loop forever on a self-referential cause chain", () => {
-    const looping: { cause?: unknown } = {};
+    const looping: { message: string; cause?: unknown } = { message: "round and round" };
     looping.cause = looping;
-    expect(isRetryableSubmission(looping)).toBe(false);
-  });
-});
-
-describe("backoffMs", () => {
-  it("is zero at the bottom of the jitter window", () => {
-    vi.spyOn(Math, "random").mockReturnValue(0);
-    expect(backoffMs(0)).toBe(0);
-    expect(backoffMs(4)).toBe(0);
-    vi.restoreAllMocks();
-  });
-
-  it("doubles its window each attempt", () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.5);
-    expect(backoffMs(0)).toBe(500);
-    expect(backoffMs(1)).toBe(1_000);
-    expect(backoffMs(2)).toBe(2_000);
-    expect(backoffMs(3)).toBe(4_000);
-    vi.restoreAllMocks();
-  });
-
-  it("stays strictly inside its window at the top", () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.9999);
-    expect(backoffMs(0)).toBeLessThan(1_000);
-    expect(backoffMs(3)).toBeLessThan(8_000);
-    vi.restoreAllMocks();
+    expect(describeFailure(looping)).toBe("round and round");
   });
 });
 

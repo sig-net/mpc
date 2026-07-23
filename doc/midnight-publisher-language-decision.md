@@ -190,6 +190,46 @@ Either mandate `--state-pruning archive` as a hard RPC capability requirement, o
 
 `service.rs:712` justifies the sequential request loop with *"respond proving peaks ~11.5 GiB RSS"*, and the header comment at `service.rs:12-13` justifies the subprocess design partly on the same ground (*"as a child process an OOM kills the prover and this service answers 502"*). With proving offloaded to the proof server in that same file, neither is the live reason any more. The sequential loop may still be correct, but for different reasons: the ledger-level OCC and one-dust-UTXO constraints in §2.6. Update the comments so the next reader does not inherit a superseded model, and reconsider whether the loop should stay sequential.
 
+### 3.4 The dependency firewall: the stated reason is false, the real reason is different [tested 2026-07-23]
+
+The firewall is justified throughout this repo by "`chain-signatures/node` pins subxt 0.44, so the ledger crates cannot share a lockfile" (`.github/workflows/midnight-publisher.yml`, `midnight-publisher/Cargo.toml`, spec §5.5). **That is not how cargo works and it is not true.** Tested by adding `midnight-node-ledger-helpers` plus the 11-entry patch set to a probe crate in a worktree of this workspace:
+
+```
+RESOLUTION: SUCCEEDED   subxt 0.44.3 and 0.50.2 in one graph
+COMPILE:    exit 0      the full decode surface builds beside subxt 0.44 (8m 44s)
+subxt   0.44.0  ->  0.44.0, 0.50.2   (in the real workspace lockfile)
+```
+
+Semver-incompatible versions coexist by design; cargo links both. Cargo also placed three ledger generations (v7, v8, v9) side by side without complaint. Note also that `midnight-node-ledger-helpers` at rev `3dc40f22` *does* depend on subxt 0.50 directly, unlike at tag `node-2.0.0-rc.4`.
+
+**The real reason to keep the firewall, which nobody had articulated:** moving the ledger crates into the main workspace makes the whole repo carry the Midnight ledger's dependency tree. Measured cost, from a resolution that succeeds:
+
+- **80 new packages**, including the ZK tree (`halo2derive`, `blake2b_halo2`, `blst`) and native crypto (`aws-lc-rs`, `aws-lc-sys`, requiring `cmake` on every build machine).
+- **60 changed version entries**, mostly benign patch drift, but including `shlex` 1.3.0 → 2.0.1 (a major bump) and `tokio` 1.45.1 → 1.53.1 (eight minors on the node's async runtime).
+- **A repo-wide toolchain bump**: 87 crates in that graph are edition 2024, so `1.81.0` → `1.96.0` across 9 lines in 6 workflows. There is no `rust-toolchain.toml`; the pin lives only in CI.
+- Roughly nine minutes on a cold build, borne by every developer and CI runner, not just Midnight work.
+
+The command that resolves it, for whoever revisits this:
+
+```
+cargo update -p bip39 -p derive-where -p async-trait -p futures -p rayon \
+  -p parking_lot@0.12.3 -p anyhow -p log -p tokio -p scale-encode \
+  -p hashbrown@0.16.0 -p rand@0.9.1 -p const-hex -p blst -p flate2
+```
+
+Every conflict it resolves is an old patch pin against a requirement the workspace already permits (`bip39` 2.2.0 needs ^2.2.2, `anyhow` 1.0.98 needs ^1.0.102, `async-trait` 0.1.88 needs ^0.1.89); almost all trace to `integration-tests`, the member with the loosest requirements and the stalest pins.
+
+**Decision (2026-07-23): keep the publisher.** The read seams stay behind the HTTP boundary. Revisit if the workspace ever needs the ledger crates for another reason, or if the toolchain bump happens anyway. The value of this test is that the firewall is now a measured tradeoff rather than an inherited assumption, and the wrong justification should stop being repeated.
+
+### 3.5 The lockfile cannot be refreshed at all [P1, unrelated to Midnight]
+
+`core2 0.4.0` is yanked from crates.io and is reachable via `chain-ethereum` → the pinned `helios` git rev → `libp2p 0.51.3` → `multiaddr` → `multihash 0.17`. Consequences, both verified:
+
+- `cargo update` (no arguments) **fails**.
+- Deleting `Cargo.lock` and resolving from scratch **fails**.
+
+Builds from the committed lock still work, so nothing is visibly broken, but no dependency in the workspace can be updated by the normal command, including for a security advisory, and a clone that loses its lockfile cannot recover. The fix is to move `helios` to a rev with a newer libp2p. This deserves its own issue.
+
 ## 4. Migration plan
 
 ### 4.1 Principles

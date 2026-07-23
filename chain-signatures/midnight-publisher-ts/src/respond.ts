@@ -563,90 +563,6 @@ function assertCompiledContractMatches(
   }
 }
 
-// ---- concurrency -----------------------------------------------------------
-
-/**
- * Every fee-paying post runs in this queue, one at a time.
- *
- * Two independent constraints force it, and both were measured rather than
- * assumed:
- *
- * 1. ONE WALLET IS ONE IN-FLIGHT FEE-PAYING TRANSACTION. Fees are paid in DUST,
- *    and every wallet on this chain holds exactly one spendable dust UTXO, so a
- *    second concurrent balance fails with the misleading
- *    `Wallet.InsufficientFunds: could not balance dust` despite a large
- *    balance. This service holds one wallet, so the queue is global. Scaling
- *    out means one wallet per worker, at which point this becomes per-wallet.
- * 2. SAME-REQUEST-ID POSTS CANNOT BE PARALLELISED. A call's transcript pins the
- *    cells it read, so two posts under one request id both read the counter at
- *    N, the winner makes it N+1, and the loser is rejected with
- *    `Transcript(Execution(ReadMismatch))`. Serializing per request id is
- *    therefore mandatory; a single global queue is strictly stronger and
- *    subsumes it.
- *
- * The three state reads happen INSIDE the queue, not before it. Reading first
- * and queueing after would let the ledger parameters go stale while waiting,
- * and stale parameters get the transaction rejected with
- * `Transcript(Execution(OutOfGas))` because fees drift per block.
- *
- * No throughput is lost by being global: a single wallet cannot have two
- * fee-paying transactions in flight in the first place.
- */
-let walletQueue: Promise<void> = Promise.resolve();
-
-function queued<T>(run: () => Promise<T>): Promise<T> {
-  // `.then(run, run)` rather than `.then(run)`: the predecessor's outcome must
-  // never decide whether this request runs.
-  const settled = walletQueue.then(run, run);
-  walletQueue = settled.then(
-    () => undefined,
-    () => undefined,
-  );
-  return settled;
-}
-
-/** Attempts for one post, the first included. */
-const MAX_ATTEMPTS = 5;
-
-/** Backoff base. Roughly a block time, which is when the contended cell can next change. */
-const RETRY_BASE_MS = 1_000;
-
-/**
- * True when the node rejected the transaction as invalid, which for these
- * blind-append circuits means the ledger-level optimistic-concurrency check
- * lost: another post under the same request id moved the counter between our
- * read and our dispatch.
- *
- * Cheap to retry, because a loser is rejected at pre-dispatch in the guaranteed
- * phase: it is never included in a block and never charged a fee.
- *
- * @param error - The thrown value.
- * @returns Whether a fresh read and a rebuilt proof could succeed.
- */
-export function isRetryableSubmission(error: unknown): boolean {
-  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 8; depth += 1) {
-    if (typeof current !== "object") break;
-    const tag = (current as { _tag?: unknown })._tag;
-    if (tag === "TransactionInvalidError") return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return error instanceof Error && error.message.includes("TransactionInvalidError");
-}
-
-/**
- * Full-jitter backoff. The jitter is not decoration: lockstep retries re-collide
- * on the same cell, and a measured three-way same-id burst livelocked with
- * fixed delays while the winner succeeded on its first attempt.
- *
- * @param attempt - Zero-based attempt index that just failed.
- * @returns Milliseconds to wait.
- */
-export function backoffMs(attempt: number): number {
-  return Math.random() * RETRY_BASE_MS * 2 ** attempt;
-}
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 // ---- the flow --------------------------------------------------------------
 
 /**
@@ -692,8 +608,8 @@ async function proveCall(ready: Publisher, call: RespondCall, address: string, s
   return ready.proofProvider.proveTx(unsubmitted.private.unprovenTx);
 }
 
-/** One full attempt: pinned reads, key check, prove, balance, submit. */
-async function postOnce(
+/** The whole post: pinned reads, key check, prove, balance, submit. */
+async function post(
   config: Config,
   client: NodeClient,
   ready: Publisher,
@@ -706,6 +622,52 @@ async function postOnce(
   return ready.wallet.submit(balanced);
 }
 
+/** One link of a thrown chain, rendered so that neither its identity nor its text is lost. */
+function describeOne(value: unknown): string {
+  if (value instanceof Error) {
+    return [value.name === "Error" ? "" : value.name, value.message].filter(Boolean).join(": ");
+  }
+  if (typeof value !== "object" || value === null) return String(value);
+  const { _tag, message } = value as { _tag?: unknown; message?: unknown };
+  const named = [_tag, message].filter((part) => typeof part === "string" && part.length > 0).join(": ");
+  if (named.length > 0) return named;
+  try {
+    // Anything else: better an object literal than `[object Object]`.
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Render a thrown value as one line that NAMES the failure.
+ *
+ * `error.message` alone is not enough, and this seam is where that bites:
+ * nothing is retried here, so this text is the entire answer the caller gets.
+ * The wallet works through Effect, which rejects with a `FiberFailure` whose
+ * `name` is the ONLY place the failing class survives and whose `message`
+ * carries just the bare text. Measured on a live same-id race, the loser's 502
+ * reads `(FiberFailure) Wallet.InsufficientFunds: Insufficient Funds: could not
+ * balance dust`, and on `error.message` alone the `Wallet.InsufficientFunds`
+ * half, which is the half that says WHICH constraint was hit, would have been
+ * dropped. A thrown non-`Error` would stringify to `[object Object]`, and a
+ * wrapper's `cause` would be dropped entirely.
+ *
+ * @param error - The thrown value.
+ * @returns The failure and its causes, innermost last, as one line.
+ */
+export function describeFailure(error: unknown): string {
+  const parts: string[] = [];
+  // Bounded, so a self-referential `cause` chain terminates rather than hangs.
+  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 8; depth += 1) {
+    const text = describeOne(current);
+    // A wrapper usually quotes what it wrapped; do not say it twice.
+    if (text.length > 0 && !parts.some((part) => part.includes(text))) parts.push(text);
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return parts.join(": ") || String(error);
+}
+
 /**
  * `POST /respond`: validate, prove and submit one response.
  *
@@ -714,6 +676,26 @@ async function postOnce(
  * guaranteed phase, and a guaranteed-phase failure is rejected at pre-dispatch
  * and never included in a block. So inclusion is success, and no extra
  * confirming read is made, matching the Rust implementation's contract.
+ *
+ * NOT SERIALIZED AND NOT RETRIED. Posts run concurrently and a failure is
+ * returned rather than absorbed, which leaves the caller owning two collisions
+ * and owning the retry for both:
+ *
+ * 1. This service holds ONE funding wallet, and a wallet on this chain has one
+ *    spendable dust UTXO. Two concurrent posts therefore collide at BALANCE
+ *    time, before either reaches the chain: measured, one returned 200 and the
+ *    other 502 `Wallet.InsufficientFunds: Insufficient Funds: could not balance
+ *    dust`, which is misleading text for a well-funded wallet.
+ * 2. Posts that do reach dispatch under one request id both read the counter at
+ *    N; the winner makes it N+1 and the ledger's optimistic-concurrency check
+ *    rejects the loser with `Transcript(Execution(ReadMismatch))`. That loser
+ *    is rejected at pre-dispatch, so it never enters a block and is never
+ *    charged a fee: retrying it costs a prove and nothing else.
+ *
+ * Whoever restores in-process serialization needs both, and must keep the three
+ * state reads INSIDE whatever queue they add: reading first and queueing after
+ * lets the ledger parameters go stale, and stale ones are rejected as
+ * `Transcript(Execution(OutOfGas))` because fees drift per block.
  *
  * @param config - Validated configuration.
  * @param client - Connected node client, used for the three pinned state reads.
@@ -735,28 +717,14 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
   const hidden = secrets(config);
   try {
     const ready = await publisher(config);
-    const txId = await queued(async () => {
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          return await postOnce(config, client, ready, validated);
-        } catch (error) {
-          if (attempt + 1 >= MAX_ATTEMPTS || !isRetryableSubmission(error)) throw error;
-          const wait = backoffMs(attempt);
-          console.warn(
-            `respond: rid=${validated.request_id} lost the ledger-level race, retrying in ${Math.round(wait)} ms ` +
-              `(attempt ${attempt + 2}/${MAX_ATTEMPTS})`,
-          );
-          await sleep(wait);
-        }
-      }
-    });
+    const txId = await post(config, client, ready, validated);
     console.log(`respond: rid=${validated.request_id} submitted tx ${txId}`);
     return { code: 200, body: `{"status":"ok"}` };
   } catch (error) {
     // Redacted at the source: wallet, proof-server and node errors can echo
     // values they were handed, and this text becomes both a 502 body and a log
     // line. The funding seed must never survive the trip.
-    const safe = redact(error instanceof Error ? error.message : String(error), hidden);
+    const safe = redact(describeFailure(error), hidden);
     console.error(`respond failed: ${safe}`);
     return { code: 502, body: safe };
   }

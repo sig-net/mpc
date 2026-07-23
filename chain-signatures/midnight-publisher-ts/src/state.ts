@@ -39,7 +39,6 @@ import type { AlignedValue, StateValue } from "@midnightntwrk/ledger-v9";
 import type { Config } from "./config.js";
 import { fromHex, isBlockHash, isHex, resolveAnchor, rpc, toHex } from "./node.js";
 import type { Anchor, BlockHashHex, NodeClient } from "./node.js";
-import { looksLikePruning } from "./preflight.js";
 import type { Reply } from "./server.js";
 
 /** One `key`/`value` pair of a decoded `StateValue::Map`. */
@@ -151,6 +150,30 @@ export function walk(value: StateValue): StateNode {
 export function decodeContractState(raw: Uint8Array): StateNode {
   const ctx = { caller: "midnight-publisher:decodeContractState" };
   return walk(deserializeContractState(raw, ctx).data.state);
+}
+
+/**
+ * Substring of the node's catch-all "I could not answer" error. Not a
+ * pruning-specific signal on its own: both failure modes below come back as
+ * `-32602` with no `data` field, so the CODE cannot discriminate and the text
+ * is the only thing that can.
+ *
+ *   pruned / unreachable state : "Unable to get requested contract state"
+ *   contract did not exist yet : "Contract not present at the requested address"
+ */
+const UNABLE = "unable to get requested contract state";
+
+/**
+ * True when a failed anchored state read looks like pruning rather than a
+ * missing contract. Callers should raise this loudly rather than folding it into
+ * a generic fetch failure: one means "this contract did not exist yet", the
+ * other means "this node has lost the ability to answer".
+ *
+ * @param message - The error text the node returned.
+ * @returns Whether the message is the catch-all that pruning produces.
+ */
+function looksLikePruning(message: string): boolean {
+  return message.toLowerCase().includes(UNABLE);
 }
 
 /**
