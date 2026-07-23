@@ -10,7 +10,7 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
-use crate::protocol::{Chain, ProtocolState};
+use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
 use crate::storage::PresignatureStorage;
@@ -65,6 +65,13 @@ const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 /// so that late-arriving peer posit messages do not re-create orphan queues.
 const MAX_DEAD_IDS: usize = 4096;
 
+/// A retained in-flight request. `is_proposer` is shared with the current
+/// task incarnation and read by the deadline watcher.
+struct SignEntry {
+    request: IndexedSignRequest,
+    is_proposer: Arc<AtomicBool>,
+}
+
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
 /// `sign_id`, plus the posit queues, delayed-response watchers, and dedup state
 /// that outlive individual tasks. (TODO: needs refactoring)
@@ -79,8 +86,8 @@ pub struct SignatureSpawner {
     posit_queues: HashMap<SignId, Arc<SignPositWorkQueue>>,
     /// Watchers that increment the delayed metric when response time exceeds expected.
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
-    /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
-    task_chains: HashMap<SignId, Chain>,
+    /// In-flight requests: enables chain-scoped abort and respawning.
+    requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan queues.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
@@ -98,8 +105,9 @@ impl SignatureSpawner {
         crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
     }
 
-    /// Spawn a signature task that internally handles the organize, posit, and generation phases.
-    fn spawn_task(
+    /// Admit a request: retain it, start its deadline watcher, and spawn its
+    /// task (held until `spawn_tasks` when governance is not running).
+    fn add_request(
         &mut self,
         governance: &GovernanceInfo,
         request: IndexedSignRequest,
@@ -109,8 +117,14 @@ impl SignatureSpawner {
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.dead_ids.pop(&sign_id);
-        self.task_chains.insert(sign_id, request.chain);
-        tracing::info!(?sign_id, "spawning signature task");
+        let is_proposer = Arc::new(AtomicBool::new(false));
+        self.requests.insert(
+            sign_id,
+            SignEntry {
+                request: request.clone(),
+                is_proposer: Arc::clone(&is_proposer),
+            },
+        );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
         let chain = request.chain;
@@ -119,7 +133,6 @@ impl SignatureSpawner {
         let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        let is_proposer = Arc::new(AtomicBool::new(false));
         // prevent incrementing delayed metric for already delayed requests
         if remaining_time > Duration::from_secs(0)
             && !matches!(request.kind, SignKind::Checkpoint(_))
@@ -145,6 +158,29 @@ impl SignatureSpawner {
             self.delayed_watchers.insert(sign_id, watcher);
         }
 
+        if !governance.is_running {
+            tracing::info!(?sign_id, "holding sign request until governance is running");
+            return;
+        }
+        self.spawn_task(governance, request, cfg);
+    }
+
+    /// Spawn a task incarnation for an already-admitted request.
+    fn spawn_task(
+        &mut self,
+        governance: &GovernanceInfo,
+        request: IndexedSignRequest,
+        cfg: ProtocolConfig,
+    ) {
+        let sign_id = request.id;
+        tracing::info!(?sign_id, "spawning signature task");
+
+        let is_proposer = self
+            .requests
+            .get(&sign_id)
+            .map(|entry| Arc::clone(&entry.is_proposer))
+            .expect("sign request entry must exist when spawning its task");
+
         // Take (or create) the posit queue; it may already hold messages
         // that arrived before this task spawned.
         let posit_queue = Arc::clone(
@@ -161,7 +197,6 @@ impl SignatureSpawner {
             rpc: self.rpc.clone(),
             backlog: self.backlog.clone(),
             cfg,
-            contract: self.contract.clone(),
             is_proposer,
             limiter: self.limiter.clone(),
             node_account_id: self.node_account_id.clone(),
@@ -172,6 +207,24 @@ impl SignatureSpawner {
             sign_id,
             task.run(request, self.mesh_state.clone(), posit_queue),
         );
+    }
+
+    /// Spawn a fresh incarnation for every retained request; the caller must
+    /// have aborted previous incarnations. Not a retirement: queues,
+    /// watchers, and dedup state survive.
+    fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
+        let requests: Vec<IndexedSignRequest> = self
+            .requests
+            .values()
+            .map(|entry| entry.request.clone())
+            .collect();
+        tracing::info!(
+            count = requests.len(),
+            "respawning sign tasks under new governance"
+        );
+        for request in requests {
+            self.spawn_task(governance, request, cfg.clone());
+        }
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
@@ -252,7 +305,7 @@ impl SignatureSpawner {
     /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
     fn retire_task(&mut self, sign_id: SignId, reason: &str) {
         self.mark_dead(sign_id);
-        self.task_chains.remove(&sign_id);
+        self.requests.remove(&sign_id);
         self.posit_queues.remove(&sign_id);
         self.abort_delayed_watcher(sign_id, reason);
     }
@@ -270,11 +323,11 @@ impl SignatureSpawner {
             SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
                 let sign_id = request.id;
 
-                // Skip if we already have a task handling this request.
-                // Use tasks instead of the queue map since it may already contain buffered messages
-                // (e.g. a Propose arriving before the indexer notifies us), so we must only look
-                // at the task map to decide whether the request is truly a duplicate.
-                if self.tasks.contains_key(&sign_id) {
+                // Skip requests we already track. Use the request map rather than
+                // the queue map, which may already hold buffered messages (e.g. a
+                // Propose arriving before the indexer notifies us), and rather than
+                // the task map, which is empty while requests are held for governance.
+                if self.requests.contains_key(&sign_id) {
                     tracing::info!(?sign_id, "skipping duplicate sign request");
                     return;
                 }
@@ -286,7 +339,7 @@ impl SignatureSpawner {
                     request.unix_timestamp_indexed,
                 );
 
-                self.spawn_task(governance, request, cfg.clone());
+                self.add_request(governance, request, cfg.clone());
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -294,9 +347,9 @@ impl SignatureSpawner {
                     "aborting all in-flight signature tasks on chain regression"
                 );
                 let to_abort: Vec<SignId> = self
-                    .task_chains
+                    .requests
                     .iter()
-                    .filter(|(_, c)| **c == chain)
+                    .filter(|(_, entry)| entry.request.chain == chain)
                     .map(|(id, _)| *id)
                     .collect();
                 for sign_id in to_abort {
@@ -343,9 +396,19 @@ impl SignatureSpawner {
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
-                Some(state) = contract_watcher.next_state() => {
-                    if let Some(new_governance) = state.governance(&self.node_account_id) {
-                        governance = new_governance;
+                Some(new_governance) = contract_watcher.next_governance(governance.clone()) => {
+                    governance = new_governance;
+                    // A governance change invalidates every incarnation — even
+                    // running -> running: the watch coalesces fast transitions.
+                    self.tasks.abort_all();
+                    if governance.is_running {
+                        self.spawn_tasks(&governance, &protocol);
+                    } else {
+                        // Entries stay in `requests` and respawn once running again.
+                        tracing::info!(
+                            count = self.requests.len(),
+                            "governance not running; holding sign requests"
+                        );
                     }
                 }
             }
@@ -367,8 +430,8 @@ impl SignatureSpawner {
         self.tasks.contains_key(&sign_id)
     }
 
-    fn test_task_chains_contains(&self, sign_id: &SignId) -> bool {
-        self.task_chains.contains_key(sign_id)
+    fn test_requests_contains(&self, sign_id: &SignId) -> bool {
+        self.requests.contains_key(sign_id)
     }
 }
 
@@ -401,7 +464,7 @@ impl SignatureSpawnerTask {
             tasks: JoinMap::new(),
             posit_queues: HashMap::new(),
             delayed_watchers: HashMap::new(),
-            task_chains: HashMap::new(),
+            requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
             mesh_state,
@@ -480,7 +543,7 @@ mod tests {
             tasks: JoinMap::new(),
             posit_queues: HashMap::new(),
             delayed_watchers: HashMap::new(),
-            task_chains: HashMap::new(),
+            requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state: mesh_rx,
             limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
@@ -501,31 +564,39 @@ mod tests {
         };
         let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
 
-        // Step 1: Spawn → queue created, task_chains populated, not dead
-        spawner.spawn_task(&governance, request.clone(), cfg.clone());
+        // Step 1: Spawn → queue created, request retained, not dead
+        spawner.add_request(&governance, request.clone(), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_queues_contains(&sign_id));
-        assert!(spawner.test_task_chains_contains(&sign_id));
+        assert!(spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 2: Abort chain → queue removed, task_chains cleared, marked dead
+        // Step 2: Abort chain → queue removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_posit_queues_contains(&sign_id));
-        assert!(!spawner.test_task_chains_contains(&sign_id));
+        assert!(!spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
         // Step 3: Late posit → dropped (dead_id check), queue NOT recreated
         spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(!spawner.test_posit_queues_contains(&sign_id));
 
-        // Step 4: Re-spawn → dead cleared, task_chains repopulated
-        spawner.spawn_task(&governance, request, cfg.clone());
+        // Step 4: Re-spawn → dead cleared, request retained again
+        spawner.add_request(&governance, request, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 5: Posit after re-spawn → accepted, queue re-created
         spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(spawner.test_posit_queues_contains(&sign_id));
+
+        // Step 6: Governance respawn → task swapped in place, nothing retired.
+        spawner.tasks.abort_all();
+        spawner.spawn_tasks(&governance, &cfg);
+        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id));
     }
 }

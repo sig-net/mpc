@@ -456,12 +456,6 @@ mod tests {
         let (_inbox, mut outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
         let rpc_channel = RpcChannel { tx: rpc_tx };
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
 
         let mut ctx = SignTask {
             governance,
@@ -471,7 +465,6 @@ mod tests {
             rpc: rpc_channel,
             backlog: Backlog::new(),
             cfg: ProtocolConfig::default(),
-            contract,
             is_proposer: Arc::new(AtomicBool::new(false)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,
