@@ -83,7 +83,7 @@ executable) are injected into a `MockStateManager` before catchup starts.
 ```sh
 RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
 CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
-START=11214938 END=11215038 WATCHERS=100 \
+START=11214938 END=11215038 WATCHERS=1000 \
 RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_watchers --features bench
 ```

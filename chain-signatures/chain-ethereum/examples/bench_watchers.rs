@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow!("START must be >= 1 and < END"));
     }
 
-    let watchers_count = env_u64("WATCHERS", Some(50))?;
+    let watchers_count = env_u64("WATCHERS", Some(1000))?;
 
     let state = MockStateManager::new();
     state.set_processed_block(Chain::Ethereum, start - 1).await;
