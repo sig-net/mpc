@@ -626,11 +626,17 @@ async fn execute_vote_checkpoint(
     );
 
     match result {
-        Ok(reached) => {
+        Ok(Some(reached)) => {
             tracing::info!(
                 ?checkpoint,
                 threshold_reached = reached,
                 "checkpoint vote submitted"
+            );
+        }
+        Ok(None) => {
+            tracing::info!(
+                ?checkpoint,
+                "checkpoint vote ignored because checkpoint is behind the latest checkpoint"
             );
         }
         Err(err) => {

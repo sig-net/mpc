@@ -1,4 +1,5 @@
 use crate::protocol::Governance;
+use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
 use mpc_primitives::ConsensusCheckpointDigest;
@@ -59,24 +60,41 @@ impl NearGovernanceClient {
         Ok(views)
     }
 
+    /// Submit a checkpoint vote.
+    ///
+    /// Returns `Some(threshold_reached)` for a successful contract call. Returns
+    /// `None` when the contract rejects the checkpoint because it is behind the
+    /// chain's latest checkpoint; that outcome is already resolved and should
+    /// not be retried.
     pub async fn vote_checkpoint(
         &self,
         checkpoint: &ConsensusCheckpointDigest,
-    ) -> anyhow::Result<bool> {
-        let result = self
+    ) -> anyhow::Result<Option<bool>> {
+        let transaction = self
             .client
             .call(&self.signer, &self.contract_id, "vote_checkpoint")
             .args_json(json!({ "checkpoint": checkpoint }))
             .max_gas()
             .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
-            })?
-            .json()?;
+            .await;
 
-        Ok(result)
+        let transaction = match transaction {
+            Ok(transaction) => transaction,
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::CheckpointBehind.to_string()) =>
+            {
+                return Ok(None);
+            }
+            Err(err) => {
+                tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
+                return Err(err.into());
+            }
+        };
+
+        Ok(Some(transaction.json()?))
     }
 }
 

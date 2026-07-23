@@ -410,8 +410,13 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .max_gas()
         .transact()
         .await?;
-    assert!(stale_vote.is_success());
-    assert!(stale_vote.json::<bool>()?);
+    assert!(stale_vote.is_failure());
+    let stale_error = stale_vote
+        .into_result()
+        .expect_err("a behind checkpoint should be rejected");
+    assert!(stale_error
+        .to_string()
+        .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
 
     let conflicting = ConsensusCheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
     let conflict = accounts[2]
