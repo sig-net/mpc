@@ -3,6 +3,16 @@
 //! generate-intent inherently needs node/toolkit-js, so docker mode runs it in
 //! the pinned toolkit-033 image; everything else uses the native toolkit
 //! binary built from this workspace's seeded lockfile.
+//!
+//! WHY subprocesses when the toolkit is already a library dependency: its commands
+//! ARE callable in-process (`commands::{contract_state, generate_intent,
+//! send_intent}::execute`, each taking typed args), so the argv assembled below is
+//! a deliberate choice rather than ignorance of that API. Two reasons keep it. The
+//! CLI is the toolkit's stable public contract, whereas its internal command types
+//! churn between release candidates of an alpha dependency. And proving peaks
+//! around 11.5 GiB RSS: as a child process an OOM kills the prover and this service
+//! answers 502, while in-process it would take the whole sidecar and every other
+//! seam down with it.
 
 use anyhow::Context as _;
 use std::io::Read as _;
@@ -57,8 +67,15 @@ pub struct Config {
     pub signer_secret_key: String,
     pub compactc_version: String,
     /// JSON-RPC client for the `GET /state` read path (finalized head, header,
-    /// `midnight_contractState`). A subprocess like the toolkit — no async HTTP
-    /// stack pulled into this nested workspace. Overridable for tests.
+    /// `midnight_contractState`). Overridable for tests.
+    ///
+    /// Still a subprocess, but the original reason ("no async HTTP stack in this
+    /// nested workspace") no longer holds: `/block` already links subxt + tokio
+    /// in-process. This is un-consolidated rather than justified, and folding it
+    /// into an in-process call would drop this config, the fake-rpc harness, and a
+    /// spawn per read. It is NOT duplicating the toolkit's own `get_contract_state`,
+    /// which requires a fully replayed `LedgerContext`; a single
+    /// `midnight_contractState` RPC answers the same question far more cheaply.
     pub curl_bin: PathBuf,
 }
 
@@ -471,18 +488,26 @@ fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-/// Fetch the contract state anchored to the finalized head, decode it, and
-/// serialize the `{anchor, tree}` response. Task 0 proved
-/// `midnight_contractState(addr, at)` honors a finalized-block-hash `at`; the
-/// blob carries no embedded anchor, so we pin it ourselves.
-fn fetch_state_response(cfg: &Config, address: &str) -> anyhow::Result<String> {
-    let head = rpc_call(cfg, "chain_getFinalizedHead", serde_json::json!([]))?;
-    let head_hash = head
-        .as_str()
-        .context("finalized head is not a string")?
-        .to_string();
+/// Fetch a contract's state at a given block (default: the finalized head),
+/// decode it, and serialize the `{anchor, tree}` response.
+/// `midnight_contractState(addr, at)` honors a block-hash `at`; the blob carries
+/// no embedded anchor, so we pin it ourselves.
+///
+/// `at` is what lets a caller ask "what did block N write to this contract?":
+/// read the contract at N and at N's parent and diff the two trees. An indexer
+/// walking blocks in order already holds the parent's tree, so that costs one
+/// read per block. See `block.rs` for why this replaces trying to recover writes
+/// out of a transaction's transcript.
+fn fetch_state_response(cfg: &Config, address: &str, at: Option<&str>) -> anyhow::Result<String> {
+    let block_hash = match at {
+        Some(hash) => hash.to_string(),
+        None => rpc_call(cfg, "chain_getFinalizedHead", serde_json::json!([]))?
+            .as_str()
+            .context("finalized head is not a string")?
+            .to_string(),
+    };
 
-    let header = rpc_call(cfg, "chain_getHeader", serde_json::json!([&head_hash]))?;
+    let header = rpc_call(cfg, "chain_getHeader", serde_json::json!([&block_hash]))?;
     let number = header
         .get("number")
         .and_then(serde_json::Value::as_str)
@@ -490,11 +515,11 @@ fn fetch_state_response(cfg: &Config, address: &str) -> anyhow::Result<String> {
     let height = u64::from_str_radix(number.trim_start_matches("0x"), 16)
         .context("parsing header.number")?;
 
-    // Address = raw 64-hex, no `0x`; `at` = the 0x-prefixed finalized hash.
+    // Address = raw 64-hex, no `0x`; `at` = the 0x-prefixed block hash.
     let blob = rpc_call(
         cfg,
         "midnight_contractState",
-        serde_json::json!([address, &head_hash]),
+        serde_json::json!([address, &block_hash]),
     )?;
     let blob = blob
         .as_str()
@@ -506,22 +531,29 @@ fn fetch_state_response(cfg: &Config, address: &str) -> anyhow::Result<String> {
     let response = StateResponse {
         anchor: Some(Anchor {
             height,
-            hash: head_hash.trim_start_matches("0x").to_string(),
+            hash: block_hash.trim_start_matches("0x").to_string(),
         }),
         tree,
     };
     Ok(serde_json::to_string(&response)?)
 }
 
-/// `GET /state?address=<64hex>` → 200 `{anchor,tree}` / 400 bad address / 502
-/// fetch or decode failure.
+/// `GET /state?address=<64hex>[&at=<0xblockhash>]` → 200 `{anchor,tree}` / 400
+/// bad address or `at` / 502 fetch or decode failure. Without `at`, reads the
+/// finalized head; with it, reads that block, so two reads either side of a
+/// block reveal exactly what that block wrote.
 fn handle_state(cfg: &Config, url: &str) -> (u16, String) {
     let address = match query_param(url, "address") {
         Some(a) if is_hex(a, 32) => a,
         Some(_) => return (400, "address must be 64 lowercase hex".into()),
         None => return (400, "missing `address` query param".into()),
     };
-    match fetch_state_response(cfg, address) {
+    let at = match query_param(url, "at") {
+        Some(h) if h.starts_with("0x") && is_hex(&h[2..], 32) => Some(h),
+        Some(_) => return (400, "at must be `0x` followed by 64 lowercase hex".into()),
+        None => None,
+    };
+    match fetch_state_response(cfg, address, at) {
         Ok(body) => (200, body),
         Err(e) => (502, format!("{e:#}")),
     }
@@ -529,11 +561,14 @@ fn handle_state(cfg: &Config, url: &str) -> (u16, String) {
 
 // ---- GET /block: finalized-block decode ----------------------------------
 
-/// Fetch a finalized block by hash and decode it into notify inserts plus
-/// cross-contract-call provenance. Step 1 (extrinsics → ledger `Transaction`
-/// bytes) is metadata-aware SCALE decoding, so it drives the toolkit's fetcher
-/// lib in-process (not the curl RPC path `/state` uses); Steps 2–3 (`block.rs`)
-/// then decode each transaction the same way `state.rs` decodes STATE.
+/// Fetch a finalized block by hash and decode its per-transaction
+/// cross-contract-call provenance. Unwrapping extrinsics into ledger
+/// `Transaction` bytes is metadata-aware SCALE decoding, so it drives the
+/// toolkit's fetcher lib in-process (not the curl RPC path `/state` uses);
+/// `block.rs` then reads each transaction's claimed calls and commitments.
+///
+/// This seam answers "which transaction called whom", not "what was written":
+/// for writes, read `/state?at=` either side of the block and diff.
 fn fetch_block_response(cfg: &Config, hash_hex: &str) -> anyhow::Result<String> {
     use midnight_node_toolkit::client::MidnightNodeClient;
     use midnight_node_toolkit::fetcher::{fetch_single_block, fetch_storage::InMemory};

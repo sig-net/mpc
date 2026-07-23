@@ -2,6 +2,14 @@
 //! state-fixture JSON schema (`kind`/`atoms`/`entries`). The same schema backs
 //! both the committed `chain-midnight` state-fixtures and the live
 //! `GET /state` reads, so `chain-midnight` gets ONE parser for both.
+//!
+//! This schema is a DELIBERATE deviation, not an oversight: `StateValue` already
+//! implements `serde::Serialize` upstream (tagged, kebab-case), and we do not use
+//! it. The consumer needs the field-aligned atoms exactly as the runtime stores
+//! them (each trailing-zero-trimmed, re-padded to the declared width on the far
+//! side) so that a Compact struct's fields line up one-to-one with what the
+//! TypeScript reader expects. Upstream's representation answers a different
+//! question. If that ever stops being true, prefer the upstream impl.
 
 use anyhow::Context as _;
 use midnight_node_ledger_helpers::{AlignedValue, ContractState, DefaultDB, StateValue};
