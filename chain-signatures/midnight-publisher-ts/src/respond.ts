@@ -1,33 +1,26 @@
 /**
- * `POST /respond`: the write seam. Validate, prove, pay, submit.
+ * `POST /respond`: validate, prove, pay, submit.
  *
  * MECHANISM, NEVER AUTHORITY. The signature was computed by the MPC threshold
- * before anything reached this service, and both circuits are blind appends
- * (counter increment plus map insert, no assert). The validation below is a
- * shape check that keeps malformed input away from the prover, not an
- * authorization check.
+ * before anything reached this service, and both circuits are blind appends. The
+ * validation below is a shape check that keeps malformed input away from the
+ * prover, not an authorization check.
  *
  * The escape hatch rather than `findDeployedContract`: three pinned reads, then
  * `createUnprovenCallTxFromInitialStates` with `crossContract` omitted, then the
- * stock proof provider, then balance and submit. That needs no
- * `PublicDataProvider`, no indexer on the read side and no private-state
- * provider, so no directory is created and no database handle is taken. What it
- * gives up is `verifyContractState`, reproduced below against the same contract
- * state the call is built from.
+ * stock proof provider, then balance and submit. That is the only entry point
+ * needing no `PublicDataProvider`, no indexer read and no private-state provider.
  *
- * The wire contract (field names, optionality, lengths, the lowercase-hex rule,
- * cross-circuit exclusion, every message and the order the checks run in) is
- * byte-identical to the Rust implementation this replaces, EXCEPT that the Rust
- * one still validates `postRespond`, a circuit that no longer exists on chain.
+ * The wire contract is byte-identical to the Rust implementation it replaces.
  */
 
-import { ContractExecutable, type CompiledContract } from "@midnight-ntwrk/midnight-js-protocol/compact-js";
+import { ContractExecutable } from "@midnight-ntwrk/midnight-js-protocol/compact-js";
 import type { ContractState } from "@midnight-ntwrk/midnight-js-protocol/compact-runtime";
-import type { LedgerParameters, ZswapChainState } from "@midnight-ntwrk/midnight-js-protocol/ledger";
 import type { UnboundTransaction, VerifierKey } from "@midnight-ntwrk/midnight-js-types";
 import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
 import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
 import {
+  isDeserializationError,
   deserializeCompactContractState,
   deserializeLedgerParameters,
   deserializeZswapChainState,
@@ -37,42 +30,38 @@ import {
   createCallTxOptions,
   createUnprovenCallTxFromInitialStates,
   verifyContractState,
+  type PublicContractStates,
 } from "@midnight-ntwrk/midnight-js/contracts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
-import type { ProofProvider } from "@midnight-ntwrk/midnight-js/types";
 import {
-  Contract,
+  Contract as SignetContract,
   createSignetContractPrivateState,
   type SignetContractCircuitId,
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
 import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
 
-import { redact, secrets, type Config } from "./config.js";
+import { redact, type Config } from "./config.js";
 import {
   badRequest,
   classify,
-  errorBody,
+  jsonObject,
   PublisherError,
   RESPOND_STAGES,
-  statusFor,
+  fail,
+  type Reply,
   type RespondStage,
 } from "./errors.js";
 import { assertLedgerTag, LEDGER_TAGS } from "./ledger.js";
 import { finalizedHead, fromHex, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
-import { openFundingWallet, type FundingWallet } from "./wallet.js";
-import type { Reply } from "./server.js";
+import { openFundingWallet } from "./wallet.js";
 
 // ---- the wire contract -----------------------------------------------------
 
 /**
- * Mirrors the Rust `RespondRequest` field for field; the two cannot share a
- * type, so the JSON contract is pinned by identical fixtures on both sides.
- *
  * `sig_r`/`sig_s` are LITTLE-ENDIAN, the order the record's `Bytes<32>` fields
- * store; the caller byte-reverses k256's big-endian scalars before posting.
- * `serialized_output` is the WHOLE zero-padded ABI return data, not a digest.
- * The contract checks none of it: consumers verify on claim.
+ * store. `serialized_output` is the whole zero-padded ABI return data, not a
+ * digest. The contract checks none of it: consumers verify on claim.
  */
 export interface RespondRequest {
   readonly contract_address: string;
@@ -91,7 +80,6 @@ export interface RespondRequest {
   readonly recovery_id?: number;
 }
 
-/** Making the guarantee a type is what keeps {@link respondCall} free of non-null assertions. */
 export type ValidatedRespondRequest =
   | (RespondRequest & {
       readonly circuit: "postSignatureResponse";
@@ -109,29 +97,18 @@ export type ValidatedRespondRequest =
       readonly recovery_id: number;
     });
 
-/**
- * One of the two circuits this seam posts to.
- *
- * Derived from the validated union rather than declared beside it, so the two
- * cannot drift. A rename upstream is already a compile error at `proveCall`,
- * where `createCallTxOptions` types its arguments against the generated
- * contract.
- */
+/** Derived from the validated union so the two cannot drift. */
 export type RespondCircuit = ValidatedRespondRequest["circuit"];
 
 // ---- parsing and validation ------------------------------------------------
 
-/** Whether a JSON value is absent for an optional field. Rust's serde treats `null` and a missing key alike. */
-function absent(value: unknown): boolean {
-  return value === undefined || value === null;
-}
+/** Rust's serde treats `null` and a missing key alike. */
+const absent = (value: unknown): boolean => value === undefined || value === null;
 
 function requiredString(source: Record<string, unknown>, field: string): string {
-  const value = source[field];
-  if (typeof value === "string") return value;
-  throw badRequest(
-    absent(value) ? `invalid JSON: missing field \`${field}\`` : `invalid JSON: \`${field}\` must be a string`,
-  );
+  const value = optionalString(source, field);
+  if (value !== undefined) return value;
+  throw badRequest(`invalid JSON: missing field \`${field}\``);
 }
 
 function optionalString(source: Record<string, unknown>, field: string): string | undefined {
@@ -141,7 +118,6 @@ function optionalString(source: Record<string, unknown>, field: string): string 
   throw badRequest(`invalid JSON: \`${field}\` must be a string`);
 }
 
-/** An optional `u8`, matching the Rust field type: an integer in 0..=255 or absent. */
 function optionalByte(source: Record<string, unknown>, field: string): number | undefined {
   const value = source[field];
   if (absent(value)) return undefined;
@@ -149,18 +125,9 @@ function optionalByte(source: Record<string, unknown>, field: string): number | 
   throw badRequest(`invalid JSON: \`${field}\` must be an integer in 0..=255`);
 }
 
-/** Unknown fields are ignored, matching the Rust struct's lack of `deny_unknown_fields`. */
+/** Unknown fields are ignored, as the Rust struct does. */
 export function parseRespondRequest(body: string): RespondRequest {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch (error) {
-    throw badRequest(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw badRequest("invalid JSON: expected a JSON object");
-  }
-  const source = parsed as Record<string, unknown>;
+  const source = jsonObject(body);
 
   return {
     contract_address: requiredString(source, "contract_address"),
@@ -178,44 +145,30 @@ export function parseRespondRequest(body: string): RespondRequest {
 }
 
 /** Present and exactly 32 bytes of lowercase hex. */
-function isHex32(value: string | undefined): boolean {
-  return value !== undefined && isHex(value, 32);
-}
+const isHex32 = (value: string | undefined): boolean => value !== undefined && isHex(value, 32);
 
-/** Checks and order are byte-identical to the Rust `validate`, so the same body yields the same message. */
+/** Checks and their order are byte-identical to the Rust `validate`. */
 export function validateRespondRequest(request: RespondRequest): asserts request is ValidatedRespondRequest {
-  if (!isHex(request.contract_address, 32)) {
-    throw badRequest("contract_address must be 64 lowercase hex");
-  }
-  if (!isHex(request.request_id, 32)) {
-    throw badRequest("request_id must be 64 hex");
-  }
+  if (!isHex(request.contract_address, 32)) throw badRequest("contract_address must be 64 lowercase hex");
+  if (!isHex(request.request_id, 32)) throw badRequest("request_id must be 64 hex");
 
   switch (request.circuit) {
-    case "postSignatureResponse": {
+    case "postSignatureResponse":
       if (!(isHex32(request.big_r_x) && isHex32(request.big_r_y) && isHex32(request.s))) {
         throw badRequest("postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each");
       }
       if (!(request.recovery_id !== undefined && request.recovery_id <= 1)) {
         throw badRequest("postSignatureResponse recovery_id must be 0|1");
       }
-      if (
-        request.serialized_output !== undefined ||
-        request.output_len !== undefined ||
-        request.sig_r !== undefined ||
-        request.sig_s !== undefined
-      ) {
+      if ([request.serialized_output, request.output_len, request.sig_r, request.sig_s].some((f) => f !== undefined)) {
         throw badRequest("postSignatureResponse takes no bidirectional fields");
       }
       return;
-    }
-    case "postRespondBidirectional": {
+    case "postRespondBidirectional":
       // serialized_output is Bytes<128>: the whole zero-padded ABI return data,
       // not a digest of it.
       if (!(request.serialized_output !== undefined && isHex(request.serialized_output, 128))) {
-        throw badRequest(
-          "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)",
-        );
+        throw badRequest("postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)");
       }
       if (!(request.output_len !== undefined && request.output_len <= 128)) {
         throw badRequest("postRespondBidirectional output_len must be 0..=128");
@@ -230,51 +183,27 @@ export function validateRespondRequest(request: RespondRequest): asserts request
         throw badRequest("postRespondBidirectional takes no postSignatureResponse fields");
       }
       return;
-    }
     default:
       throw badRequest(`unknown circuit ${request.circuit}`);
   }
 }
 
-/** One step, so the assertion's narrowing survives into the caller. */
-export function parseAndValidate(body: string): ValidatedRespondRequest {
-  const request = parseRespondRequest(body);
-  validateRespondRequest(request);
-  return request;
-}
-
 // ---- circuit arguments -----------------------------------------------------
 
-/** `postSignatureResponse`'s second argument: the whole `SignatureRespondedEvent`. */
-export interface SignatureRespondedEvent {
-  readonly bigRx: Uint8Array;
-  readonly bigRy: Uint8Array;
-  readonly s: Uint8Array;
-  readonly recoveryId: bigint;
-}
+/** Each circuit's arguments, read off the generated contract so a rename or retype upstream is a compile error here. */
+type CircuitArgs<K extends RespondCircuit> = readonly [
+  requestId: Uint8Array,
+  event: Readonly<Parameters<SignetContract<SignetContractPrivateState>["circuits"][K]>[2]>,
+];
 
-/** `postRespondBidirectional`'s second argument: the whole `RespondBidirectionalEvent`. */
-export interface RespondBidirectionalEvent {
-  readonly serializedOutput: Uint8Array;
-  readonly outputLen: bigint;
-  readonly r: Uint8Array;
-  readonly s: Uint8Array;
-  readonly recoveryId: bigint;
-}
+export type SignatureRespondedEvent = CircuitArgs<"postSignatureResponse">[1];
+export type RespondBidirectionalEvent = CircuitArgs<"postRespondBidirectional">[1];
 
-/**
- * Both circuits take the request id then the whole event struct, because that is
- * what the Compact contract declares. The generated types make a wrong shape a
- * compile error; the retired toolkit's JSON5 argv codec made it a runtime one.
- */
-export type RespondCall =
-  | { readonly circuitId: "postSignatureResponse"; readonly args: readonly [Uint8Array, SignatureRespondedEvent] }
-  | { readonly circuitId: "postRespondBidirectional"; readonly args: readonly [Uint8Array, RespondBidirectionalEvent] };
+export type RespondCall = {
+  [K in RespondCircuit]: { readonly circuitId: K; readonly args: CircuitArgs<K> };
+}[RespondCircuit];
 
-/**
- * `sig_r`/`sig_s` pass through unreversed: they are already the little-endian
- * order the hub circuit's `Bytes<32> as Secp256k1Scalar` cast expects.
- */
+/** `sig_r`/`sig_s` pass through unreversed: already the order the circuit's cast expects. */
 export function respondCall(request: ValidatedRespondRequest): RespondCall {
   const requestId = fromHex(request.request_id);
   if (request.circuit === "postSignatureResponse") {
@@ -308,23 +237,19 @@ export function respondCall(request: ValidatedRespondRequest): RespondCall {
 
 // ---- the pinned reads ------------------------------------------------------
 
-/** The three states a call is built from, all read at one pinned finalized block. */
-interface CallStates {
-  readonly blockHash: BlockHashHex;
-  readonly contractState: ContractState;
-  readonly zswapChainState: ZswapChainState;
-  readonly ledgerParameters: LedgerParameters;
-}
+/**
+ * The three states a call is built from, all read at one pinned finalized block.
+ *
+ * The library's own triple, so the dual-WASM split (`contractState` is
+ * compact-runtime's, the other two ledger-v9's) is pinned by the package that
+ * defines it rather than by a comment here.
+ */
+type CallStates = PublicContractStates & { readonly blockHash: BlockHashHex };
 
 /**
- * THE ONE PLACE THIS SERVICE READS THE CHAIN, and it stays here rather than
- * moving to the caller with the rest of the RPC. The reads must be FRESH AT
- * PROVE TIME: reusing parameters read a few blocks ago gets the transaction
- * rejected with `Transcript(Execution(OutOfGas))`, because fees drift per block.
- * Having the caller fetch them would put its queueing delay in between, and dust
- * recovery already rate-limits this service to about one post per 35 seconds.
- * The node connection has to exist anyway for the wallet, so three blobs over it
- * cost nothing and remove a staleness class.
+ * The one place this service reads the chain. The reads must be fresh at prove
+ * time — stale ledger parameters are rejected as `OutOfGas` because fees drift
+ * per block — and the node connection exists for the wallet anyway.
  */
 async function readCallStates(client: NodeClient, address: string): Promise<CallStates> {
   const blockHash = await finalizedHead(client);
@@ -335,10 +260,7 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
   ]);
 
   if (rawContract === undefined) {
-    throw new PublisherError(
-      "contract_absent",
-      `no contract state at ${address} in block ${blockHash} (is the contract deployed?)`,
-    );
+    throw new PublisherError("contract_absent", `no contract state at ${address} in block ${blockHash} (is it deployed?)`);
   }
   if (rawZswap === undefined) {
     throw new PublisherError("contract_absent", `no zswap chain state for ${address} in block ${blockHash}`);
@@ -354,11 +276,8 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
   const ctx = { caller: "midnight-publisher:readCallStates" };
   return {
     blockHash,
-    // NOT interchangeable, though the tuple looks homogeneous.
-    // `deserializeCompactContractState` yields onchain-runtime-v4's
-    // `ContractState`; the ledger-named `deserializeContractState` beside it
-    // yields ledger-v9's, the wrong class here, and produces the classic
-    // "expected instance of" dual-WASM failure. The other two ARE ledger-v9's.
+    // Not interchangeable: `deserializeCompactContractState` is
+    // onchain-runtime-v4's, the other two are ledger-v9's.
     contractState: deserializeCompactContractState(rawContract, ctx),
     zswapChainState: deserializeZswapChainState(rawZswap, ctx),
     ledgerParameters: deserializeLedgerParameters(rawParams, ctx),
@@ -367,22 +286,12 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
 
 // ---- the publisher: wallet, keys, proof server -----------------------------
 
-/** Everything a write needs that outlives a single request. */
-interface Publisher {
-  readonly wallet: FundingWallet;
-  readonly zkConfigProvider: NodeZkConfigProvider<SignetContractCircuitId>;
-  readonly proofProvider: ProofProvider;
-  readonly compiledContract: CompiledContract.CompiledContract<
-    Contract<SignetContractPrivateState>,
-    SignetContractPrivateState
-  >;
-  /** Local verifier keys, read once from `managedDir`; compared against every contract state. */
-  readonly verifierKeys: readonly [SignetContractCircuitId, VerifierKey][];
-}
+/** Whatever {@link buildPublisher} assembles; stated once, there. */
+type Publisher = Readonly<Awaited<ReturnType<typeof buildPublisher>>>;
 
 let publisherPromise: Promise<Publisher> | undefined;
 
-async function buildPublisher(config: Config): Promise<Publisher> {
+async function buildPublisher(config: Config) {
   // Global, and required before any transaction is built: it decides the
   // network id baked into the transaction and into address encoding.
   setNetworkId(config.networkId);
@@ -394,12 +303,12 @@ async function buildPublisher(config: Config): Promise<Publisher> {
   // gut `assertCompiledContractMatches`'s error, whose whole point is to say
   // "point MIDNIGHT_PUB_MANAGED_DIR at the assets this contract was deployed
   // from".
-  const compiledContract = makeVacantCompiledContract<Contract<SignetContractPrivateState>, SignetContractPrivateState>(
+  const compiledContract = makeVacantCompiledContract<SignetContract<SignetContractPrivateState>, SignetContractPrivateState>(
     "signet-contract",
-    Contract,
+    SignetContract,
     config.managedDir,
   );
-  const verifierKeys = await zkConfigProvider.getVerifierKeys(
+  const verifierKeys: readonly [SignetContractCircuitId, VerifierKey][] = await zkConfigProvider.getVerifierKeys(
     ContractExecutable.make(compiledContract).getProvableCircuitIds(),
   );
 
@@ -412,11 +321,7 @@ async function buildPublisher(config: Config): Promise<Publisher> {
   };
 }
 
-/**
- * Lazy so the read seams stay available when the indexer or proof server is
- * down, and so a transient failure does not permanently poison the process: a
- * failed attempt clears the memo and the next request retries.
- */
+/** Lazy: a failed attempt clears the memo so the next request retries. */
 function publisher(config: Config): Promise<Publisher> {
   if (publisherPromise === undefined) {
     publisherPromise = buildPublisher(config).catch((error: unknown) => {
@@ -427,7 +332,7 @@ function publisher(config: Config): Promise<Publisher> {
   return publisherPromise;
 }
 
-/** For tests and one-shot scripts; the service holds it for the process's lifetime. */
+/** For tests and one-shot scripts. */
 export async function closePublisher(): Promise<void> {
   const pending = publisherPromise;
   publisherPromise = undefined;
@@ -435,13 +340,7 @@ export async function closePublisher(): Promise<void> {
   await pending.then((ready) => ready.wallet.close()).catch(() => undefined);
 }
 
-/**
- * The `verifyContractState` check the escape-hatch route skips. Without it a
- * stale `MIDNIGHT_PUB_MANAGED_DIR` surfaces only when the chain rejects the
- * finished proof, costing a prove and a balancing round. Run against the state
- * the call is built from, so no extra read, and every time, so a redeploy under
- * a running service is caught at once.
- */
+/** The `verifyContractState` check the escape-hatch route skips, against the state already read. */
 function assertCompiledContractMatches(
   ready: Publisher,
   state: ContractState,
@@ -466,53 +365,45 @@ function assertCompiledContractMatches(
 
 // ---- the flow --------------------------------------------------------------
 
-/** Returns the proven, still unbalanced transaction. */
 async function proveCall(ready: Publisher, call: RespondCall, address: string, states: CallStates): Promise<UnboundTransaction> {
   const dependencies = {
-    coinPublicKey: ready.wallet.coinPublicKey,
+    coinPublicKey: ready.wallet.getCoinPublicKey(),
     initialContractState: states.contractState,
     initialZswapChainState: states.zswapChainState,
     ledgerParameters: states.ledgerParameters,
-    // Inline, which is why this route needs no private-state provider: nothing
-    // is stored or read, no directory created. The contract declares no
-    // witnesses, so this empty record is never consulted.
+    // Inline, which is why no private-state provider is needed. The contract
+    // declares no witnesses, so it is never consulted.
     initialPrivateState: createSignetContractPrivateState(),
   };
 
-  // The ternary is NOT cosmetic and collapsing it does not compile:
-  // `createCallTxOptions` types `args` against the circuit id, so each arm must
-  // pass a literal one. `crossContract` is omitted, which is what lets the whole
-  // route run without a `PublicDataProvider`.
+  // Collapsing the ternary does not compile: `createCallTxOptions` types `args`
+  // against the circuit id, so each arm needs a literal one.
   const options =
     call.circuitId === "postSignatureResponse"
-      ? createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [
-          call.args[0],
-          call.args[1],
-        ])
-      : createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [
-          call.args[0],
-          call.args[1],
-        ]);
+      ? createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [call.args[0], call.args[1]])
+      : createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [call.args[0], call.args[1]]);
 
   const unsubmitted = await createUnprovenCallTxFromInitialStates(
     ready.zkConfigProvider,
     { ...options, ...dependencies },
-    ready.wallet.encryptionPublicKey,
+    ready.wallet.getEncryptionPublicKey(),
   );
 
   return ready.proofProvider.proveTx(unsubmitted.private.unprovenTx);
 }
 
-/**
- * A {@link PublisherError} passes through: the throw site knew the cause and it
- * beats the stage. Anything else came out of a dependency, and the stage is what
- * keeps the answer machine-readable when that dependency's wording changes.
- */
+/** A {@link PublisherError} passes through; anything else is named by its stage. */
 async function inStage<T>(stage: RespondStage, run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
     if (error instanceof PublisherError) throw error;
+    // A deserialization failure is NOT an unreachable node, which is what the
+    // read stage's fallback would otherwise call it — telling the caller to
+    // retry a condition no amount of retrying resolves.
+    if (isDeserializationError(error) && error.context.extracted?.receivedVersion !== undefined) {
+      throw new PublisherError("ledger_mismatch", describeFailure(error));
+    }
     const described = describeFailure(error);
     // Classified against a WIDER haystack than the message it answers with.
     // Effect's `FiberFailure` keeps its cause on a Symbol, not on `.cause`, so
@@ -536,11 +427,10 @@ async function post(
   assertCompiledContractMatches(ready, states.contractState, request.contract_address, config.managedDir);
   const call = respondCall(request);
   const proven = await inStage(RESPOND_STAGES.prove, () => proveCall(ready, call, request.contract_address, states));
-  const balanced = await inStage(RESPOND_STAGES.balance, () => ready.wallet.balance(proven));
-  return inStage(RESPOND_STAGES.submit, () => ready.wallet.submit(balanced));
+  const balanced = await inStage(RESPOND_STAGES.balance, () => ready.wallet.balanceTx(proven));
+  return inStage(RESPOND_STAGES.submit, () => ready.wallet.submitTx(balanced));
 }
 
-/** One link of a chain, rendered so neither its identity nor its text is lost. */
 function describeOne(value: unknown): string {
   if (value instanceof Error) {
     return [value.name === "Error" ? "" : value.name, value.message].filter(Boolean).join(": ");
@@ -558,16 +448,9 @@ function describeOne(value: unknown): string {
 }
 
 /**
- * Render a thrown value as one line that NAMES the failure, causes innermost
- * last.
- *
- * `error.message` alone is not enough. The wallet works through Effect, which
- * rejects with a `FiberFailure` whose `name` is the ONLY place the failing class
- * survives: a live same-id race produced `(FiberFailure)
- * Wallet.InsufficientFunds: Insufficient Funds: could not balance dust`, and on
- * `message` alone the half naming WHICH constraint was hit is lost. `classify`
- * matches against this output, so this function is load-bearing for the error
- * codes, not just for the prose.
+ * One line that NAMES the failure, causes innermost last. `message` alone is not
+ * enough: Effect's `FiberFailure` keeps the failing class in `name`, and
+ * `classify` matches against this output.
  */
 export function describeFailure(error: unknown): string {
   const parts: string[] = [];
@@ -582,29 +465,19 @@ export function describeFailure(error: unknown): string {
 }
 
 /**
- * A 200 means the node reported the transaction finalized, which is equivalent
- * to `SucceedEntirely` here: both circuits run wholly in the guaranteed phase,
- * and a guaranteed-phase failure is rejected at pre-dispatch and never enters a
- * block. So inclusion is success and no confirming read is made.
+ * A 200 means finalized, equivalent to `SucceedEntirely` here: both circuits run
+ * wholly in the guaranteed phase, so inclusion is success.
  *
- * NOT SERIALIZED AND NOT RETRIED. Posts run concurrently and failures are
- * returned, so the caller owns the retry for two collisions:
- *
- * 1. One funding wallet, one spendable dust UTXO, so two concurrent posts
- *    collide at BALANCE time before either reaches the chain -> `wallet_unfunded`,
- *    recovering in about 35 seconds.
- * 2. Two posts under one request id both read the counter at N; the ledger's
- *    optimistic-concurrency check rejects the loser -> `state_conflict`, which
- *    never entered a block and was never charged.
- *
- * Whoever restores in-process serialization must keep the state reads INSIDE
- * whatever queue they add: reading first and queueing after lets the ledger
- * parameters go stale, which is rejected as `OutOfGas`.
+ * NOT SERIALIZED AND NOT RETRIED, so the caller owns two collisions: concurrent
+ * posts share one dust UTXO and collide at balance time (`wallet_unfunded`,
+ * ~35s), and two posts under one request id lose the ledger's optimistic-
+ * concurrency check (`state_conflict`, never charged). Anyone adding a queue
+ * must keep the state reads inside it, or the parameters go stale.
  */
 export async function handleRespond(config: Config, client: NodeClient, body: string): Promise<Reply> {
-  const hidden = secrets(config);
   try {
-    const validated = parseAndValidate(body);
+    const validated = parseRespondRequest(body);
+    validateRespondRequest(validated);
     console.log(`respond: circuit=${validated.circuit} rid=${validated.request_id}`);
     // Deliberately not staged: a failure here is this service failing to start
     // (unreadable `managedDir`, unreachable indexer, bad seed), which no stage
@@ -618,10 +491,10 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
     // values they were handed, and this text becomes both a response body and a
     // log line. The funding seed must never survive the trip.
     const failure = error instanceof PublisherError ? error : new PublisherError("internal", describeFailure(error));
-    const safe = redact(failure.message, hidden);
+    const safe = redact(failure.message, [config.fundingSeed]);
     // A 400 is the caller's own request coming back at it and is not worth a log
     // line; everything else is this service failing to do its job.
     if (failure.code !== "bad_request") console.error(`respond failed [${failure.code}]: ${safe}`);
-    return { status: statusFor(failure.code), body: errorBody(failure.code, safe) };
+    return fail(failure.code, safe);
   }
 }

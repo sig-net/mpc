@@ -33,9 +33,11 @@ import {
   decodeTransactions,
   type ClaimedCall,
 } from "../src/block.js";
+import { toHex } from "@midnight-ntwrk/midnight-js-utils";
 import type { Config } from "../src/config.js";
-import { fromHex, toHex, type NodeClient } from "../src/node.js";
-import { buildServer, type Reply } from "../src/server.js";
+import { fromHex, type NodeClient } from "../src/node.js";
+import type { Reply } from "../src/errors.js";
+import { buildServer } from "../src/server.js";
 import { decodeContractState, type StateNode } from "../src/state.js";
 
 /** The deployed singleton and caller of the captured SGN2 flow, and the request the caller submitted. */

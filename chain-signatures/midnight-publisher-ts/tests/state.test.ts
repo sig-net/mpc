@@ -23,9 +23,11 @@ import { fileURLToPath } from "node:url";
 import { StateMap, StateValue, type AlignedValue } from "@midnightntwrk/ledger-v9";
 import { describe, expect, it } from "vitest";
 
+import { toHex } from "@midnight-ntwrk/midnight-js-utils";
 import type { Config } from "../src/config.js";
-import { toHex, type NodeClient } from "../src/node.js";
-import { buildServer, type Reply } from "../src/server.js";
+import { type NodeClient } from "../src/node.js";
+import type { Reply } from "../src/errors.js";
+import { buildServer } from "../src/server.js";
 import { decodeContractState, walk } from "../src/state.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -259,6 +261,26 @@ describe("POST /decode/contract-state: the envelope", () => {
     expect(reply.status).toBe(422);
     expect(parseFailure(reply).code).toBe("decode_failed");
     expect(parseFailure(reply).message.length).toBeGreaterThan(0);
+  });
+
+  it("separates a chain that moved ahead from a caller's bad blob", async () => {
+    // The library classifies BOTH as `version-mismatch`, so the classification
+    // alone cannot answer this. A received version is what distinguishes them,
+    // and getting it wrong sends the operator to the wrong place entirely:
+    // `decode_failed` says "fix your blob", `ledger_mismatch` says "this build
+    // is too old for this chain, compare GET /health".
+    const real = fixtureBytes("singleton-post-state-1366.mn");
+    const skewed = Uint8Array.from(real);
+    // `midnight:contract-state[v8]` -> `[v9]`, one byte, leaving a real blob.
+    const tag = Buffer.from(real).indexOf("midnight:contract-state[v8]");
+    expect(tag).toBeGreaterThanOrEqual(0);
+    skewed[tag + "midnight:contract-state[v".length] = "9".charCodeAt(0);
+
+    const ahead = await post("/decode/contract-state", JSON.stringify({ bytes: toHex(skewed) }));
+    expect(parseFailure(ahead).code).toBe("ledger_mismatch");
+
+    const junk = await post("/decode/contract-state", '{"bytes":"deadbeef"}');
+    expect(parseFailure(junk).code).toBe("decode_failed");
   });
 
   it("rejects a body over the 8 MiB cap", async () => {

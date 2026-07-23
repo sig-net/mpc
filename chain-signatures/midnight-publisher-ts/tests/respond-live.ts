@@ -29,8 +29,9 @@ import { randomBytes } from "node:crypto";
 import { ContractState } from "@midnight-ntwrk/midnight-js-protocol/compact-runtime";
 import { ledger as signetLedger } from "@sig-net/midnight-contract";
 
+import { toHex } from "@midnight-ntwrk/midnight-js-utils";
 import { configFromEnv } from "../src/config.js";
-import { connect, isHex, runtimeApiBytes, toHex, type BlockHashHex, type NodeClient } from "../src/node.js";
+import { connect, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "../src/node.js";
 import { closePublisher, handleRespond } from "../src/respond.js";
 
 const config = configFromEnv();
@@ -73,8 +74,8 @@ async function readRespondState(
 }
 
 async function head(node: NodeClient): Promise<{ hash: BlockHashHex; height: number }> {
-  const hash = (await node.api.rpc.chain.getFinalizedHead()).toHex() as BlockHashHex;
-  return { hash, height: (await node.api.rpc.chain.getHeader(hash)).number.toNumber() };
+  const hash = (await node.rpc.chain.getFinalizedHead()).toHex() as BlockHashHex;
+  return { hash, height: (await node.rpc.chain.getHeader(hash)).number.toNumber() };
 }
 
 /**
@@ -191,7 +192,7 @@ for (let height = before.height + 1; landingHeight === undefined; height += 1) {
     height -= 1;
     continue;
   }
-  const hash = (await client.api.rpc.chain.getBlockHash(height)).toHex() as BlockHashHex;
+  const hash = (await client.rpc.chain.getBlockHash(height)).toHex() as BlockHashHex;
   const state = await readRespondState(hash);
   if (state.size > beforeState.size) {
     landingHeight = height;

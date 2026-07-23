@@ -1,16 +1,12 @@
 /**
- * The failure vocabulary. Every non-200 is `{"code":"…","message":"…"}`.
- *
- * The caller has to branch on failures, and the only other signal is prose
- * written for humans and rewritten for humans. The code is the stable half of
- * the answer; a message may be reworded in any release, a code may not.
+ * Every non-200 is `{"code","message"}`. The code is the stable half a caller
+ * branches on; the message is prose and may be reworded in any release.
  */
 
-/**
- * Split by what the caller should DO, which is why several codes share a status:
- * a 409 that is `state_conflict` should be retried as-is, a 409 that is
- * `contract_mismatch` never will succeed until this service is redeployed.
- */
+/** An HTTP status and an already-serialized body. */
+export type Reply = { readonly status: number; readonly body: string };
+
+/** Split by what the caller should DO, which is why several share a status. */
 export type ErrorCode =
   /** Malformed envelope, bad hex, failed validation. Fix the request. */
   | "bad_request"
@@ -25,11 +21,7 @@ export type ErrorCode =
   | "contract_absent"
   /** Deployed verifier keys differ from this build's. Redeploy or repoint `MIDNIGHT_PUB_MANAGED_DIR`. */
   | "contract_mismatch"
-  /**
-   * Another post won the race for this request id. Retryable as-is: the loser
-   * never entered a block and paid no fee. BEST-EFFORT — see `RESPOND_STAGES`;
-   * a submit failure that cannot be identified answers `submit_rejected`.
-   */
+  /** Another post won the race. Retryable as-is: the loser paid no fee. Best-effort, see `RESPOND_STAGES`. */
   | "state_conflict"
   | "node_unavailable"
   | "prove_failed"
@@ -41,7 +33,6 @@ export type ErrorCode =
   /** Unclassified. The message is the only detail. */
   | "internal";
 
-/** The code is the contract; the status is the courtesy. */
 const STATUS: Readonly<Record<ErrorCode, number>> = {
   bad_request: 400,
   payload_too_large: 413,
@@ -59,12 +50,9 @@ const STATUS: Readonly<Record<ErrorCode, number>> = {
   internal: 500,
 };
 
-/** A failure that already knows its own code: everywhere the cause is known at the throw site. */
+/** Thrown wherever the cause is known at the throw site. */
 export class PublisherError extends Error {
-  constructor(
-    readonly code: ErrorCode,
-    message: string,
-  ) {
+  constructor(readonly code: ErrorCode, message: string) {
     super(message);
     this.name = "PublisherError";
   }
@@ -78,55 +66,49 @@ export function statusFor(code: ErrorCode): number {
   return STATUS[code];
 }
 
-export function errorBody(code: ErrorCode, message: string): string {
-  return JSON.stringify({ code, message });
-}
-
 /**
- * One stage of `POST /respond`. The stage supplies the code structurally, and
- * `refine` sharpens it where a measured substring identifies a cause worth
- * acting on differently. Patterns match against `describeFailure`'s rendering,
- * which includes the error class names Effect hides in `name`.
+ * The stage supplies the code structurally; `refine` sharpens it where a
+ * measured substring names a cause worth acting on differently.
  */
-export interface RespondStage {
-  readonly fallback: ErrorCode;
-  readonly refine: readonly (readonly [pattern: string, code: ErrorCode])[];
-}
+type Refinement = readonly [pattern: string, code: ErrorCode];
+export type RespondStage = { readonly fallback: ErrorCode; readonly refine: readonly Refinement[] };
 
 /**
- * THE ONLY PLACE THIS SERVICE MATCHES ON A DEPENDENCY'S ERROR TEXT, pinned by
- * `tests/errors.test.ts` against errors built through a real `Effect.runPromise`
- * rejection rather than hand-set `.name`s. A pattern that stops matching
- * degrades the answer by one step (`wallet_unfunded` becomes `balance_failed`)
- * rather than losing it, because the stage itself needs no matching.
+ * The only place this service matches on a dependency's error text, pinned by
+ * `tests/errors.test.ts`. A pattern that stops matching degrades one step to the
+ * stage fallback rather than losing the answer.
  *
- * The two entries have DIFFERENT provenance and the difference matters:
- *
- * - `Wallet.InsufficientFunds` is confirmed reachable. `Data.TaggedError` puts
- *   the tag in `name` and `DustWallet` runs its Effect with no outer wrapper, so
- *   it survives into `describeFailure`. Verified against the installed source.
- * - `ReadMismatch` is NOT confirmed. `submissionService` flattens every node
- *   error into `SubmissionError{message:'Transaction submission error'}`, so it
- *   can only ever appear in the nested cause, which is why `inStage` matches
- *   against the rendered chain and not just the message. Whether the node client
- *   surfaces the ledger's text at all is unverified, and
- *   `PolkadotNodeClient`'s hardcoded invalid-transaction message suggests it may
- *   not. Treat `state_conflict` as best-effort until a live same-id race
- *   confirms it; the fallback `submit_rejected` is always correct.
+ * `Wallet.InsufficientFunds` is confirmed reachable. `ReadMismatch` is not:
+ * `submissionService` flattens every node error into a constant message, so it
+ * can only appear in the nested cause, and whether the node client surfaces it
+ * at all is unverified.
  */
 export const RESPOND_STAGES = {
   read: { fallback: "node_unavailable", refine: [] },
   prove: { fallback: "prove_failed", refine: [] },
-  balance: {
-    fallback: "balance_failed",
-    refine: [
-      ["Wallet.InsufficientFunds", "wallet_unfunded"],
-      ["could not balance dust", "wallet_unfunded"],
-    ],
-  },
+  balance: { fallback: "balance_failed", refine: [["Wallet.InsufficientFunds", "wallet_unfunded"], ["could not balance dust", "wallet_unfunded"]] },
   submit: { fallback: "submit_rejected", refine: [["ReadMismatch", "state_conflict"]] },
 } as const satisfies Record<string, RespondStage>;
 
 export function classify(stage: RespondStage, described: string): ErrorCode {
   return stage.refine.find(([pattern]) => described.includes(pattern))?.[1] ?? stage.fallback;
+}
+
+/** Built from the code, so status and body cannot disagree. */
+export function fail(code: ErrorCode, message: string): Reply {
+  return { status: statusFor(code), body: JSON.stringify({ code, message }) };
+}
+
+/** The `invalid JSON:` preamble both seams answer with, byte for byte. */
+export function jsonObject(body: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch (error) {
+    throw badRequest(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw badRequest("invalid JSON: expected a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }

@@ -1,14 +1,10 @@
-/**
- * `MIDNIGHT_PUB_*` environment configuration, keeping the Rust implementation's
- * variable names so a deployment moves without an env change.
- */
+/** `MIDNIGHT_PUB_*` configuration, keeping the Rust implementation's variable names. */
+
+import { indexerWsUrlFromIndexerUrl, NETWORK_IDS } from "@sig-net/midnight-contract-deploy";
 
 export interface Config {
   readonly port: number;
-  /**
-   * The loopback boundary IS this service's access control: no authentication of
-   * any kind, and it holds a funding wallet.
-   */
+  /** The loopback boundary IS the access control: no auth, and it holds a funding wallet. */
   readonly bindHost: string;
   /** Substrate ws endpoint. */
   readonly nodeUrl: string;
@@ -24,7 +20,7 @@ export interface Config {
   readonly networkId: string;
 }
 
-/** An empty variable counts as absent: `FOO=` is a mistake, not a deliberate empty value. */
+/** `FOO=` counts as absent. */
 function envOr(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
@@ -33,21 +29,6 @@ function envRequired(key: string): string {
   const value = process.env[key];
   if (!value) throw new Error(`${key} must be set`);
   return value;
-}
-
-/**
- * The subscription endpoint is not the query endpoint with a swapped scheme: it
- * lives one segment deeper, at `/ws`. The running indexer answers an upgrade on
- * `/api/v3/graphql` with 405 and only shakes hands on `/api/v3/graphql/ws`.
- *
- * Getting this wrong is silent. The facade never syncs and it surfaces as
- * `Wallet.InsufficientFunds: could not balance dust`, not as a connection error.
- */
-export function indexerWsUrlFrom(indexerUrl: string): string {
-  const url = new URL(indexerUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = `${url.pathname.replace(/\/$/, "")}/ws`;
-  return url.toString();
 }
 
 function isLoopback(host: string): boolean {
@@ -71,35 +52,34 @@ export function configFromEnv(): Config {
 
   const indexerUrl = envRequired("MIDNIGHT_PUB_INDEXER_URL");
 
+  // Unvalidated, a typo here builds a wallet at a DIFFERENT unshielded address,
+  // proves a call, spends dust, and fails only at the node as `InvalidNetworkId`
+  // — or earlier as the same misleading "could not balance dust". The library
+  // owns the closed set; nothing here restates it.
+  const networkId = envOr("MIDNIGHT_PUB_NETWORK_ID", "undeployed");
+  if (!(NETWORK_IDS as readonly string[]).includes(networkId)) {
+    throw new Error(`MIDNIGHT_PUB_NETWORK_ID=${networkId} is not one of ${NETWORK_IDS.join(", ")}`);
+  }
+
   return {
     port,
     bindHost,
     nodeUrl: envRequired("MIDNIGHT_PUB_NODE_URL"),
     proofServerUrl: envRequired("MIDNIGHT_PUB_PROOF_SERVER_URL"),
     indexerUrl,
-    indexerWsUrl: envOr("MIDNIGHT_PUB_INDEXER_WS_URL", indexerWsUrlFrom(indexerUrl)),
+    // A segment deeper than the query endpoint. Getting it wrong is silent: the
+    // facade never syncs and it surfaces as "could not balance dust".
+    indexerWsUrl: envOr("MIDNIGHT_PUB_INDEXER_WS_URL", indexerWsUrlFromIndexerUrl(indexerUrl)),
     managedDir: envRequired("MIDNIGHT_PUB_MANAGED_DIR"),
-    // Never defaulted: a fallback here is a real hot wallet seed shipped in the
-    // image that silently works in production.
+    // Never defaulted: a fallback is a real hot wallet seed shipped in the image.
     fundingSeed: envRequired("MIDNIGHT_PUB_FUNDING_SEED"),
-    networkId: envOr("MIDNIGHT_PUB_NETWORK_ID", "undeployed"),
+    networkId,
   };
 }
 
-/** Values that must never reach a log line or a response body. */
-export function secrets(config: Config): readonly string[] {
-  return [config.fundingSeed].filter((s) => s.length > 0);
-}
-
-/**
- * Wallet, proof-server and node errors can echo values they were handed, and
- * that text becomes both a response body and a log line, so it is redacted at
- * the source.
- */
+/** Dependency errors echo values they were handed, and that text becomes a response body. */
 export function redact(text: string, values: readonly string[]): string {
-  // Belt and braces: `envRequired` and `secrets()` both already exclude an
-  // empty seed, but `redact` is exported and takes an arbitrary array, and
-  // `split("")` would explode the text into characters and rejoin it with a
-  // placeholder between every one.
+  // Load-bearing: `split("")` would explode the text into characters and rejoin
+  // it with a placeholder between every one.
   return values.reduce((out, value) => (value ? out.split(value).join("<redacted>") : out), text);
 }

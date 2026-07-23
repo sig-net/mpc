@@ -365,6 +365,15 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ],
 ];
 
+describe("the JSON preamble", () => {
+  it("is byte-identical on this seam, not merely prefix-matched", () => {
+    // Shared with `/decode/contract-state` since both were byte-matched against
+    // the Rust implementation. Pinned on both sides so unifying them cannot
+    // silently move one.
+    expect(() => parseRespondRequest("[]")).toThrow("invalid JSON: expected a JSON object");
+  });
+});
+
 describe("handleRespond: the bad_request path never touches the chain", () => {
   it.each(BAD_REQUESTS)("returns bad_request for %s", async (_label, body, expected) => {
     const reply = await handleRespond(offlineConfig, forbiddenClient, body);

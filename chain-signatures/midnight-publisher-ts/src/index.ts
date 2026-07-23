@@ -1,9 +1,6 @@
 /**
- * midnight-publisher: the localhost-bound Midnight sidecar.
- *
- * Mechanism, never an authority. It holds a funding (gas) wallet and no signing
- * key shares. Every security decision (request-id recompute, proof verification)
- * lives in the `chain-midnight` crate over the raw bytes this service returns,
+ * Mechanism, never an authority: this holds a funding wallet and no key shares.
+ * Every security decision lives in `chain-midnight` over the bytes it returns,
  * so a decode bug here is a dropped request, never a wrong signature.
  */
 
