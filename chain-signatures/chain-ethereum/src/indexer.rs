@@ -20,7 +20,7 @@ use mpc_primitives::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -483,9 +483,16 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         failed.extend(gated_failed);
 
         // Failed watchers are retried on the next block.
-        self.watcher_gate.lock().unwrap().retry = failed;
+        self.lock_watcher_gate().retry = failed;
 
         Ok(events)
+    }
+
+    /// Locks the watcher gate Mutex, recovering the guard if poisoned.
+    fn lock_watcher_gate(&self) -> MutexGuard<'_, WatcherGateState> {
+        self.watcher_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Updates gate scheduling state, returning the watchers to nonce-check
@@ -495,7 +502,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         &self,
         watchers: &HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
-        let mut gate = self.watcher_gate.lock().unwrap();
+        let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
         let new_watchers = watchers
             .keys()
