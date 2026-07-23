@@ -161,8 +161,28 @@ async fn test_channel_contention_multiple_blocks_at_once() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_multiple_blocks_at_once_delayed() {
-    // TODO: delay should be > ORGANIZE_POSIT_TIMEOUT but right now the system can't handle it
+    // Delay stays below T(0) here; the case with delay > T(0) is covered by
+    // `test_channel_contention_delayed_beyond_round0_timeout` (needs Move 1).
     let delay = mpc_node::protocol::request::organize_posit_timeout() / 2;
+    check_channel_contention(5, 10, 50, Some(delay)).await;
+}
+
+/// Staggers each node's observation of the block by MORE than the round-0 timeout
+/// `T(0)`, so a lagging node enters its round 0 only after the others have already
+/// timed out and rotated past it.
+///
+/// This is the case the sibling `_delayed` test used to flag as unhandled: on the
+/// pre-Move-1 election a node scans its *local* active set for a proposer and jumps
+/// `state.round` accordingly, so staggered nodes pick different proposers/rounds and
+/// never form a quorum before the fixed timeout trips. With deterministic rotation
+/// every node elects `proposer_per_round(r)` identically, the per-round `T(r)`
+/// schedule keeps each rotation cheap, and a laggard resyncs its round in one
+/// `bump_round` via `highest_seen_round` — so all signatures still complete.
+///
+/// Expected: passes on the Move 1 stack, times out before Move 1.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_channel_contention_delayed_beyond_round0_timeout() {
+    let delay = mpc_node::protocol::request::organize_posit_timeout() * 3 / 2; // > T(0)
     check_channel_contention(5, 10, 50, Some(delay)).await;
 }
 
