@@ -1287,7 +1287,6 @@ mod tests {
         }
     }
 
-    // TODO: do we need live event channel?
     #[tokio::test]
     async fn forward_live_events_forwards_until_cancel() {
         let indexer = test_indexer("http://localhost:1", MockStateManager::new());
