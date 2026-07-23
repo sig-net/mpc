@@ -2,6 +2,8 @@
 name = "signet-primitives"
 version.workspace = true
 edition = "2021"
+description = "Interface types for the SigNet network"
+readme = "README.md"
 
 [dependencies]
 borsh.workspace = true
