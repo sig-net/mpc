@@ -6056,6 +6056,7 @@ dependencies = [
  "testcontainers",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber 0.3.20",
  "url 2.5.4",
@@ -7364,6 +7365,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber 0.3.20",
 ]
@@ -7384,6 +7386,7 @@ dependencies = [
  "mpc-primitives",
  "rand 0.8.5",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -7432,6 +7435,7 @@ dependencies = [
  "solana-sdk",
  "solana-transaction-status",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber 0.3.20",
 ]
@@ -7562,6 +7566,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-opentelemetry",
  "tracing-stackdriver",
@@ -15639,9 +15644,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.15"
+version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66a539a9ad6d5d281510d5bd368c973d636c02dbf8a67300bfb6b950696ad7df"
+checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",

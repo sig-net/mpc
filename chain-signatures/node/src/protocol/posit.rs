@@ -67,6 +67,9 @@ pub enum PositRejectReason {
     /// The posit message is invalid, usually because of bad timing leading to
     /// round / proposer mismatches.
     InvalidRequest = 3,
+    /// The sender's round is behind the rejector's current round. The reject
+    /// carries the rejector's round so the sender can catch up in one bump.
+    StaleRound = 4,
 }
 
 impl PositAction {

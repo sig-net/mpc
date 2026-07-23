@@ -228,7 +228,7 @@ impl MessageOutbox {
 
     /// Allows tests to manually handle outgoing message before they are
     /// encrypted and published.
-    #[cfg(feature = "test-feature")]
+    #[cfg(any(test, feature = "test-feature"))]
     pub fn intercept_outgoing_messages(&mut self) -> &mut mpsc::Receiver<SendMessage> {
         &mut self.outbox_rx
     }

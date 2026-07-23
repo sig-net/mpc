@@ -254,7 +254,7 @@ pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient
         .network(network)
         .consensus_rpc(&eth.consensus_rpc_http_url)
         .map_err(|err| anyhow::anyhow!("failed to build consensus rpc: {err:?}"))?
-        .execution_rpc(&eth.execution_rpc_http_url)
+        .execution_rpc(eth.execution_rpc_http_url.as_str())
         .map_err(|err| anyhow::anyhow!("failed to build execution rpc: {err:?}"))?
         .data_dir(PathBuf::from(&eth.helios_data_path))
         .with_file_db()

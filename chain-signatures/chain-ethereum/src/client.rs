@@ -209,7 +209,7 @@ impl EthereumClient {
             }
         } else {
             EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
-                &eth.execution_rpc_http_url,
+                eth.execution_rpc_http_url,
             ))
         };
 
