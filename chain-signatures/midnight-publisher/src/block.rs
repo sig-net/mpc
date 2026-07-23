@@ -54,9 +54,23 @@ pub struct BlockNotify {
 }
 
 /// `GET /block` response: one entry per notify insert across the block's calls.
+///
+/// Best-effort by contract. `calls` is what this seam could decode, never a
+/// proof of everything the block contained: see `skipped` below for what it had
+/// to drop, and the `Branch` limitation on `scan_map_inserts` for the one case
+/// it cannot even see. A consumer reads a missing notify as "not seen here",
+/// never as "did not happen".
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BlockResponse {
     pub calls: Vec<BlockNotify>,
+    /// Decode failures this response deliberately survived, one human-readable
+    /// reason each. A block carries every contract call on the chain, including
+    /// third-party contracts whose state shapes this seam does not model, so one
+    /// of those must never cost us the block's real notifies: they are skipped
+    /// here instead of failing the request. Non-empty means `calls` is NOT known
+    /// to be complete for this block, so `chain-midnight` alarms on it rather
+    /// than treating the block as fully read.
+    pub skipped: Vec<String>,
 }
 
 /// Cross-call provenance payload serialized into `BlockNotify.claimed_contract_calls`.
@@ -121,6 +135,13 @@ fn pop<'a>(stack: &mut Vec<Sym<'a>>) -> Sym<'a> {
 /// resolved statically, so we pop its condition and take the fall-through path.
 /// Compiled circuits keep both branch arms stack-balanced, so depth stays
 /// consistent at the merge point regardless.
+///
+/// KNOWN LIMITATION: only the fall-through arm is walked, so a Map insert living
+/// in the OTHER arm of an `if`/`else` is not reported, and nothing flags its
+/// absence. This seam is therefore a best-effort reader of a block's inserts,
+/// never a proof that a block contained none: a consumer must read a missing
+/// notify as "not seen here", never as "did not happen". SGN2's own notify
+/// circuit writes unconditionally, so no SGN2 notify is affected today.
 pub(crate) fn scan_map_inserts<'a>(
     program: &[&'a Op<ResultModeVerify, DefaultDB>],
 ) -> Vec<MapInsert> {
@@ -199,6 +220,17 @@ pub(crate) fn scan_map_inserts<'a>(
                 let len = stack.len();
                 if len >= n + 2 {
                     stack.swap(len - 1, len - 2 - n);
+                } else {
+                    // Fail CLOSED. Underflow means our symbolic stack is shorter
+                    // than the real one, so the slots we do hold are no longer at
+                    // the offsets the program expects. Silently skipping the swap
+                    // would leave a Concrete value sitting where a later `Ins`
+                    // reads its key or value, fabricating an insert that never
+                    // occurred. Poisoning every slot keeps the scanner honest: it
+                    // can only ever under-report, never invent.
+                    for slot in stack.iter_mut() {
+                        *slot = Sym::Opaque;
+                    }
                 }
             }
 
@@ -322,9 +354,19 @@ fn provenance(
     ))
 }
 
-/// Extract every notify insert from every contract call in a decoded transaction.
-pub(crate) fn notifies_from_tx(tx: &Tx) -> anyhow::Result<Vec<BlockNotify>> {
+/// Extract every notify insert from every contract call in a decoded
+/// transaction, plus a reason for anything skipped.
+///
+/// Per-transcript and per-insert decode failures are RECORDED and skipped, never
+/// propagated. A block carries every contract call on the chain, including
+/// unrelated third-party contracts whose state shapes this seam does not model
+/// (`state::walk` rejects a `BoundedMerkleTree`, for one), so a stranger's
+/// contract landing in the same block must never cost us that block's real
+/// notifies. Under-reporting is recoverable and visible; failing the whole block
+/// is neither.
+pub(crate) fn notifies_from_tx(tx: &Tx) -> (Vec<BlockNotify>, Vec<String>) {
     let mut notifies = Vec::new();
+    let mut skipped = Vec::new();
     for (_segment, call) in tx.calls() {
         let address = hex::encode(call.address.0 .0);
         let commitment = hex::encode(call.communication_commitment.as_le_bytes());
@@ -335,20 +377,38 @@ pub(crate) fn notifies_from_tx(tx: &Tx) -> anyhow::Result<Vec<BlockNotify>> {
         .into_iter()
         .flatten()
         {
-            let claimed = provenance(&transcript.effects, &commitment)?;
+            let claimed = match provenance(&transcript.effects, &commitment) {
+                Ok(claimed) => claimed,
+                Err(reason) => {
+                    skipped.push(format!("{address}: call provenance: {reason:#}"));
+                    continue;
+                }
+            };
             let program: Vec<&Op<ResultModeVerify, DefaultDB>> =
                 transcript.program.iter_deref().collect();
             for insert in scan_map_inserts(&program) {
+                let (insert_key, insert_value) =
+                    match (atoms_of(&insert.key), atoms_of(&insert.value)) {
+                        (Ok(key), Ok(value)) => (key, value),
+                        (key, value) => {
+                            let reason = key
+                                .err()
+                                .or_else(|| value.err())
+                                .expect("the Ok/Ok arm above matched every success");
+                            skipped.push(format!("{address}: insert atoms: {reason:#}"));
+                            continue;
+                        }
+                    };
                 notifies.push(BlockNotify {
                     address: address.clone(),
-                    insert_key: atoms_of(&insert.key)?,
-                    insert_value: atoms_of(&insert.value)?,
+                    insert_key,
+                    insert_value,
                     claimed_contract_calls: claimed.clone(),
                 });
             }
         }
     }
-    Ok(notifies)
+    (notifies, skipped)
 }
 
 /// Deserialize the tagged rc.4 ledger `Transaction` bytes (the `midnight_tx`
@@ -359,21 +419,37 @@ pub(crate) fn decode_transaction(tx_bytes: &[u8]) -> anyhow::Result<Tx> {
 }
 
 /// Convenience: deserialize then extract notifies from a single tx's bytes.
-pub(crate) fn notifies_from_tx_bytes(tx_bytes: &[u8]) -> anyhow::Result<Vec<BlockNotify>> {
-    notifies_from_tx(&decode_transaction(tx_bytes)?)
+/// Deserialization failure is the caller's to handle (it costs one transaction);
+/// everything past it is skipped-and-reported rather than propagated.
+pub(crate) fn notifies_from_tx_bytes(
+    tx_bytes: &[u8],
+) -> anyhow::Result<(Vec<BlockNotify>, Vec<String>)> {
+    Ok(notifies_from_tx(&decode_transaction(tx_bytes)?))
 }
 
 /// Decode a fetched block's transactions (Step 1 output) into a `BlockResponse`.
 /// Only `Midnight` transactions carry ledger `Transaction` bytes; system
-/// transactions are skipped.
+/// transactions are ignored.
+///
+/// One undecodable transaction costs that transaction, never the block: a tx
+/// version this build does not know yet would otherwise 502 the request and drop
+/// every real SGN2 notify beside it. Whatever is dropped is reported in
+/// `BlockResponse.skipped` so the loss is visible to the caller.
 pub(crate) fn decode_block(txs: &[RawTransaction]) -> anyhow::Result<BlockResponse> {
     let mut calls = Vec::new();
-    for tx in txs {
+    let mut skipped = Vec::new();
+    for (index, tx) in txs.iter().enumerate() {
         if let RawTransaction::Midnight(bytes) = tx {
-            calls.extend(notifies_from_tx_bytes(bytes)?);
+            match notifies_from_tx_bytes(bytes) {
+                Ok((mut tx_calls, mut tx_skipped)) => {
+                    calls.append(&mut tx_calls);
+                    skipped.append(&mut tx_skipped);
+                }
+                Err(reason) => skipped.push(format!("tx[{index}]: {reason:#}")),
+            }
         }
     }
-    Ok(BlockResponse { calls })
+    Ok(BlockResponse { calls, skipped })
 }
 
 #[cfg(test)]
@@ -613,9 +689,8 @@ mod tests {
         }
 
         // Full pipeline yields a well-formed (possibly empty) BlockResponse.
-        let response = BlockResponse {
-            calls: notifies_from_tx_bytes(&bytes).expect("extract notifies"),
-        };
+        let (calls, skipped) = notifies_from_tx_bytes(&bytes).expect("extract notifies");
+        let response = BlockResponse { calls, skipped };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.starts_with("{\"calls\":"), "well-formed response: {json}");
         eprintln!(
@@ -626,18 +701,125 @@ mod tests {
 
     /// The scanner's SGN2-specific correctness (which `Ins` in a real compiled
     /// notify circuit is the semantic insert, and how many container levels it
-    /// splices) needs a REAL notify transcript, which does not exist until a live
-    /// SGN2 deploy captures one. Ignored until `tests/fixtures/notify-tx.mn` lands.
+    /// splices) can only be settled against a REAL notify transcript.
+    /// `tests/fixtures/notify-tx.mn` is one, captured from a live SGN2 deploy:
+    /// the caller contract's `submitSignatureRequest` cross-contract call into
+    /// the singleton's `signBidirectionalEvent`, finalized at block 1366.
     #[test]
-    #[ignore = "pending a live SGN2 notify fixture"]
     fn notify_fixture_yields_expected_insert() {
         let raw = std::fs::read_to_string("tests/fixtures/notify-tx.mn").unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let bytes = hex::decode(v["tx"]["Midnight"].as_str().unwrap()).unwrap();
-        let notifies = notifies_from_tx_bytes(&bytes).unwrap();
+        let (notifies, skipped) = notifies_from_tx_bytes(&bytes).unwrap();
         assert!(
-            !notifies.is_empty(),
-            "a real SGN2 notify tx must yield at least one insert"
+            skipped.is_empty(),
+            "the golden notify tx must decode with nothing skipped: {skipped:?}"
+        );
+
+        // Golden values from THIS capture (signet-caller e2e, request
+        // abf32e14…, block 1366): the deployed singleton + caller addresses and
+        // the request id. Recapture the fixture and these together.
+        const SIGNET_ADDR: &str =
+            "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
+        const CALLER_ADDR: &str =
+            "dcd470fbc066befe0b6cddcf273dc9a838832ccbb8327f2625ec7028b0a6f0d2";
+        const REQUEST_ID: &str =
+            "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
+
+        // The tx carries three map inserts: the caller's own request record,
+        // the singleton's per-request counter init, and the singleton's notify.
+        assert_eq!(notifies.len(), 3, "caller record + counter init + notify");
+
+        // The singleton's notify insert: key = SignetMapKey{count:0 (trailing
+        // zeros trimmed to empty), requestId}; value = the V1 notification =
+        // {version:1, callerAddress ‖ field 4}.
+        let notify = notifies
+            .iter()
+            .find(|n| n.address == SIGNET_ADDR && n.insert_key.len() == 2)
+            .expect("the singleton's notify insert must be extracted");
+        assert_eq!(notify.insert_key, vec![String::new(), REQUEST_ID.to_string()]);
+        assert_eq!(
+            notify.insert_value,
+            vec!["01".to_string(), format!("{CALLER_ADDR}04")],
+            "notification = version 1, caller address, field 4"
+        );
+
+        // The caller's own request record, keyed by request id, and the Step-3
+        // cross-contract-call provenance naming the singleton — the linkage the
+        // MPC uses to authenticate the sender.
+        let caller = notifies
+            .iter()
+            .find(|n| n.address == CALLER_ADDR)
+            .expect("the caller's own request insert must be extracted");
+        assert_eq!(caller.insert_key, vec![REQUEST_ID.to_string()]);
+        assert!(
+            caller
+                .claimed_contract_calls
+                .as_deref()
+                .is_some_and(|c| c.contains(SIGNET_ADDR)),
+            "the caller's claimed_contract_calls must name the singleton"
+        );
+    }
+
+    /// A `Swap` the symbolic stack is too short to perform means we have lost
+    /// track of the real stack's shape. It must poison rather than silently
+    /// no-op: a no-op leaves a Concrete value sitting where a later `Ins` reads
+    /// its key or value, reporting an insert that never happened.
+    #[test]
+    fn scanner_swap_underflow_fails_closed() {
+        let container = empty_map();
+        let key = cell(0x66);
+        let value = cell(0x77);
+        let program = [
+            push(&container),
+            push(&key),
+            push(&value),
+            // Three slots held, so `swap 5` cannot be modeled.
+            Op::Swap { n: 5 },
+            Op::Ins {
+                cached: false,
+                n: 1,
+            },
+        ];
+        let inserts = scan(&program);
+        assert!(
+            inserts.is_empty(),
+            "an unmodelable swap must poison the stack, never fabricate an insert (got {})",
+            inserts.len()
+        );
+    }
+
+    /// A block carries every contract call on the chain. One transaction this
+    /// build cannot deserialize must cost that transaction only: the real SGN2
+    /// notifies beside it still come back, and the drop is reported instead of
+    /// failing the whole request.
+    #[test]
+    fn decode_block_survives_an_undecodable_transaction() {
+        let raw = std::fs::read_to_string("tests/fixtures/notify-tx.mn").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let good = hex::decode(v["tx"]["Midnight"].as_str().unwrap()).unwrap();
+
+        let response = decode_block(&[
+            RawTransaction::Midnight(vec![0xde, 0xad, 0xbe, 0xef]),
+            RawTransaction::Midnight(good),
+        ])
+        .expect("an undecodable transaction must not fail the block");
+
+        assert_eq!(
+            response.calls.len(),
+            3,
+            "the real notify tx beside the poisoned one must still decode"
+        );
+        assert_eq!(
+            response.skipped.len(),
+            1,
+            "the drop must be reported: {:?}",
+            response.skipped
+        );
+        assert!(
+            response.skipped[0].starts_with("tx[0]:"),
+            "the report must name the dropped transaction: {:?}",
+            response.skipped
         );
     }
 }

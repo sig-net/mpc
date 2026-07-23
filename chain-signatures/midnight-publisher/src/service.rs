@@ -5,6 +5,7 @@
 //! binary built from this workspace's seeded lockfile.
 
 use anyhow::Context as _;
+use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -83,9 +84,27 @@ impl Config {
             other => anyhow::bail!("MIDNIGHT_PUB_INTENT_MODE must be docker|native, got {other}"),
         };
         let node_url = env_required("MIDNIGHT_PUB_NODE_URL")?;
+
+        // The loopback boundary IS this service's access control: it has no
+        // authentication of any kind and it holds a funding wallet. Binding it
+        // somewhere reachable must be a deliberate, spelled-out act behind an
+        // external authenticated boundary, never a typo in an env var.
+        let bind_host = env_or("MIDNIGHT_PUB_BIND_HOST", "127.0.0.1");
+        let is_loopback = bind_host == "localhost"
+            || bind_host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
+        anyhow::ensure!(
+            is_loopback || env_or("MIDNIGHT_PUB_ALLOW_NON_LOOPBACK", "0") == "1",
+            "MIDNIGHT_PUB_BIND_HOST={bind_host} is not a loopback address. This service has \
+             no authentication and holds a funding wallet; set \
+             MIDNIGHT_PUB_ALLOW_NON_LOOPBACK=1 only when an authenticated boundary fronts it."
+        );
+
         Ok(Self {
             port: env_or("MIDNIGHT_PUB_PORT", "8790").parse()?,
-            bind_host: env_or("MIDNIGHT_PUB_BIND_HOST", "127.0.0.1"),
+            bind_host,
             work_dir: PathBuf::from(env_required("MIDNIGHT_PUB_WORK_DIR")?),
             node_url_docker: env_or("MIDNIGHT_PUB_NODE_URL_DOCKER", &node_url),
             node_url,
@@ -99,7 +118,9 @@ impl Config {
             toolkit_js_path: env_or("MIDNIGHT_PUB_TOOLKIT_JS_PATH", ""),
             funding_seed: env_required("MIDNIGHT_PUB_FUNDING_SEED")?,
             coin_public: env_required("MIDNIGHT_PUB_COIN_PUBLIC")?,
-            signer_secret_key: env_or("MIDNIGHT_PUB_SIGNER_SECRET_KEY", &"11".repeat(32)),
+            // Required, never defaulted: a baked-in fallback is a real signing
+            // key that ships in the binary and silently works in production.
+            signer_secret_key: env_required("MIDNIGHT_PUB_SIGNER_SECRET_KEY")?,
             compactc_version: env_or("MIDNIGHT_PUB_COMPACTC_VERSION", "0.33.0"),
             curl_bin: PathBuf::from(env_or("MIDNIGHT_PUB_CURL_BIN", "curl")),
         })
@@ -108,6 +129,12 @@ impl Config {
     fn run_dir(&self) -> PathBuf {
         // Own subdir: never collide with the driver scripts' .run/ files.
         self.work_dir.join(".run/publisher")
+    }
+
+    /// The values that must never reach a log line or an HTTP response body.
+    /// Both are passed to the toolkit on its argv, so its stderr can echo them.
+    fn secrets(&self) -> [&str; 2] {
+        [self.funding_seed.as_str(), self.signer_secret_key.as_str()]
     }
 }
 
@@ -181,7 +208,23 @@ pub fn circuit_args(req: &RespondRequest) -> Vec<String> {
     }
 }
 
-fn run(mut cmd: Command, what: &str) -> anyhow::Result<()> {
+/// Replace every occurrence of a secret with a placeholder.
+///
+/// The toolkit takes `--funding-seed` on its argv and several of its failures
+/// echo the invocation back, so raw stderr can carry the funding wallet's seed.
+/// That stderr becomes an HTTP 502 body and a log line, so it is redacted at the
+/// source: every later consumer is then safe by construction.
+fn redact(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        if !secret.is_empty() {
+            out = out.replace(secret, "<redacted>");
+        }
+    }
+    out
+}
+
+fn run(mut cmd: Command, what: &str, secrets: &[&str]) -> anyhow::Result<()> {
     let output = cmd.output().with_context(|| format!("spawning {what}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -193,7 +236,11 @@ fn run(mut cmd: Command, what: &str) -> anyhow::Result<()> {
             .chars()
             .rev()
             .collect();
-        anyhow::bail!("{what} failed ({}): {tail}", output.status);
+        anyhow::bail!(
+            "{what} failed ({}): {}",
+            output.status,
+            redact(&tail, secrets)
+        );
     }
     Ok(())
 }
@@ -235,7 +282,7 @@ pub fn run_respond_flow(cfg: &Config, req: &RespondRequest) -> anyhow::Result<()
         "--dest-file",
         &run_dir.join("state.mn").display().to_string(),
     ]);
-    run(fetch, "toolkit contract-state")?;
+    run(fetch, "toolkit contract-state", &cfg.secrets())?;
 
     // 2. Generate the circuit intent (needs toolkit-js).
     let args = circuit_args(req);
@@ -326,7 +373,7 @@ pub fn run_respond_flow(cfg: &Config, req: &RespondRequest) -> anyhow::Result<()
             cmd
         }
     };
-    run(intent, "toolkit generate-intent")?;
+    run(intent, "toolkit generate-intent", &cfg.secrets())?;
 
     // 3. Build + prove + fund + submit.
     let mut send = toolkit_cmd(cfg);
@@ -343,7 +390,7 @@ pub fn run_respond_flow(cfg: &Config, req: &RespondRequest) -> anyhow::Result<()
         "--compiled-contract-dir",
         &cfg.work_dir.join(".run/resolver").display().to_string(),
     ]);
-    run(send, "toolkit send-intent")?;
+    run(send, "toolkit send-intent", &cfg.secrets())?;
     Ok(())
 }
 
@@ -532,6 +579,10 @@ fn handle_block(cfg: &Config, url: &str) -> (u16, String) {
     }
 }
 
+/// Upper bound on a `POST /respond` body. The payload is a handful of 64-hex
+/// fields; anything beyond this is a bug or an attack, not a real request.
+const MAX_RESPOND_BODY_BYTES: u64 = 64 * 1024;
+
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
     let server = tiny_http::Server::http((cfg.bind_host.as_str(), cfg.port))
         .map_err(|e| anyhow::anyhow!("bind {}:{}: {e}", cfg.bind_host, cfg.port))?;
@@ -561,8 +612,16 @@ pub fn serve(cfg: Config) -> anyhow::Result<()> {
                 respond(request, code, body);
             }
             ("POST", "/respond") => {
+                // Bounded read: a respond payload is a handful of 64-hex fields,
+                // and this server is sequential, so one oversized body would
+                // otherwise pin the whole service's memory and stall every seam.
                 let mut body = String::new();
-                if request.as_reader().read_to_string(&mut body).is_err() {
+                if request
+                    .as_reader()
+                    .take(MAX_RESPOND_BODY_BYTES)
+                    .read_to_string(&mut body)
+                    .is_err()
+                {
                     respond(request, 400, "unreadable body".into());
                     continue;
                 }
@@ -850,7 +909,7 @@ mod tests {
 
     #[test]
     fn state_fetches_decodes_and_anchors_via_fake_rpc() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap();
+        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = std::env::temp_dir().join(format!("mn-pub-state-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let log = tmp.join("rpc.log");
@@ -897,7 +956,7 @@ mod tests {
 
     #[test]
     fn state_decode_failure_is_502() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap();
+        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = std::env::temp_dir().join(format!("mn-pub-state502-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let bad = tmp.join("bad.mn");
@@ -919,23 +978,66 @@ mod tests {
 
     #[test]
     fn config_defaults_localhost_bind_and_native_intent() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap();
+        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (k, v) in [
             ("MIDNIGHT_PUB_NODE_URL", "ws://node:9944"),
             ("MIDNIGHT_PUB_WORK_DIR", "/tmp"),
             ("MIDNIGHT_PUB_TOOLKIT_BIN", "toolkit"),
             ("MIDNIGHT_PUB_FUNDING_SEED", "00"),
             ("MIDNIGHT_PUB_COIN_PUBLIC", "aa"),
+            ("MIDNIGHT_PUB_SIGNER_SECRET_KEY", "11"),
         ] {
             std::env::set_var(k, v);
         }
         std::env::remove_var("MIDNIGHT_PUB_BIND_HOST");
         std::env::remove_var("MIDNIGHT_PUB_INTENT_MODE");
+        std::env::remove_var("MIDNIGHT_PUB_ALLOW_NON_LOOPBACK");
         let cfg = Config::from_env().expect("from_env with required vars set");
         assert_eq!(cfg.bind_host, "127.0.0.1", "defaults to localhost bind");
         assert!(
             matches!(cfg.intent_mode, IntentMode::Native),
             "defaults to native intent"
         );
+
+        // The signing key is required, never defaulted: a baked-in fallback is a
+        // real key shipped in the binary that silently works in production.
+        std::env::remove_var("MIDNIGHT_PUB_SIGNER_SECRET_KEY");
+        assert!(
+            Config::from_env().is_err(),
+            "a missing signer secret key must fail startup, not fall back to a baked-in default"
+        );
+        std::env::set_var("MIDNIGHT_PUB_SIGNER_SECRET_KEY", "11");
+
+        // Loopback is the entire access control, so a reachable bind has to be
+        // opted into explicitly and can never be reached by a typo.
+        std::env::set_var("MIDNIGHT_PUB_BIND_HOST", "0.0.0.0");
+        assert!(
+            Config::from_env().is_err(),
+            "a non-loopback bind must be refused without an explicit opt-in"
+        );
+        std::env::set_var("MIDNIGHT_PUB_ALLOW_NON_LOOPBACK", "1");
+        assert_eq!(
+            Config::from_env()
+                .expect("the explicit opt-in permits a reachable bind")
+                .bind_host,
+            "0.0.0.0"
+        );
+        std::env::remove_var("MIDNIGHT_PUB_BIND_HOST");
+        std::env::remove_var("MIDNIGHT_PUB_ALLOW_NON_LOOPBACK");
+    }
+
+    /// Secrets reach the toolkit on its argv, and several of its failures echo
+    /// the invocation back. That stderr becomes a 502 body and a log line, so
+    /// the seed must never survive the trip.
+    #[test]
+    fn subprocess_stderr_is_redacted_before_it_escapes() {
+        let seed = "c0ffee00c0ffee00c0ffee00c0ffee00";
+        let leaked = format!("toolkit: invoked with --funding-seed {seed} and it blew up");
+        let safe = redact(&leaked, &[seed, "unused"]);
+        assert!(
+            !safe.contains(seed),
+            "the funding seed must not survive redaction: {safe}"
+        );
+        assert!(safe.contains("<redacted>"), "{safe}");
     }
 }
