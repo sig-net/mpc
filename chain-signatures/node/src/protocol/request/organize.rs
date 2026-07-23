@@ -80,21 +80,9 @@ impl OrganizingPhase {
                 return state.reorganize();
             };
 
-            let max_rounds = state.round + PROPOSER_SEARCH_WINDOW;
-            let (selected_round, proposer) = (state.round..max_rounds)
-                .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
-                .find(|(_, potential_proposer)| active.contains(potential_proposer))
-                .unwrap_or_else(|| {
-                    (
-                        max_rounds,
-                        *active
-                            .iter()
-                            .choose(&mut StdRng::from_seed(entropy))
-                            .unwrap(),
-                    )
-                });
-
-            state.round = selected_round;
+            // No liveness filter: `state.round` advances only via `bump_round`,
+            // and a dead proposer costs one silent round bounded by `T(r)`.
+            let proposer = Self::proposer_per_round(state.round, &participants, &entropy);
 
             // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
             let skip_proposing = state
@@ -105,7 +93,7 @@ impl OrganizingPhase {
 
             tracing::info!(
                 ?sign_id,
-                round = selected_round,
+                round = ?state.round,
                 ?proposer,
                 ?me,
                 is_proposer,
@@ -258,5 +246,39 @@ mod tests {
             OrganizingPhase::proposer_per_round(2, &participants, &entropy),
             Participant::from(0)
         );
+    }
+
+    /// The liveness guarantee deterministic rotation exists to provide: from any
+    /// starting round, with any set of `f < n` participants down, a live proposer
+    /// is elected within `f + 1` rounds. This is the bound that lets a request
+    /// make progress past dead proposers; a rotation that clustered or skipped
+    /// participants (e.g. a hash-based seed) would silently break it. Checked
+    /// exhaustively over every down-set and start round, across seeds.
+    #[test]
+    fn rotation_reaches_live_proposer_within_f_plus_1_rounds() {
+        let participants: Vec<Participant> = (0u32..5).map(Participant::from).collect();
+        let n = participants.len();
+        for seed in [0u8, 1, 7, 128, 255] {
+            let mut entropy = [0u8; 32];
+            entropy[0] = seed;
+            // Every down-set except "all down" (which has no live proposer).
+            for down_mask in 0..((1u32 << n) - 1) {
+                let down: BTreeSet<Participant> = (0..n)
+                    .filter(|&i| down_mask & (1 << i) != 0)
+                    .map(|i| participants[i])
+                    .collect();
+                let budget = down.len() + 1; // f + 1 rounds
+                for start in 0..n {
+                    let reached_live = (start..start + budget).any(|r| {
+                        let p = OrganizingPhase::proposer_per_round(r, &participants, &entropy);
+                        !down.contains(&p)
+                    });
+                    assert!(
+                        reached_live,
+                        "seed {seed}, down {down:?}, start {start}: no live proposer within {budget} rounds"
+                    );
+                }
+            }
+        }
     }
 }

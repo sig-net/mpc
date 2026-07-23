@@ -20,9 +20,6 @@ use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
 use mpc_primitives::{IndexedSignRequest, SignCommand, SignId, SignKind};
-use rand::rngs::StdRng;
-use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,18 +41,36 @@ use task::SignTask;
 
 pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
 
-/// How many rounds ahead the organizing phase searches for an active proposer.
-const PROPOSER_SEARCH_WINDOW: usize = 512;
-
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
-/// Timeout budget for organizing and posit phases (shorter under test for speed).
+/// Round-0 timeout, and the base and cap of [`round_timeout`]. Generous, to
+/// absorb a proposer's indexer lag or a momentary empty presignature pool.
+/// TODO: size from data (indexer-lag p99 + ~3δ) once that telemetry exists.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     5
 } else {
     20
 });
+
+/// Floor of the per-round schedule for rounds `r >= 1`. Safe to keep short: the
+/// post-Accept minimum-wait clamp in `posit.rs` raises an accepted deliberator's
+/// wait regardless.
+const ROUND_TIMEOUT_FLOOR: Duration =
+    Duration::from_secs(if cfg!(feature = "test-feature") { 1 } else { 2 });
+
+/// Linear per-round growth of the schedule past `r = 1` (Tendermint-style).
+const ROUND_TIMEOUT_STEP: Duration = Duration::from_secs(1);
+
+/// Deterministic timeout schedule `T(r)`, identical on every node: a generous
+/// `T(0)`, then a short floor at `r = 1` growing linearly, capped at `T(0)`.
+fn round_timeout(round: usize) -> Duration {
+    if round == 0 {
+        return ORGANIZE_POSIT_TIMEOUT;
+    }
+    let steps = u32::try_from(round - 1).unwrap_or(u32::MAX);
+    (ROUND_TIMEOUT_FLOOR + ROUND_TIMEOUT_STEP * steps).min(ORGANIZE_POSIT_TIMEOUT)
+}
 
 /// A proposer tries to include all eligible deliberators but will go ahead with
 /// a subset after this timeout, if above the minimum threshold.
@@ -598,5 +613,27 @@ mod tests {
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_posit_queues_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
+    }
+
+    #[test]
+    fn round_timeout_schedule() {
+        // Round 0 is the generous budget; every later round is cheaper, so
+        // rotating past a dead proposer is cheap.
+        assert_eq!(round_timeout(0), ORGANIZE_POSIT_TIMEOUT);
+        assert!(round_timeout(1) < round_timeout(0));
+
+        // Every round past 0 stays within [floor, base] and never decreases:
+        // the backoff grows smoothly and is bounded.
+        let mut prev = round_timeout(1);
+        for r in 1..1_000usize {
+            let t = round_timeout(r);
+            assert!(t >= ROUND_TIMEOUT_FLOOR, "round {r} fell below the floor");
+            assert!(t <= ORGANIZE_POSIT_TIMEOUT, "round {r} exceeded the cap");
+            assert!(t >= prev, "round {r} decreased");
+            prev = t;
+        }
+
+        // A peer-advanced round number must not panic or overflow, and is capped.
+        assert_eq!(round_timeout(usize::MAX), ORGANIZE_POSIT_TIMEOUT);
     }
 }

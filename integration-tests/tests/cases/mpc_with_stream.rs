@@ -201,10 +201,6 @@ async fn test_channel_contention_delayed_beyond_round0_timeout() {
 /// Electing from shared inputs only (round, participants, entropy) leaves
 /// `state.round` advancing solely through `bump_round`, so every node stays on
 /// the same round, the first Propose is accepted, and the request settles.
-///
-/// Run it with `cargo test -p integration-tests -- --ignored
-/// test_divergent_active_views_still_converge` to reproduce the stall.
-#[ignore = "fails until proposer election stops reading the local active set; un-ignore together with that change"]
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_divergent_active_views_still_converge() {
     let num_nodes = 5;
