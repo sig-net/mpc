@@ -7,7 +7,7 @@ use crate::types::CheckpointWatcher;
 
 use futures_util::StreamExt;
 use mpc_chain_integration_core::ChainIndexer;
-use mpc_primitives::{Chain, SignCommand};
+use mpc_primitives::{Chain, ChainConfig as _, SignCommand};
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;

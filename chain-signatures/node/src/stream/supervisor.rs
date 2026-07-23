@@ -152,7 +152,7 @@ mod tests {
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-    use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+    use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, SignCommand};
     use near_account_id::AccountId;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};

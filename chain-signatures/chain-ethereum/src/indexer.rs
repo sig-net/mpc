@@ -15,8 +15,8 @@ use futures_util::{stream, Stream, StreamExt};
 use mpc_chain_integration_core::utils::task::AbortOnDrop;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
-    SignId,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
+    IndexedSignRequest, SignId,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -11,11 +11,11 @@ use mpc_contract::primitives::{CandidateInfo, ParticipantInfo, Participants, Sig
 use mpc_contract::update::UpdateId;
 use mpc_crypto::kdf::{check_ec_signature, derive_secret_key};
 use mpc_crypto::{derive_epsilon_near, derive_key};
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
+use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 
 pub const CONTRACT_FILE_PATH: &str =
     "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";

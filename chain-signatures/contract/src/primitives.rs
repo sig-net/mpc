@@ -1,12 +1,13 @@
-pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use signet_primitives::Chain;
 
 use crate::config::Config;
 use crate::state::ProtocolContractState;
 
-use mpc_primitives::{borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
+use signet_primitives::{borsh_scalar, SignId, Signature};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
