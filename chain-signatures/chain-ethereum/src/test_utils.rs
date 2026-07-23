@@ -2,6 +2,7 @@ use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
+use alloy::rpc::types::{Block, Log};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use std::sync::Arc;
@@ -173,18 +174,16 @@ pub fn live_block(number: u64) -> CatchupItem {
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
-    let block: alloy::rpc::types::Block =
-        serde_json::from_value(value).expect("block fixture should deserialize");
+    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
     CatchupItem::LiveBlock(block)
 }
 
-pub fn batch_block(number: u64, logs: Vec<alloy::rpc::types::Log>) -> CatchupItem {
+pub fn batch_block(number: u64, logs: Vec<Log>) -> CatchupItem {
     let value = block_response(1, number)
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
-    let block: alloy::rpc::types::Block =
-        serde_json::from_value(value).expect("block fixture should deserialize");
+    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
     CatchupItem::BatchBlock { block, logs }
 }
 
