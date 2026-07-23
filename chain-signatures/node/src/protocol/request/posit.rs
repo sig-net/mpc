@@ -45,6 +45,10 @@ impl PositPhase {
                 // that higher round, or else any peer could force themselves to
                 // be the proposer every time.
                 if state.round > *peer_round {
+                    // Stamp the reject with our own (higher) round, not the
+                    // sender's. A behind proposer then sees a future round,
+                    // updates its `highest_seen_round`, and catches up in one
+                    // `bump_round` instead of climbing one round per attempt.
                     ctx.msg
                         .send(
                             ctx.governance.me,
@@ -53,11 +57,11 @@ impl PositPhase {
                                 id: PositProtocolId::Signature(
                                     sign_id,
                                     *presignature_id,
-                                    *peer_round,
+                                    state.round,
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::InvalidRequest,
+                                    PositRejectReason::StaleRound,
                                 ),
                             },
                         )
@@ -414,5 +418,123 @@ impl PositPhase {
                 .await;
         }
         participants
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::message::Message;
+    use crate::protocol::presignature::Presignature;
+    use deadpool_redis::Runtime;
+
+    /// A deliberator that rejects a Propose from a *behind* proposer must stamp
+    /// the reject with its own (higher) round, not echo the sender's round.
+    /// Otherwise the behind proposer never learns it is behind and climbs one
+    /// round per attempt instead of catching up in a single `bump_round`.
+    #[tokio::test]
+    async fn reject_of_older_round_carries_rejectors_round() {
+        let me = Participant::from(1);
+        let proposer = Participant::from(0);
+
+        let account_id: near_account_id::AccountId = "p-1".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&proposer, ParticipantInfo::new(0));
+        participants.insert(&me, ParticipantInfo::new(1));
+
+        let governance = GovernanceInfo {
+            me,
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [proposer, me].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        // The reject path never touches presignatures, so the lazy pool is
+        // never actually connected.
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, mut outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+
+        let mut ctx = SignTask {
+            governance,
+            sign_id: SignId::new([0u8; 32]),
+            presignatures,
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog: Backlog::new(),
+            cfg: ProtocolConfig::default(),
+            contract,
+            is_proposer: Arc::new(AtomicBool::new(false)),
+            limiter: SignLimiter::new(1),
+            node_account_id: account_id,
+        };
+
+        let request = IndexedSignRequest::new(
+            ctx.sign_id,
+            mpc_primitives::SignArgs {
+                entropy: [0u8; 32],
+                epsilon: k256::Scalar::from(1u64),
+                payload: k256::Scalar::from(2u64),
+                path: "test".to_string(),
+                key_version: 0,
+            },
+            Chain::Ethereum,
+            0,
+            SignKind::Sign,
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let mut state = SignState::new(request, mesh_rx);
+
+        // We are ahead of the proposer: our round is 5, the incoming Propose is
+        // for round 2. Give the round a short budget so `wait_for_propose`
+        // times out and returns shortly after emitting the reject.
+        state.round = 5;
+        state.budget.reset(Duration::from_millis(200));
+
+        let posit_queue = SignPositWorkQueue::new();
+        posit_queue.push(SignTaskMessage::PositMessage {
+            presignature_id: 42,
+            round: 2,
+            from: proposer,
+            action: PositAction::Propose,
+        });
+
+        // Behind-proposer Propose is rejected; the call then times out waiting
+        // for a valid one and reorganizes.
+        let phase =
+            PositPhase::wait_for_propose(&mut ctx, &mut state, &posit_queue, proposer).await;
+        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+
+        let sent = outbox
+            .intercept_outgoing_messages()
+            .try_recv()
+            .expect("a reject should have been sent to the behind proposer");
+        assert_eq!(sent.from, me);
+        assert_eq!(sent.to, proposer);
+
+        let Message::Posit(posit) = sent.message else {
+            panic!("expected a posit message");
+        };
+        let PositProtocolId::Signature(_, _, reject_round) = posit.id else {
+            panic!("expected a signature posit id");
+        };
+        // The reject carries our round (5), not the sender's echoed round (2).
+        assert_eq!(reject_round, 5);
+        assert!(matches!(
+            posit.action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
     }
 }
