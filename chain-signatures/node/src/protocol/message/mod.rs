@@ -21,7 +21,7 @@ pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
-pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
+pub use sub::Subscriber;
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;

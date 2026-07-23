@@ -39,9 +39,6 @@ const MAX_CONCURRENT_FETCH: usize = 5;
 /// The max chunk size for fetching slots and blocks per batch.
 const MAX_CHUNK_SIZE: usize = 50;
 
-/// The max chunk size allowed for fetching concurrently.
-pub const MAX_CONCURRENT_CHUNK_SIZE: usize = MAX_CONCURRENT_FETCH * MAX_CHUNK_SIZE;
-
 const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const SOL_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
@@ -231,6 +228,7 @@ impl SolanaClient {
         )
     }
 
+    // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
         retry_rpc!(

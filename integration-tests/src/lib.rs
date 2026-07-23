@@ -385,15 +385,26 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
         let contract_address_hex = hex::encode(contract_address);
         spawner.cfg.eth = Some(EthConfig {
-            account_sk: sandbox.secret_key.clone(),
+            account_sk: sandbox
+                .secret_key
+                .parse()
+                .context("invalid ethereum sandbox secret key")?,
             consensus_rpc_http_url: rpc_endpoint.clone(),
-            execution_rpc_http_url: rpc_endpoint,
-            contract_address: contract_address_hex.clone(),
-            network: "sepolia".to_string(),
-            helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
+            execution_rpc_http_url: rpc_endpoint
+                .parse()
+                .context("invalid ethereum sandbox rpc endpoint")?,
+            contract_address: contract_address_hex
+                .parse()
+                .context("invalid deployed contract address")?,
+            network: "anvil".to_string(),
+            helios_data_path: format!("/tmp/helios-{contract_address_hex}"),
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             light_client: false,
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         });
 
         ethereum = Some(EthereumContext {

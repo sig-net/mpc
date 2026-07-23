@@ -19,3 +19,4 @@ mpc-primitives.workspace = true
 rand.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
