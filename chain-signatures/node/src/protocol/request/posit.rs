@@ -45,10 +45,6 @@ impl PositPhase {
                 // that higher round, or else any peer could force themselves to
                 // be the proposer every time.
                 if state.round > *peer_round {
-                    // Stamp the reject with our own (higher) round, not the
-                    // sender's. A behind proposer then sees a future round,
-                    // updates its `highest_seen_round`, and catches up in one
-                    // `bump_round` instead of climbing one round per attempt.
                     ctx.msg
                         .send(
                             ctx.governance.me,
