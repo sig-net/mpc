@@ -84,11 +84,7 @@ impl OrganizingPhase {
             // and a dead proposer costs one silent round bounded by `T(r)`.
             let proposer = Self::proposer_per_round(state.round, &participants, &entropy);
 
-            // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
-            let skip_proposing = state
-                .pause_proposing_until
-                .is_some_and(|until| until > std::time::Instant::now());
-            let is_proposer = proposer == me && !skip_proposing;
+            let is_proposer = proposer == me;
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
 
             tracing::info!(
@@ -97,7 +93,6 @@ impl OrganizingPhase {
                 ?proposer,
                 ?me,
                 is_proposer,
-                skip_proposing,
                 active_count = active.len(),
                 "organized: selected proposer"
             );

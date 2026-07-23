@@ -53,9 +53,6 @@ impl GeneratingPhase {
         state: &mut SignState,
         posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
-        // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing_until = None;
-
         let sign_id = ctx.sign_id;
         let round = state.round;
 

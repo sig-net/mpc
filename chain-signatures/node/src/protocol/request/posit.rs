@@ -298,23 +298,16 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
+                            // No pause under single-leader rotation; just reorganize.
+                            // `num_ongoing` (peers already generating) is diagnostic only.
                             let num_ongoing = counter.num_peers_with_ongoing_generation();
-                            if ctx.governance.participants.len().saturating_sub(num_ongoing) < ctx.governance.threshold {
-                                state.pause_proposing_until = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
-                                tracing::info!(
-                                    ?sign_id,
-                                    ?round,
-                                    resume=?state.pause_proposing_until,
-                                    "pausing proposer: peers already generating this signature"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    ?from,
-                                    "received enough REJECTs, reorganizing"
-                                );
-                            }
+                            tracing::warn!(
+                                ?sign_id,
+                                ?round,
+                                ?from,
+                                num_ongoing,
+                                "received enough REJECTs, reorganizing"
+                            );
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
