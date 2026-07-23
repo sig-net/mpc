@@ -14,28 +14,20 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
     "@midnight-ntwrk/midnight-js": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.4",
     "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.4",
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.4",
     "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.4",
     "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.4",
     "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.4",
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@midnightntwrk/onchain-runtime-v4": "4.0.0-rc.3",
-    "@midnightntwrk/wallet-sdk-abstractions": "3.0.0-beta.0",
-    "@midnightntwrk/wallet-sdk-dust-wallet": "5.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-hd": "3.1.0-beta.1",
-    "@midnightntwrk/wallet-sdk-shielded": "4.0.0-beta.2",
-    "@midnightntwrk/wallet-sdk-unshielded-wallet": "4.0.0-beta.2",
     "@polkadot/api": "^16.5.6",
     "@sig-net/midnight-contract": "0.10.0",
     "@sig-net/midnight-contract-deploy": "0.10.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "effect": "3.22.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
