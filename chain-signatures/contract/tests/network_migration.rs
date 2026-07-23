@@ -101,7 +101,6 @@ async fn assert_migration(
 }
 
 #[tokio::test]
-#[ignore = "requires near testnet and mainnet RPC access"]
 async fn test_migrate_deployed_network_states() -> anyhow::Result<()> {
     let wasm = std::fs::read(CONTRACT_FILE_PATH)?;
 
