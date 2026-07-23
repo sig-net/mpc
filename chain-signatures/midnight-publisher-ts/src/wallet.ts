@@ -1,32 +1,16 @@
 /**
- * The funding (gas) wallet: a seed, the three role keys derived from it, a
- * started `WalletFacade`, and the two midnight-js provider interfaces the write
- * path balances and submits through.
+ * The funding (gas) wallet: seed, derived role keys, a started `WalletFacade`.
  *
- * THIS MODULE IS THE SERVICE'S ONLY INDEXER DEPENDENCY, and it is deliberate
- * rather than incidental. Everything else on the write path (contract state,
- * zswap chain state, ledger parameters) comes from the node's runtime API, and
- * the read seams touch no indexer at all. Balancing is different: the shielded,
+ * THE SERVICE'S ONLY INDEXER DEPENDENCY, and unavoidable. The shielded,
  * unshielded and dust sub-wallets discover their UTXOs exclusively through
- * `indexerClientConnection`, and NO node RPC or runtime API returns UTXO or
- * dust state for an address (established by enumerating every runtime-API
- * namespace this chain exposes: `midnightRuntimeApi`, `c2mBridgeApi`,
- * `tokenBridgeIDPRuntimeApi`, `systemParametersApi`). Point the facade at a
- * dead port with node RPC intact and it loops on `Wallet.Sync` forever: there
- * is no coin selection, no dust, and therefore no fee payment.
+ * `indexerClientConnection`, and no node RPC or runtime API returns UTXO or dust
+ * state for an address (checked against every namespace this chain exposes).
+ * Point the facade at a dead indexer with node RPC intact and it loops on
+ * `Wallet.Sync` forever: no coin selection, no dust, no fee payment.
  *
- * What that dependency does and does not cost: the indexer feeds fee payment
- * only. It is downstream of every security decision, absent from the discovery
- * pipeline, and cannot influence a response's content. A hostile indexer can
- * cause silence (withheld or stale UTXOs stop balancing; fabricated ones are
- * rejected by the node, which validates against real state) and it learns which
- * addresses this wallet uses. It can never induce a spend, because spending
- * needs the wallet keys it never sees. Self-hosting removes the disclosure;
- * reading from several endpoints removes the single point of silence.
- *
- * Nothing here touches disk: transaction history is in-memory, and the escape-
- * hatch call route in `respond.ts` constructs no private-state provider at all,
- * so the service runs from a read-only filesystem.
+ * It feeds fee payment only, so it is downstream of every security decision and
+ * cannot influence a response's content; see the decision record §2.5 for what a
+ * hostile indexer can and cannot do. Nothing here touches disk.
  */
 
 import type * as ledger from "@midnightntwrk/ledger-v9";
@@ -34,54 +18,37 @@ import { deriveAccountKeys, initialiseWalletFacade, type AccountKeys } from "@si
 
 import type { Config } from "./config.js";
 
-/**
- * The live key material for the funding account. Held for the process's
- * lifetime: every balance and every signature needs it.
- */
 export type FundingKeys = AccountKeys;
 
 /**
- * A started funding wallet, reduced to exactly what the write path uses.
- *
- * Deliberately NOT midnight-js's `WalletProvider & MidnightProvider`: those
- * interfaces exist to be handed to `findDeployedContract`, and this service
- * calls `createUnprovenCallTxFromInitialStates` instead, which takes no
- * provider set. The four members below are the whole surface a write needs.
+ * Deliberately not midnight-js's `WalletProvider & MidnightProvider`: those
+ * exist to be handed to `findDeployedContract`, and this service calls
+ * `createUnprovenCallTxFromInitialStates`, which takes no provider set.
  */
 export interface FundingWallet {
-  /** Zswap coin public key, one of the four data dependencies of a call. */
   readonly coinPublicKey: ledger.CoinPublicKey;
-  /** Zswap encryption public key, passed to the unproven-call builder. */
   readonly encryptionPublicKey: ledger.EncPublicKey;
-  /**
-   * Balance a proven transaction: add the dust and unshielded inputs that pay
-   * the fee, sign those segments, then finalize (which proves the balancing
-   * segments through the configured proof server).
-   */
+  /** Add the dust and unshielded inputs that pay the fee, sign them, finalize. */
   balance(tx: ledger.Transaction<ledger.SignatureEnabled, ledger.Proof, ledger.PreBinding>): Promise<ledger.FinalizedTransaction>;
   /** Submit and wait for the node to report the transaction finalized. */
   submit(tx: ledger.FinalizedTransaction): Promise<string>;
-  /** Stop syncing and release the indexer connections. */
   close(): Promise<void>;
 }
 
-/** Balancing recipes expire this far out. Ample for a prove-and-submit round. */
+/**
+ * Ample for a prove-and-submit round, which measures ~20 s. But this value is
+ * ALSO the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so it
+ * is how long an abandoned finalize holds the fee coin: a post that dies between
+ * finalize and submit strands it for up to 30 minutes, against the ~35 s the
+ * concurrency design budgets. Lowering it to a few minutes would bound that;
+ * left here deliberately for now, and recorded in the decision record §7.3.
+ */
 const RECIPE_TTL_MS = 30 * 60 * 1000;
 
 /**
- * Parse a funding seed: 16 to 64 bytes of hex, `0x` optional.
- *
- * Hex only, matching the Rust implementation's `MIDNIGHT_PUB_FUNDING_SEED`
- * (which was handed straight to the toolkit's `--funding-seed`), so a
- * deployment moves without touching the variable. A mnemonic is rejected here
- * rather than silently hashed into a different wallet. That rejection is also
- * the only thing keeping {@link deriveFundingKeys} narrow, since the library
- * derivation it delegates to accepts one.
- *
- * @param seed - The configured seed.
- * @returns The seed bytes.
- * @throws If the value is not 16 to 64 bytes of hex. The message never quotes
- *   the value, since this is the one true secret the service holds.
+ * 16 to 64 bytes of hex, `0x` optional, matching the Rust implementation's
+ * `MIDNIGHT_PUB_FUNDING_SEED` so a deployment moves without touching it. The
+ * message never quotes the value.
  */
 export function parseFundingSeed(seed: string): Uint8Array {
   const compact = seed.trim().replace(/^0x/i, "");
@@ -95,56 +62,27 @@ export function parseFundingSeed(seed: string): Uint8Array {
   return Uint8Array.from(Buffer.from(compact, "hex"));
 }
 
-/**
- * Derive the three role keys (Zswap, NightExternal, Dust) from the funding
- * seed. Pure crypto: no network, and the HD wallet is cleared immediately after
- * derivation so the master key does not linger.
- *
- * @param seed - The funding seed, hex.
- * @param networkId - The network the unshielded keystore encodes addresses for.
- * @returns The derived key material.
- * @throws If the seed is malformed or key derivation is out of bounds.
- */
+/** Zswap, NightExternal and Dust role keys. Pure crypto, no network. */
 export function deriveFundingKeys(seed: string, networkId: string): FundingKeys {
-  // NOT a redundant parse. `deriveAccountKeys` reads the seed through the
-  // package's `parseSeed`, which ALSO accepts a BIP-39 mnemonic and runs it
-  // through PBKDF2 into a different, unfunded wallet (measured: the same input
-  // yields two different unshielded addresses). Nothing can be injected into
-  // that parser, so this pre-check is the only thing holding the accepted input
-  // for the one secret this service holds to what the Rust implementation took.
-  // A widened seed fails much later, as `Wallet.InsufficientFunds: could not
-  // balance dust`. Do not remove it.
+  // NOT a redundant parse, do not remove. `deriveAccountKeys` reads the seed
+  // through a parser that ALSO accepts a BIP-39 mnemonic and PBKDF2s it into a
+  // different, unfunded wallet (measured: same input, two different unshielded
+  // addresses). A widened seed then fails much later as
+  // `Wallet.InsufficientFunds: could not balance dust`.
   parseFundingSeed(seed);
   return deriveAccountKeys(seed, networkId);
 }
 
-/**
- * Open and sync the funding wallet.
- *
- * Blocks until the facade reports a synced state, because an unsynced wallet
- * has no coins to select and every balance would fail with the misleading
- * `Wallet.InsufficientFunds: could not balance dust`.
- *
- * @param config - Validated configuration; supplies both the indexer endpoints
- *   and the funding seed.
- * @returns The started wallet.
- * @throws If the seed is malformed, or the facade cannot reach the indexer,
- *   the node, or the proof server.
- */
+/** Opens and blocks until synced: an unsynced wallet fails every balance. */
 export async function openFundingWallet(config: Config): Promise<FundingWallet> {
   const keys = deriveFundingKeys(config.fundingSeed, config.networkId);
 
-  // Constructs the three sub-wallets and nothing more; every connection opens
-  // on `start()`. `Config` satisfies the published `MidnightNodeConfig` as-is,
-  // and the wiring it hides was diffed against what this file used to spell
-  // out: identical fee settings (`additionalFeeOverhead` 300_000_000_000,
-  // `feeBlocksMargin` 5, a smaller margin risks an underpriced transaction as
-  // fees drift), the same http->ws rescue on `nodeUrl` for a facade that only
-  // speaks WebSocket, and the same in-memory transaction history, which is what
-  // keeps this service off a writable volume and out of an exclusive database
-  // handle. The dependency is pinned to an exact version so those values cannot
-  // move under it. The indexer connection it takes from `config` is this
-  // service's sole indexer dependency; see this module's header.
+  // Constructs the sub-wallets only; connections open on `start()`. The wiring
+  // it hides was diffed against what this file used to spell out and is
+  // identical (fee overhead and block margin, the http->ws rescue for a facade
+  // that only speaks WebSocket, in-memory transaction history, which is what
+  // keeps this service off a writable volume). Pinned to an exact version so
+  // those values cannot move under it.
   const facade = await initialiseWalletFacade(keys, config);
 
   await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);

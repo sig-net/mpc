@@ -1,38 +1,32 @@
 /**
- * `/state` seam tests.
+ * `POST /decode/contract-state` tests.
  *
- * Two tiers, deliberately separated:
- *
- * OFFLINE (always run) — golden tests against committed fixtures. The goldens in
+ * All offline, and that is the point: the seam is a pure codec, so there is
+ * nothing left that a running node could tell us. The goldens in
  * `tests/fixtures/rust-*.json` are the VERBATIM response bodies of the Rust
  * `midnight-publisher` binary, captured from the live stack; the `.mn` fixtures
- * are the same contract-state blobs its own test suite uses. Correctness here is
+ * are the same contract-state blobs its own test suite uses. Correctness is
  * anchored to the reference implementation's bytes, not to hand-written
- * expectations.
+ * expectations, and the tree this seam emits must still match them exactly now
+ * that the bytes arrive over HTTP instead of off an RPC.
  *
- * LIVE (opt-in via `MIDNIGHT_PUB_TEST_NODE_URL`) — the parts that need a running
- * node: the anchor wrapper, the finalized-head path, and the full serialized
- * body. See `tests/block.test.ts` for the same split on `/block`.
+ * The live and acceptance tiers this file used to carry stood the Rust binary up
+ * and byte-diffed `GET /state` against it. Those endpoints no longer exist on
+ * either side; the coverage they gave — same bytes, same decoder, same golden —
+ * is kept by driving the fixtures through the real HTTP server below.
  */
 
 import { readFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { StateMap, StateValue, type AlignedValue } from "@midnightntwrk/ledger-v9";
-import { ApiPromise, WsProvider } from "@polkadot/api";
 import { describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
-import { connect, type NodeClient } from "../src/node.js";
-import { decodeContractState, handleState, walk } from "../src/state.js";
-
-/** The deployed singleton and caller of the captured SGN2 flow. Recapture the fixtures and these together. */
-const SINGLETON = "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
-const CALLER = "dcd470fbc066befe0b6cddcf273dc9a838832ccbb8327f2625ec7028b0a6f0d2";
-
-/** The notify block and its parent: the pair the whole state-diff design rests on. */
-const BLOCK_1365 = "0x1d4c24186a5f3c2ce43c691797bd336aae587e9af29701ed5b532e6aab5dd633";
-const BLOCK_1366 = "0x588b87380b6b17463ed87837fa5651a32b5a9d4f02deeb015661f1f04f0ad8fc";
+import { toHex, type NodeClient } from "../src/node.js";
+import { buildServer, type Reply } from "../src/server.js";
+import { decodeContractState, walk } from "../src/state.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -48,7 +42,9 @@ function goldenText(name: string): string {
  * The `tree` member of a golden response as RAW TEXT.
  *
  * Deliberately string surgery rather than `JSON.parse`: round-tripping through a
- * parser launders key order, which is exactly the property under test.
+ * parser launders key order, which is exactly the property under test. The
+ * `anchor` the goldens carry belongs to the retired `GET /state` wrapper; the
+ * tree beside it is what this seam answers with, unchanged.
  */
 function goldenTree(golden: string): string {
   const marker = ',"tree":';
@@ -58,31 +54,86 @@ function goldenTree(golden: string): string {
   return golden.slice(start + marker.length, -1);
 }
 
-/** A config with only the fields the read seams could possibly consult. */
-function testConfig(nodeUrl: string): Config {
-  return {
-    port: 0,
-    bindHost: "127.0.0.1",
-    nodeUrl,
-    proofServerUrl: "http://127.0.0.1:6300",
-    indexerUrl: "http://127.0.0.1:8088",
-    indexerWsUrl: "ws://127.0.0.1:8088",
-    managedDir: FIXTURES,
-    fundingSeed: "0".repeat(64),
-    networkId: "undeployed",
-  };
+/** A config with only the fields the server itself could consult. */
+const TEST_CONFIG: Config = {
+  port: 0,
+  bindHost: "127.0.0.1",
+  nodeUrl: "ws://127.0.0.1:1",
+  proofServerUrl: "http://127.0.0.1:1",
+  indexerUrl: "http://127.0.0.1:1",
+  indexerWsUrl: "ws://127.0.0.1:1",
+  managedDir: FIXTURES,
+  fundingSeed: "deadbeef".repeat(8),
+  networkId: "undeployed",
+};
+
+/**
+ * A node client that must never be reached. The decode seams are pure codecs, so
+ * ANY property access here is a bug: this is what proves the read path opens no
+ * connection, rather than merely not needing one.
+ */
+const FORBIDDEN_CLIENT = new Proxy({} as NodeClient, {
+  get(_target, property) {
+    throw new Error(`a decode seam touched the node client (${String(property)})`);
+  },
+});
+
+/**
+ * The exact bytes a failure reply carries, spelled out rather than imported, so
+ * these tests pin the wire shape instead of agreeing with whatever `errors.ts`
+ * currently serializes.
+ *
+ * @param code - The machine-readable cause.
+ * @param message - The prose half.
+ * @returns The response body.
+ */
+function failure(code: string, message: string): string {
+  return JSON.stringify({ code, message });
+}
+
+/** A failure reply's two halves, parsed. */
+function parseFailure(reply: Reply): { code: string; message: string } {
+  return JSON.parse(reply.body) as { code: string; message: string };
 }
 
 /**
- * A real but never-connected client, for the paths that must answer before any
- * network call. `autoConnect: false` means no socket is ever opened, so touching
- * it would hang. That is the point: if validation ever starts reaching the node,
- * these tests stop passing quietly.
+ * Round-trip a body through the REAL HTTP server, on an ephemeral port.
+ *
+ * Not a direct handler call: the envelope (method, path, body cap, JSON, hex) is
+ * as much of the contract as the tree is, and the caller on the other side is a
+ * separate process.
+ *
+ * @param path - Request path.
+ * @param body - Raw request body.
+ * @returns The status and body the server answered with.
  */
-const OFFLINE_CLIENT: NodeClient = (() => {
-  const provider = new WsProvider("ws://127.0.0.1:1", false);
-  return { api: new ApiPromise({ provider, noInitWarn: true }), provider, disconnect: async () => {} };
-})();
+async function request(path: string, init?: RequestInit): Promise<Reply> {
+  const server = buildServer(TEST_CONFIG, FORBIDDEN_CLIENT);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
+    return { status: response.status, body: await response.text() };
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+}
+
+/** {@link request}, as a `POST` carrying a body. */
+function post(path: string, body: string): Promise<Reply> {
+  return request(path, { method: "POST", body });
+}
+
+/** {@link request}, as a bare `GET`. */
+function get(path: string): Promise<Reply> {
+  return request(path);
+}
+
+/** A `POST /decode/contract-state` body carrying a fixture's bytes. */
+function stateBody(fixture: string): string {
+  return JSON.stringify({ bytes: toHex(fixtureBytes(fixture)) });
+}
 
 describe("offline: the decoded tree is byte-identical to the Rust seam's", () => {
   const TREE_GOLDENS: ReadonlyArray<readonly [string, string]> = [
@@ -90,19 +141,19 @@ describe("offline: the decoded tree is byte-identical to the Rust seam's", () =>
     ["singleton-pre-state-1365.mn", "rust-state-singleton-1365.json"],
   ];
 
-  it.each(TREE_GOLDENS)("%s matches %s", (fixture, golden) => {
+  it.each(TREE_GOLDENS)("%s decodes to %s's tree", (fixture, golden) => {
     expect(JSON.stringify(decodeContractState(fixtureBytes(fixture)))).toBe(
       goldenTree(goldenText(golden)),
     );
   });
 
-  it("reproduces the whole response body, key order included", () => {
-    // The wrapper's byte layout, pinned against the Rust binary's own output:
-    // `anchor` before `tree`, `height` before `hash`, hash bare with no `0x`.
-    const tree = JSON.stringify(decodeContractState(fixtureBytes("singleton-post-state-1366.mn")));
-    expect(`{"anchor":{"height":1366,"hash":"${BLOCK_1366.slice(2)}"},"tree":${tree}}`).toBe(
-      goldenText("rust-state-singleton-1366.json"),
-    );
+  it.each(TREE_GOLDENS)("%s served over HTTP is %s's tree, byte for byte", async (fixture, golden) => {
+    // The whole response body, not a re-serialization of a parsed one: key order
+    // (`kind` first, `key` before `value`) is part of what the consumer parses.
+    expect(await post("/decode/contract-state", stateBody(fixture))).toEqual({
+      status: 200,
+      body: goldenTree(goldenText(golden)),
+    });
   });
 });
 
@@ -160,190 +211,103 @@ describe("offline: the schema the consumer parses", () => {
   });
 });
 
-describe("offline: validation answers before any network call", () => {
-  // Every message here is the Rust binary's verbatim 400 body: `chain-midnight`
-  // must not be able to tell which implementation answered it.
-  const REJECTED: ReadonlyArray<readonly [string, string]> = [
-    ["/state", "missing `address` query param"],
-    ["/state?address=zz", "address must be 64 lowercase hex"],
-    [`/state?address=${SINGLETON.slice(0, 63)}`, "address must be 64 lowercase hex"],
-    [`/state?address=${SINGLETON.toUpperCase()}`, "address must be 64 lowercase hex"],
-    [`/state?address=${SINGLETON}&at=0xzz`, "at must be `0x` followed by 64 lowercase hex"],
-    [
-      `/state?address=${SINGLETON}&at=${BLOCK_1366.slice(2)}`,
-      "at must be `0x` followed by 64 lowercase hex",
-    ],
+describe("POST /decode/contract-state: the envelope", () => {
+  const HEX_SHAPE = "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed";
+  const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
+    ["a JSON array", "[]", "invalid JSON: expected a JSON object"],
+    ["a missing `bytes`", "{}", "`bytes` must be a hex string"],
+    ["a non-string `bytes`", '{"bytes":123}', "`bytes` must be a hex string"],
+    ["an array `bytes`", '{"bytes":["00"]}', "`bytes` must be a hex string"],
+    ["odd-length hex", '{"bytes":"abc"}', HEX_SHAPE],
+    ["hex that is not hex", '{"bytes":"zz"}', HEX_SHAPE],
+    ["a `0x` prefix on odd-length hex", '{"bytes":"0xabc"}', HEX_SHAPE],
   ];
 
-  it.each(REJECTED)("%s -> 400", async (path, body) => {
-    const reply = await handleState(
-      testConfig("ws://127.0.0.1:1"),
-      OFFLINE_CLIENT,
-      new URL(path, "http://localhost"),
-    );
-    expect(reply).toEqual({ code: 400, body });
+  it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
+    expect(await post("/decode/contract-state", body)).toEqual({
+      status: 400,
+      body: failure("bad_request", expected),
+    });
+  });
+
+  it("rejects a body that is not JSON as bad_request", async () => {
+    const reply = await post("/decode/contract-state", "{");
+    expect(reply.status).toBe(400);
+    expect(parseFailure(reply)).toMatchObject({ code: "bad_request" });
+    expect(parseFailure(reply).message).toMatch(/^invalid JSON:/);
+  });
+
+  it.each([["0x-prefixed", (hex: string) => `0x${hex}`], ["upper-case", (hex: string) => hex.toUpperCase()]])(
+    "accepts %s hex",
+    async (_what, spell) => {
+      // The sender is another service. Both spellings decode unambiguously, and
+      // both must reach the same tree as the bare lower-case form.
+      const bytes = spell(toHex(fixtureBytes("singleton-post-state-1366.mn")));
+      expect(await post("/decode/contract-state", JSON.stringify({ bytes }))).toEqual({
+        status: 200,
+        body: goldenTree(goldenText("rust-state-singleton-1366.json")),
+      });
+    },
+  );
+
+  it("answers decode_failed, not bad_request, when the envelope is fine and the ledger refuses the bytes", async () => {
+    // The split the caller depends on, and the reason both halves have codes:
+    // `bad_request` means "fix your request", `decode_failed` means "these bytes
+    // are not a contract state this build can read", which is also how a
+    // ledger-version skew arrives.
+    const reply = await post("/decode/contract-state", '{"bytes":"deadbeef"}');
+    expect(reply.status).toBe(422);
+    expect(parseFailure(reply).code).toBe("decode_failed");
+    expect(parseFailure(reply).message.length).toBeGreaterThan(0);
+  });
+
+  it("rejects a body over the 8 MiB cap", async () => {
+    // 8 MiB carries ~280 serialized transactions; a contract state is far
+    // smaller. Past it the request is a bug or an attack, not a real read.
+    // Sized only just over on purpose: the server answers the moment it crosses
+    // the cap, and a body that is still uploading when it does would race the
+    // reply rather than test it.
+    const oversize = `{"bytes":"${"ab".repeat(4 * 1024 * 1024)}"}`;
+    expect(oversize.length).toBeGreaterThan(8 * 1024 * 1024);
+    expect(await post("/decode/contract-state", oversize)).toEqual({
+      status: 413,
+      body: failure("payload_too_large", "body exceeds the 8 MiB limit"),
+    });
+  });
+
+  it("is not reachable by GET, and says so with a code", async () => {
+    // ~14 KB of transaction does not fit a query string, so the decode seams are
+    // POST-only by design and the old GET spelling must not half-work. Every
+    // failure carries a code, this one included, so a caller never has to read
+    // prose to tell a routing mistake from a decode failure.
+    const reply = await get("/decode/contract-state");
+    expect(reply.status).toBe(404);
+    expect(parseFailure(reply).code).toBe("not_found");
   });
 });
 
-/**
- * LIVE. Needs the node the fixtures were captured from. Opt in with:
- *   MIDNIGHT_PUB_TEST_NODE_URL=ws://127.0.0.1:9944 npx vitest run
- */
-const LIVE_NODE_URL = process.env["MIDNIGHT_PUB_TEST_NODE_URL"];
+describe("GET /health", () => {
+  it("declares which ledger this build speaks", async () => {
+    // The publisher's ENTIRE compatibility surface: the caller asserts these
+    // against the chain it reads, at startup, so version skew fails where it can
+    // be understood rather than later as a `decode_failed` on good bytes.
+    const reply = await get("/health");
+    expect(reply.status).toBe(200);
+    expect(JSON.parse(reply.body)).toEqual({
+      status: "ok",
+      ledger: {
+        contractState: "midnight:contract-state[v8]",
+        zswapChainState: "midnight:zswap-ledger-state[v5]",
+        ledgerParameters: "midnight:ledger-parameters[v8]",
+        transaction: "midnight:transaction[v12]",
+      },
+    });
+  });
 
-/**
- * ACCEPTANCE. Byte-diffs these handlers against the RUST binary this package
- * replaces, live, on both seams. Needs the node AND the Rust service; opt in
- * with `MIDNIGHT_PUB_TEST_RUST_URL`.
- *
- * The Rust tree is not rebuilt and not modified — the already-built binary is
- * run read-only on a spare port with throwaway credentials, since the read seams
- * never touch the toolkit, the wallet or the signer:
- *
- *   cd ../midnight-publisher && \
- *   MIDNIGHT_PUB_PORT=8799 MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
- *   MIDNIGHT_PUB_WORK_DIR=/tmp/mnpub-ref MIDNIGHT_PUB_TOOLKIT_BIN=/bin/false \
- *   MIDNIGHT_PUB_FUNDING_SEED=throwaway MIDNIGHT_PUB_COIN_PUBLIC=00 \
- *   MIDNIGHT_PUB_SIGNER_SECRET_KEY=00 ./target/debug/midnight-publisher &
- *
- *   MIDNIGHT_PUB_TEST_NODE_URL=ws://127.0.0.1:9944 \
- *   MIDNIGHT_PUB_TEST_RUST_URL=http://127.0.0.1:8799 npx vitest run
- *
- *   kill %1
- */
-const RUST_URL = process.env["MIDNIGHT_PUB_TEST_RUST_URL"];
-
-describe.runIf(LIVE_NODE_URL)("live: anchored reads against the node", () => {
-  const nodeUrl = LIVE_NODE_URL ?? "";
-
-  async function stateBody(client: NodeClient, query: string): Promise<string> {
-    const reply = await handleState(
-      testConfig(nodeUrl),
-      client,
-      new URL(`/state?${query}`, "http://localhost"),
-    );
-    expect(reply.code).toBe(200);
-    return reply.body;
-  }
-
-  it(
-    "serves both contracts at a pinned `at` byte-identically to the Rust binary",
-    async () => {
-      const client = await connect(nodeUrl);
-      try {
-        expect(await stateBody(client, `address=${SINGLETON}&at=${BLOCK_1366}`)).toBe(
-          goldenText("rust-state-singleton-1366.json"),
-        );
-        expect(await stateBody(client, `address=${CALLER}&at=${BLOCK_1366}`)).toBe(
-          goldenText("rust-state-caller-1366.json"),
-        );
-        expect(await stateBody(client, `address=${SINGLETON}&at=${BLOCK_1365}`)).toBe(
-          goldenText("rust-state-singleton-1365.json"),
-        );
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
-
-  it(
-    "raises a DISTINCT error when a read is refused on a block it can still fetch",
-    async () => {
-      // The §3.1 finding, asserted on the live node's own error taxonomy. Both
-      // failure modes return -32602 with no `data`, so only the text separates
-      // "this contract did not exist yet" from "this node has lost the ability
-      // to answer". An archive node answers `ContractNotPresent` here, which is
-      // POSITIVE evidence that state at that height was reachable, so the seam
-      // must NOT report pruning. On a pruned node the same call yields the
-      // catch-all and the seam must say so loudly instead.
-      const client = await connect(nodeUrl);
-      try {
-        const absent = handleState(
-          testConfig(nodeUrl),
-          client,
-          new URL(`/state?address=${"00".repeat(32)}&at=${BLOCK_1366}`, "http://localhost"),
-        );
-        await expect(absent).rejects.toThrow(/not present/i);
-        await expect(absent).rejects.not.toThrow(/PRUNED/);
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
-
-  it(
-    "anchors to the finalized head when no `at` is given",
-    async () => {
-      const client = await connect(nodeUrl);
-      try {
-        const observed = (
-          await client.api.rpc.chain.getHeader(await client.api.rpc.chain.getFinalizedHead())
-        ).number.toNumber();
-        const body = await stateBody(client, `address=${SINGLETON}`);
-
-        // Asserted on the raw text, so the wrapper's byte layout is pinned by a
-        // LIVE response and not only by the committed goldens. The head advances
-        // every 6s, so the height is bounded rather than fixed.
-        const anchor = /^\{"anchor":\{"height":(\d+),"hash":"([0-9a-f]{64})"\},"tree":\{/.exec(body);
-        expect(anchor, `unexpected anchor layout: ${body.slice(0, 120)}`).not.toBeNull();
-        expect(Number(anchor?.[1])).toBeGreaterThanOrEqual(observed);
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
-});
-
-describe.runIf(LIVE_NODE_URL && RUST_URL)("acceptance: /state byte-diff against the Rust binary", () => {
-  const nodeUrl = LIVE_NODE_URL ?? "";
-  const rustUrl = RUST_URL ?? "";
-
-  async function bothBodies(query: string): Promise<[string, string]> {
-    const client = await connect(nodeUrl);
-    try {
-      const rust = await (await fetch(`${rustUrl}${query}`)).text();
-      const reply = await handleState(testConfig(nodeUrl), client, new URL(query, "http://localhost"));
-      expect(reply.code).toBe(200);
-      return [rust, reply.body];
-    } finally {
-      await client.disconnect();
-    }
-  }
-
-  it.each([
-    [`/state?address=${SINGLETON}&at=${BLOCK_1366}`],
-    [`/state?address=${CALLER}&at=${BLOCK_1366}`],
-    [`/state?address=${SINGLETON}&at=${BLOCK_1365}`],
-  ])("%s is byte-identical", async (query) => {
-    const [rust, ts] = await bothBodies(query);
-    expect(ts).toBe(rust);
-  }, 120_000);
-
-  it(
-    "is byte-identical at the finalized head",
-    async () => {
-      // Both services resolve the head independently, so they can land on
-      // different blocks if one lands either side of a 6s block. Retried until
-      // they agree on the anchor; only then is the comparison meaningful.
-      const client = await connect(nodeUrl);
-      try {
-        const query = `/state?address=${SINGLETON}`;
-        let rust = "";
-        let ts = "";
-        for (let attempt = 0; attempt < 5; attempt++) {
-          rust = await (await fetch(`${rustUrl}${query}`)).text();
-          ts = (await handleState(testConfig(nodeUrl), client, new URL(query, "http://localhost")))
-            .body;
-          if (rust.slice(0, 90) === ts.slice(0, 90)) break;
-        }
-        expect(ts, "the two services never agreed on a finalized head").toBe(rust);
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
+  it("needs no node", async () => {
+    // Liveness only, deliberately: readiness would have to reach the node, the
+    // indexer and the proof server, and a caller that treats an unreachable
+    // dependency as "publisher down" restarts the wrong process.
+    await expect(get("/health")).resolves.toMatchObject({ status: 200 });
+  });
 });

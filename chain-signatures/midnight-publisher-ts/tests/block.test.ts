@@ -1,48 +1,47 @@
 /**
- * `/block` seam tests.
+ * `POST /decode/transactions` tests.
  *
- * Two tiers, deliberately separated:
- *
- * OFFLINE (always run) — golden tests against committed fixtures.
+ * All offline, and that is the point: the seam is a pure codec, so there is
+ * nothing left that a running node could tell us.
  * `tests/fixtures/rust-block-1366.json` is the VERBATIM `GET /block` body of the
  * Rust `midnight-publisher` binary for block 1366, and `notify-tx.mn` holds that
- * block's transaction. Decoding the fixture must reproduce the golden byte for
- * byte, so correctness is anchored to the reference implementation rather than
- * to hand-written expectations.
+ * block's one transaction. Block 1366 carried exactly one transaction slot, so
+ * decoding that single blob must still reproduce the golden byte for byte:
+ * correctness stays anchored to the reference implementation rather than to
+ * hand-written expectations, even though the caller now hands the bytes over
+ * instead of this service walking the block for them.
  *
- * LIVE (opt-in via `MIDNIGHT_PUB_TEST_NODE_URL`) — the half no fixture can
- * cover: pulling the transaction back out of a real block's extrinsics. That is
- * where the snake_case/camelCase trap lives, so it is asserted rather than
- * assumed.
+ * The live and acceptance tiers this file used to carry pulled the transaction
+ * out of a real block's extrinsics and byte-diffed `GET /block` against the Rust
+ * binary. Neither endpoint exists on either side now; the coverage they gave —
+ * same bytes, same decoder, same golden — is kept by driving the fixture through
+ * the real HTTP server below. Unwrapping the blob out of a block is the caller's
+ * job, and its traps are recorded in `src/block.ts`.
  */
 
 import { readFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { ContractCall } from "@midnightntwrk/ledger-v9";
-import { ApiPromise, WsProvider } from "@polkadot/api";
 import { describe, expect, it } from "vitest";
 
-import type { Config } from "../src/config.js";
 import {
-  blockSlots,
   callsFromTx,
   compareClaimedCalls,
-  decodeBlock,
   decodeTransaction,
-  handleBlock,
+  decodeTransactions,
   type ClaimedCall,
-  type TransactionSlot,
 } from "../src/block.js";
-import { connect, fromHex, type BlockHashHex, type NodeClient } from "../src/node.js";
+import type { Config } from "../src/config.js";
+import { fromHex, toHex, type NodeClient } from "../src/node.js";
+import { buildServer, type Reply } from "../src/server.js";
 import { decodeContractState, type StateNode } from "../src/state.js";
 
 /** The deployed singleton and caller of the captured SGN2 flow, and the request the caller submitted. */
 const SINGLETON = "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
 const CALLER = "dcd470fbc066befe0b6cddcf273dc9a838832ccbb8327f2625ec7028b0a6f0d2";
 const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
-
-const BLOCK_1366: BlockHashHex = "0x588b87380b6b17463ed87837fa5651a32b5a9d4f02deeb015661f1f04f0ad8fc";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -66,11 +65,6 @@ function fixtureTxBytes(name: string): Uint8Array {
   return fromHex(parsed.tx.Midnight);
 }
 
-/** One midnight slot per fixture transaction, in the order given. */
-function midnightSlots(...names: readonly string[]): TransactionSlot[] {
-  return names.map((name) => ({ kind: "midnight", bytes: fixtureTxBytes(name) }));
-}
-
 function fixtureBytes(name: string): Uint8Array {
   return Uint8Array.from(readFileSync(`${FIXTURES}${name}`));
 }
@@ -79,37 +73,72 @@ function goldenText(name: string): string {
   return readFileSync(`${FIXTURES}${name}`, "utf8");
 }
 
-/** A config with only the fields the read seams could possibly consult. */
-function testConfig(nodeUrl: string): Config {
-  return {
-    port: 0,
-    bindHost: "127.0.0.1",
-    nodeUrl,
-    proofServerUrl: "http://127.0.0.1:6300",
-    indexerUrl: "http://127.0.0.1:8088",
-    indexerWsUrl: "ws://127.0.0.1:8088",
-    managedDir: FIXTURES,
-    fundingSeed: "0".repeat(64),
-    networkId: "undeployed",
-  };
+/** A config with only the fields the server itself could consult. */
+const TEST_CONFIG: Config = {
+  port: 0,
+  bindHost: "127.0.0.1",
+  nodeUrl: "ws://127.0.0.1:1",
+  proofServerUrl: "http://127.0.0.1:1",
+  indexerUrl: "http://127.0.0.1:1",
+  indexerWsUrl: "ws://127.0.0.1:1",
+  managedDir: FIXTURES,
+  fundingSeed: "deadbeef".repeat(8),
+  networkId: "undeployed",
+};
+
+/**
+ * A node client that must never be reached. The decode seams are pure codecs, so
+ * ANY property access here is a bug: this is what proves the read path opens no
+ * connection, rather than merely not needing one.
+ */
+const FORBIDDEN_CLIENT = new Proxy({} as NodeClient, {
+  get(_target, property) {
+    throw new Error(`a decode seam touched the node client (${String(property)})`);
+  },
+});
+
+/**
+ * Round-trip a body through the REAL HTTP server, on an ephemeral port.
+ *
+ * @param path - Request path.
+ * @param body - Raw request body.
+ * @returns The status and body the server answered with.
+ */
+async function post(path: string, body: string): Promise<Reply> {
+  const server = buildServer(TEST_CONFIG, FORBIDDEN_CLIENT);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", body });
+    return { status: response.status, body: await response.text() };
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 }
 
-/** A real but never-connected client: `autoConnect: false`, so no socket is ever opened. */
-const OFFLINE_CLIENT: NodeClient = (() => {
-  const provider = new WsProvider("ws://127.0.0.1:1", false);
-  return { api: new ApiPromise({ provider, noInitWarn: true }), provider, disconnect: async () => {} };
-})();
+/** A `POST /decode/transactions` body carrying the named fixtures' transactions, in order. */
+function txBody(...names: readonly string[]): string {
+  return JSON.stringify({ bytes: names.map((name) => toHex(fixtureTxBytes(name))) });
+}
 
-describe("offline: the decoded block is byte-identical to the Rust seam's", () => {
+describe("offline: the decoded transactions are byte-identical to the Rust seam's", () => {
   it("reproduces the Rust binary's block-1366 body exactly", () => {
-    // Block 1366 holds exactly one transaction slot, so decoding the captured
+    // Block 1366 held exactly one transaction slot, so decoding the captured
     // transaction alone must reproduce the whole response: field order
     // (transactions/skipped, index/calls, address/communication_commitment/
     // claimed, position/address/entry_point/commitment), the stripped Fr tag,
     // and the claimed-call ordering all have to match at once.
-    expect(JSON.stringify(decodeBlock(midnightSlots("notify-tx.mn")))).toBe(
+    expect(JSON.stringify(decodeTransactions([fixtureTxBytes("notify-tx.mn")]))).toBe(
       goldenText("rust-block-1366.json"),
     );
+  });
+
+  it("reproduces it over HTTP too", async () => {
+    expect(await post("/decode/transactions", txBody("notify-tx.mn"))).toEqual({
+      status: 200,
+      body: goldenText("rust-block-1366.json"),
+    });
   });
 });
 
@@ -184,7 +213,7 @@ describe("offline: cross-call provenance", () => {
 
   it("decodes the pre-SGN2 reference transaction into a well-formed response", () => {
     // It may carry zero contract calls; that is asserted as well-formed, not required.
-    const response = decodeBlock(midnightSlots("serialized_tx.mn"));
+    const response = decodeTransactions([fixtureTxBytes("serialized_tx.mn")]);
     expect(response.skipped).toEqual([]);
     expect(response.transactions).toHaveLength(1);
     expect(response.transactions[0]?.calls).toHaveLength(
@@ -196,9 +225,9 @@ describe("offline: cross-call provenance", () => {
 
 describe("offline: one bad transaction costs that transaction only", () => {
   it("keeps the real calls beside a poisoned one and reports the drop", () => {
-    const response = decodeBlock([
-      { kind: "midnight", bytes: Uint8Array.from([0xde, 0xad, 0xbe, 0xef]) },
-      ...midnightSlots("notify-tx.mn"),
+    const response = decodeTransactions([
+      Uint8Array.from([0xde, 0xad, 0xbe, 0xef]),
+      fixtureTxBytes("notify-tx.mn"),
     ]);
 
     expect(response.transactions).toHaveLength(1);
@@ -206,31 +235,34 @@ describe("offline: one bad transaction costs that transaction only", () => {
     expect(response.skipped).toHaveLength(1);
     expect(response.skipped[0]?.startsWith("tx[0]:")).toBe(true);
   });
-});
 
-describe("offline: system transactions occupy an index", () => {
-  it("numbers a midnight transaction by its slot, not by its rank among midnight ones", () => {
-    // The Rust fetcher appends a slot per `SystemTransactionApplied` event
-    // alongside the `send_mn_transaction` ones, and `index` is the position in
-    // that combined list. Counting only midnight transactions would renumber
-    // everything after a system transaction, silently and only on chains that
-    // have them (this one has none in 0..1400, which is exactly why it needs a
-    // test rather than an observation).
-    const response = decodeBlock([
-      { kind: "system" },
-      ...midnightSlots("notify-tx.mn"),
-      { kind: "system" },
-    ]);
-    expect(response.transactions.map((tx) => tx.index)).toEqual([1]);
+  it("survives per item over HTTP, and never renumbers what follows a drop", async () => {
+    // `index` is the position in the REQUEST's `bytes` array, so the caller can
+    // map a result back to the blob it sent. Numbering by rank among the
+    // successful ones instead would shift every transaction after a dropped one,
+    // silently, and only for callers unlucky enough to hit an unknown shape.
+    const bytes = ["deadbeef", toHex(fixtureTxBytes("notify-tx.mn"))];
+    const reply = await post("/decode/transactions", JSON.stringify({ bytes }));
+    expect(reply.status).toBe(200);
+
+    const decoded = JSON.parse(reply.body) as { transactions: { index: number }[]; skipped: string[] };
+    expect(decoded.transactions.map((tx) => tx.index)).toEqual([1]);
+    expect(decoded.skipped).toHaveLength(1);
+    expect(decoded.skipped[0]?.startsWith("tx[0]:")).toBe(true);
+  });
+
+  it("accepts an empty batch", () => {
+    // A block with no midnight transactions is a normal answer, not an error.
+    expect(JSON.stringify(decodeTransactions([]))).toBe('{"transactions":[],"skipped":[]}');
   });
 });
 
 /**
  * Every `(map key hex, cell atoms)` pair reachable in a walked state tree.
  *
- * Mirrors the Rust `block.rs` test helper of the same name: it lives with the
- * `/block` tests because it exists to demonstrate the seam's central design
- * claim, that a state diff already answers "what did this block write".
+ * Mirrors the Rust `block.rs` test helper of the same name: it lives with these
+ * tests because it exists to demonstrate the seam's central design claim, that a
+ * state diff already answers "what did this block write".
  */
 function mapEntries(node: StateNode): Array<[string, readonly string[]]> {
   const out: Array<[string, readonly string[]]> = [];
@@ -274,96 +306,33 @@ describe("offline: a state diff yields the notify", () => {
   });
 });
 
-describe("offline: validation answers before any network call", () => {
-  // Every message here is the Rust binary's verbatim 400 body.
-  const REJECTED: ReadonlyArray<readonly [string, string]> = [
-    ["/block", "missing `hash` query param"],
-    ["/block?hash=abc", "hash must be `0x` followed by 64 lowercase hex"],
-    [`/block?hash=${BLOCK_1366.slice(2)}`, "hash must be `0x` followed by 64 lowercase hex"],
-    [`/block?hash=${BLOCK_1366}0`, "hash must be `0x` followed by 64 lowercase hex"],
-    [`/block?hash=${BLOCK_1366.toUpperCase()}`, "hash must be `0x` followed by 64 lowercase hex"],
+describe("POST /decode/transactions: the envelope", () => {
+  const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
+    ["a missing `bytes`", "{}", "`bytes` must be an array of hex strings"],
+    ["a bare string `bytes`", '{"bytes":"00"}', "`bytes` must be an array of hex strings"],
+    ["a non-string element", '{"bytes":["00",7]}', "`bytes[1]` must be a hex string"],
+    [
+      "an element that is not hex",
+      '{"bytes":["00","zz"]}',
+      "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed",
+    ],
   ];
 
-  it.each(REJECTED)("%s -> 400", async (path, body) => {
-    const reply = await handleBlock(
-      testConfig("ws://127.0.0.1:1"),
-      OFFLINE_CLIENT,
-      new URL(path, "http://localhost"),
-    );
-    expect(reply).toEqual({ code: 400, body });
+  it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
+    // A malformed envelope fails the whole request: answering 200 with
+    // everything skipped would hide a caller's typo behind a success. Only bytes
+    // the LEDGER refuses survive per item.
+    expect(await post("/decode/transactions", body)).toEqual({
+      status: 400,
+      body: JSON.stringify({ code: "bad_request", message: expected }),
+    });
   });
-});
 
-/**
- * LIVE. Needs the node the fixtures were captured from. Opt in with:
- *   MIDNIGHT_PUB_TEST_NODE_URL=ws://127.0.0.1:9944 npx vitest run
- */
-const LIVE_NODE_URL = process.env["MIDNIGHT_PUB_TEST_NODE_URL"];
-
-/**
- * ACCEPTANCE. Byte-diffs this handler against the RUST binary this package
- * replaces. Needs the node AND the Rust service; see `tests/state.test.ts` for
- * the read-only invocation that starts the already-built binary on a spare port
- * without rebuilding or modifying that tree.
- */
-const RUST_URL = process.env["MIDNIGHT_PUB_TEST_RUST_URL"];
-
-describe.runIf(LIVE_NODE_URL)("live: unwrapping a real block", () => {
-  const nodeUrl = LIVE_NODE_URL ?? "";
-
-  it(
-    "finds the sendMnTransaction blob and reproduces the Rust binary's body",
-    async () => {
-      const client = await connect(nodeUrl);
-      try {
-        const slots = await blockSlots(client, BLOCK_1366);
-
-        // Block 1366 plainly contains a `midnight.sendMnTransaction`. Asserting
-        // that one was FOUND is the whole point: `@polkadot/api` camelCases the
-        // runtime's `send_mn_transaction`, and matching the snake_case spelling
-        // returns an empty block with no error at all.
-        const found = slots.filter((slot) => slot.kind === "midnight");
-        expect(found.length, "block 1366 must yield a sendMnTransaction blob").toBeGreaterThan(0);
-
-        // The extracted bytes are the fixture's bytes: the unwrapping is exact.
-        expect(Buffer.from(found[0]?.bytes ?? new Uint8Array())).toEqual(
-          Buffer.from(fixtureTxBytes("notify-tx.mn")),
-        );
-
-        const reply = await handleBlock(
-          testConfig(nodeUrl),
-          client,
-          new URL(`/block?hash=${BLOCK_1366}`, "http://localhost"),
-        );
-        expect(reply.code).toBe(200);
-        expect(reply.body).toBe(goldenText("rust-block-1366.json"));
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
-});
-
-describe.runIf(LIVE_NODE_URL && RUST_URL)("acceptance: /block byte-diff against the Rust binary", () => {
-  it(
-    "block 1366 is byte-identical",
-    async () => {
-      const client = await connect(LIVE_NODE_URL ?? "");
-      try {
-        const query = `/block?hash=${BLOCK_1366}`;
-        const rust = await (await fetch(`${RUST_URL ?? ""}${query}`)).text();
-        const reply = await handleBlock(
-          testConfig(LIVE_NODE_URL ?? ""),
-          client,
-          new URL(query, "http://localhost"),
-        );
-        expect(reply.code).toBe(200);
-        expect(reply.body).toBe(rust);
-      } finally {
-        await client.disconnect();
-      }
-    },
-    120_000,
-  );
+  it("accepts `0x`-prefixed hex", async () => {
+    const bytes = [`0x${toHex(fixtureTxBytes("notify-tx.mn"))}`];
+    expect(await post("/decode/transactions", JSON.stringify({ bytes }))).toEqual({
+      status: 200,
+      body: goldenText("rust-block-1366.json"),
+    });
+  });
 });

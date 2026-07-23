@@ -365,11 +365,15 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ],
 ];
 
-describe("handleRespond: the 400 path never touches the chain", () => {
-  it.each(BAD_REQUESTS)("returns 400 for %s", async (_label, body, expected) => {
+describe("handleRespond: the bad_request path never touches the chain", () => {
+  it.each(BAD_REQUESTS)("returns bad_request for %s", async (_label, body, expected) => {
     const reply = await handleRespond(offlineConfig, forbiddenClient, body);
-    expect(reply.code).toBe(400);
-    expect(reply.body).toMatch(expected);
+    expect(reply.status).toBe(400);
+    // The code is the stable half and the message is the free half; a caller
+    // branches on the first and shows the second.
+    const { code, message } = JSON.parse(reply.body) as { code: string; message: string };
+    expect(code).toBe("bad_request");
+    expect(message).toMatch(expected);
   });
 });
 

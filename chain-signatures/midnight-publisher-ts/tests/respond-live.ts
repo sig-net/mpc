@@ -170,11 +170,11 @@ const reply = await handleRespond(config, client, body);
 const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2);
 console.log = realLog;
 
-console.log(`\nHTTP            ${reply.code} ${reply.body}   (${elapsed} s)`);
-if (reply.code !== 200) {
+console.log(`\nHTTP            ${reply.status} ${reply.body}   (${elapsed} s)`);
+if (reply.status !== 200) {
   await closePublisher();
   await client.disconnect();
-  throw new Error(`respond did not succeed: ${reply.code} ${reply.body}`);
+  throw new Error(`respond did not succeed: ${reply.status} ${reply.body}`);
 }
 
 const submitted = lines.find((line) => line.includes("submitted tx"))?.split("submitted tx ")[1] ?? "(not logged)";
