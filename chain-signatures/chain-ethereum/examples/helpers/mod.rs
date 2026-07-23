@@ -2,8 +2,10 @@
 
 use anyhow::anyhow;
 use futures_util::StreamExt;
-use mpc_chain_ethereum::{EthConfig, EthereumStream};
-use mpc_chain_integration_core::{ChainIndexer, ChainStream, MockStateManager, NoopChainTelemetry};
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
+use mpc_chain_integration_core::{
+    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
+};
 
 /// Read a required environment variable, erroring if it's not set.
 pub fn opt_env(name: &str) -> anyhow::Result<String> {
@@ -37,19 +39,24 @@ pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 /// (`RPC_URL`, `CONTRACT_ADDRESS`, `NETWORK`, `OPTIMISTIC`).
 pub fn make_config() -> anyhow::Result<EthConfig> {
     Ok(EthConfig {
-        account_sk: String::new(),
+        // The bench only indexes; the signer is never used.
+        account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .parse()
+            .unwrap(),
         consensus_rpc_http_url: String::new(),
-        execution_rpc_http_url: opt_env("RPC_URL")?,
+        execution_rpc_http_url: opt_env("RPC_URL")?
+            .parse()
+            .map_err(|e| anyhow!("invalid RPC_URL: {e}"))?,
         contract_address: opt_env("CONTRACT_ADDRESS")?
-            .trim_start_matches("0x")
-            .to_string(),
+            .parse()
+            .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
         network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
         helios_data_path: "/tmp/helios-bench".to_string(),
         refresh_finalized_interval: 1,
         optimistic_requests: env_bool("OPTIMISTIC", true)?,
         light_client: false,
-        gas: Default::default(),
         rpc: Default::default(),
+        gas: Default::default(),
         publisher: Default::default(),
         indexer: Default::default(),
     })
@@ -76,32 +83,28 @@ pub async fn run_catchup(
     end: u64,
     label: &'static str,
 ) -> anyhow::Result<u64> {
-    let mut stream = EthereumStream::new(config, state, NoopChainTelemetry).await?;
-    let mut indexer = stream.start().await?;
+    let indexer = EthereumIndexer::new(config, state, NoopChainTelemetry).await?;
+    let (events_tx, mut events_rx) = chain_event_channel();
 
     tracing::info!("{label}: starting catchup ending at {end}");
 
     let drain = tokio::spawn(async move {
-        loop {
-            match stream.next_event().await {
-                Some(ev) => tracing::debug!(?ev, "{label} drained event"),
-                None => {
-                    tracing::warn!("{label}: event channel closed during catchup");
-                    return;
-                }
-            }
+        while let Some(ev) = events_rx.recv().await {
+            tracing::debug!(?ev, "bench_catchup drained event");
         }
     });
 
-    let blocks_stream = indexer.catchup_range(end).await;
+    let blocks_stream = indexer.catchup_blocks(end).await;
     let mut blocks = std::pin::pin!(blocks_stream);
     let mut count: u64 = 0;
     while let Some(block) = blocks.next().await {
-        indexer.process_catchup(&block).await?;
+        indexer.process_catchup_item(&events_tx, &block).await?;
         count += 1;
     }
 
-    indexer.notify_catchup_completed().await?;
+    // Fires the final `report_metrics("catchup_completed")` log under `bench`.
+    #[cfg(feature = "bench")]
+    mpc_chain_ethereum::bench::report_metrics("catchup_completed");
 
     drain.abort();
     let _ = drain.await;
