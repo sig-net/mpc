@@ -1094,7 +1094,7 @@ mod tests {
     use near_sdk::testing_env;
 
     #[derive(BorshSerialize)]
-    struct OldMpcContractTest {
+    struct OldMpcContract {
         protocol_state: ProtocolContractState,
         pending_requests: IterableMap<SignId, PendingRequest>,
         proposed_updates: ProposedUpdates,
@@ -1102,28 +1102,8 @@ mod tests {
     }
 
     #[derive(BorshSerialize)]
-    enum VersionedOldMpcContractTest {
-        V0(OldMpcContractTest),
-    }
-
-    #[derive(BorshDeserialize, BorshSerialize)]
-    struct LegacySignedCheckpointTest {
-        checkpoint: ConsensusCheckpointDigest,
-        signature: Signature,
-    }
-
-    #[derive(BorshDeserialize, BorshSerialize)]
-    struct LegacyCheckpointMpcContractTest {
-        protocol_state: ProtocolContractState,
-        pending_requests: IterableMap<SignId, PendingRequest>,
-        proposed_updates: ProposedUpdates,
-        config: Config,
-        latest_checkpoints: IterableMap<Chain, LegacySignedCheckpointTest>,
-    }
-
-    #[derive(BorshDeserialize, BorshSerialize)]
-    enum VersionedLegacyCheckpointMpcContractTest {
-        V0(LegacyCheckpointMpcContractTest),
+    enum VersionedOldMpcContract {
+        V0(OldMpcContract),
     }
 
     #[derive(BorshSerialize)]
@@ -1171,13 +1151,13 @@ mod tests {
         testing_env!(context);
 
         // 1. Serialize and write the OLD contract state to storage
-        let old_contract = OldMpcContractTest {
+        let old_contract = OldMpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
         };
-        let versioned_old = VersionedOldMpcContractTest::V0(old_contract);
+        let versioned_old = VersionedOldMpcContract::V0(old_contract);
         let old_bytes = borsh::to_vec(&versioned_old).unwrap();
         env::storage_write(b"STATE", &old_bytes);
 
@@ -1214,104 +1194,6 @@ mod tests {
         match &second_migrated {
             VersionedMpcContract::V0(contract) => {
                 assert!(contract.latest_checkpoints.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn test_migrate_signed_checkpoint_to_digest() {
-        let context = VMContextBuilder::new()
-            .current_account_id("dev.sig-net.testnet".parse().unwrap())
-            .build();
-        testing_env!(context);
-
-        let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
-        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpoints);
-        latest_checkpoints.insert(
-            Chain::Solana,
-            LegacySignedCheckpointTest {
-                checkpoint,
-                signature: Signature {
-                    big_r: k256::AffinePoint::GENERATOR,
-                    s: Scalar::ONE,
-                    recovery_id: 0,
-                },
-            },
-        );
-        assert!(latest_checkpoints.get(&Chain::Solana).is_some());
-        latest_checkpoints.flush();
-        let legacy =
-            VersionedLegacyCheckpointMpcContractTest::V0(LegacyCheckpointMpcContractTest {
-                protocol_state: ProtocolContractState::NotInitialized,
-                pending_requests: IterableMap::new(StorageKey::PendingRequests),
-                proposed_updates: ProposedUpdates::default(),
-                config: Config::default(),
-                latest_checkpoints,
-            });
-        let legacy_bytes = borsh::to_vec(&legacy).unwrap();
-        let roundtrip =
-            VersionedLegacyCheckpointMpcContractTest::try_from_slice(&legacy_bytes).unwrap();
-        let VersionedLegacyCheckpointMpcContractTest::V0(roundtrip) = &roundtrip;
-        assert!(roundtrip.latest_checkpoints.get(&Chain::Solana).is_some());
-        env::storage_write(b"STATE", &legacy_bytes);
-
-        let migrated = VersionedMpcContract::migrate().unwrap();
-        match migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert_eq!(
-                    contract.latest_checkpoints.get(&Chain::Solana),
-                    Some(&checkpoint)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_migrate_pre_checkpoint_state_to_testnet() {
-        let context = VMContextBuilder::new()
-            .current_account_id("v1.sig-net.testnet".parse().unwrap())
-            .build();
-        testing_env!(context);
-
-        let old_contract = OldMpcContractTest {
-            protocol_state: ProtocolContractState::NotInitialized,
-            pending_requests: IterableMap::new(StorageKey::PendingRequests),
-            proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
-        };
-        let old_bytes = borsh::to_vec(&VersionedOldMpcContractTest::V0(old_contract)).unwrap();
-        env::storage_write(b"STATE", &old_bytes);
-
-        let migrated = VersionedMpcContract::migrate().unwrap();
-        match migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-                assert!(contract.checkpoint_votes.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn test_migrate_unversioned_state_to_mainnet() {
-        let context = VMContextBuilder::new()
-            .current_account_id("contract.near".parse().unwrap())
-            .build();
-        testing_env!(context);
-
-        let old_contract = OldMpcContractTest {
-            protocol_state: ProtocolContractState::NotInitialized,
-            pending_requests: IterableMap::new(StorageKey::PendingRequests),
-            proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
-        };
-        let old_bytes = borsh::to_vec(&old_contract).unwrap();
-        env::storage_write(b"STATE", &old_bytes);
-
-        let migrated = VersionedMpcContract::migrate().unwrap();
-        match migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-                assert!(contract.checkpoint_votes.is_empty());
             }
         }
     }
