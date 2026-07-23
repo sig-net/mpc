@@ -182,7 +182,7 @@ impl SignatureSpawner {
             .requests
             .get(&sign_id)
             .map(|entry| Arc::clone(&entry.is_proposer))
-            .unwrap_or_default();
+            .expect("sign request entry must exist when spawning its task");
 
         // Subscribe to (or create) the posit inbox for this sign request
         let inbox = self
