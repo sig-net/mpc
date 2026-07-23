@@ -27,25 +27,35 @@ pub struct RespondRequest {
     pub contract_address: String,
     pub circuit: String,
     pub request_id: String,
-    // postRespond fields: the ECDSA nonce point + scalar + recovery id.
+    // `postRespond` -> `SignatureRespondedEvent { bigRx, bigRy, s, recoveryId }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub big_r_x: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub big_r_y: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s: Option<String>,
+    // `postRespondBidirectional` -> `RespondBidirectionalEvent { serializedOutput,
+    // outputLen, r, s, recoveryId }`. The event stores the WHOLE ABI-encoded
+    // return data (`Bytes<128>`, zero-padded, so 256 hex) plus its meaningful
+    // byte count, NOT a digest of it.
+    //
+    // `sig_r`/`sig_s` are LITTLE-ENDIAN, the byte order the record's `Bytes<32>`
+    // fields store (the node-side client byte-reverses k256's big-endian
+    // scalars before POSTing). The central contract does NOT check any of this:
+    // both post circuits are blind appends (counter increment + map insert, no
+    // assert), so consumers verify on claim and validity is the caller's
+    // responsibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_id: Option<u8>,
-    // postRespondBidirectional fields: the attestation digest + the secp256k1
-    // signature scalars in LITTLE-ENDIAN byte order (the circuit's
-    // `Bytes<32> as Secp256k1Scalar` cast), verified in-circuit against the hub's
-    // fixed MPC key.
+    pub serialized_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_hash: Option<String>,
+    pub output_len: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig_r: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig_s: Option<String>,
+    /// Parity of R.y, carried by BOTH events for off-chain key recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +76,18 @@ pub struct Config {
     pub coin_public: String,
     pub signer_secret_key: String,
     pub compactc_version: String,
+    /// Proof server to offload circuit proving to, or `None` to prove locally
+    /// in-process.
+    ///
+    /// Not merely an optimisation for the signet contracts: they are compiled
+    /// with `--feature-zkir-v3` (the toolchain floor for in-circuit
+    /// `secp256k1EcdsaVerify`), and the ledger this toolkit links pins
+    /// `midnight-zkir` 2.2.0, which accepts only `ir-source[v2]`/`[v2-generic]`.
+    /// Proving such a contract locally therefore cannot work at all — it aborts
+    /// with "expected one of 'ir-source[v2-generic]' or 'ir-source[v2]', got
+    /// 'ir-source[v3-generic]'" — while the 9.x proof server handles v3. So for
+    /// any zkir-v3 contract this is required, not optional.
+    pub proof_server: Option<String>,
     /// JSON-RPC client for the `GET /state` read path (finalized head, header,
     /// `midnight_contractState`). Overridable for tests.
     ///
@@ -139,6 +161,8 @@ impl Config {
             // key that ships in the binary and silently works in production.
             signer_secret_key: env_required("MIDNIGHT_PUB_SIGNER_SECRET_KEY")?,
             compactc_version: env_or("MIDNIGHT_PUB_COMPACTC_VERSION", "0.33.0"),
+            proof_server: Some(env_or("MIDNIGHT_PUB_PROOF_SERVER_URL", ""))
+                .filter(|url| !url.is_empty()),
             curl_bin: PathBuf::from(env_or("MIDNIGHT_PUB_CURL_BIN", "curl")),
         })
     }
@@ -179,20 +203,36 @@ pub fn validate(req: &RespondRequest) -> anyhow::Result<()> {
                 "postRespond recovery_id must be 0|1"
             );
             anyhow::ensure!(
-                req.output_hash.is_none() && req.sig_r.is_none() && req.sig_s.is_none(),
+                req.serialized_output.is_none()
+                    && req.output_len.is_none()
+                    && req.sig_r.is_none()
+                    && req.sig_s.is_none(),
                 "postRespond takes no bidirectional fields"
             );
         }
         "postRespondBidirectional" => {
+            // serializedOutput is Bytes<128>: the whole zero-padded ABI return
+            // data, not a digest of it.
             anyhow::ensure!(
-                is_hex32(&req.output_hash) && is_hex32(&req.sig_r) && is_hex32(&req.sig_s),
-                "postRespondBidirectional needs output_hash/sig_r/sig_s as 64 lowercase hex each"
+                req.serialized_output
+                    .as_deref()
+                    .is_some_and(|v| is_hex(v, 128)),
+                "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)"
             );
             anyhow::ensure!(
-                req.big_r_x.is_none()
-                    && req.big_r_y.is_none()
-                    && req.s.is_none()
-                    && req.recovery_id.is_none(),
+                req.output_len.is_some_and(|len| len as usize <= 128),
+                "postRespondBidirectional output_len must be 0..=128"
+            );
+            anyhow::ensure!(
+                is_hex32(&req.sig_r) && is_hex32(&req.sig_s),
+                "postRespondBidirectional needs sig_r/sig_s as 64 lowercase hex each"
+            );
+            anyhow::ensure!(
+                req.recovery_id.is_some_and(|r| r <= 1),
+                "postRespondBidirectional recovery_id must be 0|1"
+            );
+            anyhow::ensure!(
+                req.big_r_x.is_none() && req.big_r_y.is_none() && req.s.is_none(),
                 "postRespondBidirectional takes no postRespond fields"
             );
         }
@@ -201,25 +241,48 @@ pub fn validate(req: &RespondRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Circuit CLI args in the toolkit-js codec: Bytes<N> = full lowercase hex,
-/// Uint<N> = decimal. `sig_r`/`sig_s` are already the little-endian byte order
-/// the hub circuit's `Bytes<32> as Secp256k1Scalar` cast expects — the node-side
-/// client byte-reverses k256's big-endian scalars before POSTing.
+/// Circuit CLI args in the toolkit-js codec.
+///
+/// The toolkit reflects over the Compact-generated `contract/index.d.ts`
+/// (`ImpureCircuits`) and parses each argv entry as JSON5 against the declared
+/// parameter type, so the arity and shape below are dictated by the contract,
+/// not chosen: BOTH circuits take exactly two arguments — the request id, then
+/// the whole event struct as ONE JSON object. Passing the struct's fields as
+/// separate argv entries fails the toolkit's arity check before proving.
+///
+/// - `Bytes<N>` is declared `Uint8Array` and takes bare lowercase hex.
+/// - `Uint<N>` is declared `bigint` and must be a JSON *number*: struct members
+///   are re-serialized before conversion, so a quoted `"1"` would reach
+///   `BigInt("'1'")` and throw.
+///
+/// `sig_r`/`sig_s` are already the little-endian byte order the hub circuit's
+/// `Bytes<32> as Secp256k1Scalar` cast expects — the node-side client
+/// byte-reverses k256's big-endian scalars before POSTing.
 pub fn circuit_args(req: &RespondRequest) -> Vec<String> {
     let field = |f: &Option<String>| f.clone().expect("validated");
     match req.circuit.as_str() {
+        // requestId + SignatureRespondedEvent{bigRx, bigRy, s, recoveryId}
         "postRespond" => vec![
             req.request_id.clone(),
-            field(&req.big_r_x),
-            field(&req.big_r_y),
-            field(&req.s),
-            req.recovery_id.expect("validated").to_string(),
+            format!(
+                r#"{{"bigRx":"{}","bigRy":"{}","s":"{}","recoveryId":{}}}"#,
+                field(&req.big_r_x),
+                field(&req.big_r_y),
+                field(&req.s),
+                req.recovery_id.expect("validated"),
+            ),
         ],
+        // requestId + RespondBidirectionalEvent{serializedOutput, outputLen, r, s, recoveryId}
         "postRespondBidirectional" => vec![
             req.request_id.clone(),
-            field(&req.output_hash),
-            field(&req.sig_r),
-            field(&req.sig_s),
+            format!(
+                r#"{{"serializedOutput":"{}","outputLen":{},"r":"{}","s":"{}","recoveryId":{}}}"#,
+                field(&req.serialized_output),
+                req.output_len.expect("validated"),
+                field(&req.sig_r),
+                field(&req.sig_s),
+                req.recovery_id.expect("validated"),
+            ),
         ],
         _ => unreachable!("validated"),
     }
@@ -280,8 +343,8 @@ pub fn run_respond_flow(cfg: &Config, req: &RespondRequest) -> anyhow::Result<()
     std::fs::create_dir_all(&run_dir)?;
     std::fs::create_dir_all(cfg.work_dir.join(".cache-native"))?;
     std::fs::create_dir_all(cfg.work_dir.join(".cache"))?; // docker-mode mount target
-    // Private state is an empty record for this contract; keep our own copy so
-    // driver-script runs never race us.
+                                                           // Private state is an empty record for this contract; keep our own copy so
+                                                           // driver-script runs never race us.
     let private_state = run_dir.join("private-state.json");
     if !private_state.exists() {
         std::fs::copy(cfg.work_dir.join(".run/private-state.json"), &private_state)
@@ -404,9 +467,18 @@ pub fn run_respond_flow(cfg: &Config, req: &RespondRequest) -> anyhow::Result<()
         &cfg.funding_seed,
         "--intent-file",
         &run_dir.join("publish.intent").display().to_string(),
+        // The toolkit's Resolver reads `<dir>/keys/<circuit>.{prover,verifier}`
+        // and `<dir>/zkir/<circuit>.bzkir`, so this is the compiled-contract
+        // asset root — the same `managed/` the toolkit-js binding names in its
+        // `withCompiledFileAssets`, not a separate directory. Point it anywhere
+        // else and the resolver finds no circuit data: proving then panics
+        // inside the toolkit ("prover key not created") rather than erroring.
         "--compiled-contract-dir",
-        &cfg.work_dir.join(".run/resolver").display().to_string(),
+        &cfg.work_dir.join("managed").display().to_string(),
     ]);
+    if let Some(url) = &cfg.proof_server {
+        send.args(["--proof-server", url]);
+    }
     run(send, "toolkit send-intent", &cfg.secrets())?;
     Ok(())
 }
@@ -591,9 +663,15 @@ fn fetch_block_response(cfg: &Config, hash_hex: &str) -> anyhow::Result<String> 
             .map_err(|e| anyhow::anyhow!("connect to node {}: {e}", cfg.node_url))?;
         // chain_id and block_number are only cache keys for this per-request,
         // discarded InMemory store; the block itself is fetched purely by hash.
-        fetch_single_block(H256::zero(), 0, block_hash, Some(&client), &InMemory::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch block 0x{hash_hex}: {e}"))
+        fetch_single_block(
+            H256::zero(),
+            0,
+            block_hash,
+            Some(&client),
+            &InMemory::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch block 0x{hash_hex}: {e}"))
     })?;
 
     let response = crate::block::decode_block(&raw.transactions)?;
@@ -703,7 +781,8 @@ mod tests {
             big_r_y: Some("33".repeat(32)),
             s: Some("44".repeat(32)),
             recovery_id: Some(1),
-            output_hash: None,
+            serialized_output: None,
+            output_len: None,
             sig_r: None,
             sig_s: None,
         }
@@ -717,8 +796,9 @@ mod tests {
             big_r_x: None,
             big_r_y: None,
             s: None,
-            recovery_id: None,
-            output_hash: Some("55".repeat(32)),
+            recovery_id: Some(0),
+            serialized_output: Some("55".repeat(128)),
+            output_len: Some(64),
             sig_r: Some("66".repeat(32)),
             sig_s: Some("77".repeat(32)),
         }
@@ -740,6 +820,7 @@ mod tests {
             coin_public: String::new(),
             signer_secret_key: String::new(),
             compactc_version: String::new(),
+            proof_server: None,
             curl_bin,
         }
     }
@@ -763,10 +844,10 @@ mod tests {
         );
 
         let expected_bidirectional = format!(
-            r#"{{"contract_address":"{ab}","circuit":"postRespondBidirectional","request_id":"{r1}","output_hash":"{h}","sig_r":"{sr}","sig_s":"{ss}"}}"#,
+            r#"{{"contract_address":"{ab}","circuit":"postRespondBidirectional","request_id":"{r1}","serialized_output":"{o}","output_len":64,"sig_r":"{sr}","sig_s":"{ss}","recovery_id":0}}"#,
             ab = "ab".repeat(32),
             r1 = "11".repeat(32),
-            h = "55".repeat(32),
+            o = "55".repeat(128),
             sr = "66".repeat(32),
             ss = "77".repeat(32),
         );
@@ -792,21 +873,27 @@ mod tests {
         bad.big_r_x = None;
         assert!(validate(&bad).is_err());
         let mut bad = post_respond();
-        bad.output_hash = Some("55".repeat(32));
+        bad.serialized_output = Some("55".repeat(128));
         assert!(
             validate(&bad).is_err(),
             "postRespond must reject bidirectional fields"
         );
 
-        // postRespondBidirectional: needs the three 64-hex fields, no post fields.
+        // postRespondBidirectional: the whole event, and no postRespond fields.
         let mut bad = post_respond_bidirectional();
         bad.sig_r = None;
         assert!(validate(&bad).is_err());
         let mut bad = post_respond_bidirectional();
-        bad.output_hash = Some("55".repeat(31)); // 62 hex — wrong length
+        bad.serialized_output = Some("55".repeat(127)); // 254 hex, wrong length
         assert!(validate(&bad).is_err());
         let mut bad = post_respond_bidirectional();
-        bad.recovery_id = Some(0);
+        bad.output_len = None;
+        assert!(validate(&bad).is_err(), "outputLen is part of the event");
+        let mut bad = post_respond_bidirectional();
+        bad.recovery_id = None;
+        assert!(validate(&bad).is_err(), "recoveryId is part of the event");
+        let mut bad = post_respond_bidirectional();
+        bad.big_r_x = Some("22".repeat(32));
         assert!(
             validate(&bad).is_err(),
             "postRespondBidirectional must reject postRespond fields"
@@ -821,27 +908,62 @@ mod tests {
         assert!(validate(&bad).is_err(), "old circuit name removed");
     }
 
+    /// Both circuits take two arguments: the request id, then the event struct
+    /// as one JSON object whose keys are the Compact struct's field names. The
+    /// arity is the toolkit's own precondition — it compares argv against the
+    /// generated `ImpureCircuits` declaration and refuses to prove on mismatch.
     #[test]
-    fn circuit_args_order() {
+    fn circuit_args_are_request_id_plus_one_event_object() {
         assert_eq!(
             circuit_args(&post_respond()),
             vec![
                 "11".repeat(32),
-                "22".repeat(32),
-                "33".repeat(32),
-                "44".repeat(32),
-                "1".to_string(),
+                format!(
+                    r#"{{"bigRx":"{}","bigRy":"{}","s":"{}","recoveryId":1}}"#,
+                    "22".repeat(32),
+                    "33".repeat(32),
+                    "44".repeat(32),
+                ),
             ]
         );
         assert_eq!(
             circuit_args(&post_respond_bidirectional()),
             vec![
                 "11".repeat(32),
-                "55".repeat(32),
-                "66".repeat(32),
-                "77".repeat(32),
+                format!(
+                    r#"{{"serializedOutput":"{}","outputLen":64,"r":"{}","s":"{}","recoveryId":0}}"#,
+                    "55".repeat(128),
+                    "66".repeat(32),
+                    "77".repeat(32),
+                ),
             ]
         );
+    }
+
+    /// The event argument must survive the toolkit's JSON5 parse with the exact
+    /// key set and JS types the declaration names: hex strings for the
+    /// `Uint8Array` fields, and bare numbers for the `bigint` fields (a quoted
+    /// number would reach `BigInt("'64'")` inside the toolkit and throw).
+    #[test]
+    fn event_argument_is_json_with_the_declared_field_types() {
+        let args = circuit_args(&post_respond_bidirectional());
+        let event: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        let obj = event.as_object().unwrap();
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["outputLen", "r", "recoveryId", "s", "serializedOutput"]
+        );
+
+        assert_eq!(
+            event["serializedOutput"],
+            serde_json::json!("55".repeat(128))
+        );
+        assert_eq!(event["outputLen"], serde_json::json!(64));
+        assert_eq!(event["recoveryId"], serde_json::json!(0));
+        assert!(event["outputLen"].is_number() && event["recoveryId"].is_number());
     }
 
     /// Runs the full flow against a fake toolkit that records its argv; pins
@@ -870,6 +992,7 @@ mod tests {
             coin_public: "aa".repeat(32),
             signer_secret_key: "11".repeat(32),
             compactc_version: "0.33.0".into(),
+            proof_server: Some("http://127.0.0.1:6300".into()),
             curl_bin: PathBuf::from("curl"),
         };
         std::env::set_var("FAKE_TOOLKIT_LOG", &log);
@@ -883,14 +1006,22 @@ mod tests {
         assert!(lines[1].starts_with("generate-intent circuit "));
         assert!(lines[1].contains("--config"));
         assert!(lines[1].ends_with(&format!(
-            "postRespond {} {} {} {} 1",
+            r#"postRespond {} {{"bigRx":"{}","bigRy":"{}","s":"{}","recoveryId":1}}"#,
             "11".repeat(32),
             "22".repeat(32),
             "33".repeat(32),
             "44".repeat(32)
         )));
         assert!(lines[2].starts_with("send-intent "));
-        assert!(lines[2].contains("--compiled-contract-dir"));
+        // The resolver root is the compiled-contract asset dir itself: the
+        // toolkit reads keys/<circuit>.prover and zkir/<circuit>.bzkir under it.
+        assert!(lines[2].contains(&format!(
+            "--compiled-contract-dir {}",
+            work.join("managed").display()
+        )));
+        // Proving is offloaded when a proof server is configured — mandatory for
+        // the zkir-v3 signet contracts, which the linked ledger cannot prove.
+        assert!(lines[2].contains("--proof-server http://127.0.0.1:6300"));
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -944,7 +1075,9 @@ mod tests {
 
     #[test]
     fn state_fetches_decodes_and_anchors_via_fake_rpc() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = RPC_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = std::env::temp_dir().join(format!("mn-pub-state-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let log = tmp.join("rpc.log");
@@ -991,7 +1124,9 @@ mod tests {
 
     #[test]
     fn state_decode_failure_is_502() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = RPC_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = std::env::temp_dir().join(format!("mn-pub-state502-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let bad = tmp.join("bad.mn");
@@ -1013,7 +1148,9 @@ mod tests {
 
     #[test]
     fn config_defaults_localhost_bind_and_native_intent() {
-        let _guard = RPC_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = RPC_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for (k, v) in [
             ("MIDNIGHT_PUB_NODE_URL", "ws://node:9944"),
             ("MIDNIGHT_PUB_WORK_DIR", "/tmp"),

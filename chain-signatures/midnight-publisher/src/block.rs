@@ -197,7 +197,8 @@ mod tests {
             tx: RawTransaction,
         }
         let raw = std::fs::read_to_string(path).expect("fixture is readable");
-        let fixture: FixtureTx = serde_json::from_str(&raw).expect("fixture holds a RawTransaction");
+        let fixture: FixtureTx =
+            serde_json::from_str(&raw).expect("fixture holds a RawTransaction");
         fixture.tx.as_bytes().to_vec()
     }
 
@@ -307,7 +308,10 @@ mod tests {
 
         assert!(response.skipped.is_empty(), "{:?}", response.skipped);
         assert_eq!(response.transactions.len(), 1);
-        assert_eq!(response.transactions[0].calls.len(), calls_from_tx(&tx).len());
+        assert_eq!(
+            response.transactions[0].calls.len(),
+            calls_from_tx(&tx).len()
+        );
         let json = serde_json::to_string(&response).unwrap();
         assert!(
             json.starts_with("{\"transactions\":"),
