@@ -1,4 +1,7 @@
+use alloy::primitives::Address;
+use alloy_signer_local::PrivateKeySigner;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
+use reqwest::Url;
 use std::fmt;
 use std::time::Duration;
 
@@ -156,13 +159,13 @@ impl Default for IndexerConfig {
 #[derive(Clone)]
 pub struct EthConfig {
     /// The ethereum account secret key used to sign eth respond txn.
-    pub account_sk: String,
+    pub account_sk: PrivateKeySigner,
     /// Ethereum consensus HTTP RPC URL
     pub consensus_rpc_http_url: String,
     /// Ethereum execution HTTP RPC URL
-    pub execution_rpc_http_url: String,
-    /// The contract address to watch without the `0x` prefix
-    pub contract_address: String,
+    pub execution_rpc_http_url: Url,
+    /// The contract address to watch
+    pub contract_address: Address,
     /// must be one of sepolia, mainnet
     pub network: String,
     /// path to store helios data
@@ -183,11 +186,7 @@ pub struct EthConfig {
 impl EthConfig {
     /// Ethereum address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
-        let signer: alloy_signer_local::PrivateKeySigner = self
-            .account_sk
-            .parse()
-            .expect("cannot parse Eth account sk");
-        signer.address().to_string()
+        self.account_sk.address().to_string()
     }
 }
 
