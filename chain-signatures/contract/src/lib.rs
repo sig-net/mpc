@@ -862,6 +862,9 @@ impl VersionedMpcContract {
 
         self.mutable_checkpoints()
             .insert(checkpoint.chain, checkpoint);
+
+        // Remove stale votes where candidate checkpoint is less than or equal to
+        // this voted in consensus checkpoint.
         self.mutable_checkpoint_votes()
             .votes
             .retain(|candidate, _| {
@@ -871,7 +874,11 @@ impl VersionedMpcContract {
     }
 
     pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
-        self.checkpoint_votes_state()
+        let votes = match self {
+            Self::V0(mpc_contract) => &mpc_contract.checkpoint_votes,
+        };
+
+        votes
             .votes
             .iter()
             .filter(|(checkpoint, _)| checkpoint.chain == chain)
@@ -1106,12 +1113,6 @@ impl VersionedMpcContract {
     fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
-        }
-    }
-
-    fn checkpoint_votes_state(&self) -> &CheckpointVotes {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.checkpoint_votes,
         }
     }
 
