@@ -49,15 +49,18 @@ impl SignedMessage {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Result<T, MessageError> {
-        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(()))
+        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(())).map(|(_, msg)| msg)
     }
 
+    /// Decrypt and verify, returning the authenticated sender (proven by its
+    /// signature) alongside the payload. Sender fields inside the payload
+    /// are unverified claims by the signer.
     pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> Result<(), MessageError>>(
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
         mut check: F,
-    ) -> Result<T, MessageError> {
+    ) -> Result<(Participant, T), MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
             .inspect_err(|err| {
@@ -78,7 +81,7 @@ impl SignedMessage {
             ));
         }
 
-        cbor_from_bytes(&msg)
+        Ok((from, cbor_from_bytes(&msg)?))
     }
 }
 

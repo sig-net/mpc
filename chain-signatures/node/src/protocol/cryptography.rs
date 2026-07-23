@@ -229,7 +229,7 @@ impl CryptographicProtocol for ResharingState {
 
         // If we have received new tokens while running (i.e. node restart while in the midst),
         // short-circuit and restart the whole resharing protocol.
-        if let Some(new_tokens) = resharing.restartable(self.me, ctx, &self.contract) {
+        if let Some(new_tokens) = resharing.restartable(ctx, &self.contract) {
             self.phase = ResharingPhase::awaiting(self.me);
             if let ResharingPhase::Awaiting(state) = &mut self.phase {
                 for (participant, token) in new_tokens {
@@ -508,7 +508,6 @@ impl ReshareRunning {
     /// Checks if while running we have received readiness messages for a new attempt,
     fn restartable(
         &self,
-        me: Participant,
         ctx: &mut MpcSignProtocol,
         contract: &ResharingContractState,
     ) -> Option<Vec<(Participant, u64)>> {
@@ -527,9 +526,6 @@ impl ReshareRunning {
                             contract_epoch = contract.old_epoch,
                             "resharing: ignoring readiness message for other epoch while running",
                         );
-                        continue;
-                    }
-                    if from == me {
                         continue;
                     }
                     match self.ready_tokens.get(&from) {
