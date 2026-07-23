@@ -68,6 +68,8 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     telemetry: T,
 }
 
+type CatchupBlockItem = (u64, SolanaCatchupBlock);
+
 impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
@@ -98,7 +100,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         &self,
         anchor_height: u64,
     ) -> anyhow::Result<
-        Pin<Box<dyn Stream<Item = anyhow::Result<(u64, SolanaCatchupBlock)>> + Send + 'static>>,
+        Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
     > {
         let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
             return Ok(Box::pin(stream::empty()));
@@ -194,8 +196,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     fn fetch_blocks_for_pages(
         client: SolanaClient,
         pages: impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(u64, SolanaCatchupBlock)>> + Send + 'static>>
-    {
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>> {
         let stream = pages
             .filter_map(|res| async move {
                 match res {
@@ -209,7 +210,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 async move {
                     let slots = res?;
                     let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await;
-                    let items: Vec<(u64, SolanaCatchupBlock)> = slots
+                    let items: Vec<CatchupBlockItem> = slots
                         .into_iter()
                         .map(|s| {
                             let block = blocks.remove(&s).unwrap_or(SolanaCatchupBlock::Missing);
@@ -221,7 +222,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             })
             .map(|res| match res {
                 Ok(items) => {
-                    let stream_items: Vec<anyhow::Result<(u64, SolanaCatchupBlock)>> =
+                    let stream_items: Vec<anyhow::Result<CatchupBlockItem>> =
                         items.into_iter().map(Ok).collect();
                     stream::iter(stream_items)
                 }
