@@ -171,19 +171,89 @@ async fn test_channel_contention_multiple_blocks_at_once_delayed() {
 /// `T(0)`, so a lagging node enters its round 0 only after the others have already
 /// timed out and rotated past it.
 ///
-/// This is the case the sibling `_delayed` test used to flag as unhandled: on the
-/// pre-Move-1 election a node scans its *local* active set for a proposer and jumps
-/// `state.round` accordingly, so staggered nodes pick different proposers/rounds and
-/// never form a quorum before the fixed timeout trips. With deterministic rotation
-/// every node elects `proposer_per_round(r)` identically, the per-round `T(r)`
-/// schedule keeps each rotation cheap, and a laggard resyncs its round in one
-/// `bump_round` via `highest_seen_round` — so all signatures still complete.
-///
-/// Expected: passes on the Move 1 stack, times out before Move 1.
+/// Measured: passes both with and without deterministic rotation. Staggered
+/// observation produces round *skew*, not divergent active views — with views
+/// agreeing, the local-active scan elects the same proposer as deterministic
+/// rotation, and `highest_seen_round` catch-up already handles skew. Kept as a
+/// regression guard for catch-up, not as evidence for any election change.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_delayed_beyond_round0_timeout() {
     let delay = mpc_node::protocol::request::organize_posit_timeout() * 3 / 2; // > T(0)
     check_channel_contention(5, 10, 50, Some(delay)).await;
+}
+
+/// Liveness when nodes disagree about who is active.
+///
+/// Every node hides exactly one peer — its successor in participant order — and
+/// nothing ever changes after that. Each node still sees `threshold` peers, so
+/// the `wait_for_active_participants` supply gate never trips; otherwise both
+/// variants would stall there and this test would prove nothing about election.
+///
+/// Electing the proposer by scanning the node's *own* active set also moves
+/// `state.round` to whichever round that scan lands on. Because the views
+/// disagree, the nodes land on *different* rounds and never co-locate: a
+/// proposer that jumped ahead broadcasts at its round, deliberators still on a
+/// lower round buffer that Propose as a future-round message rather than
+/// accepting it, and then time out waiting for a proposal at their own round.
+/// Accepts never reach `threshold`, for any round, indefinitely — the observed
+/// failure is future-round buffering plus Propose timeouts, with no rejects.
+///
+/// Electing from shared inputs only (round, participants, entropy) leaves
+/// `state.round` advancing solely through `bump_round`, so every node stays on
+/// the same round, the first Propose is accepted, and the request settles.
+///
+/// Run it with `cargo test -p integration-tests -- --ignored
+/// test_divergent_active_views_still_converge` to reproduce the stall.
+#[ignore = "fails until proposer election stops reading the local active set; un-ignore together with that change"]
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_divergent_active_views_still_converge() {
+    let num_nodes = 5;
+    let threshold = 4;
+    let network = MpcFixtureBuilder::new(num_nodes, threshold)
+        .only_generate_signatures()
+        .with_mock_stream(Chain::Solana, MockStream::default())
+        .await
+        .build()
+        .await;
+
+    // Each node hides its successor, leaving exactly `threshold` peers active.
+    let participants = network.sorted_participants();
+    let n = participants.len();
+    for node in network.nodes.iter() {
+        let index = participants
+            .iter()
+            .position(|p| *p == node.me)
+            .expect("node is a participant");
+        let hidden = participants[(index + 1) % n];
+        let mut view = node.mesh.borrow().clone();
+        view.remove(hidden);
+        let _ = node.mesh.send(view);
+    }
+
+    network
+        .process_sign_requests(Chain::Solana, &[sign_request(0)])
+        .await;
+
+    let deadline = Duration::from_secs(90);
+    let start = std::time::Instant::now();
+    loop {
+        let completed = {
+            let actions = network.output.rpc_actions.lock().await;
+            actions
+                .iter()
+                .filter(|action| !action.contains("kind: Checkpoint"))
+                .count()
+        };
+        if completed >= 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < deadline,
+            "request never settled under divergent active views after {:?}",
+            start.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
