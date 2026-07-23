@@ -1,0 +1,151 @@
+name: Midnight Publisher
+
+# `chain-signatures/midnight-publisher` is a NESTED Cargo workspace: it carries its
+# own Cargo.lock and is deliberately kept out of the root workspace `members` list.
+# It pulls the midnight-node toolkit + midnight-ledger git dependencies (subxt 0.50,
+# polkadot-sdk, ledger-9), which cannot share a lockfile with the main mpc workspace
+# (chain-signatures/node pins subxt 0.44). This workflow builds and tests that nested
+# workspace, and guards the dependency firewall between the two.
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - ".github/workflows/midnight-publisher.yml"
+      - "chain-signatures/midnight-publisher/**"
+      # Root manifest + lockfile: a firewall breach surfaces here, so changes to
+      # them must re-run the guard below.
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/midnight-publisher.yml"
+      - "chain-signatures/midnight-publisher/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  merge_group:
+
+# NOTE: unlike the other Rust workflows in this repo, this one deliberately does NOT
+# set a global `RUSTFLAGS: -D warnings`. Cargo applies RUSTFLAGS to every crate it
+# compiles, and this workspace builds ~960 third-party crates (polkadot-sdk,
+# midnight-ledger, subxt); a single upstream warning would turn CI red for reasons
+# outside this repo's control. The clippy step enforces `-D warnings` instead, which
+# cargo scopes to workspace members only.
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: warp-ubuntu-latest-x64-4x
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-publisher
+    env:
+      # midnight-node and polkadot-sdk are large git repos; the git CLI fetches them
+      # more reliably (and with better errors) than cargo's built-in transport.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned to 1.96.0 rather than the repo-wide 1.81.0: subxt 0.50, a direct
+      # dependency here, is `edition = "2024"` and declares `rust-version = "1.85.0"`,
+      # so 1.81.0 cannot compile this workspace at all.
+      # `default: true` is required for the pin to actually take effect -- without it
+      # actions-rs/toolchain only installs the toolchain and leaves the runner's
+      # preinstalled stable active. `components: clippy` is required because the
+      # `minimal` profile does not ship clippy.
+      - name: Install Rust (1.96.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.96.0
+          components: clippy
+          default: true
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config cmake
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Nested workspace: cache `chain-signatures/midnight-publisher/target` plus
+          # the shared ~/.cargo registry and git checkouts. The git dependencies are
+          # the expensive part of a cold build here (~4 minutes without a cache).
+          # The cache key includes a hash of the nested Cargo.lock.
+          workspaces: chain-signatures/midnight-publisher -> target
+          shared-key: midnight-publisher
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  dependency-firewall:
+    name: Dependency Firewall
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert the midnight toolkit universe stayed out of the main workspace
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+
+          # Each marker below can only reach the ROOT lockfile through the
+          # midnight-node toolkit / midnight-ledger dependency universe, which is
+          # confined to the nested chain-signatures/midnight-publisher workspace.
+          #
+          # Deliberately NOT guarded: `subxt*`, `sp-*`, `frame-*`, `substrate-*`.
+          # chain-signatures/node has a first-class dependency on subxt 0.44 from
+          # crates.io, which legitimately pulls that whole family into the root
+          # lockfile (31 such crates on develop today). Guarding them would fail on
+          # day one. The markers below are the ones that are genuinely zero.
+
+          check_crates() {
+            label="$1"
+            pattern="$2"
+            hits=$(grep -oE "^name = \"${pattern}\"" Cargo.lock | sed -E 's/^name = "(.*)"$/\1/' | sort -u) || true
+            if [ -n "$hits" ]; then
+              while IFS= read -r crate; do
+                echo "::error file=Cargo.lock::dependency firewall breached: ${crate} leaked into the main mpc workspace (${label})"
+              done <<< "$hits"
+              status=1
+            fi
+          }
+
+          check_crates "midnight-node toolkit / midnight-ledger crate" 'midnight[a-z0-9_-]*'
+          check_crates "polkadot-sdk crate" 'polkadot[a-z0-9_-]*'
+
+          sources=$(grep -oE '^source = "git\+https://github\.com/midnightntwrk/[^"]+"' Cargo.lock | sort -u) || true
+          if [ -n "$sources" ]; then
+            while IFS= read -r src; do
+              echo "::error file=Cargo.lock::dependency firewall breached: ${src} leaked into the main mpc workspace (midnightntwrk git dependency)"
+            done <<< "$sources"
+            status=1
+          fi
+
+          if [ "$status" -ne 0 ]; then
+            echo ""
+            echo "The nested workspace at chain-signatures/midnight-publisher exists to keep these"
+            echo "dependencies out of the main mpc workspace. Keep midnight-publisher out of the"
+            echo "root [workspace] members list, and do not depend on it from a root workspace crate."
+            exit 1
+          fi
+
+          echo "dependency firewall intact: no midnight / polkadot-sdk crates, and no"
+          echo "midnightntwrk git sources, in the main mpc workspace lockfile."
