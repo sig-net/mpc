@@ -60,42 +60,41 @@ import { openFundingWallet } from "./wallet.js";
 // ---- the wire contract -----------------------------------------------------
 
 /**
- * `sig_r`/`sig_s` are LITTLE-ENDIAN, the order the record's `Bytes<32>` fields
- * store. `serialized_output` is the whole zero-padded ABI return data, not a
- * digest. The contract checks none of it: consumers verify on claim.
+ * The MPC's canonical `Signature { big_r, s, recovery_id }` verbatim, nested
+ * exactly as every other sig-net signer represents it (the Rust type, the EVM
+ * and Solana contracts, the Canton parser, and the Compact
+ * `Signature { bigR: { x, y }, s, recoveryId }` this lands in). Coordinates
+ * and `s` are SEC1 BIG-ENDIAN hex, `recovery_id` the parity of R.y, and the
+ * components reach the ledger untouched — the publisher converts nothing.
+ */
+export interface WireSignature {
+  readonly big_r: { readonly x: string; readonly y: string };
+  readonly s: string;
+  readonly recovery_id: number;
+}
+
+/**
+ * BOTH circuits carry a signature, so it is a required field rather than one
+ * of the per-circuit optionals. `serialized_output` is the whole zero-padded
+ * ABI return data, not a digest, and belongs to `postRespondBidirectional`
+ * alone. The contract checks none of it: consumers verify on claim.
  */
 export interface RespondRequest {
   readonly contract_address: string;
   readonly circuit: string;
   readonly request_id: string;
-  /** `postSignatureResponse` -> `SignatureRespondedEvent { bigRx, bigRy, s, recoveryId }`. */
-  readonly big_r_x?: string;
-  readonly big_r_y?: string;
-  readonly s?: string;
-  /** `postRespondBidirectional` -> `RespondBidirectionalEvent { serializedOutput, outputLen, r, s, recoveryId }`. */
+  readonly signature: WireSignature;
+  /** `postRespondBidirectional` only: the foreign execution's output. */
   readonly serialized_output?: string;
   readonly output_len?: number;
-  readonly sig_r?: string;
-  readonly sig_s?: string;
-  /** Parity of R.y, carried by BOTH events for off-chain key recovery. */
-  readonly recovery_id?: number;
 }
 
 export type ValidatedRespondRequest =
-  | (RespondRequest & {
-      readonly circuit: "postSignatureResponse";
-      readonly big_r_x: string;
-      readonly big_r_y: string;
-      readonly s: string;
-      readonly recovery_id: number;
-    })
+  | (RespondRequest & { readonly circuit: "postSignatureResponse" })
   | (RespondRequest & {
       readonly circuit: "postRespondBidirectional";
       readonly serialized_output: string;
       readonly output_len: number;
-      readonly sig_r: string;
-      readonly sig_s: string;
-      readonly recovery_id: number;
     });
 
 /** Derived from the validated union so the two cannot drift. */
@@ -106,27 +105,63 @@ export type RespondCircuit = ValidatedRespondRequest["circuit"];
 /** The wire treats `null` and a missing key alike. */
 const absent = (value: unknown): boolean => value === undefined || value === null;
 
-function requiredString(source: Record<string, unknown>, field: string): string {
-  const value = optionalString(source, field);
+// Nested fields are reported by their full path (`signature.big_r.x`), so
+// `label` carries that path while `field` stays the plain key to read.
+
+function requiredString(source: Record<string, unknown>, field: string, label = field): string {
+  const value = optionalString(source, field, label);
   if (value !== undefined) return value;
-  throw badRequest(`invalid JSON: missing field \`${field}\``);
+  throw badRequest(`invalid JSON: missing field \`${label}\``);
 }
 
-function optionalString(source: Record<string, unknown>, field: string): string | undefined {
+function optionalString(source: Record<string, unknown>, field: string, label = field): string | undefined {
   const value = source[field];
   if (absent(value)) return undefined;
   if (typeof value === "string") return value;
-  throw badRequest(`invalid JSON: \`${field}\` must be a string`);
+  throw badRequest(`invalid JSON: \`${label}\` must be a string`);
 }
 
-function optionalByte(source: Record<string, unknown>, field: string): number | undefined {
+function requiredByte(source: Record<string, unknown>, field: string, label = field): number {
+  const value = optionalByte(source, field, label);
+  if (value !== undefined) return value;
+  throw badRequest(`invalid JSON: missing field \`${label}\``);
+}
+
+function optionalByte(source: Record<string, unknown>, field: string, label = field): number | undefined {
   const value = source[field];
   if (absent(value)) return undefined;
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255) return value;
-  throw badRequest(`invalid JSON: \`${field}\` must be an integer in 0..=255`);
+  throw badRequest(`invalid JSON: \`${label}\` must be an integer in 0..=255`);
 }
 
-/** Unknown fields are ignored; only a missing or mistyped known field rejects. */
+function requiredObject(source: Record<string, unknown>, field: string, label = field): Record<string, unknown> {
+  const value = source[field];
+  if (absent(value)) throw badRequest(`invalid JSON: missing field \`${label}\``);
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest(`invalid JSON: \`${label}\` must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/** The nested `signature` object. Every field is required: both circuits carry one. */
+function parseSignature(source: Record<string, unknown>): WireSignature {
+  const signature = requiredObject(source, "signature");
+  const bigR = requiredObject(signature, "big_r", "signature.big_r");
+  return {
+    big_r: {
+      x: requiredString(bigR, "x", "signature.big_r.x"),
+      y: requiredString(bigR, "y", "signature.big_r.y"),
+    },
+    s: requiredString(signature, "s", "signature.s"),
+    recovery_id: requiredByte(signature, "recovery_id", "signature.recovery_id"),
+  };
+}
+
+/**
+ * Unknown fields are ignored; only a missing or mistyped known field rejects.
+ * Fields are read in declaration order, so the FIRST malformed one is what the
+ * caller hears about — pinned by `tests/respond.test.ts`.
+ */
 export function parseRespondRequest(body: string): RespondRequest {
   const source = jsonObject(body);
 
@@ -134,14 +169,9 @@ export function parseRespondRequest(body: string): RespondRequest {
     contract_address: requiredString(source, "contract_address"),
     circuit: requiredString(source, "circuit"),
     request_id: requiredString(source, "request_id"),
-    big_r_x: optionalString(source, "big_r_x"),
-    big_r_y: optionalString(source, "big_r_y"),
-    s: optionalString(source, "s"),
+    signature: parseSignature(source),
     serialized_output: optionalString(source, "serialized_output"),
     output_len: optionalByte(source, "output_len"),
-    sig_r: optionalString(source, "sig_r"),
-    sig_s: optionalString(source, "sig_s"),
-    recovery_id: optionalByte(source, "recovery_id"),
   };
 }
 
@@ -153,15 +183,17 @@ export function validateRespondRequest(request: RespondRequest): asserts request
   if (!isHex(request.contract_address, 32)) throw badRequest("contract_address must be 64 lowercase hex");
   if (!isHex(request.request_id, 32)) throw badRequest("request_id must be 64 hex");
 
+  // The signature is circuit-independent, so it is checked once here rather
+  // than per branch.
+  const { big_r, s, recovery_id } = request.signature;
+  if (!(isHex32(big_r.x) && isHex32(big_r.y) && isHex32(s))) {
+    throw badRequest("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
+  }
+  if (recovery_id > 1) throw badRequest("signature.recovery_id must be 0|1");
+
   switch (request.circuit) {
     case "postSignatureResponse":
-      if (!(isHex32(request.big_r_x) && isHex32(request.big_r_y) && isHex32(request.s))) {
-        throw badRequest("postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each");
-      }
-      if (!(request.recovery_id !== undefined && request.recovery_id <= 1)) {
-        throw badRequest("postSignatureResponse recovery_id must be 0|1");
-      }
-      if ([request.serialized_output, request.output_len, request.sig_r, request.sig_s].some((f) => f !== undefined)) {
+      if (request.serialized_output !== undefined || request.output_len !== undefined) {
         throw badRequest("postSignatureResponse takes no bidirectional fields");
       }
       return;
@@ -173,15 +205,6 @@ export function validateRespondRequest(request: RespondRequest): asserts request
       }
       if (!(request.output_len !== undefined && request.output_len <= 128)) {
         throw badRequest("postRespondBidirectional output_len must be 0..=128");
-      }
-      if (!(isHex32(request.sig_r) && isHex32(request.sig_s))) {
-        throw badRequest("postRespondBidirectional needs sig_r/sig_s as 64 lowercase hex each");
-      }
-      if (!(request.recovery_id !== undefined && request.recovery_id <= 1)) {
-        throw badRequest("postRespondBidirectional recovery_id must be 0|1");
-      }
-      if (request.big_r_x !== undefined || request.big_r_y !== undefined || request.s !== undefined) {
-        throw badRequest("postRespondBidirectional takes no postSignatureResponse fields");
       }
       return;
     default:
@@ -204,21 +227,26 @@ export type RespondCall = {
   [K in RespondCircuit]: { readonly circuitId: K; readonly args: CircuitArgs<K> };
 }[RespondCircuit];
 
-/** `sig_r`/`sig_s` pass through unreversed: already the order the circuit's cast expects. */
+/**
+ * The wire signature as the events' `Signature` struct — the same shape under
+ * the language's own naming, no transformation. Big-endian in, big-endian
+ * stored: the publisher never touches byte order; consumers re-encode for
+ * circuit args off-chain.
+ */
+function signatureStruct(signature: WireSignature): SignatureRespondedEvent["signature"] {
+  return {
+    bigR: { x: fromHex(signature.big_r.x), y: fromHex(signature.big_r.y) },
+    s: fromHex(signature.s),
+    recoveryId: BigInt(signature.recovery_id),
+  };
+}
+
 export function respondCall(request: ValidatedRespondRequest): RespondCall {
   const requestId = fromHex(request.request_id);
   if (request.circuit === "postSignatureResponse") {
     return {
       circuitId: "postSignatureResponse",
-      args: [
-        requestId,
-        {
-          bigRx: fromHex(request.big_r_x),
-          bigRy: fromHex(request.big_r_y),
-          s: fromHex(request.s),
-          recoveryId: BigInt(request.recovery_id),
-        },
-      ],
+      args: [requestId, { signature: signatureStruct(request.signature) }],
     };
   }
   return {
@@ -228,9 +256,7 @@ export function respondCall(request: ValidatedRespondRequest): RespondCall {
       {
         serializedOutput: fromHex(request.serialized_output),
         outputLen: BigInt(request.output_len),
-        r: fromHex(request.sig_r),
-        s: fromHex(request.sig_s),
-        recoveryId: BigInt(request.recovery_id),
+        signature: signatureStruct(request.signature),
       },
     ],
   };

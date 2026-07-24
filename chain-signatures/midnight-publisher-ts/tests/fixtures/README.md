@@ -8,5 +8,6 @@ Every file here is produced by [`regenerate.ts`](./regenerate.ts) against the ru
 | `caller-state-1366.mn` | the caller's blob at the notify block: hub address, attestation point, null nodes, trimmed atoms, the request map |
 | `notify-tx.mn`, `deploy-tx-1352.mn` | the `midnight.sendMnTransaction` bytes of the notify and of the singleton deploy, in the `{"tx":{"Midnight":"<hex>"}}` wrapper |
 | `golden-*.json` | the decoders' output for those bytes, frozen as regression pins and byte-compared by the tests |
+| `respond-singleton-state-25087.mn` | the write-path harness state: a singleton of the CURRENT contract build (`82ebe184…664af182`, deployed via `tests/bootstrap-live.ts`) captured at the block a `tests/respond-live.ts` post landed in — its embedded verifier keys must match `dist/managed`, so it is redeployed and recaptured on every contract change |
 
 The goldens pin the wire, so a golden that comes out `CHANGED` under `regenerate.ts` is a wire change and needs review; never re-freeze one to green a failing test. If the capture chain is ever gone, the checked-in files remain the record: recapturing means a fresh deploy, new heights and addresses in `regenerate.ts`, and a review of every pinned value in the tests.

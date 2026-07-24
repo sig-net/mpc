@@ -48,7 +48,7 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const MANAGED = fileURLToPath(new URL("../node_modules/@sig-net/midnight-contract/dist/managed/", import.meta.url));
 
 /** The deployed singleton the state fixture was captured from. */
-const SINGLETON = "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
+const SINGLETON = "82ebe184cd00e19e422f0e7aa246012e11160ba3b98c09aace67dab1664af182";
 
 /** The public genesis dev seed, as in `tests/respond-live.ts`. Not a secret. */
 const DEV_SEED = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -74,10 +74,11 @@ function respondBody(rid: string): string {
     contract_address: SINGLETON,
     circuit: "postSignatureResponse",
     request_id: rid,
-    big_r_x: "11".repeat(32),
-    big_r_y: "22".repeat(32),
-    s: "33".repeat(32),
-    recovery_id: 0,
+    signature: {
+      big_r: { x: "11".repeat(32), y: "22".repeat(32) },
+      s: "33".repeat(32),
+      recovery_id: 0,
+    },
   });
 }
 
@@ -107,7 +108,7 @@ interface StubReads {
 function stubClient(overrides: StubReads = {}): NodeClient {
   const reads: Required<StubReads> = {
     head: async () => ({ toHex: () => `0x${HEAD_BARE}` }),
-    contract: async () => ok(Uint8Array.from(readFileSync(`${FIXTURES}singleton-post-state-1366.mn`))),
+    contract: async () => ok(Uint8Array.from(readFileSync(`${FIXTURES}respond-singleton-state-25087.mn`))),
     zswap: async () => ok(new ZswapChainState().serialize()),
     params: async () => ok(LedgerParameters.initialParameters().serialize()),
     ...overrides,

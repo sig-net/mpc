@@ -23,11 +23,22 @@ import {
   type RespondCircuit,
   type RespondRequest,
   type SignatureRespondedEvent,
+  type WireSignature,
 } from "../src/respond.js";
 import { deriveFundingKeys, parseFundingSeed } from "../src/wallet.js";
 
 const ADDRESS = "ab".repeat(32);
 const REQUEST_ID = "11".repeat(32);
+
+/** The shared signature both circuits carry; vary it with an explicit spread. */
+const SIGNATURE: WireSignature = {
+  big_r: { x: "22".repeat(32), y: "33".repeat(32) },
+  s: "44".repeat(32),
+  recovery_id: 1,
+};
+
+/** SIGNATURE with one component replaced, for the rejection rows. */
+const withSignature = (delta: Partial<WireSignature>): WireSignature => ({ ...SIGNATURE, ...delta });
 
 /** A valid `postSignatureResponse` request, with fields optionally replaced. */
 function signatureResponse(overrides: Partial<RespondRequest> = {}): RespondRequest {
@@ -35,10 +46,7 @@ function signatureResponse(overrides: Partial<RespondRequest> = {}): RespondRequ
     contract_address: ADDRESS,
     circuit: "postSignatureResponse",
     request_id: REQUEST_ID,
-    big_r_x: "22".repeat(32),
-    big_r_y: "33".repeat(32),
-    s: "44".repeat(32),
-    recovery_id: 1,
+    signature: SIGNATURE,
     ...overrides,
   };
 }
@@ -51,9 +59,7 @@ function bidirectional(overrides: Partial<RespondRequest> = {}): RespondRequest 
     request_id: REQUEST_ID,
     serialized_output: "55".repeat(128),
     output_len: 64,
-    sig_r: "66".repeat(32),
-    sig_s: "77".repeat(32),
-    recovery_id: 0,
+    signature: { ...SIGNATURE, recovery_id: 0 },
     ...overrides,
   };
 }
@@ -92,8 +98,12 @@ describe("validateRespondRequest: accepts", () => {
   });
 
   it("recovery_id 0 and 1 on both circuits", () => {
-    expect(() => validateRespondRequest(signatureResponse({ recovery_id: 0 }))).not.toThrow();
-    expect(() => validateRespondRequest(bidirectional({ recovery_id: 1 }))).not.toThrow();
+    expect(() =>
+      validateRespondRequest(signatureResponse({ signature: withSignature({ recovery_id: 0 }) })),
+    ).not.toThrow();
+    expect(() =>
+      validateRespondRequest(bidirectional({ signature: withSignature({ recovery_id: 1 }) })),
+    ).not.toThrow();
   });
 });
 
@@ -108,19 +118,19 @@ const REJECTIONS: [string, RespondRequest, string][] = [
   ["request id too long", signatureResponse({ request_id: "11".repeat(33) }), "request_id must be 64 hex"],
   ["request id uppercase", signatureResponse({ request_id: "AA".repeat(32) }), "request_id must be 64 hex"],
 
+  // ---- the signature, checked once for both circuits ----
+  ["big_r.x uppercase", signatureResponse({ signature: withSignature({ big_r: { x: "AA".repeat(32), y: "33".repeat(32) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["big_r.x short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(31), y: "33".repeat(32) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["big_r.y short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(32), y: "33".repeat(31) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["s uppercase", signatureResponse({ signature: withSignature({ s: "AA".repeat(32) }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["s empty", signatureResponse({ signature: withSignature({ s: "" }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["the same signature rejected on the other circuit", bidirectional({ signature: withSignature({ s: "AA".repeat(32) }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
+  ["recovery_id 2", signatureResponse({ signature: withSignature({ recovery_id: 2 }) }), "signature.recovery_id must be 0|1"],
+  ["recovery_id 255", signatureResponse({ signature: withSignature({ recovery_id: 255 }) }), "signature.recovery_id must be 0|1"],
+
   // ---- postSignatureResponse ----
-  ["big_r_x absent", signatureResponse({ big_r_x: undefined }), "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each"],
-  ["big_r_y absent", signatureResponse({ big_r_y: undefined }), "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each"],
-  ["s absent", signatureResponse({ s: undefined }), "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each"],
-  ["s uppercase", signatureResponse({ s: "AA".repeat(32) }), "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each"],
-  ["big_r_x short", signatureResponse({ big_r_x: "22".repeat(31) }), "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each"],
-  ["recovery_id absent", signatureResponse({ recovery_id: undefined }), "postSignatureResponse recovery_id must be 0|1"],
-  ["recovery_id 2", signatureResponse({ recovery_id: 2 }), "postSignatureResponse recovery_id must be 0|1"],
-  ["recovery_id 255", signatureResponse({ recovery_id: 255 }), "postSignatureResponse recovery_id must be 0|1"],
   ["contaminated with serialized_output", signatureResponse({ serialized_output: "55".repeat(128) }), "postSignatureResponse takes no bidirectional fields"],
   ["contaminated with output_len", signatureResponse({ output_len: 64 }), "postSignatureResponse takes no bidirectional fields"],
-  ["contaminated with sig_r", signatureResponse({ sig_r: "66".repeat(32) }), "postSignatureResponse takes no bidirectional fields"],
-  ["contaminated with sig_s", signatureResponse({ sig_s: "77".repeat(32) }), "postSignatureResponse takes no bidirectional fields"],
 
   // ---- postRespondBidirectional ----
   ["serialized_output absent", bidirectional({ serialized_output: undefined }), "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)"],
@@ -129,14 +139,6 @@ const REJECTIONS: [string, RespondRequest, string][] = [
   ["output_len absent", bidirectional({ output_len: undefined }), "postRespondBidirectional output_len must be 0..=128"],
   ["output_len 129", bidirectional({ output_len: 129 }), "postRespondBidirectional output_len must be 0..=128"],
   ["output_len 255", bidirectional({ output_len: 255 }), "postRespondBidirectional output_len must be 0..=128"],
-  ["sig_r absent", bidirectional({ sig_r: undefined }), "postRespondBidirectional needs sig_r/sig_s as 64 lowercase hex each"],
-  ["sig_s absent", bidirectional({ sig_s: undefined }), "postRespondBidirectional needs sig_r/sig_s as 64 lowercase hex each"],
-  ["sig_s uppercase", bidirectional({ sig_s: "FF".repeat(32) }), "postRespondBidirectional needs sig_r/sig_s as 64 lowercase hex each"],
-  ["bidi recovery_id absent", bidirectional({ recovery_id: undefined }), "postRespondBidirectional recovery_id must be 0|1"],
-  ["bidi recovery_id 2", bidirectional({ recovery_id: 2 }), "postRespondBidirectional recovery_id must be 0|1"],
-  ["contaminated with big_r_x", bidirectional({ big_r_x: "22".repeat(32) }), "postRespondBidirectional takes no postSignatureResponse fields"],
-  ["contaminated with big_r_y", bidirectional({ big_r_y: "33".repeat(32) }), "postRespondBidirectional takes no postSignatureResponse fields"],
-  ["contaminated with s", bidirectional({ s: "44".repeat(32) }), "postRespondBidirectional takes no postSignatureResponse fields"],
 
   // ---- circuit names ----
   ["an unrecognized circuit name", signatureResponse({ circuit: "postRespond" }), "unknown circuit postRespond"],
@@ -164,10 +166,21 @@ describe("validateRespondRequest: checks fire in their pinned wire order", () =>
     );
   });
 
-  it("reports missing scalars before a bad recovery id", () => {
-    expect(() => validateRespondRequest(signatureResponse({ big_r_x: undefined, recovery_id: 9 }))).toThrowError(
-      "postSignatureResponse needs big_r_x/big_r_y/s as 64 lowercase hex each",
-    );
+  it("reports a malformed scalar before a bad recovery id", () => {
+    expect(() =>
+      validateRespondRequest(
+        signatureResponse({ signature: withSignature({ s: "zz".repeat(32), recovery_id: 9 }) }),
+      ),
+    ).toThrowError("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
+  });
+
+  it("reports the signature before the circuit's own fields", () => {
+    // The signature is shared, so it is checked before the circuit splits.
+    expect(() =>
+      validateRespondRequest(
+        bidirectional({ signature: withSignature({ s: "" }), serialized_output: "55" }),
+      ),
+    ).toThrowError("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
   });
 
   it("reports a bad serialized_output before a bad output_len", () => {
@@ -187,19 +200,27 @@ const MALFORMED_BODIES: [string, string][] = [
 ];
 
 const MISSING_FIELDS: [string, string][] = [
-  ["contract_address", JSON.stringify({ circuit: "postRespondBidirectional", request_id: REQUEST_ID })],
-  ["circuit", JSON.stringify({ contract_address: ADDRESS, request_id: REQUEST_ID })],
-  ["request_id", JSON.stringify({ contract_address: ADDRESS, circuit: "postRespondBidirectional" })],
+  ["contract_address", JSON.stringify({ ...bidirectional(), contract_address: undefined })],
+  ["circuit", JSON.stringify({ ...bidirectional(), circuit: undefined })],
+  ["request_id", JSON.stringify({ ...bidirectional(), request_id: undefined })],
+  ["signature", JSON.stringify({ ...bidirectional(), signature: undefined })],
+  ["signature.big_r", JSON.stringify({ ...bidirectional(), signature: { s: SIGNATURE.s, recovery_id: 1 } })],
+  ["signature.big_r.x", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, big_r: { y: SIGNATURE.big_r.y } } })],
+  ["signature.s", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, s: undefined } })],
+  ["signature.recovery_id", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, recovery_id: undefined } })],
 ];
 
 const WRONG_JSON_TYPES: [string, Record<string, unknown>, string][] = [
   ["contract_address as a number", { ...bidirectional(), contract_address: 1 }, "invalid JSON: `contract_address` must be a string"],
-  ["sig_r as a number", { ...bidirectional(), sig_r: 1 }, "invalid JSON: `sig_r` must be a string"],
+  ["signature as a string", { ...bidirectional(), signature: "nope" }, "invalid JSON: `signature` must be an object"],
+  ["signature as an array", { ...bidirectional(), signature: [] }, "invalid JSON: `signature` must be an object"],
+  ["big_r as a string", { ...bidirectional(), signature: { ...SIGNATURE, big_r: "nope" } }, "invalid JSON: `signature.big_r` must be an object"],
+  ["big_r.x as a number", { ...bidirectional(), signature: { ...SIGNATURE, big_r: { x: 1, y: SIGNATURE.big_r.y } } }, "invalid JSON: `signature.big_r.x` must be a string"],
   ["output_len as a string", { ...bidirectional(), output_len: "64" }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len negative", { ...bidirectional(), output_len: -1 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len fractional", { ...bidirectional(), output_len: 1.5 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len beyond u8", { ...bidirectional(), output_len: 256 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-  ["recovery_id as a string", { ...signatureResponse(), recovery_id: "1" }, "invalid JSON: `recovery_id` must be an integer in 0..=255"],
+  ["recovery_id as a string", { ...signatureResponse(), signature: { ...SIGNATURE, recovery_id: "1" } }, "invalid JSON: `signature.recovery_id` must be an integer in 0..=255"],
 ];
 
 describe("parseRespondRequest", () => {
@@ -215,9 +236,22 @@ describe("parseRespondRequest", () => {
   });
 
   it("treats null exactly as absent, matching serde's Option", () => {
-    const parsed = parseRespondRequest(JSON.stringify({ ...bidirectional(), big_r_x: null, big_r_y: null, s: null }));
-    expect(parsed.big_r_x).toBeUndefined();
+    // A serde caller serializes the fields its circuit does not use as nulls;
+    // rejecting those as contamination would reject every standard caller. The
+    // nulled fields here are bidirectional-only — this body's own signature
+    // (big_r_x/big_r_y/s/recovery_id) is present and stays required.
+    const parsed = parseRespondRequest(
+      JSON.stringify({ ...signatureResponse(), serialized_output: null, output_len: null }),
+    );
+    expect(parsed.serialized_output).toBeUndefined();
     expect(() => validateRespondRequest(parsed)).not.toThrow();
+  });
+
+  it("rejects a required signature field sent as null, since null is absent", () => {
+    // The flip side of null-equals-absent: nulling a field the circuit NEEDS
+    // is a missing signature, never a present-but-empty one.
+    const body = JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, s: null } });
+    expect(() => parseRespondRequest(body)).toThrowError("invalid JSON: missing field `signature.s`");
   });
 
   it("ignores unknown fields, as the wire always has", () => {
@@ -240,8 +274,10 @@ describe("parseRespondRequest", () => {
 
 /**
  * Both circuits take exactly two arguments: the request id, then the whole
- * event struct. The struct's field names are the Compact declaration's, and its
- * numeric members are `bigint`, because `Uint<N>` is generated as `bigint`.
+ * event struct. The struct's field names are the Compact declaration's, its
+ * numeric members are `bigint` (`Uint<N>` generates as `bigint`), and the
+ * signature is the nested `Signature { bigR: { x, y }, s, recoveryId }`
+ * struct — the wire's big-endian bytes land in it verbatim.
  */
 describe("respondCall", () => {
   it("builds requestId plus one SignatureRespondedEvent", () => {
@@ -251,17 +287,19 @@ describe("respondCall", () => {
 
     expect(call.args).toHaveLength(2);
     expect(hex(call.args[0])).toBe(REQUEST_ID);
-    expect(Object.keys(signatureEvent(request)).sort()).toStrictEqual(["bigRx", "bigRy", "recoveryId", "s"]);
+    const event = signatureEvent(request);
+    expect(Object.keys(event)).toStrictEqual(["signature"]);
+    expect(Object.keys(event.signature).sort()).toStrictEqual(["bigR", "recoveryId", "s"]);
+    expect(Object.keys(event.signature.bigR).sort()).toStrictEqual(["x", "y"]);
   });
 
-  it("carries the postSignatureResponse scalars unchanged", () => {
+  it("carries the wire's big-endian components into the struct unchanged", () => {
     const event = signatureEvent(signatureResponse());
 
-    expect(hex(event.bigRx)).toBe("22".repeat(32));
-    expect(hex(event.bigRy)).toBe("33".repeat(32));
-    expect(hex(event.s)).toBe("44".repeat(32));
-    expect(event.recoveryId).toBe(1n);
-    expect(typeof event.recoveryId).toBe("bigint");
+    expect(hex(event.signature.bigR.x)).toBe("22".repeat(32));
+    expect(hex(event.signature.bigR.y)).toBe("33".repeat(32));
+    expect(hex(event.signature.s)).toBe("44".repeat(32));
+    expect(event.signature.recoveryId).toBe(1n);
   });
 
   it("builds requestId plus one RespondBidirectionalEvent", () => {
@@ -270,20 +308,16 @@ describe("respondCall", () => {
     const call = respondCall(request);
 
     expect(hex(call.args[0])).toBe(REQUEST_ID);
-    expect(Object.keys(bidirectionalEvent(request)).sort()).toStrictEqual([
+    const event = bidirectionalEvent(request);
+    expect(Object.keys(event).sort()).toStrictEqual([
       "outputLen",
-      "r",
-      "recoveryId",
-      "s",
       "serializedOutput",
+      "signature",
     ]);
-  });
-
-  it("passes sig_r/sig_s straight through as r/s, already little-endian", () => {
-    const event = bidirectionalEvent(bidirectional({ sig_r: `${"00".repeat(31)}01`, sig_s: `01${"00".repeat(31)}` }));
-
-    expect(hex(event.r)).toBe(`${"00".repeat(31)}01`);
-    expect(hex(event.s)).toBe(`01${"00".repeat(31)}`);
+    expect(hex(event.signature.bigR.x)).toBe("22".repeat(32));
+    expect(hex(event.signature.bigR.y)).toBe("33".repeat(32));
+    expect(hex(event.signature.s)).toBe("44".repeat(32));
+    expect(event.signature.recoveryId).toBe(0n);
   });
 
   it("keeps serializedOutput at its full 128 bytes and outputLen as a bigint", () => {
@@ -301,15 +335,15 @@ describe("wire fixtures", () => {
   it("accepts the pinned postSignatureResponse body", () => {
     const body =
       `{"contract_address":"${ADDRESS}","circuit":"postSignatureResponse","request_id":"${REQUEST_ID}",` +
-      `"big_r_x":"${"22".repeat(32)}","big_r_y":"${"33".repeat(32)}","s":"${"44".repeat(32)}","recovery_id":1}`;
+      `"signature":{"big_r":{"x":"2222222222222222222222222222222222222222222222222222222222222222","y":"3333333333333333333333333333333333333333333333333333333333333333"},"s":"4444444444444444444444444444444444444444444444444444444444444444","recovery_id":1}}`;
     expect(() => validateRespondRequest(parseRespondRequest(body))).not.toThrow();
   });
 
   it("accepts the pinned postRespondBidirectional body byte for byte", () => {
     const body =
       `{"contract_address":"${ADDRESS}","circuit":"postRespondBidirectional","request_id":"${REQUEST_ID}",` +
-      `"serialized_output":"${"55".repeat(128)}","output_len":64,"sig_r":"${"66".repeat(32)}",` +
-      `"sig_s":"${"77".repeat(32)}","recovery_id":0}`;
+      `"serialized_output":"${"55".repeat(128)}","output_len":64,` +
+      `"signature":{"big_r":{"x":"${"22".repeat(32)}","y":"${"33".repeat(32)}"},"s":"${"44".repeat(32)}","recovery_id":0}}`;
     const request = parseRespondRequest(body);
     expect(() => validateRespondRequest(request)).not.toThrow();
     expect(request).toEqual(bidirectional());
@@ -343,8 +377,8 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ["an unknown circuit", JSON.stringify(signatureResponse({ circuit: "postRespond" })), "unknown circuit postRespond"],
   [
     "a contaminated body",
-    JSON.stringify(bidirectional({ big_r_x: "22".repeat(32) })),
-    "postRespondBidirectional takes no postSignatureResponse fields",
+    JSON.stringify(signatureResponse({ serialized_output: "55".repeat(128) })),
+    "postSignatureResponse takes no bidirectional fields",
   ],
 ];
 

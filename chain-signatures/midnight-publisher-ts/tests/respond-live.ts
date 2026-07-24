@@ -60,8 +60,8 @@ async function readRespondState(
     if (toHex(entryKey.requestId) !== requestId) continue;
     landed.push(
       `count=${entryKey.count} serializedOutput=${toHex(value.serializedOutput).slice(0, 16)}… ` +
-        `outputLen=${value.outputLen} r=${toHex(value.r).slice(0, 12)}… s=${toHex(value.s).slice(0, 12)}… ` +
-        `recoveryId=${value.recoveryId}`,
+        `outputLen=${value.outputLen} bigR.x=${toHex(value.signature.bigR.x).slice(0, 12)}… ` +
+        `s=${toHex(value.signature.s).slice(0, 12)}… recoveryId=${value.signature.recoveryId}`,
     );
   }
   return {
@@ -152,9 +152,11 @@ const body = JSON.stringify({
   request_id: requestId,
   serialized_output: serializedOutput,
   output_len: 4,
-  sig_r: `${"00".repeat(31)}01`,
-  sig_s: `${"00".repeat(31)}02`,
-  recovery_id: 1,
+  signature: {
+    big_r: { x: `${"00".repeat(31)}01`, y: `${"00".repeat(31)}02` },
+    s: `${"00".repeat(31)}03`,
+    recovery_id: 1,
+  },
 });
 
 // The handler logs the submitted transaction id; tap it rather than duplicating

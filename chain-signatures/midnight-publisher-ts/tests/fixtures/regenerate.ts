@@ -33,6 +33,17 @@ const CALLER = "dcd470fbc066befe0b6cddcf273dc9a838832ccbb8327f2625ec7028b0a6f0d2
 const SINGLETON_DEPLOY_HEIGHT = 1352;
 const NOTIFY_HEIGHT = 1366;
 
+/**
+ * The write-path harness singleton: the CURRENT contract build, deployed
+ * fresh (`tests/bootstrap-live.ts`) with one respond posted by
+ * `tests/respond-live.ts`, captured at the block that post landed in. Kept
+ * separate from the decode singleton above: the write path executes the
+ * compiled circuit against this state, so its embedded verifier keys must
+ * match `dist/managed` — redeploy and recapture on every contract change.
+ */
+const RESPOND_SINGLETON = "82ebe184cd00e19e422f0e7aa246012e11160ba3b98c09aace67dab1664af182";
+const RESPOND_STATE_HEIGHT = 25087;
+
 const provider = new WsProvider(process.env["MIDNIGHT_NODE_URL"] ?? "ws://127.0.0.1:9944");
 const api = await ApiPromise.create({ provider, noInitWarn: true });
 
@@ -73,12 +84,14 @@ const postState = await stateBlob(SINGLETON, NOTIFY_HEIGHT);
 const callerState = await stateBlob(CALLER, NOTIFY_HEIGHT);
 const notifyTx = await onlyTxBytes(NOTIFY_HEIGHT);
 const deployTx = await onlyTxBytes(SINGLETON_DEPLOY_HEIGHT);
+const respondState = await stateBlob(RESPOND_SINGLETON, RESPOND_STATE_HEIGHT);
 
 write(`singleton-pre-state-${NOTIFY_HEIGHT - 1}.mn`, preState);
 write(`singleton-post-state-${NOTIFY_HEIGHT}.mn`, postState);
 write(`caller-state-${NOTIFY_HEIGHT}.mn`, callerState);
 write(`notify-tx.mn`, txFixture(notifyTx));
 write(`deploy-tx-${SINGLETON_DEPLOY_HEIGHT}.mn`, txFixture(deployTx));
+write(`respond-singleton-state-${RESPOND_STATE_HEIGHT}.mn`, respondState);
 
 write(`golden-state-singleton-${NOTIFY_HEIGHT - 1}.json`, Buffer.from(JSON.stringify(decodeContractState(preState))));
 write(`golden-state-singleton-${NOTIFY_HEIGHT}.json`, Buffer.from(JSON.stringify(decodeContractState(postState))));
