@@ -1,7 +1,9 @@
-# The midnight publisher's offline gate: typecheck plus the full vitest suite.
-# Everything it runs is stack-free by design (pure codecs against checked-in
-# fixtures, stubbed write-path orchestration); the live prove-and-submit tier
-# stays manual (`tests/respond-live.ts`).
+# The midnight publisher's two CI tiers. `test` is the fast offline gate:
+# typecheck plus the full vitest suite, stack-free by design (pure codecs
+# against checked-in fixtures, stubbed write-path orchestration). `respond-live`
+# is the real thing: it boots the dockerized Midnight stack, deploys a fresh
+# singleton with the genesis dev wallet, and drives `tests/respond-live.ts`
+# through an actual prove, balance, submit, and on-chain confirmation.
 name: midnight-publisher-ts
 
 on:
@@ -31,3 +33,51 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx vitest run
+
+  respond-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-publisher-ts
+    env:
+      MIDNIGHT_PUB_PORT: "0"
+      MIDNIGHT_PUB_BIND_HOST: 127.0.0.1
+      MIDNIGHT_PUB_NODE_URL: ws://127.0.0.1:9944
+      MIDNIGHT_PUB_PROOF_SERVER_URL: http://127.0.0.1:6300
+      MIDNIGHT_PUB_INDEXER_URL: http://127.0.0.1:8088/api/v3/graphql
+      MIDNIGHT_PUB_INDEXER_WS_URL: ws://127.0.0.1:8088/api/v3/graphql/ws
+      MIDNIGHT_PUB_MANAGED_DIR: ${{ github.workspace }}/chain-signatures/midnight-publisher-ts/node_modules/@sig-net/midnight-contract/dist/managed
+      # The public genesis dev wallet of a fresh `undeployed` chain; not a secret.
+      MIDNIGHT_PUB_FUNDING_SEED: "0000000000000000000000000000000000000000000000000000000000000001"
+      MIDNIGHT_PUB_NETWORK_ID: undeployed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+      - run: npm ci
+      - name: Start the Midnight stack
+        run: docker compose -f tests/live-stack.compose.yml up -d
+      - name: Wait for node, proof server, and indexer
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' http://127.0.0.1:9944 > /dev/null \
+              && curl -sf http://127.0.0.1:6300/health > /dev/null \
+              && curl -sf -X POST -H 'content-type: application/json' -d '{"query":"{ block { height } }"}' http://127.0.0.1:8088/api/v3/graphql > /dev/null \
+              && exit 0
+            sleep 3
+          done
+          echo "stack did not become ready" >&2
+          docker compose -f tests/live-stack.compose.yml logs --tail 100
+          exit 1
+      - name: Deploy a fresh singleton
+        id: deploy
+        run: echo "address=$(npx tsx tests/bootstrap-live.ts | tee /dev/stderr | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Prove, submit, and confirm on chain
+        run: npx tsx tests/respond-live.ts "${{ steps.deploy.outputs.address }}"
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -f tests/live-stack.compose.yml logs --tail 200
