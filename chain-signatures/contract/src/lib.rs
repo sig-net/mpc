@@ -756,7 +756,7 @@ impl VersionedMpcContract {
     }
 
     pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
-        self.checkpoints().get(&chain)
+        self.latest_checkpoints().get(&chain)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -769,7 +769,7 @@ impl VersionedMpcContract {
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
                         .into_iter()
-                        .filter_map(|chain| self.checkpoints().get(&chain).map(|cp| (chain, *cp)))
+                        .filter_map(|chain| self.latest_checkpoint(chain).map(|cp| (chain, *cp)))
                         .collect(),
                 ),
             };
@@ -808,8 +808,7 @@ impl VersionedMpcContract {
     /// The return value is `Ok(true)` when the submitted checkpoint is already
     /// settled at the same height or becomes settled during this call. It is
     /// `Ok(false)` when the vote was recorded but more votes are still
-    /// required. A checkpoint behind the latest checkpoint returns the
-    /// [`CheckpointError::CheckpointBehind`] error instead of a boolean result.
+    /// required.
     ///
     /// Returns an error if the protocol is not running, the caller is not an
     /// eligible participant, the submitted checkpoint is behind the latest
@@ -826,7 +825,7 @@ impl VersionedMpcContract {
             _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
         };
 
-        if let Some(existing) = self.checkpoints().get(&checkpoint.chain) {
+        if let Some(existing) = self.latest_checkpoint(checkpoint.chain) {
             if existing.height > checkpoint.height {
                 // checkpoint is behind, reject.
                 return Err(CheckpointError::CheckpointBehind.into());
@@ -841,7 +840,7 @@ impl VersionedMpcContract {
         }
 
         let vote_count = {
-            let checkpoint_votes = self.mutable_checkpoint_votes();
+            let checkpoint_votes = self.checkpoint_votes_mut();
             let voters = checkpoint_votes.entry(checkpoint);
             voters.insert(voter);
             voters.len()
@@ -850,17 +849,13 @@ impl VersionedMpcContract {
         if vote_count < threshold {
             return Ok(false);
         }
-
-        self.mutable_checkpoints()
-            .insert(checkpoint.chain, checkpoint);
+        self.insert_checkpoint(checkpoint.chain, checkpoint);
 
         // Remove stale votes where candidate checkpoint is less than or equal to
         // this voted in consensus checkpoint.
-        self.mutable_checkpoint_votes()
-            .votes
-            .retain(|candidate, _| {
-                candidate.chain != checkpoint.chain || candidate.height > checkpoint.height
-            });
+        self.checkpoint_votes_mut().votes.retain(|candidate, _| {
+            candidate.chain != checkpoint.chain || candidate.height > checkpoint.height
+        });
         Ok(true)
     }
 
@@ -1095,19 +1090,21 @@ impl VersionedMpcContract {
         Ok(voter)
     }
 
-    fn checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
         }
     }
 
-    fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
         match self {
-            Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+            Self::V0(mpc_contract) => {
+                mpc_contract.latest_checkpoints.insert(chain, checkpoint);
+            }
         }
     }
 
-    fn mutable_checkpoint_votes(&mut self) -> &mut CheckpointVotes {
+    fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.checkpoint_votes,
         }
@@ -1254,7 +1251,7 @@ mod tests {
             "direct checkpoint lookup should reproduce production .get() behavior"
         );
         assert!(
-            contract.checkpoints().iter().next().is_none(),
+            contract.latest_checkpoints().iter().next().is_none(),
             "test setup should reproduce the broken iterable index"
         );
 

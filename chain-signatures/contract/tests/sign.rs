@@ -403,6 +403,35 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .json()?;
     assert_eq!(latest, Some(checkpoint));
 
+    let competing_a = ConsensusCheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
+    let competing_b = ConsensusCheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
+    let first_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_a }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(first_competing_vote.is_success());
+    assert!(!first_competing_vote.json::<bool>()?);
+
+    let second_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_competing_vote.is_success());
+    assert!(!second_competing_vote.json::<bool>()?);
+
+    let finalize_competing_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(finalize_competing_vote.is_success());
+    assert!(finalize_competing_vote.json::<bool>()?);
+
     let stale = ConsensusCheckpointDigest::new(Chain::Solana, 119, [9u8; 32]);
     let stale_vote = accounts[2]
         .call(contract.id(), "vote_checkpoint")
