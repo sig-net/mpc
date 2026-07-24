@@ -43,8 +43,7 @@ impl Drop for RunningCantonIndexer {
 }
 
 /// Spawn `CantonIndexer::run()` against the sandbox, waiting for catchup to
-/// complete before returning. Accepts Backlog as parameter (needed for
-/// checkpoint tests).
+/// complete before returning.
 async fn run_canton_indexer(
     sandbox: &CantonSandbox,
     backlog: Backlog,

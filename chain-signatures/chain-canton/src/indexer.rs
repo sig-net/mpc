@@ -156,10 +156,7 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
     }
 
     // TODO: ws_conn + last_seen_offset are threaded as explicit params because
-    // `run(&self)` is immutable. A cleaner shape (matching Solana/Ethereum) would
-    // spawn a WS-driver task owning the connection and emitting Updates on a
-    // channel, leaving `run()` to drain it; CantonClient is Clone so this is
-    // feasible. Revisit post-migration.
+    // `run(&self)` is immutable. Consider better approache post migration
     async fn connect_and_subscribe(
         &self,
         ws_conn: &mut CantonConnection,
@@ -235,9 +232,9 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         }
     }
 
-    /// Decode a ledger update, emit its events + a `Block(offset)`, and report the
-    /// offset so the caller can advance its cursor. Errors only when `events_tx` is
-    /// closed (supervisor shutdown) — there is no transient failure worth retrying.
+    /// Process a single `Update` (transaction or offset checkpoint) and emit the
+    /// corresponding `ChainEvent::Block(offset)` event. Returns the offset of the
+    /// processed update.
     async fn process_update(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -264,9 +261,8 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         Ok(offset)
     }
 
-    /// Drive the WebSocket until `last_seen_offset >= target_offset`. A 2s per-pull
-    /// timeout falls back to checking the ledger end: if the global ledger has passed
-    /// the target with no events for our party, catchup completes without emitting.
+    /// Process catchup from `last_seen_offset` (exclusive) to `target_offset` (inclusive),
+    /// emitting `ChainEvent::Block(offset)` events for each processed update.
     async fn process_catchup_offset(
         &self,
         ws_conn: &mut CantonConnection,
