@@ -71,6 +71,9 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
 type CatchupBlockItem = (u64, SolanaCatchupBlock);
 
 impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
+    /// Delay between retries of transient RPC failures
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+
     pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
             format!(
@@ -337,8 +340,6 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     const CHAIN: Chain = Chain::Solana;
-    type Block = (u64, SolanaCatchupBlock);
-    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn run(
         &self,
