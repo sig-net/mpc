@@ -6,8 +6,8 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
-    "chain-signatures/signet-crypto",
-    "chain-signatures/signet-primitives",
+    "signet-crypto",
+    "signet-primitives",
     "integration-tests", 
     "chain-signatures/chain-integration-core", 
     "chain-signatures/chain-canton", 
@@ -94,8 +94,8 @@ mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
-signet-crypto = { path = "./chain-signatures/signet-crypto" }
-signet-primitives = { path = "./chain-signatures/signet-primitives" }
+signet-crypto = { path = "./signet-crypto" }
+signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
 
 [patch.crates-io]

@@ -3,7 +3,7 @@
 Internal, node-side cryptography for the MPC network. **Not published.**
 
 If you are building a client against the network, you almost certainly want
-[`signet-crypto`](../signet-crypto) instead — that is the small, published crate
+[`signet-crypto`](../../signet-crypto) instead — that is the small, published crate
 of key-derivation primitives (epsilon derivation and derived-key computation)
 that produce keys and request identifiers matching the network.
 
