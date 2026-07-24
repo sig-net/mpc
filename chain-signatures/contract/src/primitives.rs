@@ -1,5 +1,5 @@
 pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
-pub use signet_primitives::Chain;
+pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
 use crate::state::ProtocolContractState;
@@ -386,13 +386,6 @@ pub struct InternalSignRequest {
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,
-}
-
-#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]
-pub struct SignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
 }
 
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
