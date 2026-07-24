@@ -204,11 +204,6 @@ fn parse_signature_responded_event(
     })
 }
 
-pub fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> std::ops::Range<u64> {
-    let start = checkpoint.saturating_add(1).min(anchor_height);
-    start..anchor_height
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,30 +279,6 @@ mod tests {
             der,
             recovery_id: 0,
         })
-    }
-
-    #[test]
-    fn catchup_range_without_checkpoint_starts_at_one() {
-        let offsets: Vec<_> = catchup_offset_range(0, 5).collect();
-        assert_eq!(offsets, vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn catchup_range_uses_checkpoint_plus_one() {
-        let offsets: Vec<_> = catchup_offset_range(5, 9).collect();
-        assert_eq!(offsets, vec![6, 7, 8]);
-    }
-
-    #[test]
-    fn catchup_range_empty_when_caught_up() {
-        let offsets: Vec<_> = catchup_offset_range(9, 9).collect();
-        assert!(offsets.is_empty());
-    }
-
-    #[test]
-    fn catchup_range_empty_when_checkpoint_past_anchor() {
-        let offsets: Vec<_> = catchup_offset_range(12, 9).collect();
-        assert!(offsets.is_empty());
     }
 
     #[test]
