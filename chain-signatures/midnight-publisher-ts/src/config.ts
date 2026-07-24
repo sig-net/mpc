@@ -1,4 +1,4 @@
-/** `MIDNIGHT_PUB_*` configuration, keeping the Rust implementation's variable names. */
+/** `MIDNIGHT_PUB_*` configuration. The variable names are the deployment contract; never rename casually. */
 
 import { z } from "zod";
 

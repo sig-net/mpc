@@ -20,7 +20,7 @@ import { ContractCall } from "@midnightntwrk/ledger-v9";
 import type { AlignedValue, FinalizedTransaction, Transcript } from "@midnightntwrk/ledger-v9";
 
 /**
- * ledger-v9 tags every `Fr`; Rust's `Fr::as_le_bytes()` is the bare 32. Failing
+ * ledger-v9 tags every `Fr`; the wire carries the bare 32 LE bytes. Failing
  * to strip it is SILENT — commitments come out 66 hex instead of 64 and every
  * self-consistent test still passes.
  */
@@ -80,8 +80,8 @@ function positionNumber(position: bigint): number {
 }
 
 /**
- * Plain `<`/`>` on ASCII hex is the byte order Rust's `String::cmp` gives;
- * `localeCompare` is not. Exported because no fixture can exercise it.
+ * Plain `<`/`>` on ASCII hex is byte order; `localeCompare` is locale
+ * collation and is not. Exported because no fixture can exercise it.
  */
 export function compareClaimedCalls(a: ClaimedCall, b: ClaimedCall): number {
   if (a.position !== b.position) return a.position - b.position;

@@ -2,21 +2,18 @@
  * `POST /decode/transactions` tests.
  *
  * All offline, and that is the point: the seam is a pure codec, so there is
- * nothing left that a running node could tell us.
- * `tests/fixtures/rust-block-1366.json` is the VERBATIM `GET /block` body of the
- * Rust `midnight-publisher` binary for block 1366, and `notify-tx.mn` holds that
- * block's one transaction. Block 1366 carried exactly one transaction slot, so
- * decoding that single blob must still reproduce the golden byte for byte:
- * correctness stays anchored to the reference implementation rather than to
- * hand-written expectations, even though the caller now hands the bytes over
- * instead of this service walking the block for them.
+ * nothing left that a running node could tell us. `notify-tx.mn` holds block
+ * 1366's one transaction, read off the live local chain;
+ * `tests/fixtures/golden-block-1366.json` is its expected decode, captured and
+ * independently cross-verified byte for byte before this suite froze it. Block
+ * 1366 carried exactly one transaction slot, so decoding that single blob must
+ * still reproduce the golden byte for byte: correctness stays anchored to a
+ * verified capture rather than to hand-written expectations, even though the
+ * caller now hands the bytes over instead of this service walking the block
+ * for them.
  *
- * The live and acceptance tiers this file used to carry pulled the transaction
- * out of a real block's extrinsics and byte-diffed `GET /block` against the Rust
- * binary. Neither endpoint exists on either side now; the coverage they gave —
- * same bytes, same decoder, same golden — is kept by driving the fixture through
- * the real HTTP server below. Unwrapping the blob out of a block is the caller's
- * job, and its traps are recorded in `src/block.ts`.
+ * Unwrapping the blob out of a block is the caller's job, and its traps are
+ * recorded in `src/block.ts`.
  */
 
 import { readFileSync } from "node:fs";
@@ -116,22 +113,22 @@ function txBody(...names: readonly string[]): string {
   return JSON.stringify({ bytes: names.map((name) => toHex(fixtureTxBytes(name))) });
 }
 
-describe("offline: the decoded transactions are byte-identical to the Rust seam's", () => {
-  it("reproduces the Rust binary's block-1366 body exactly", () => {
+describe("offline: the decoded transactions are byte-identical to the captured golden's", () => {
+  it("reproduces the reference golden's block-1366 body exactly", () => {
     // Block 1366 held exactly one transaction slot, so decoding the captured
     // transaction alone must reproduce the whole response: field order
     // (transactions/skipped, index/calls, address/communication_commitment/
     // claimed, position/address/entry_point/commitment), the stripped Fr tag,
     // and the claimed-call ordering all have to match at once.
     expect(JSON.stringify(decodeTransactions([fixtureTxBytes("notify-tx.mn")]))).toBe(
-      goldenText("rust-block-1366.json"),
+      goldenText("golden-block-1366.json"),
     );
   });
 
   it("reproduces it over HTTP too", async () => {
     expect(await post("/decode/transactions", txBody("notify-tx.mn"))).toEqual({
       status: 200,
-      body: goldenText("rust-block-1366.json"),
+      body: goldenText("golden-block-1366.json"),
     });
   });
 });
@@ -156,8 +153,8 @@ describe("offline: the ledger-v9 Fr tag", () => {
       expect(value.slice(0, 2)).toBe("73");
     }
 
-    // ...and every commitment this seam emits is the bare 32-byte value Rust's
-    // `Fr::as_le_bytes()` produces.
+    // ...and every commitment this seam emits is the bare 32-byte
+    // little-endian value, tag stripped.
     for (const call of calls) {
       expect(call.communication_commitment).toMatch(/^[0-9a-f]{64}$/);
       for (const claim of call.claimed) expect(claim.commitment).toMatch(/^[0-9a-f]{64}$/);
@@ -205,15 +202,13 @@ describe("offline: cross-call provenance", () => {
     expect(claim?.commitment).toBe(singleton?.communication_commitment);
   });
 
-  it("decodes the pre-SGN2 reference transaction into a well-formed response", () => {
-    // It may carry zero contract calls; that is asserted as well-formed, not required.
-    const response = decodeTransactions([fixtureTxBytes("serialized_tx.mn")]);
-    expect(response.skipped).toEqual([]);
-    expect(response.transactions).toHaveLength(1);
-    expect(response.transactions[0]?.calls).toHaveLength(
-      callsFromTx(decodeTransaction(fixtureTxBytes("serialized_tx.mn"))).length,
-    );
-    expect(JSON.stringify(response).startsWith('{"transactions":')).toBe(true);
+  it("decodes a call-free transaction (the singleton deploy) into an empty calls list", () => {
+    // A deploy is a `ContractAction` with no transcript and no commitment, so
+    // the `instanceof` filter must drop it and answer cleanly, never fail.
+    expect(decodeTransactions([fixtureTxBytes("deploy-tx-1352.mn")])).toEqual({
+      transactions: [{ index: 0, calls: [] }],
+      skipped: [],
+    });
   });
 });
 
@@ -254,9 +249,8 @@ describe("offline: one bad transaction costs that transaction only", () => {
 /**
  * Every `(map key hex, cell atoms)` pair reachable in a walked state tree.
  *
- * Mirrors the Rust `block.rs` test helper of the same name: it lives with these
- * tests because it exists to demonstrate the seam's central design claim, that a
- * state diff already answers "what did this block write".
+ * Lives with these tests because it demonstrates the seam's central design
+ * claim: a state diff already answers "what did this block write".
  */
 function mapEntries(node: StateNode): Array<[string, readonly string[]]> {
   const out: Array<[string, readonly string[]]> = [];
@@ -323,7 +317,7 @@ describe("POST /decode/transactions: the envelope", () => {
     const bytes = [`0x${toHex(fixtureTxBytes("notify-tx.mn"))}`];
     expect(await post("/decode/transactions", JSON.stringify({ bytes }))).toEqual({
       status: 200,
-      body: goldenText("rust-block-1366.json"),
+      body: goldenText("golden-block-1366.json"),
     });
   });
 });

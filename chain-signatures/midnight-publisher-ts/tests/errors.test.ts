@@ -150,8 +150,8 @@ describe("the redaction funnel", () => {
 
   it("carries the stage when one is given, and omits the key when not", () => {
     // The stage is the machine-readable half the caller's alerting branches on;
-    // an absent stage must be an absent key, not a null, so a strict parser on
-    // the Rust side can make the field optional.
+    // an absent stage must be an absent key, not a null, so the caller's strict
+    // parser can make the field optional.
     const staged = failRedacted("submit_rejected", "the chain refused it", [], undefined, "submit");
     expect(JSON.parse(staged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it", stage: "submit" });
     const unstaged = failRedacted("submit_rejected", "the chain refused it", []);

@@ -3,10 +3,8 @@
  * indexer, no proof server, no wallet. The live prove-and-submit is a script,
  * `tests/respond-live.ts`.
  *
- * These tests are the seam's specification. The Rust implementation's
- * `validation_rules`, `circuit_args_are_request_id_plus_one_event_object` and
- * `event_argument_is_json_with_the_declared_field_types` are reproduced case for
- * case, plus the negative cases they did not cover (wrong JSON types, `null`
+ * These tests are the seam's specification: every acceptance, every rejection
+ * with its exact body, and the JSON-shape negatives (wrong types, `null`
  * versus absent, unknown fields, check ordering).
  */
 
@@ -99,12 +97,7 @@ describe("validateRespondRequest: accepts", () => {
   });
 });
 
-/**
- * Every rejection, with the exact 400 body. The messages are the Rust
- * implementation's verbatim, except that its retired circuit name `postRespond`
- * is spelled `postSignatureResponse` here, which is what the deployed contract
- * declares.
- */
+/** Every rejection, with the exact 400 body. */
 const REJECTIONS: [string, RespondRequest, string][] = [
   // ---- address and request id, checked before the circuit ----
   ["address too short", signatureResponse({ contract_address: "ab".repeat(31) }), "contract_address must be 64 lowercase hex"],
@@ -146,8 +139,7 @@ const REJECTIONS: [string, RespondRequest, string][] = [
   ["contaminated with s", bidirectional({ s: "44".repeat(32) }), "postRespondBidirectional takes no postSignatureResponse fields"],
 
   // ---- circuit names ----
-  ["retired Rust name postRespond", signatureResponse({ circuit: "postRespond" }), "unknown circuit postRespond"],
-  ["retired name respond", signatureResponse({ circuit: "respond" }), "unknown circuit respond"],
+  ["an unrecognized circuit name", signatureResponse({ circuit: "postRespond" }), "unknown circuit postRespond"],
   ["empty circuit", signatureResponse({ circuit: "" }), "unknown circuit "],
   ["wrong case", signatureResponse({ circuit: "postsignatureresponse" }), "unknown circuit postsignatureresponse"],
   ["the notify circuit is not postable here", signatureResponse({ circuit: "signBidirectionalEvent" }), "unknown circuit signBidirectionalEvent"],
@@ -159,7 +151,7 @@ describe.each(REJECTIONS)("validateRespondRequest rejects %s", (_label, request,
   });
 });
 
-describe("validateRespondRequest: check order matches the Rust implementation", () => {
+describe("validateRespondRequest: checks fire in their pinned wire order", () => {
   it("reports the address before the request id", () => {
     expect(() => validateRespondRequest(signatureResponse({ contract_address: "nope", request_id: "nope" }))).toThrowError(
       "contract_address must be 64 lowercase hex",
@@ -228,7 +220,7 @@ describe("parseRespondRequest", () => {
     expect(() => validateRespondRequest(parsed)).not.toThrow();
   });
 
-  it("ignores unknown fields, as the Rust struct does", () => {
+  it("ignores unknown fields, as the wire always has", () => {
     const body = JSON.stringify({ ...bidirectional(), output_hash: "deadbeef", extra: 1 });
     expect(() => validateRespondRequest(parseRespondRequest(body))).not.toThrow();
   });
@@ -304,10 +296,7 @@ describe("respondCall", () => {
   });
 });
 
-/**
- * The exact bodies the Rust test suite pins, minus its retired circuit name.
- * If either implementation's field set drifts, one of these fails.
- */
+/** The exact wire bodies this seam accepts, byte for byte. If the field set drifts, one of these fails. */
 describe("wire fixtures", () => {
   it("accepts the pinned postSignatureResponse body", () => {
     const body =
@@ -326,12 +315,6 @@ describe("wire fixtures", () => {
     expect(request).toEqual(bidirectional());
   });
 
-  it("rejects the Rust body that still names the retired postRespond circuit", () => {
-    const body =
-      `{"contract_address":"${ADDRESS}","circuit":"postRespond","request_id":"${REQUEST_ID}",` +
-      `"big_r_x":"${"22".repeat(32)}","big_r_y":"${"33".repeat(32)}","s":"${"44".repeat(32)}","recovery_id":1}`;
-    expect(() => validateRespondRequest(parseRespondRequest(body))).toThrowError("unknown circuit postRespond");
-  });
 });
 
 /** A node client that must never be reached: validation happens before any I/O. */
@@ -367,9 +350,8 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
 
 describe("the JSON preamble", () => {
   it("is byte-identical on this seam, not merely prefix-matched", () => {
-    // Shared with `/decode/contract-state` since both were byte-matched against
-    // the Rust implementation. Pinned on both sides so unifying them cannot
-    // silently move one.
+    // Shared with `/decode/contract-state`; pinned on both sides so unifying
+    // them cannot silently move one.
     expect(() => parseRespondRequest("[]")).toThrow("invalid JSON: expected a JSON object");
   });
 });

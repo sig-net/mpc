@@ -11,7 +11,7 @@
  * submit. The one entry point needing no `PublicDataProvider`, no indexer read,
  * no private-state provider.
  *
- * The request wire is byte-identical to the retired Rust implementation.
+ * The request wire is frozen, pinned case for case by `tests/respond.test.ts`.
  * Replies extend it: `stage` on errors, `tx_id`/`block_hash` on 200.
  */
 
@@ -103,7 +103,7 @@ export type RespondCircuit = ValidatedRespondRequest["circuit"];
 
 // ---- parsing and validation ------------------------------------------------
 
-/** Rust's serde treats `null` and a missing key alike. */
+/** The wire treats `null` and a missing key alike. */
 const absent = (value: unknown): boolean => value === undefined || value === null;
 
 function requiredString(source: Record<string, unknown>, field: string): string {
@@ -126,7 +126,7 @@ function optionalByte(source: Record<string, unknown>, field: string): number | 
   throw badRequest(`invalid JSON: \`${field}\` must be an integer in 0..=255`);
 }
 
-/** Unknown fields are ignored, as the Rust struct does. */
+/** Unknown fields are ignored; only a missing or mistyped known field rejects. */
 export function parseRespondRequest(body: string): RespondRequest {
   const source = jsonObject(body);
 
@@ -148,7 +148,7 @@ export function parseRespondRequest(body: string): RespondRequest {
 /** Present and exactly 32 bytes of lowercase hex. */
 const isHex32 = (value: string | undefined): boolean => value !== undefined && isHex(value, 32);
 
-/** Checks and their order are byte-identical to the Rust `validate`. */
+/** The checks AND their order are wire contract, pinned by `tests/respond.test.ts`. */
 export function validateRespondRequest(request: RespondRequest): asserts request is ValidatedRespondRequest {
   if (!isHex(request.contract_address, 32)) throw badRequest("contract_address must be 64 lowercase hex");
   if (!isHex(request.request_id, 32)) throw badRequest("request_id must be 64 hex");

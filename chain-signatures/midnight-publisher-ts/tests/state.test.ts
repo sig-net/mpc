@@ -2,18 +2,12 @@
  * `POST /decode/contract-state` tests.
  *
  * All offline, and that is the point: the seam is a pure codec, so there is
- * nothing left that a running node could tell us. The goldens in
- * `tests/fixtures/rust-*.json` are the VERBATIM response bodies of the Rust
- * `midnight-publisher` binary, captured from the live stack; the `.mn` fixtures
- * are the same contract-state blobs its own test suite uses. Correctness is
- * anchored to the reference implementation's bytes, not to hand-written
- * expectations, and the tree this seam emits must still match them exactly now
- * that the bytes arrive over HTTP instead of off an RPC.
- *
- * The live and acceptance tiers this file used to carry stood the Rust binary up
- * and byte-diffed `GET /state` against it. Those endpoints no longer exist on
- * either side; the coverage they gave — same bytes, same decoder, same golden —
- * is kept by driving the fixtures through the real HTTP server below.
+ * nothing left that a running node could tell us. The `.mn` fixtures are
+ * contract-state blobs read off the live local chain over RPC; the goldens in
+ * `tests/fixtures/golden-state-*.json` are their expected decoded trees,
+ * captured and independently cross-verified byte for byte before this suite
+ * froze them. Correctness is anchored to those captures, not to hand-written
+ * expectations.
  */
 
 import { readFileSync } from "node:fs";
@@ -32,28 +26,16 @@ import { decodeContractState, walk } from "../src/state.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
+/** The deployed hub (singleton) and the caller's one captured request, on the capture chain. */
+const SINGLETON = "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
+const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
+
 function fixtureBytes(name: string): Uint8Array {
   return Uint8Array.from(readFileSync(`${FIXTURES}${name}`));
 }
 
 function goldenText(name: string): string {
   return readFileSync(`${FIXTURES}${name}`, "utf8");
-}
-
-/**
- * The `tree` member of a golden response as RAW TEXT.
- *
- * Deliberately string surgery rather than `JSON.parse`: round-tripping through a
- * parser launders key order, which is exactly the property under test. The
- * `anchor` the goldens carry belongs to the retired `GET /state` wrapper; the
- * tree beside it is what this seam answers with, unchanged.
- */
-function goldenTree(golden: string): string {
-  const marker = ',"tree":';
-  const start = golden.indexOf(marker);
-  expect(start, "golden must carry a `tree` member").toBeGreaterThan(0);
-  expect(golden.endsWith("}")).toBe(true);
-  return golden.slice(start + marker.length, -1);
 }
 
 /** A config with only the fields the server itself could consult. */
@@ -137,16 +119,16 @@ function stateBody(fixture: string): string {
   return JSON.stringify({ bytes: toHex(fixtureBytes(fixture)) });
 }
 
-describe("offline: the decoded tree is byte-identical to the Rust seam's", () => {
+describe("offline: the decoded tree is byte-identical to the captured golden's", () => {
   const TREE_GOLDENS: ReadonlyArray<readonly [string, string]> = [
-    ["singleton-post-state-1366.mn", "rust-state-singleton-1366.json"],
-    ["singleton-pre-state-1365.mn", "rust-state-singleton-1365.json"],
+    ["singleton-post-state-1366.mn", "golden-state-singleton-1366.json"],
+    ["singleton-pre-state-1365.mn", "golden-state-singleton-1365.json"],
   ];
 
   it.each(TREE_GOLDENS)("%s decodes to %s's tree", (fixture, golden) => {
-    expect(JSON.stringify(decodeContractState(fixtureBytes(fixture)))).toBe(
-      goldenTree(goldenText(golden)),
-    );
+    // Compared as RAW TEXT, never parsed: round-tripping through `JSON.parse`
+    // would launder key order, which is part of what is under test.
+    expect(JSON.stringify(decodeContractState(fixtureBytes(fixture)))).toBe(goldenText(golden));
   });
 
   it.each(TREE_GOLDENS)("%s served over HTTP is %s's tree, byte for byte", async (fixture, golden) => {
@@ -154,14 +136,14 @@ describe("offline: the decoded tree is byte-identical to the Rust seam's", () =>
     // (`kind` first, `key` before `value`) is part of what the consumer parses.
     expect(await post("/decode/contract-state", stateBody(fixture))).toEqual({
       status: 200,
-      body: goldenTree(goldenText(golden)),
+      body: goldenText(golden),
     });
   });
 });
 
 describe("offline: the schema the consumer parses", () => {
   it("tags every node on `kind`, serialized first", () => {
-    const tree = decodeContractState(fixtureBytes("reference-state.mn"));
+    const tree = decodeContractState(fixtureBytes("caller-state-1366.mn"));
     expect(tree.kind).toBe("array");
     // `kind` must serialize FIRST: the consumer's discriminated-union parser and
     // the byte-diff both depend on it.
@@ -169,30 +151,35 @@ describe("offline: the schema the consumer parses", () => {
   });
 
   it("extracts trailing-zero-trimmed atoms in declaration order", () => {
-    const tree = decodeContractState(fixtureBytes("reference-state.mn"));
-    if (tree.kind !== "array") throw new Error(`reference state is an ordinal array, got ${tree.kind}`);
+    const tree = decodeContractState(fixtureBytes("caller-state-1366.mn"));
+    if (tree.kind !== "array") throw new Error(`the caller ledger is an ordinal array, got ${tree.kind}`);
 
-    // Ordinal 0 is the configured hub contract address; ordinal 1 is the MPC
-    // attestation Secp256k1Point. Both are independent oracles: they match the
-    // cross-language golden state-fixture that `chain-midnight` parses, which is
-    // what proves the trimmed, declaration-order atom extraction.
-    expect(tree.children[0]).toEqual({
-      kind: "cell",
-      atoms: ["1ff6b01828eaff69181037f78de6ef97fb4e179c082302633f6f99c39790c476"],
-    });
-    expect(tree.children[1]).toEqual({
+    // Ordinal 3 is the hub address this caller was deployed against; ordinal 2
+    // is its MPC attestation Secp256k1Point, 24- and 8-byte atoms in
+    // declaration order, each trailing-zero-trimmed with "" meaning zero.
+    expect(tree.children[3]).toEqual({ kind: "cell", atoms: [SINGLETON] });
+    expect(tree.children[2]).toEqual({
       kind: "cell",
       atoms: [
-        "c54fb75de1cf50d52c6aa024b979dcbcf11306595fa23489",
-        "430667daa96f76bd",
-        "aaa4d27b044ee6320f8d8269caebba009de81c8d143d4ade",
-        "cb49972244d665fe",
+        "231b0992a4116fa52d0dcc9a19752b3854aef6ab58d9528c",
+        "0b1516d5a2f1909a",
+        "88f8208ba07291ba4bc108f5ff853b4e7202fcfa8e54d1be",
+        "d71494b2d5d4a256",
         "",
       ],
     });
-    // Ordinals 3 & 4 are the signBiRequests / signRequests maps.
-    expect(tree.children[3]?.kind).toBe("map");
-    expect(tree.children[4]?.kind).toBe("map");
+    // Ordinal 0 nests the live request: its id, then an inner array whose null
+    // nodes and empty atom pin the rest of the node vocabulary.
+    if (tree.children[0]?.kind !== "array") throw new Error("ordinal 0 is the request block");
+    expect(tree.children[0].children[0]).toEqual({ kind: "cell", atoms: [REQUEST_ID] });
+    expect(tree.children[0].children[1]).toEqual({
+      kind: "array",
+      children: [{ kind: "null" }, { kind: "null" }, { kind: "cell", atoms: [""] }],
+    });
+    // Ordinal 4 is the request map, keyed by the request id.
+    const requests = tree.children[4];
+    if (requests?.kind !== "map") throw new Error("ordinal 4 is the request map");
+    expect(requests.entries.map((entry) => entry.key)).toEqual([REQUEST_ID]);
   });
 
   it("sorts map entries by key hex", () => {
@@ -265,7 +252,7 @@ describe("POST /decode/contract-state: the envelope", () => {
       const bytes = spell(toHex(fixtureBytes("singleton-post-state-1366.mn")));
       expect(await post("/decode/contract-state", JSON.stringify({ bytes }))).toEqual({
         status: 200,
-        body: goldenTree(goldenText("rust-state-singleton-1366.json")),
+        body: goldenText("golden-state-singleton-1366.json"),
       });
     },
   );
