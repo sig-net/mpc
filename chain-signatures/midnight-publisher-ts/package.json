@@ -23,7 +23,8 @@
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
     "@polkadot/api": "^16.5.6",
     "@sig-net/midnight-contract": "0.10.0",
-    "@sig-net/midnight-contract-deploy": "0.10.0"
+    "@sig-net/midnight-contract-deploy": "0.10.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
