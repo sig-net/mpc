@@ -57,7 +57,6 @@ impl GeneratingPhase {
         state.pause_proposing_until = None;
 
         let sign_id = ctx.sign_id;
-        let round = state.round;
 
         tracing::info!(
             ?sign_id,
@@ -71,12 +70,7 @@ impl GeneratingPhase {
             match reservation.commit().await {
                 Some(taken) => PendingPresignature::Available(Box::new(taken)),
                 None => {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?round,
-                        "failed to commit presignature reservation, reorganizing"
-                    );
-                    return state.reorganize();
+                    return state.reorganize("failed to commit presignature reservation");
                 }
             }
         } else {
@@ -100,13 +94,7 @@ impl GeneratingPhase {
         {
             Ok(gen) => gen,
             Err(err) => {
-                tracing::warn!(
-                    ?sign_id,
-                    ?round,
-                    ?err,
-                    "failed to create generator, reorganizing"
-                );
-                return state.reorganize();
+                return state.reorganize(&format!("failed to create generator: {err}"));
             }
         };
 
@@ -128,16 +116,7 @@ impl GeneratingPhase {
 
         match result {
             Ok(()) => SignPhase::Complete(Ok(())),
-            Err(err) => {
-                tracing::warn!(
-                    ?sign_id,
-                    ?round,
-                    ?err,
-                    me=?ctx.governance.me,
-                    "signature generation failed, reorganizing"
-                );
-                state.reorganize()
-            }
+            Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
         }
     }
 
