@@ -36,6 +36,10 @@ pub(super) fn test_mock_network(
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
+    // Participant info as of network start, consulted only for the recipient's
+    // encryption key. A node's active set may shrink during a test; delivery in
+    // the mock network must not depend on the sender's view of liveness.
+    let initial_participants = mesh.borrow().active().clone();
 
     tokio::spawn(async move {
         tracing::debug!(target: "mock_network", "Test message executor started");
@@ -53,7 +57,10 @@ pub(super) fn test_mock_network(
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active().clone();
                     let SendMessage { message: msg, from, to, .. } = &send_message;
-                    let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
+                    let receiver_info = participants
+                        .get(to)
+                        .or_else(|| initial_participants.get(to))
+                        .unwrap_or_else(|| panic!("no participant info for recipient {to:?}"));
                     match SignedMessage::encrypt(
                         &[msg],
                         *from,
