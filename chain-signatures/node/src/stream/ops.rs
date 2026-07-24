@@ -7,7 +7,8 @@ use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignCommand, SignId, SignKind, Signature, SignatureRespondedEvent,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
 };
 
 pub(crate) async fn process_sign_request(
@@ -107,11 +108,9 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    let responded_signature = respond_event.signature;
+    verify_entry_signature(root_pk, &entry, &respond_event.signature, sign_id)?;
 
-    verify_entry_signature(root_pk, &entry, &responded_signature, sign_id)?;
-
-    let event = match &entry.request.kind {
+    match &entry.request.kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             ctx.backlog.remove(source_chain, &sign_id).await;
@@ -121,9 +120,12 @@ pub(crate) async fn process_respond_event(
                     .await
                     .context("failed to send completion for respond event")?;
             }
-            return Ok(());
+            Ok(())
         }
-        SignKind::SignBidirectional(event) => event,
+        SignKind::SignBidirectional(event) => {
+            advance_bidirectional_to_execution(&entry, event, respond_event, sign_id, root_pk, ctx)
+                .await
+        }
         SignKind::RespondBidirectional(_) => {
             anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
         }
@@ -132,7 +134,20 @@ pub(crate) async fn process_respond_event(
                 "unexpected sign type: Checkpoint should not be generated from a sign event"
             );
         }
-    };
+    }
+}
+
+/// Advance a bidirectional sign request from "signature responded" to
+/// "pending execution".
+async fn advance_bidirectional_to_execution(
+    entry: &crate::backlog::BacklogEntry,
+    event: &SignBidirectionalEvent,
+    respond_event: SignatureRespondedEvent,
+    sign_id: SignId,
+    root_pk: mpc_primitives::PublicKey,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let source_chain = respond_event.chain;
 
     if entry.execution_tx().is_some() {
         tracing::info!(
@@ -153,7 +168,7 @@ pub(crate) async fn process_respond_event(
     let epsilon = event.epsilon()?;
     let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
 
-    let mpc_sig = responded_signature;
+    let mpc_sig = respond_event.signature;
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(

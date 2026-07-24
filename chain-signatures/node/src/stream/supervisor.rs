@@ -140,18 +140,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
     let mut load_local = true;
     loop {
-        recover_backlog(
-            chain,
-            load_local,
-            &ctx.backlog,
-            &mut ctx.checkpoints_rx,
-            &mut ctx.mesh_state,
-            &ctx.node_client,
-            &ctx.sign_tx,
-            threshold,
-            &my_account_id,
-        )
-        .await;
+        recover_backlog(chain, load_local, &mut ctx, threshold, &my_account_id).await;
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -316,7 +305,10 @@ mod tests {
         assert!(!result, "matching digest should not trigger regression");
 
         let persisted = backlog.storage.load_latest(chain).await.unwrap();
-        assert!(persisted.is_some(), "matching checkpoint should be persisted");
+        assert!(
+            persisted.is_some(),
+            "matching checkpoint should be persisted"
+        );
         assert_eq!(persisted.unwrap().block_height, 100);
     }
 
