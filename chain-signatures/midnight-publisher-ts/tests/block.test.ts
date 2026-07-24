@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { ContractCall } from "@midnightntwrk/ledger-v9";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   callsFromTx,
@@ -49,22 +50,13 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
 /**
  * A fixture's transaction bytes. The captured fixtures carry only the `tx`
- * member of the toolkit's `SerializedTx`, tagged with its chain.
+ * member of the toolkit's `SerializedTx`, tagged with its chain. Parsed, not
+ * cast: a regenerated fixture with the wrong shape must name itself here, not
+ * surface later as an inexplicable golden diff.
  */
 function fixtureTxBytes(name: string): Uint8Array {
-  const parsed: unknown = JSON.parse(readFileSync(`${FIXTURES}${name}`, "utf8"));
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("tx" in parsed) ||
-    typeof parsed.tx !== "object" ||
-    parsed.tx === null ||
-    !("Midnight" in parsed.tx) ||
-    typeof parsed.tx.Midnight !== "string"
-  ) {
-    throw new Error(`${name} does not hold a Midnight RawTransaction`);
-  }
-  return fromHex(parsed.tx.Midnight);
+  const { tx } = z.object({ tx: z.object({ Midnight: z.string() }) }).parse(JSON.parse(readFileSync(`${FIXTURES}${name}`, "utf8")));
+  return fromHex(tx.Midnight);
 }
 
 function fixtureBytes(name: string): Uint8Array {
@@ -318,6 +310,7 @@ describe("POST /decode/transactions: the envelope", () => {
     ["a bare string `bytes`", '{"bytes":"00"}', "`bytes` must be an array of hex strings"],
     ["a non-string element", '{"bytes":["00",7]}', "`bytes[1]` must be a hex string"],
     ["a non-hex element", '{"bytes":["00","zz"]}', "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["an empty element", '{"bytes":["00",""]}', "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
   ];
 
   it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {

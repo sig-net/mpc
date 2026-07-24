@@ -6,6 +6,13 @@
  * Writes are recovered by diffing contract state across blocks, not from
  * transcripts. This seam answers the one thing a diff cannot: which transaction
  * made a given call.
+ *
+ * Loss is only ever whole-transaction, never silent: a decoded transaction
+ * reports every call and claim in its BODY (presence does not imply the
+ * fallible segment executed; the caller-ledger read is the execution check),
+ * and an undecodable one lands in `skipped`. On a version-matched chain skips
+ * never happen (the node deserialized everything it included), so a skip is
+ * ledger skew or a caller-side extraction bug.
  */
 
 import { deserializeLedgerTransaction, toHex } from "@midnight-ntwrk/midnight-js-utils";
@@ -52,7 +59,11 @@ export interface DecodedTransaction {
 
 export interface DecodedTransactions {
   readonly transactions: readonly DecodedTransaction[];
-  /** Inputs survived rather than failed on. Non-empty means coverage is incomplete. */
+  /**
+   * Inputs survived rather than failed on, `tx[<index>]: <reason>` each.
+   * Non-empty is never routine (see header): treat the block as unprocessed,
+   * not partially indexed.
+   */
   readonly skipped: readonly string[];
 }
 

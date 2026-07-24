@@ -7,11 +7,12 @@
  * prover, not an authorization check.
  *
  * The escape hatch rather than `findDeployedContract`: three pinned reads, then
- * `createUnprovenCallTxFromInitialStates` with `crossContract` omitted, then the
- * stock proof provider, then balance and submit. That is the only entry point
- * needing no `PublicDataProvider`, no indexer read and no private-state provider.
+ * `createUnprovenCallTxFromInitialStates`, the stock proof provider, balance,
+ * submit. The one entry point needing no `PublicDataProvider`, no indexer read,
+ * no private-state provider.
  *
- * The wire contract is byte-identical to the Rust implementation it replaces.
+ * The request wire is byte-identical to the retired Rust implementation.
+ * Replies extend it: `stage` on errors, `tx_id`/`block_hash` on 200.
  */
 
 import { ContractExecutable } from "@midnight-ntwrk/midnight-js-protocol/compact-js";
@@ -288,17 +289,15 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
 // ---- deadlines ---------------------------------------------------------------
 
 /**
- * Hangs, not latencies: a dead indexer leaves the wallet sync pending forever,
- * and a node that dies mid-life leaves `@polkadot/api` queueing calls for a
- * reconnect that may never come. Without these, the caller's `POST /respond`
- * simply never answers, which is the one failure the error model cannot
- * express. balance and submit are deliberately NOT bounded: abandoning a
- * finalized recipe strands the fee coin for the dust-intent TTL (`wallet.ts`).
- *
- * Fields are mutable on purpose, as the test seam that lets a suite shrink a
- * deadline instead of waiting one out.
+ * Per-stage time budgets, applied by `post`'s `runStage`; a stage absent here
+ * runs unbounded. They bound hangs, not latencies: a dead indexer leaves wallet sync
+ * pending forever and `@polkadot/api` queues calls across reconnects
+ * indefinitely, and midnight-js's own `submitTxCore` documents that it "waits
+ * indefinitely", which a service holding the busy gate cannot afford. balance
+ * and submit are deliberately absent: abandoning a finalized recipe strands the
+ * fee coin for the dust-intent TTL (`wallet.ts`). Mutable as the test seam.
  */
-export const RESPOND_DEADLINES = {
+export const RESPOND_DEADLINES: { boot: number } & Partial<Record<string, number>> = {
   /** First respond after boot pays for wallet sync; generous. */
   boot: 90_000,
   /** Three runtime-API reads over an open socket; anything near this is a hang. */
@@ -307,8 +306,9 @@ export const RESPOND_DEADLINES = {
   prove: 60_000,
 };
 
-/** Rejects with `timeoutError()` after `ms`; the abandoned attempt's own late failure is swallowed. */
-export async function withDeadline<T>(work: Promise<T>, ms: number, timeoutError: () => Error): Promise<T> {
+/** Rejects after `ms` (a `what` string becomes a plain deadline `Error`); the abandoned attempt's own late failure is swallowed. */
+export async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: string | (() => Error)): Promise<T> {
+  const timeoutError = typeof onTimeout === "string" ? () => new Error(`${onTimeout} exceeded the ${ms} ms deadline`) : onTimeout;
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
@@ -338,12 +338,9 @@ async function buildPublisher(config: Config) {
   setNetworkId(config.networkId);
 
   const zkConfigProvider = new NodeZkConfigProvider<SignetContractCircuitId>(config.managedDir);
-  // `managedDir` stays the caller's, deliberately: the package's neighbouring
-  // `signetContractCompiledContract` resolves assets from the installed
-  // contract package instead, which would defeat `MIDNIGHT_PUB_MANAGED_DIR` and
-  // gut `assertCompiledContractMatches`'s error, whose whole point is to say
-  // "point MIDNIGHT_PUB_MANAGED_DIR at the assets this contract was deployed
-  // from".
+  // Deliberately the operator's `managedDir`, not the contract package's own
+  // asset resolution: anything else bypasses MIDNIGHT_PUB_MANAGED_DIR and guts
+  // `assertCompiledContractMatches`'s "repoint it" remedy.
   const compiledContract = makeVacantCompiledContract<SignetContract<SignetContractPrivateState>, SignetContractPrivateState>(
     "signet-contract",
     SignetContract,
@@ -451,6 +448,22 @@ async function proveCall(ready: Publisher, call: RespondCall, address: string, s
   return ready.proofProvider.proveTx(unsubmitted.private.unprovenTx);
 }
 
+/**
+ * The failure's rendered cause chain as wire evidence, when it says more than
+ * the one-line message: Effect's `FiberFailure` hides its cause on a Symbol
+ * where `describeFailure` cannot reach it, while `String(error)` runs
+ * `Cause.pretty` and renders the whole chain. Stack frames stripped, capped;
+ * single-line renderings carry nothing `describeFailure` did not already say.
+ */
+function failureDetail(error: unknown): string | undefined {
+  const lines = String(error)
+    .split("\n")
+    .filter((line) => !/^\s+at /.test(line) && line.trim().length > 0);
+  if (lines.length <= 1) return undefined;
+  const rendered = lines.join("\n");
+  return rendered.length > 2_000 ? `${rendered.slice(0, 2_000)}…` : rendered;
+}
+
 /** A {@link PublisherError} passes through, gaining the stage if it lacks one; anything else is named by its stage. */
 async function inStage<T>(stage: RespondStage, run: () => Promise<T>): Promise<T> {
   try {
@@ -466,14 +479,10 @@ async function inStage<T>(stage: RespondStage, run: () => Promise<T>): Promise<T
       throw new PublisherError("ledger_mismatch", describeFailure(error), stage.name);
     }
     const described = describeFailure(error);
-    // Classified against a WIDER haystack than the message it answers with.
-    // Effect's `FiberFailure` keeps its cause on a Symbol, not on `.cause`, so
-    // `describeFailure`'s walk cannot reach it and every submit failure renders
-    // as the same constant `SubmissionError: Transaction submission error`.
-    // `String(error)` runs Effect's own `Cause.pretty` and does render the
-    // nested chain. It is multi-line with stack frames, so it is fit for
-    // matching and not for a response body.
-    throw new PublisherError(classify(stage, `${described}\n${String(error)}`), described, stage.name);
+    // Classified against a WIDER haystack than the answered message, for the
+    // same Symbol-hidden-cause reason `failureDetail` exists; the caller gets
+    // the same evidence in `detail`.
+    throw new PublisherError(classify(stage, `${described}\n${String(error)}`), described, stage.name, failureDetail(error));
   }
 }
 
@@ -493,27 +502,24 @@ async function post(
   ready: Publisher,
   request: ValidatedRespondRequest,
 ): Promise<Posted> {
+  /** Classifies (`inStage`), bounds (`RESPOND_DEADLINES`), and clocks one stage. */
   const timings: string[] = [];
-  const timed = async <T>(stage: RespondStage, run: () => Promise<T>): Promise<T> => {
+  const runStage = async <T>(stage: RespondStage, run: () => Promise<T>): Promise<T> => {
+    const budget = RESPOND_DEADLINES[stage.name];
     const started = performance.now();
     try {
-      return await inStage(stage, run);
+      return await inStage(stage, budget === undefined ? run : () => withDeadline(run(), budget, stage.name));
     } finally {
       timings.push(`${stage.name}=${Math.round(performance.now() - started)}ms`);
     }
   };
 
-  const deadline = (what: string, ms: number) => () => new Error(`${what} exceeded the ${ms} ms deadline`);
-  const states = await timed(RESPOND_STAGES.read, () =>
-    withDeadline(readCallStates(client, request.contract_address), RESPOND_DEADLINES.read, deadline("reading the pinned states", RESPOND_DEADLINES.read)));
+  const states = await runStage(RESPOND_STAGES.read, () => readCallStates(client, request.contract_address));
   assertCompiledContractMatches(ready, states.contractState, request.contract_address, config.managedDir);
   const call = respondCall(request);
-  const proven = await timed(RESPOND_STAGES.prove, () =>
-    withDeadline(proveCall(ready, call, request.contract_address, states), RESPOND_DEADLINES.prove, deadline("proving", RESPOND_DEADLINES.prove)));
-  // No deadline past this point: abandoning a finalized recipe strands the fee
-  // coin for the dust-intent TTL (`wallet.ts`), so balance and submit run out.
-  const balanced = await timed(RESPOND_STAGES.balance, () => ready.wallet.balanceTx(proven));
-  const txId = await timed(RESPOND_STAGES.submit, () => ready.wallet.submitTx(balanced));
+  const proven = await runStage(RESPOND_STAGES.prove, () => proveCall(ready, call, request.contract_address, states));
+  const balanced = await runStage(RESPOND_STAGES.balance, () => ready.wallet.balanceTx(proven));
+  const txId = await runStage(RESPOND_STAGES.submit, () => ready.wallet.submitTx(balanced));
   return { txId, blockHash: states.blockHash.replace(/^0x/, ""), timing: timings.join(" ") };
 }
 
@@ -594,7 +600,7 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
     // values they were handed, and this text becomes both a response body and a
     // log line. `failRedacted` is the single funnel; the seed never survives it.
     const failure = error instanceof PublisherError ? error : new PublisherError("internal", describeFailure(error));
-    return failRedacted(failure.code, failure.message, [config.fundingSeed], "respond failed", failure.stage);
+    return failRedacted(failure.code, failure.message, [config.fundingSeed], "respond failed", failure.stage, failure.detail);
   } finally {
     if (claimed) inFlightRid = undefined;
   }

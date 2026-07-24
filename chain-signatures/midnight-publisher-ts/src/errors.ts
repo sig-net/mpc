@@ -1,8 +1,9 @@
 /**
  * Every non-200 is `{"code","message"}` plus, on the respond path, the `stage`
- * that failed (`boot|read|prove|balance|submit`). The code and stage are the
- * stable halves a caller branches on; the message is prose and may be reworded
- * in any release.
+ * that failed (`boot|read|prove|balance|submit`) and, when a dependency's
+ * rendered cause chain says more than its one-line message, a `detail`
+ * carrying that chain. The code and stage are the stable halves a caller
+ * branches on; message and detail are evidence, reworded freely.
  */
 
 import { redact } from "./config.js";
@@ -59,7 +60,7 @@ const STATUS: Readonly<Record<ErrorCode, number>> = {
 
 /** Thrown wherever the cause is known at the throw site. */
 export class PublisherError extends Error {
-  constructor(readonly code: ErrorCode, message: string, readonly stage?: string) {
+  constructor(readonly code: ErrorCode, message: string, readonly stage?: string, readonly detail?: string) {
     super(message);
     this.name = "PublisherError";
   }
@@ -81,14 +82,11 @@ type Refinement = readonly [pattern: string, code: ErrorCode];
 export type RespondStage = { readonly name: string; readonly fallback: ErrorCode; readonly refine: readonly Refinement[] };
 
 /**
- * The only place this service matches on a dependency's error text, pinned by
- * `tests/errors.test.ts`. A pattern that stops matching degrades one step to the
- * stage fallback rather than losing the answer.
- *
- * `Wallet.InsufficientFunds` is confirmed reachable. `ReadMismatch` is not:
- * `submissionService` flattens every node error into a constant message, so it
- * can only appear in the nested cause, and whether the node client surfaces it
- * at all is unverified.
+ * The only place this service matches on dependency error TEXT, pinned by
+ * `tests/errors.test.ts`; a pattern that stops matching degrades to the stage
+ * fallback. `Wallet.InsufficientFunds` is confirmed reachable. `ReadMismatch`
+ * is best-effort: `submissionService` flattens node errors to a constant
+ * message, so it can only surface in the rendered cause chain.
  */
 export const RESPOND_STAGES = {
   read: { name: "read", fallback: "node_unavailable", refine: [] },
@@ -106,24 +104,24 @@ export function classify(stage: RespondStage, described: string): ErrorCode {
  * purpose: `failRedacted` is the only exported way to build an error reply, so
  * nothing can answer the caller without passing through redaction first.
  */
-function fail(code: ErrorCode, message: string, stage?: string): Reply {
-  return { status: statusFor(code), body: JSON.stringify(stage === undefined ? { code, message } : { code, message, stage }) };
+function fail(code: ErrorCode, message: string, stage?: string, detail?: string): Reply {
+  const body = { code, message, ...(stage === undefined ? {} : { stage }), ...(detail === undefined ? {} : { detail }) };
+  return { status: statusFor(code), body: JSON.stringify(body) };
 }
 
 /**
- * The single funnel every error answer passes through, so the funding seed
- * cannot reach a response body or a log line without going through `redact`
- * first. Classification stays at the throw site; this owns only the
- * redact-log-serialize tail. Keep every error path routed through here and the
- * redaction stays total by construction rather than by remembering to add it.
- *
- * `logLabel` omitted means silent: a `bad_request` is the caller's own request
- * coming back at it, not this service failing, and is never worth a log line.
+ * The single funnel every error answer passes through: the funding seed cannot
+ * reach a body or a log line except via `redact`, by construction rather than
+ * by remembering. `logLabel` omitted means silent; a `bad_request` is the
+ * caller's own mistake and never worth a log line.
  */
-export function failRedacted(code: ErrorCode, rawMessage: string, secrets: readonly string[], logLabel?: string, stage?: string): Reply {
+export function failRedacted(code: ErrorCode, rawMessage: string, secrets: readonly string[], logLabel?: string, stage?: string, rawDetail?: string): Reply {
   const message = redact(rawMessage, secrets);
-  if (logLabel !== undefined && code !== "bad_request") console.error(`${logLabel} [${code}${stage === undefined ? "" : ` @${stage}`}]: ${message}`);
-  return fail(code, message, stage);
+  const detail = rawDetail === undefined ? undefined : redact(rawDetail, secrets);
+  if (logLabel !== undefined && code !== "bad_request") {
+    console.error(`${logLabel} [${code}${stage === undefined ? "" : ` @${stage}`}]: ${message}${detail === undefined ? "" : `\n${detail}`}`);
+  }
+  return fail(code, message, stage, detail);
 }
 
 /** The `invalid JSON:` preamble both seams answer with, byte for byte. */

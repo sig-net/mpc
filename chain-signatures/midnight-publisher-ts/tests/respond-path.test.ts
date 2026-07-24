@@ -28,6 +28,7 @@ import {
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
 import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
+import { Data, Effect } from "effect";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
@@ -197,6 +198,11 @@ describe("withDeadline", () => {
     await expect(timeout).rejects.toMatchObject({ code: "wallet_unsynced", stage: "boot" });
   });
 
+  it("names the operation and the budget in the plain-string form", async () => {
+    const hang = new Promise<never>(() => undefined);
+    await expect(withDeadline(hang, 20, "proving")).rejects.toThrow("proving exceeded the 20 ms deadline");
+  });
+
   it("swallows the abandoned attempt's late failure", async () => {
     // The losing side of the race may still reject; that must not surface as an
     // unhandled rejection after the caller already got its answer.
@@ -286,6 +292,33 @@ describe("POST /respond: the flow against stubbed edges", () => {
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(409);
     expect(parseBody(reply)).toMatchObject({ code: "state_conflict", stage: "submit" });
+  });
+
+  it("forwards the rendered cause chain as detail when Effect flattens the message", async () => {
+    // The submission service wraps every node error in a constant-message
+    // SubmissionError whose cause Effect stores on a Symbol, out of
+    // `describeFailure`'s reach. The caller must still receive the evidence:
+    // classification alone could be wrong, and the chain is what proves it.
+    class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
+    class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{ message: string }> {}
+    primeStub({
+      submitTx: () =>
+        Effect.runPromise(
+          Effect.fail(
+            new SubmissionError({
+              message: "Transaction submission error",
+              cause: new TransactionInvalidError({ message: "rejected by the node: Transcript(Execution(ReadMismatch))" }),
+            }),
+          ),
+        ) as Promise<string>,
+    });
+    const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
+    expect(reply.status).toBe(409);
+    const body = parseBody(reply);
+    expect(body).toMatchObject({ code: "state_conflict", stage: "submit" });
+    expect(String(body["message"])).toContain("Transaction submission error");
+    expect(String(body["detail"])).toContain("ReadMismatch");
+    expect(String(body["detail"])).not.toMatch(/^\s+at /m);
   });
 
   it("plumbs a boot failure's code and stage out to the wire", async () => {

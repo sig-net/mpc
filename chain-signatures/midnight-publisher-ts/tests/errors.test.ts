@@ -139,6 +139,15 @@ describe("the redaction funnel", () => {
     expect(JSON.parse(reply.body)).toEqual({ code: "contract_absent", message: "no contract at that address" });
   });
 
+  it("redacts the detail too, and omits the key when there is none", () => {
+    const seed = "deadbeef".repeat(8);
+    const withDetail = failRedacted("submit_rejected", "flat message", [seed], undefined, "submit", `the node echoed ${seed} in its cause chain`);
+    expect(withDetail.body).not.toContain(seed);
+    expect(JSON.parse(withDetail.body)).toMatchObject({ detail: expect.stringContaining("<redacted>") as unknown });
+    const without = failRedacted("submit_rejected", "flat message", [seed]);
+    expect(JSON.parse(without.body)).toEqual({ code: "submit_rejected", message: "flat message" });
+  });
+
   it("carries the stage when one is given, and omits the key when not", () => {
     // The stage is the machine-readable half the caller's alerting branches on;
     // an absent stage must be an absent key, not a null, so a strict parser on

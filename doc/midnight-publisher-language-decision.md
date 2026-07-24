@@ -417,7 +417,7 @@ The caller asserts these against the chain it reads, at startup. Left implicit, 
 
 ### 7.5 Errors are codes, not prose
 
-Every non-200 is `{"code":"<machine>","message":"<prose>"}`, plus a `"stage"` (`boot|read|prove|balance|submit`) on respond-path failures so alerting can tell "proof server sick" from "chain rejecting" without string matching. The caller branches on code and stage; the message is for the human reading the log. That split is what makes a wording improvement a non-event instead of a breaking change. A respond 200 carries `{"status":"ok","tx_id":"<submitted>","block_hash":"<the finalized block the three reads were pinned to, bare hex>"}` for settlement observation and debugging.
+Every non-200 is `{"code":"<machine>","message":"<prose>"}`, plus a `"stage"` (`boot|read|prove|balance|submit`) on respond-path failures so alerting can tell "proof server sick" from "chain rejecting" without string matching, plus a `"detail"` carrying the dependency's rendered cause chain (stack frames stripped, seed-redacted) whenever it says more than the one-line message: the classification is the contract, the detail is the evidence that lets a wrong classification be seen and fixed. The caller branches on code and stage; the message is for the human reading the log. That split is what makes a wording improvement a non-event instead of a breaking change. A respond 200 carries `{"status":"ok","tx_id":"<submitted>","block_hash":"<the finalized block the three reads were pinned to, bare hex>"}` for settlement observation and debugging.
 
 | code | HTTP | means | what the caller does |
 |---|---|---|---|

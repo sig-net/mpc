@@ -246,6 +246,8 @@ describe("POST /decode/contract-state: the envelope", () => {
     ["an array `bytes`", '{"bytes":["00"]}', "`bytes` must be a hex string"],
     ["odd-length hex", '{"bytes":"abc"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
     ["hex that is not hex", '{"bytes":"zz"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["an empty `bytes`", '{"bytes":""}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["a bare `0x`", '{"bytes":"0x"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
   ];
 
   it.each(REJECTED_BYTES)("rejects %s as bad_request", async (_what, body, expected) => {

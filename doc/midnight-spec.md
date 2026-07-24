@@ -183,6 +183,7 @@ No state polling. The MPC discovers work by watching the finalized transactions 
 - **Block-body retention:** `--blocks-pruning` defaults to `archive-canonical` (every finalized body retained indefinitely), so catch-up from arbitrary downtime works on a default node. Ops rules: never set `--blocks-pruning <NUMBER>`, never warp-sync. A finalized body the endpoint no longer has is an availability failure (alarm, switch endpoints), not something we route around by reading storage.
 - **State pruning is separate:** `--state-pruning` (default 256 blocks) limits historical *state* reads, not bodies, so it never affects the walk. The step-5 anchored read targets a just-finalized block (well inside 256); historical read-proofs (§5.4) want `--state-pruning archive`.
 - **Checkpoint** = last fully processed finalized height (the existing per-chain checkpoint machinery).
+- **Skips block the walk:** a block whose transaction decode reports `skipped` entries is treated as unprocessed: alarm, and do not advance the checkpoint past it. On a version-matched chain skips never happen (the node already deserialized every transaction it included), so a skip means the publisher build trails the chain's ledger line (compare `GET /health`) or a caller-side extraction bug, never a tolerable gap.
 
 Non-normative alternative discovery sources (`state_subscribeStorage`; the indexer `contractActions` subscription) exist and are catalogued in decisions doc §B — optional, never the foundation.
 

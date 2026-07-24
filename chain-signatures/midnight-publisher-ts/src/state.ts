@@ -5,6 +5,10 @@
  * The schema deviates from `StateValue`'s own `serde::Serialize` on purpose, and
  * matches the Rust seam it replaces: the consumer needs field-aligned atoms as
  * the runtime stores them so a Compact struct's fields line up one to one.
+ *
+ * Failure is total, never partial: a blob walks to a complete tree or the
+ * request fails loudly (version skew arrives as `ledger_mismatch`), so a diff
+ * of two returned trees cannot miss a write.
  */
 
 // Dual instance: everything here is ledger-v9's. The near-namesake

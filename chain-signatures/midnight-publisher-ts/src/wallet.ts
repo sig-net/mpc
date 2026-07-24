@@ -8,7 +8,7 @@
  */
 
 import type { MidnightProvider, WalletProvider } from "@midnight-ntwrk/midnight-js-types";
-import { deriveAccountKeys, initialiseWalletFacade, type AccountKeys } from "@sig-net/midnight-contract-deploy";
+import { deriveAccountKeys, initialiseWalletFacade, parseSeed, SeedFormat, type AccountKeys } from "@sig-net/midnight-contract-deploy";
 
 import type { Config } from "./config.js";
 
@@ -21,26 +21,22 @@ export interface FundingWallet extends WalletProvider, MidnightProvider {
 }
 
 /**
- * Ample for a prove-and-submit round, which measures ~20 s. But this value is
- * ALSO the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so it
- * is how long an abandoned finalize holds the fee coin: a post that dies between
- * finalize and submit strands it for up to this long, which is why `respond.ts`
- * puts no deadline past the balance stage. Five minutes is ~15x the measured
- * round and bounds the stranded window (decision record §7.3; was 30 minutes).
+ * Doubles as the dust-spending intent's TTL, so it is how long a post that
+ * dies between finalize and submit strands the fee coin, and why `respond.ts`
+ * bounds nothing past balance. ~15x the measured ~20 s round (was 30 min;
+ * decision record §7.3).
  */
 const RECIPE_TTL_MS = 5 * 60 * 1000;
 
-/** Hex only, 16 to 64 bytes. The message never quotes the value. */
+/** Hex only, via the library's own seed parser. The message names the env var and never quotes the value. */
 export function parseFundingSeed(seed: string): Uint8Array {
-  const compact = seed.trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]+$/.test(compact) || compact.length % 2 !== 0) {
-    throw new Error("MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted");
+  try {
+    const parsed = parseSeed(seed);
+    if (parsed.source.format === SeedFormat.Hex) return parsed.seed;
+  } catch {
+    // The lib's ParseError describes shapes; ours must name the env var instead.
   }
-  const bytes = compact.length / 2;
-  if (bytes < 16 || bytes > 64) {
-    throw new Error(`MIDNIGHT_PUB_FUNDING_SEED must be 16 to 64 bytes of hex, got ${bytes}`);
-  }
-  return Uint8Array.from(Buffer.from(compact, "hex"));
+  throw new Error("MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted");
 }
 
 export function deriveFundingKeys(seed: string, networkId: string): AccountKeys {
