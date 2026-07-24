@@ -48,7 +48,13 @@ impl SignState {
     /// held permit and resetting the timeout budget) and restart the state
     /// machine from the Organizing phase. The single back-edge of the sign
     /// state machine.
-    pub fn reorganize(&mut self) -> SignPhase {
+    pub fn reorganize(&mut self, reason: &str) -> SignPhase {
+        tracing::warn!(
+            sign_id = ?self.request.id,
+            round = self.round,
+            reason,
+            "reorganizing sign request"
+        );
         self.bump_round();
         SignPhase::Organizing(OrganizingPhase)
     }
