@@ -47,6 +47,16 @@ pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
 /// How many rounds ahead the organizing phase searches for an active proposer.
 const PROPOSER_SEARCH_WINDOW: usize = 512;
 
+/// How far ahead of us a peer's round may be before we stop believing it.
+///
+/// Rounds only advance on `ORGANIZE_POSIT_TIMEOUT` expiry, so even a peer that
+/// has been unreachable for hours cannot legitimately be this far ahead. The
+/// bound matters because `round` is peer-supplied and feeds unchecked
+/// arithmetic (`round + 1`, `round + PROPOSER_SEARCH_WINDOW`, `entropy[0] +
+/// round`): an unbounded value overflows there, and once `round` saturates,
+/// bumping it is a no-op and proposer rotation stops for good.
+const MAX_ROUND_LOOKAHEAD: usize = 1024;
+
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 

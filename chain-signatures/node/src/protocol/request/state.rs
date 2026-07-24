@@ -69,7 +69,9 @@ impl SignState {
             ..
         } = msg;
 
-        if peer_round < self.highest_seen_round {
+        if peer_round < self.highest_seen_round
+            || peer_round > self.round.saturating_add(MAX_ROUND_LOOKAHEAD)
+        {
             return;
         }
         if peer_round > self.highest_seen_round {
@@ -87,6 +89,73 @@ impl SignState {
             self.buffered_messages.remove(&key)
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mpc_primitives::{Chain, SignArgs, SignId, SignKind};
+
+    fn state() -> SignState {
+        let request = IndexedSignRequest::new(
+            SignId {
+                request_id: [0u8; 32],
+            },
+            SignArgs {
+                entropy: [0u8; 32],
+                epsilon: Default::default(),
+                payload: Default::default(),
+                path: String::new(),
+                key_version: 0,
+            },
+            Chain::Ethereum,
+            0,
+            SignKind::Sign,
+        );
+        let (_tx, rx) = watch::channel(MeshState::default());
+        SignState::new(request, rx)
+    }
+
+    fn posit(round: usize) -> SignTaskMessage {
+        SignTaskMessage::PositMessage {
+            presignature_id: 0,
+            round,
+            from: Participant::from(0),
+            action: PositAction::Propose,
+        }
+    }
+
+    #[test]
+    fn peer_round_within_lookahead_is_adopted() {
+        let mut state = state();
+        state.buffer_future_posit_message(posit(MAX_ROUND_LOOKAHEAD));
+
+        assert_eq!(state.highest_seen_round, MAX_ROUND_LOOKAHEAD);
+        assert_eq!(state.buffered_messages.len(), 1);
+    }
+
+    #[test]
+    fn peer_round_beyond_lookahead_is_ignored() {
+        let mut state = state();
+        state.buffer_future_posit_message(posit(usize::MAX));
+
+        assert_eq!(state.highest_seen_round, 0);
+        assert!(state.buffered_messages.is_empty());
+    }
+
+    #[test]
+    fn peer_cannot_stall_rotation_with_an_implausible_round() {
+        let mut state = state();
+        for _ in 0..8 {
+            state.buffer_future_posit_message(posit(usize::MAX));
+            let prev = state.round;
+            state.reorganize();
+            assert!(
+                state.round > prev,
+                "round must keep advancing so the proposer keeps rotating"
+            );
         }
     }
 }
