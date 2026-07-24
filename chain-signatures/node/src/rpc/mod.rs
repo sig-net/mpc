@@ -190,6 +190,26 @@ impl ContractStateWatcher {
         self.contract_state.borrow_and_update().clone()
     }
 
+    pub async fn next_governance(&mut self, current: GovernanceInfo) -> Option<GovernanceInfo> {
+        loop {
+            if self.contract_state.changed().await.is_err() {
+                return None;
+            }
+            let Some(state) = self.contract_state.borrow_and_update().clone() else {
+                continue;
+            };
+            let next = state.governance(&self.account_id).unwrap_or_else(|| {
+                let mut stale = current.clone();
+                stale.is_running = false;
+                stale
+            });
+            if next != current {
+                tracing::info!(old = ?current, new = ?next, "signing governance changed");
+                return Some(next);
+            }
+        }
+    }
+
     pub fn mark_changed(&mut self) {
         self.contract_state.mark_changed();
     }
@@ -523,6 +543,70 @@ mod tests {
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::SignKind;
+
+    /// Vote churn must be absorbed without completing; real governance changes
+    /// and leaving the running state must be delivered.
+    #[tokio::test]
+    async fn next_governance_filters_non_governance_changes() {
+        let account_id: AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+        let (mut watcher, tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let governance = watcher.governance().unwrap();
+
+        let running = |epoch, join_votes| RunningContractState {
+            epoch,
+            public_key: k256::AffinePoint::default(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes,
+            leave_votes: Default::default(),
+            threshold: 1,
+        };
+
+        // Vote churn: state changed, governance content did not.
+        let churn = crate::protocol::contract::primitives::Votes {
+            votes: [("p-1".parse().unwrap(), Default::default())].into(),
+        };
+        tx.send(Some(ProtocolState::Running(running(0, churn))))
+            .unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            watcher.next_governance(governance.clone()),
+        )
+        .await;
+        assert!(pending.is_err(), "vote churn must not wake next_governance");
+
+        // Epoch bump: a real governance change is delivered.
+        tx.send(Some(ProtocolState::Running(running(1, Default::default()))))
+            .unwrap();
+        let next = watcher.next_governance(governance.clone()).await.unwrap();
+        assert_eq!(next.epoch, 1);
+
+        // Leaving the running state is reported as is_running = false.
+        let resharing = ResharingContractState {
+            old_epoch: 1,
+            old_participants: participants.clone(),
+            new_participants: participants.clone(),
+            threshold: 1,
+            new_threshold: 1,
+            public_key: k256::AffinePoint::default(),
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        };
+        tx.send(Some(ProtocolState::Resharing(resharing))).unwrap();
+        let next = watcher.next_governance(next).await.unwrap();
+        assert!(!next.is_running);
+
+        // Channel closed.
+        drop(tx);
+        assert!(watcher.next_governance(next).await.is_none());
+    }
 
     /// A publisher that counts the number of times it has been called.
     struct CountingPublisher {
