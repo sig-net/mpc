@@ -6,13 +6,13 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use crate::stream::{run_stream, StreamContext};
+use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
-use mpc_chain_integration_core::{ChainStream, NoopChainTelemetry};
+use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalEvent,
     SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
@@ -163,10 +163,10 @@ pub fn make_test_stream_context_with_generator_pk(
     )
 }
 
-/// Drive `run_stream` against a two-node mesh backed by in-memory Mockito HTTP
+/// Drive `run_supervised` against a two-node mesh backed by in-memory Mockito HTTP
 /// servers (one per participant) that always serve an empty checkpoint map.
-pub async fn run_stream_with_two_node_mesh<S: ChainStream>(
-    client: S,
+pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
+    indexer: I,
     sign_tx: mpsc::Sender<SignCommand>,
     backlog: Backlog,
     root_pk: AffinePoint,
@@ -211,8 +211,8 @@ pub async fn run_stream_with_two_node_mesh<S: ChainStream>(
     let node_client = NodeClient::new(&Default::default());
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
-    run_stream(
-        client,
+    run_supervised(
+        indexer,
         StreamContext::new(
             backlog,
             sign_tx,
