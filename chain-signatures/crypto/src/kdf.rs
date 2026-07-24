@@ -1,5 +1,5 @@
 use crate::types::KeyVersion;
-use crate::{PublicKey, ScalarExt};
+use crate::PublicKey;
 use anyhow::Context;
 use k256::{
     ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
@@ -12,6 +12,13 @@ use k256::{
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
+
+// `ScalarExt` and `Sha3_256` are used only by `derive_delta`, which is
+// excluded from the wasm contract build; gate the imports to match so the
+// wasm build has no unused imports (CI compiles with `-D warnings`).
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ScalarExt;
+#[cfg(not(target_arch = "wasm32"))]
 use sha3::Sha3_256;
 
 // Epsilon derivation and derived-key computation now live in the publishable
