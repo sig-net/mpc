@@ -796,8 +796,8 @@ impl VersionedMpcContract {
     /// - If the contract already has a checkpoint at the same height with a
     ///   different digest, the request is rejected as conflicting.
     /// - If the submitted height is greater than the current checkpoint, the
-    ///   caller's previous vote for any digest at the same chain and height is
-    ///   removed, then the caller votes for the submitted digest.
+    ///   caller votes for the submitted digest. Competing digests at the same
+    ///   unfinalized height may retain overlapping voters.
     /// - If the resulting vote count is below the threshold, the vote remains
     ///   stored and the latest checkpoint is unchanged.
     /// - If the resulting vote count reaches the threshold, the submitted
@@ -842,15 +842,6 @@ impl VersionedMpcContract {
 
         let vote_count = {
             let checkpoint_votes = self.mutable_checkpoint_votes();
-            for (candidate, voters) in &mut checkpoint_votes.votes {
-                if candidate.chain == checkpoint.chain && candidate.height == checkpoint.height {
-                    voters.remove(&voter);
-                }
-            }
-            checkpoint_votes
-                .votes
-                .retain(|_, voters| !voters.is_empty());
-
             let voters = checkpoint_votes.entry(checkpoint);
             voters.insert(voter);
             voters.len()
