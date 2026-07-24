@@ -26,6 +26,7 @@ solana-sdk.workspace = true
 solana-transaction-status.workspace = true
 solana-client.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

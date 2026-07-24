@@ -196,16 +196,18 @@ impl MessageInbox {
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
+    /// Decrypt and dedup pending batches, returning each alongside its
+    /// authenticated sender.
     fn decrypt(
         &mut self,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-    ) -> Vec<Message> {
+    ) -> Vec<(Participant, Vec<Message>)> {
         let mut retry = Vec::new();
 
-        let mut messages = Vec::new();
+        let mut batches = Vec::new();
         while let Some((encrypted, timestamp)) = self.pending_decrypt.pop_front() {
-            let decrypted: Result<Vec<Message>, _> =
+            let decrypted: Result<(Participant, Vec<Message>), _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
                     if self.idempotent.put(sig.clone(), ()).is_some() {
                         Err(MessageError::Idempotent)
@@ -215,7 +217,7 @@ impl MessageInbox {
                 });
 
             match decrypted {
-                Ok(decrypted) => messages.extend(decrypted),
+                Ok(batch) => batches.push(batch),
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
                         retry.push((encrypted, timestamp));
@@ -228,6 +230,36 @@ impl MessageInbox {
         }
 
         self.pending_decrypt.extend(retry);
+        batches
+    }
+
+    /// Drop messages whose claimed sender differs from the authenticated
+    /// envelope sender, and whole batches we sent to ourselves.
+    fn verify_senders(
+        batches: Vec<(Participant, Vec<Message>)>,
+        me: Option<Participant>,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        for (authenticated_from, batch) in batches {
+            // Only our key signs as us: a local send bug or a peer
+            // echoing our own traffic back.
+            if Some(authenticated_from) == me {
+                tracing::error!("inbox: dropping a batch we sent to ourselves");
+                continue;
+            }
+            messages.extend(batch.into_iter().filter(|msg| match msg.claimed_sender() {
+                Some(claimed_from) if claimed_from != authenticated_from => {
+                    tracing::error!(
+                        ?authenticated_from,
+                        ?claimed_from,
+                        typename = msg.typename(),
+                        "inbox: dropping message with spoofed sender"
+                    );
+                    false
+                }
+                _ => true,
+            }));
+        }
         messages
     }
 
@@ -387,11 +419,13 @@ impl MessageInbox {
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
+                    let me = contract.me().await;
                     let cipher_sk = config.local.network.cipher_sk;
 
                     self.expire(expiration);
                     self.pending_decrypt.push_back((encrypted, Instant::now()));
-                    let messages = self.decrypt(&cipher_sk, &participants);
+                    let batches = self.decrypt(&cipher_sk, &participants);
+                    let messages = Self::verify_senders(batches, me);
 
                     // update filter before fanning out messages.
                     self.filter.try_update();
@@ -625,6 +659,87 @@ mod tests {
         assert!(result3.is_err());
 
         setup.inbox.abort();
+    }
+
+    /// Forged inner senders and self-sent batches are dropped.
+    #[test]
+    fn test_inbox_drops_spoofed_and_self_sent_messages() {
+        let me = Participant::from(0);
+        let peer = Participant::from(1);
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let my_sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let peer_sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt1");
+        let mut participants = Participants::default();
+        for (p, sign_sk) in [(me, &my_sign_sk), (peer, &peer_sign_sk)] {
+            participants.insert(
+                &p,
+                ParticipantInfo {
+                    sign_pk: sign_sk.public_key(),
+                    cipher_pk: cipher_pk.clone(),
+                    id: p.into(),
+                    url: "http://localhost:3030".to_string(),
+                    account_id: "test.near".parse().unwrap(),
+                },
+            );
+        }
+        let participants = ParticipantMap::One(participants);
+        let (mut inbox, _outbox, _channel) = MessageChannel::new();
+
+        // Envelope signed by `peer`, inner messages claiming `me`: forged.
+        let spoofed = triple_batch(0, me);
+        let encrypted = SignedMessage::encrypt(&spoofed, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
+
+        // Mixed batch: only the forged message is dropped.
+        let mixed = vec![
+            Message::Triple(TripleMessage {
+                id: 4,
+                epoch: 0,
+                from: me, // forged: envelope is signed by `peer`
+                data: vec![1u8; 8],
+                timestamp: 1,
+            }),
+            Message::Triple(TripleMessage {
+                id: 5,
+                epoch: 0,
+                from: peer,
+                data: vec![2u8; 8],
+                timestamp: 2,
+            }),
+            Message::Unknown(HashMap::new()),
+        ];
+        let encrypted = SignedMessage::encrypt(&mixed, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let survivors = MessageInbox::verify_senders(batches, Some(me));
+        assert_eq!(survivors.len(), 2);
+        assert!(matches!(&survivors[0], Message::Triple(msg) if msg.id == 5));
+        assert!(matches!(&survivors[1], Message::Unknown(_)));
+
+        // Self-signed batch: dropped whole.
+        let self_sent = triple_batch(1, me);
+        let encrypted = SignedMessage::encrypt(&self_sent, me, &my_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
+
+        // Wrong signing key: rejected at signature verification already.
+        let forged_envelope = triple_batch(3, peer);
+        let encrypted =
+            SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        assert!(inbox.decrypt(&cipher_sk, &participants).is_empty());
+
+        // Control: consistent sender passes through.
+        let valid = triple_batch(2, peer);
+        let encrypted = SignedMessage::encrypt(&valid, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert_eq!(MessageInbox::verify_senders(batches, Some(me)).len(), 3);
     }
 
     #[tokio::test]

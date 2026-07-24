@@ -6,34 +6,25 @@ use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered
 use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::Address;
-use alloy::rpc::types::{Block, BlockId, Log};
+use alloy::network::TransactionResponse;
+use alloy::primitives::{Address, B256};
+use alloy::rpc::types::{Block, BlockId, BlockTransactions, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream, StreamExt};
+use mpc_chain_integration_core::utils::task::AbortOnDrop;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
     SignId,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
 use tokio_util::sync::CancellationToken;
-
-// TODO: Move this to some common crate so it can be shared across workspace
-/// Aborts the wrapped task on drop, prevents leaking a background task
-/// if the indexer is dropped while the live block fetcher is still running.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
 
 pub struct BlockAndRequests {
     block_number: u64,
@@ -75,7 +66,29 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     contract_address: Address,
     /// The block number of the latest finalized block at the time catchup started. Used to determine which blocks are finalized during catchup.
     catchup_finalized_head: AtomicU64,
+    /// Watcher nonce-gate scheduling state (first-appearance checks + retries).
+    watcher_gate: Mutex<WatcherGateState>,
 }
+
+/// Scheduling state for the watcher nonce gate
+#[derive(Default)]
+struct WatcherGateState {
+    /// Watchers present at the previous block, for first-appearance detection.
+    prev: HashSet<BidirectionalTxId>,
+    /// Watchers whose last RPC resolution attempt failed; retried every block.
+    retry: HashSet<BidirectionalTxId>,
+}
+
+/// A pending execution watcher entry from the state manager.
+type WatcherEntry = (BidirectionalTxId, (SignId, BidirectionalTx));
+
+/// Per-watcher receipt resolution result.
+type WatcherReceipt = (
+    BidirectionalTxId,
+    SignId,
+    BidirectionalTx,
+    anyhow::Result<BackfillOutcome>,
+);
 
 /// Result of a `backfill_execution_confirmation`. `Observed` carries an
 /// optional event; the staleness check skips observed watchers so a mined tx
@@ -99,6 +112,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             client,
             contract_address,
             catchup_finalized_head: AtomicU64::new(0),
+            watcher_gate: Mutex::new(WatcherGateState::default()),
         })
     }
 
@@ -119,6 +133,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             client,
             contract_address,
             catchup_finalized_head: AtomicU64::new(0),
+            watcher_gate: Mutex::new(WatcherGateState::default()),
         }
     }
 
@@ -246,7 +261,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
-        let exec_events = self.collect_execution_confirmations(block_number).await?;
+        let exec_events = self.collect_execution_confirmations(block).await?;
 
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.
@@ -399,101 +414,302 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(BackfillOutcome::Observed { event })
     }
 
+    /// Collects execution confirmations for all watchers at the given block
     async fn collect_execution_confirmations(
         &self,
-        block_number: u64,
+        block: &Block,
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        let mut events = Vec::new();
-        let mut resolved_tx_ids = HashSet::new();
-
         let watchers = self
             .state_manager
             .get_execution_watchers(Chain::Ethereum)
             .await;
+
+        if watchers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let block_number = block.header.number;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
             "collect_execution_confirmations checking watchers"
         );
 
-        // Watchers whose receipt we saw this call, even if no event was
-        // emitted. The staleness check below skips these so a mined tx with
-        // a failed extraction stays pending for retry, not flagged Failed.
-        let mut observed_tx_ids = HashSet::new();
+        let (new_watchers, retry) = self.schedule_watcher_gates(&watchers);
 
-        // TODO: submit as batch or parallelize the per-watcher `eth_getTransactionReceipt` calls once
-        // we have a way to track rate-limits and backoff for all requests (right now we just retry individually on failure)
-        // Per-watcher `eth_getTransactionReceipt`
-        for (tx_id, (sign_id, pending_tx)) in watchers {
-            tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
-            match self
-                .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                .await?
-            {
-                BackfillOutcome::Observed { event } => {
-                    observed_tx_ids.insert(tx_id);
-                    if let Some(event) = event {
-                        events.push(event);
-                        resolved_tx_ids.insert(tx_id);
-                    }
-                    // `None` means extraction failed — leave pending for retry.
-                    // `observed_tx_ids` above exempts it from the staleness check.
-                }
-                BackfillOutcome::NotObserved => {}
-            }
-        }
+        // Extract hashes from the block
+        let block_tx_hashes: HashSet<_> = match &block.transactions {
+            BlockTransactions::Hashes(hashes) => hashes.iter().copied().collect(),
+            BlockTransactions::Full(txs) => txs.iter().map(|tx| tx.tx_hash()).collect(),
+            _ => HashSet::new(),
+        };
 
-        // Staleness checks (nonce too low)
-        let remaining_pending = self
-            .state_manager
-            .get_execution_watchers(Chain::Ethereum)
+        // Partition watchers into those that mined in this block and those that did not
+        let (mined_in_block, unmined_watchers): (Vec<_>, Vec<_>) = watchers
+            .into_iter()
+            .partition(|(tx_id, _)| block_tx_hashes.contains(&B256::from(tx_id.0)));
+
+        // Receipts for watched txs mined in this block
+        let (mut events, consumed_slots, mut failed) = self
+            .resolve_mined_watchers(mined_in_block, block_number)
             .await;
 
-        for (tx_id, (sign_id, tx)) in remaining_pending {
-            if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
-                continue;
-            }
+        // Fail pending watchers replaced by a sibling tx mined in this block
+        let (sibling_events, unmined_watchers) =
+            Self::resolve_replaced_siblings(unmined_watchers, &consumed_slots, block_number);
 
-            let current_nonce = match self
+        events.extend(sibling_events);
+
+        // Nonce gate: one-shot for new watchers, every block for retries,
+        // every WATCHER_SLOW_SWEEP_INTERVAL blocks for edge-case consumption by a tx with no local watcher.
+        let sweep_all = block_number % self.eth.indexer.watcher_slow_sweep_interval == 0;
+        let gated: Vec<_> = unmined_watchers
+            .into_iter()
+            .filter(|(tx_id, _)| sweep_all || new_watchers.contains(tx_id) || retry.contains(tx_id))
+            .collect();
+
+        let (gated_events, gated_failed) = self.resolve_gated_watchers(gated, block_number).await;
+        events.extend(gated_events);
+        failed.extend(gated_failed);
+
+        // Failed watchers are retried on the next block.
+        self.lock_watcher_gate().retry = failed;
+
+        Ok(events)
+    }
+
+    /// Locks the watcher gate Mutex, recovering the guard if poisoned.
+    fn lock_watcher_gate(&self) -> MutexGuard<'_, WatcherGateState> {
+        self.watcher_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Updates gate scheduling state, returning the watchers to nonce-check
+    /// this block: newly appeared ones (one-shot) and previously failed ones
+    /// (retried every block).
+    fn schedule_watcher_gates(
+        &self,
+        watchers: &HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>,
+    ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
+        let mut gate = self.lock_watcher_gate();
+        gate.retry.retain(|id| watchers.contains_key(id));
+        let new_watchers = watchers
+            .keys()
+            .filter(|id| !gate.prev.contains(*id))
+            .copied()
+            .collect();
+        gate.prev = watchers.keys().copied().collect();
+        (new_watchers, gate.retry.clone())
+    }
+
+    /// Fetches receipts for a batch of watchers with bounded concurrency,
+    /// keeping per-watcher results so one failure doesn't abort the batch.
+    async fn fetch_watcher_receipts(
+        &self,
+        watchers: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> Vec<WatcherReceipt> {
+        stream::iter(
+            watchers
+                .into_iter()
+                .map(|(tx_id, (sign_id, pending_tx))| async move {
+                    let result = self
+                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                        .await;
+                    (tx_id, sign_id, pending_tx, result)
+                }),
+        )
+        .buffer_unordered(self.eth.indexer.max_concurrent_watcher_rpcs)
+        .collect()
+        .await
+    }
+
+    /// Fetches nonces for the given senders with bounded concurrency.
+    async fn fetch_sender_nonces(
+        &self,
+        senders: HashSet<Address>,
+        block_number: u64,
+    ) -> Vec<(Address, anyhow::Result<u64>)> {
+        stream::iter(senders.into_iter().map(|sender| async move {
+            let result = self
                 .client
-                .as_ref()
                 .get_nonce(
-                    tx.from_address.into(),
+                    sender,
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
-                .await
-            {
-                Ok(nonce) => nonce,
+                .await;
+            (sender, result)
+        }))
+        .buffer_unordered(self.eth.indexer.max_concurrent_watcher_rpcs)
+        .collect()
+        .await
+    }
+
+    /// Resolves watched txs whose hash appears in this block. Returns emitted
+    /// events, the (sender, nonce) slots consumed by observed txs (input to
+    /// sibling correlation), and watchers whose RPC attempt failed.
+    async fn resolve_mined_watchers(
+        &self,
+        mined: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> (
+        Vec<ChainEvent>,
+        HashSet<(Address, u64)>,
+        HashSet<BidirectionalTxId>,
+    ) {
+        let mut events = Vec::new();
+        let mut consumed_slots = HashSet::new();
+        let mut failed = HashSet::new();
+
+        for (tx_id, sign_id, pending_tx, result) in
+            self.fetch_watcher_receipts(mined, block_number).await
+        {
+            match result {
+                Ok(BackfillOutcome::Observed { event }) => {
+                    consumed_slots
+                        .insert((Address::from(pending_tx.from_address), pending_tx.nonce));
+                    if let Some(event) = event {
+                        events.push(event);
+                    }
+                }
+                Ok(BackfillOutcome::NotObserved) => {}
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
                         ?sign_id,
                         ?err,
-                        "Failed to fetch nonce for bidirectional tx"
+                        "failed to fetch receipt for bidirectional tx mined in block"
                     );
-                    continue;
+                    failed.insert(tx_id);
                 }
-            };
+            }
+        }
 
-            if tx.nonce < current_nonce {
+        (events, consumed_slots, failed)
+    }
+
+    /// Fails pending watchers whose (sender, nonce) slot was consumed by a
+    /// different tx mined in this block: since only the network can sign for
+    /// these sender addresses, the consuming tx is necessarily another
+    /// watcher, making replacement a pure function of block content + local
+    /// watcher state (no RPC, deterministic `block_height` across nodes).
+    /// Returns the events and the remaining unmined watchers.
+    fn resolve_replaced_siblings(
+        unmined: Vec<WatcherEntry>,
+        consumed_slots: &HashSet<(Address, u64)>,
+        block_number: u64,
+    ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
+        let (replaced, remaining): (Vec<_>, Vec<_>) =
+            unmined.into_iter().partition(|(_, (_, tx))| {
+                consumed_slots.contains(&(Address::from(tx.from_address), tx.nonce))
+            });
+
+        let events = replaced
+            .into_iter()
+            .map(|(tx_id, (sign_id, tx))| {
                 tracing::warn!(
+                    ?tx_id,
                     ?sign_id,
-                    "Nonce too low for tx {:?}: expected {}, got {}",
-                    tx_id,
-                    tx.nonce,
-                    current_nonce
+                    nonce = tx.nonce,
+                    "transaction replaced by sibling tx mined in this block"
                 );
-                events.push(ChainEvent::ExecutionConfirmed {
+                ChainEvent::ExecutionConfirmed {
                     tx_id,
                     sign_id,
                     source_chain: tx.source_chain,
                     block_height: block_number,
                     result: ExecutionOutcome::Failed,
-                });
+                }
+            })
+            .collect();
+
+        (events, remaining)
+    }
+
+    /// Nonce-gates unmined watchers: fetches deduped sender nonces, then
+    /// resolves watchers whose nonce was consumed. Returns emitted events and
+    /// watchers whose RPC attempt failed.
+    async fn resolve_gated_watchers(
+        &self,
+        gated: Vec<WatcherEntry>,
+        block_number: u64,
+    ) -> (Vec<ChainEvent>, HashSet<BidirectionalTxId>) {
+        let unique_senders: HashSet<_> = gated
+            .iter()
+            .map(|(_, (_, tx))| Address::from(tx.from_address))
+            .collect();
+
+        // Failed senders are skipped: their watchers stay pending and are
+        // retried on the next block.
+        let mut nonces = HashMap::new();
+        let mut failed = HashSet::new();
+        for (sender, result) in self.fetch_sender_nonces(unique_senders, block_number).await {
+            match result {
+                Ok(nonce) => {
+                    nonces.insert(sender, nonce);
+                }
+                Err(err) => {
+                    tracing::warn!(?sender, ?err, "failed to fetch nonce for bidirectional tx");
+                    failed.extend(
+                        gated
+                            .iter()
+                            .filter(|(_, (_, tx))| Address::from(tx.from_address) == sender)
+                            .map(|(tx_id, _)| *tx_id),
+                    );
+                }
             }
         }
 
-        Ok(events)
+        // Keep ONLY watchers whose nonces were consumed
+        let consumed_txs: Vec<_> = gated
+            .into_iter()
+            .filter(|(_, (_, tx))| {
+                nonces
+                    .get(&Address::from(tx.from_address))
+                    .is_some_and(|&current_nonce| tx.nonce < current_nonce)
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        for (tx_id, sign_id, pending_tx, result) in self
+            .fetch_watcher_receipts(consumed_txs, block_number)
+            .await
+        {
+            match result {
+                Ok(BackfillOutcome::Observed { event }) => {
+                    if let Some(event) = event {
+                        events.push(event); // Late watcher pickup
+                    }
+                }
+                Ok(BackfillOutcome::NotObserved) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        expected_nonce = pending_tx.nonce,
+                        "transaction replaced or dropped (nonce consumed by another tx)"
+                    );
+                    events.push(ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        sign_id,
+                        source_chain: pending_tx.source_chain,
+                        block_height: block_number,
+                        result: ExecutionOutcome::Failed,
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        ?err,
+                        "failed to fetch receipt for nonce-consumed bidirectional tx"
+                    );
+                    failed.insert(tx_id);
+                }
+            }
+        }
+
+        (events, failed)
     }
 
     /// Emits the processed block in-order once we reach finality for it.
@@ -950,11 +1166,10 @@ mod tests {
     use crate::{test_utils, IndexerConfig};
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256};
-    use alloy::rpc::types::BlockId;
+    use alloy::rpc::types::{Block, BlockId, BlockTransactions};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
-    use mpc_chain_integration_core::ChainIndexer;
-    use mpc_chain_integration_core::StateManager;
+    use mpc_chain_integration_core::{ChainIndexer, StateManager};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
@@ -1583,6 +1798,20 @@ mod tests {
             "status": "0x0"
         });
 
+        // Mock Nonce Call: Block height 10 ("0xa"), returning current nonce 1
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0xa"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .create_async()
+            .await;
+
+        // Mock Receipt Call
         server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
@@ -1630,8 +1859,13 @@ mod tests {
             .await;
         let indexer = builder.build().await;
 
+        // Construct mock block at height 10 (triggers modulo 10 check)
+        let mut block: Block = Block::default();
+        block.header.number = 10;
+        block.transactions = BlockTransactions::Hashes(Vec::new());
+
         let events = indexer
-            .collect_execution_confirmations(5)
+            .collect_execution_confirmations(&block)
             .await
             .expect("late watcher backfill should succeed");
 
@@ -1879,5 +2113,908 @@ mod tests {
             max_at_cancel,
             "live block producer survived run() cancellation"
         );
+    }
+
+    #[tokio::test]
+    async fn watcher_resolution_deduplicates_nonces_and_gates_receipts() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash_0 = b256!("0000000000000000000000000000000000000000000000000000000000000000");
+        let tx_hash_1 = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+        let tx_hash_2 = b256!("2222222222222222222222222222222222222222222222222222222222222222");
+
+        // Mock Nonce Call: Expect exactly 1 call (deduplicated) for height 10 ("0xa"), returning nonce 2
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0xa"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x2" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Mock Receipts: Expect calls for tx_0 and tx_1. tx_2 should NOT be called.
+        let receipt_mock_0 = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({ "method": "eth_getTransactionReceipt", "params": [format!("{tx_hash_0:#x}")] })))
+            .with_status(200)
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .expect(1)
+            .create_async().await;
+
+        let receipt_mock_1 = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({ "method": "eth_getTransactionReceipt", "params": [format!("{tx_hash_1:#x}")] })))
+            .with_status(200)
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .expect(1)
+            .create_async().await;
+
+        let receipt_mock_2 = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({ "method": "eth_getTransactionReceipt", "params": [format!("{tx_hash_2:#x}")] })))
+            .with_status(200)
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .expect(0) // Nonce < current_nonce is false
+            .create_async().await;
+
+        // Setup Indexer & Watchers
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+
+        let create_tx = |hash: alloy::primitives::B256, nonce: u64| BidirectionalTx {
+            id: BidirectionalTxId(hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: hash.0,
+            from_address: **from_address,
+            nonce,
+        };
+
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([0; 32]),
+                create_tx(tx_hash_0, 0),
+            )
+            .await;
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([1; 32]),
+                create_tx(tx_hash_1, 1),
+            )
+            .await;
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([2; 32]),
+                create_tx(tx_hash_2, 2),
+            )
+            .await;
+
+        let indexer = builder.build().await;
+
+        // Mock block at height 10
+        let mut block: Block = Block::default();
+        block.header.number = 10;
+        block.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(
+            events.len(),
+            2,
+            "Should emit 2 Failed events for consumed nonces"
+        );
+
+        nonce_mock.assert_async().await;
+        receipt_mock_0.assert_async().await;
+        receipt_mock_1.assert_async().await;
+        receipt_mock_2.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn watcher_resolution_uses_block_transactions_without_nonce_rpc() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = b256!("018b2331d461a4aeedf6a1f9cc37463377578244e6a35216057a8370714e798f");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x5",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        // Mock Receipt: EXPECT 1 call
+        let receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Mock Nonce: EXPECT 0 calls (because the hash was found directly in the block!)
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getTransactionCount".to_string()))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let sign_id = SignId::new([0x55; 32]);
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(tx_hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: sign_id.request_id,
+            from_address: **from_address,
+            nonce: 0,
+        };
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .await;
+        let indexer = builder.build().await;
+
+        // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
+        let mut block: Block = Block::default();
+        block.header.number = 5;
+        block.transactions = BlockTransactions::Hashes(vec![tx_hash]);
+
+        let events = indexer
+            .collect_execution_confirmations(&block)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 1);
+        receipt_mock.assert_async().await;
+        nonce_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn watcher_resolution_tolerates_single_receipt_failure() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash_ok = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+        let tx_hash_err = b256!("2222222222222222222222222222222222222222222222222222222222222222");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash_ok:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x5",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        let receipt_ok_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_ok:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Always fail; the test client retries, so assert it was hit at least once
+        let receipt_err_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_err:#x}")]
+            })))
+            .with_status(500)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+
+        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
+            id: BidirectionalTxId(hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: hash.0,
+            from_address: **from_address,
+            nonce: 0,
+        };
+
+        builder
+            .state_manager
+            .watch_execution(Chain::Ethereum, SignId::new([1; 32]), create_tx(tx_hash_ok))
+            .await;
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([2; 32]),
+                create_tx(tx_hash_err),
+            )
+            .await;
+
+        let state_manager = builder.state_manager.clone();
+        let indexer = builder.build().await;
+
+        let mut block: Block = Block::default();
+        block.header.number = 5;
+        block.transactions = BlockTransactions::Hashes(vec![tx_hash_ok, tx_hash_err]);
+
+        // One failing receipt must not fail the whole block
+        let events = indexer
+            .collect_execution_confirmations(&block)
+            .await
+            .expect("block processing should tolerate a single receipt failure");
+
+        assert_eq!(
+            events.len(),
+            1,
+            "only the successful receipt emits an event"
+        );
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed { tx_id, .. } => {
+                assert_eq!(tx_id.0, tx_hash_ok.0);
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
+
+        // The failed watcher stays pending for a later retry
+        let pending = state_manager.get_execution_watchers(Chain::Ethereum).await;
+        assert!(
+            pending.contains_key(&BidirectionalTxId(tx_hash_err.0)),
+            "failed watcher should remain pending"
+        );
+
+        receipt_ok_mock.assert_async().await;
+        receipt_err_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn watcher_resolution_tolerates_nonce_fetch_failure() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = b256!("3333333333333333333333333333333333333333333333333333333333333333");
+
+        // Nonce fetch always fails; watcher must stay pending without events
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+            })))
+            .with_status(500)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // No receipt fetch should happen for an unmined tx whose nonce is unknown
+        let receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getTransactionReceipt".to_string()))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(tx_hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: tx_hash.0,
+            from_address: **from_address,
+            nonce: 0,
+        };
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .await;
+        let state_manager = builder.state_manager.clone();
+        let indexer = builder.build().await;
+
+        // Block height 10 triggers the throttled nonce check
+        let mut block: Block = Block::default();
+        block.header.number = 10;
+        block.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block)
+            .await
+            .expect("nonce fetch failure should not fail block processing");
+
+        assert!(events.is_empty());
+        let pending = state_manager.get_execution_watchers(Chain::Ethereum).await;
+        assert!(pending.contains_key(&BidirectionalTxId(tx_hash.0)));
+
+        nonce_mock.assert_async().await;
+        receipt_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn new_watcher_resolves_at_appearance_block() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = b256!("4444444444444444444444444444444444444444444444444444444444444444");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x3",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        // Nonce check pinned at block 5 (NOT a tick): one-shot
+        // appearance gate fires immediately for newly seen watchers
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x5"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Receipt shows the tx already mined at block 3 (before registration)
+        let receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([4; 32]),
+                BidirectionalTx {
+                    id: BidirectionalTxId(tx_hash.0),
+                    sender: [0u8; 32],
+                    serialized_transaction: vec![],
+                    source_chain: Chain::Solana,
+                    target_chain: Chain::Ethereum,
+                    caip2_id: "eip155:31337".to_string(),
+                    key_version: LATEST_MPC_KEY_VERSION,
+                    deposit: 0,
+                    path: "m/44'/60'/0'/0/0".to_string(),
+                    algo: "secp256k1".to_string(),
+                    dest: Chain::Ethereum.to_string(),
+                    params: "{}".to_string(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                    request_id: tx_hash.0,
+                    from_address: **from_address,
+                    nonce: 0,
+                },
+            )
+            .await;
+        let indexer = builder.build().await;
+
+        let mut block: Block = Block::default();
+        block.header.number = 5;
+        block.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed {
+                tx_id,
+                block_height,
+                result,
+                ..
+            } => {
+                assert_eq!(tx_id.0, tx_hash.0);
+                assert_eq!(*block_height, 3, "event height is the mined block");
+                assert!(matches!(result, ExecutionOutcome::Failed));
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
+
+        nonce_mock.assert_async().await;
+        receipt_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn failed_mined_receipt_retried_next_block() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = b256!("5555555555555555555555555555555555555555555555555555555555555555");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x5",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        // Phase 1 (block 5): receipt RPC fails
+        let failing_receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(500)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([5; 32]),
+                BidirectionalTx {
+                    id: BidirectionalTxId(tx_hash.0),
+                    sender: [0u8; 32],
+                    serialized_transaction: vec![],
+                    source_chain: Chain::Solana,
+                    target_chain: Chain::Ethereum,
+                    caip2_id: "eip155:31337".to_string(),
+                    key_version: LATEST_MPC_KEY_VERSION,
+                    deposit: 0,
+                    path: "m/44'/60'/0'/0/0".to_string(),
+                    algo: "secp256k1".to_string(),
+                    dest: Chain::Ethereum.to_string(),
+                    params: "{}".to_string(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                    request_id: tx_hash.0,
+                    from_address: **from_address,
+                    nonce: 0,
+                },
+            )
+            .await;
+        let indexer = builder.build().await;
+
+        let mut block5: Block = Block::default();
+        block5.header.number = 5;
+        block5.transactions = BlockTransactions::Hashes(vec![tx_hash]);
+
+        let events = indexer
+            .collect_execution_confirmations(&block5)
+            .await
+            .expect("receipt failure should not fail block processing");
+        assert!(events.is_empty());
+        failing_receipt_mock.assert_async().await;
+        failing_receipt_mock.remove_async().await;
+
+        // Phase 2 (block 6, NOT a tick): the failed watcher is retried via the
+        // nonce gate without waiting for the next sweep
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x6"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut block6: Block = Block::default();
+        block6.header.number = 6;
+        block6.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block6)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed {
+                tx_id,
+                block_height,
+                ..
+            } => {
+                assert_eq!(tx_id.0, tx_hash.0);
+                assert_eq!(*block_height, 5, "event height is the mined block");
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
+
+        nonce_mock.assert_async().await;
+        receipt_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn failed_nonce_fetch_retried_next_block() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = b256!("6666666666666666666666666666666666666666666666666666666666666666");
+
+        // Phase 1 (block 10, tick): nonce fetch fails
+        let failing_nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+            })))
+            .with_status(500)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([6; 32]),
+                BidirectionalTx {
+                    id: BidirectionalTxId(tx_hash.0),
+                    sender: [0u8; 32],
+                    serialized_transaction: vec![],
+                    source_chain: Chain::Solana,
+                    target_chain: Chain::Ethereum,
+                    caip2_id: "eip155:31337".to_string(),
+                    key_version: LATEST_MPC_KEY_VERSION,
+                    deposit: 0,
+                    path: "m/44'/60'/0'/0/0".to_string(),
+                    algo: "secp256k1".to_string(),
+                    dest: Chain::Ethereum.to_string(),
+                    params: "{}".to_string(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                    request_id: tx_hash.0,
+                    from_address: **from_address,
+                    nonce: 0,
+                },
+            )
+            .await;
+        let indexer = builder.build().await;
+
+        let mut block10: Block = Block::default();
+        block10.header.number = 10;
+        block10.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block10)
+            .await
+            .expect("nonce failure should not fail block processing");
+        assert!(events.is_empty());
+        failing_nonce_mock.assert_async().await;
+        failing_nonce_mock.remove_async().await;
+
+        // Phase 2 (block 11, NOT a tick): retried via the nonce gate; nonce
+        // consumed, no receipt -> Failed at block 11
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0xb"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipt_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut block11: Block = Block::default();
+        block11.header.number = 11;
+        block11.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block11)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed {
+                tx_id,
+                block_height,
+                result,
+                ..
+            } => {
+                assert_eq!(tx_id.0, tx_hash.0);
+                assert_eq!(*block_height, 11);
+                assert!(matches!(result, ExecutionOutcome::Failed));
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
+
+        nonce_mock.assert_async().await;
+        receipt_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn replaced_sibling_fails_at_replacement_block_without_rpc() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash_a = b256!("7777777777777777777777777777777777777777777777777777777777777777");
+        let tx_hash_b = b256!("8888888888888888888888888888888888888888888888888888888888888888");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash_a:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x5",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        // Phase 1 (block 4): both watchers appear; one-shot gate checks the
+        // (deduped) sender once, nonce not yet consumed
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x0" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipt_a_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_a:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // The replaced sibling must never be queried over RPC
+        let receipt_b_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_b:#x}")]
+            })))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
+            id: BidirectionalTxId(hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: hash.0,
+            from_address: **from_address,
+            nonce: 0,
+        };
+
+        builder
+            .state_manager
+            .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+            .await;
+        builder
+            .state_manager
+            .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+            .await;
+        let indexer = builder.build().await;
+
+        let mut block4: Block = Block::default();
+        block4.header.number = 4;
+        block4.transactions = BlockTransactions::Hashes(Vec::new());
+
+        let events = indexer
+            .collect_execution_confirmations(&block4)
+            .await
+            .expect("should succeed");
+        assert!(events.is_empty());
+        nonce_mock.assert_async().await;
+        nonce_mock.remove_async().await;
+
+        // Phase 2 (block 5, NOT a tick): tx A mines; sibling B is failed
+        // purely from local watcher state, no nonce RPC
+        let mut block5: Block = Block::default();
+        block5.header.number = 5;
+        block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
+
+        let events = indexer
+            .collect_execution_confirmations(&block5)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 2);
+        let mut resolved: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    block_height,
+                    result,
+                    ..
+                } => {
+                    assert_eq!(*block_height, 5, "both events at the replacement block");
+                    assert!(matches!(result, ExecutionOutcome::Failed));
+                    tx_id.0
+                }
+                other => panic!("expected ExecutionConfirmed, got {other:?}"),
+            })
+            .collect();
+        resolved.sort();
+        let mut expected = vec![tx_hash_a.0, tx_hash_b.0];
+        expected.sort();
+        assert_eq!(resolved, expected);
+
+        receipt_a_mock.assert_async().await;
+        receipt_b_mock.assert_async().await;
     }
 }

@@ -136,6 +136,11 @@ pub struct IndexerConfig {
     pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
+    /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
+    pub max_concurrent_watcher_rpcs: usize,
+    /// Cadence (in blocks) of the full nonce sweep over long-pending watchers.
+    /// Backstop only: consumption by a tx with no local watcher shouldn't happen.
+    pub watcher_slow_sweep_interval: u64,
 }
 
 impl Default for IndexerConfig {
@@ -145,6 +150,8 @@ impl Default for IndexerConfig {
             live_block_buffer: 16384,
             max_finalized_failures: 20,
             stall_rewarn_secs: 300,
+            max_concurrent_watcher_rpcs: 8,
+            watcher_slow_sweep_interval: 10,
         }
     }
 }

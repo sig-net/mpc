@@ -35,7 +35,7 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_near::NearClient;
-use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
@@ -818,11 +818,11 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
-            Ok(sol_stream) => {
-                tracing::info!("solana indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    sol_stream,
+        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+            Ok(sol_indexer) => {
+                tracing::info!("solana indexer created successfully");
+                tokio::spawn(run_supervised(
+                    sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
                         sign_tx.clone(),
@@ -836,7 +836,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer stream");
+                tracing::error!(?err, "failed to create solana indexer");
             }
         }
     }

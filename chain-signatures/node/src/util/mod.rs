@@ -129,6 +129,14 @@ impl<T, U> JoinMap<T, U> {
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
+
+    pub fn abort_all(&mut self) {
+        for handle in self.mapping.values() {
+            handle.abort();
+        }
+        self.mapping.clear();
+        self.mapping_id.clear();
+    }
 }
 
 impl<T, U> JoinMap<T, U>

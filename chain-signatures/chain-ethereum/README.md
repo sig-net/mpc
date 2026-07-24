@@ -72,6 +72,22 @@ RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
 ```
 
+### Watchers benchmark
+
+`examples/bench_watchers.rs` drives `EthereumIndexer` over a fixed historical
+block range with a simulated load of pending cross-chain execution watchers.
+This exercises the nonce-gated polling logic to ensure receipt requests don't
+rate-limit the RPC. Dummy watchers (with `nonce = u64::MAX`, i.e. never
+executable) are injected into a `MockStateManager` before catchup starts.
+
+```sh
+RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
+CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+START=11214938 END=11215038 WATCHERS=1000 \
+RUST_LOG=mpc_chain_ethereum::bench=info \
+cargo run --example bench_watchers --features bench
+```
+
 ### Environment variables
 
 | var              | required? | description |
@@ -82,11 +98,12 @@ cargo run --example bench_catchup --features bench
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
 | `NETWORK`        | no        | default `sepolia` |
 | `OPTIMISTIC`     | no        | `1` (default) enables optimistic requests; `0` exercises finality polling |
+| `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `50`) |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
 ## Features
 
 | feature   | what it enables |
 |-----------|-----------------|
-| `bench`   | the `bench` module + RPC/timing counters in the direct-RPC indexer; required by `examples/bench_catchup.rs` |
+| `bench`   | the `bench` module + RPC/timing counters in the direct-RPC indexer; required by `examples/bench_catchup.rs` and `examples/bench_watchers.rs` |
 | `helios`  | the `indexer_eth_helios` light-client |
