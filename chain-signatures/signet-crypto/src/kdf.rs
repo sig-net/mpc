@@ -1,7 +1,7 @@
 use crate::{Address, KeyVersion, Path, Purpose};
 use k256::{elliptic_curve::CurveArithmetic, Scalar, Secp256k1};
-use signet_primitives::{Chain, PublicKey, ScalarExt};
 use sha3::{Digest, Keccak256, Sha3_256};
+use signet_primitives::{Chain, PublicKey, ScalarExt};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
