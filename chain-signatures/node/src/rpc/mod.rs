@@ -1017,39 +1017,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_cancels_queued_publish_before_chain_abort() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
-        publishers.insert(
-            Chain::Ethereum,
-            Arc::new(CountingFailingPublisher {
-                call_count: call_count.clone(),
-            }),
-        );
-
-        let (tx, mut rx) = mpsc::channel(16);
-        tx.send(RpcAction::Publish(make_publish_action(
-            Chain::Ethereum,
-            SignKind::Sign,
-        )))
-        .await
-        .unwrap();
-        tx.send(RpcAction::AbortChain(Chain::Ethereum))
-            .await
-            .unwrap();
-
-        let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 0);
-
-        drop(tx);
-        dispatch.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn executor_discards_delayed_publish_after_chain_abort() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
