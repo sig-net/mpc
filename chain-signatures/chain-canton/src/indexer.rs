@@ -1,19 +1,18 @@
-//! Canton stream and indexer implementation.
+//! Canton indexer implementation.
 
 use crate::client::CantonClient;
 use crate::config::CantonConfig;
-use crate::events::{catchup_offset_range, process_canton_event};
+use crate::events::process_canton_event;
 use crate::ledger_api;
 
+use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream::{self, SplitSink, SplitStream};
+use futures_util::stream::{Empty, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainStream, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainEvent};
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -22,54 +21,11 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
-
-pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
-    client: Option<CantonClient>,
-    state_manager: S,
-    telemetry: T,
-    events_rx: mpsc::Receiver<ChainEvent>,
-    events_tx: Option<mpsc::Sender<ChainEvent>>,
-}
-
-impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
-    pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let client = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?; // Indexer does not publish
-        let (events_tx, events_rx) = chain_event_channel();
-        Ok(CantonStream {
-            client: Some(client),
-            state_manager,
-            telemetry,
-            events_rx,
-            events_tx: Some(events_tx),
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager, T: ChainTelemetry> ChainStream for CantonStream<S, T> {
-    type Indexer = CantonIndexer<S, T>;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        let (Some(events_tx), Some(client)) = (self.events_tx.take(), self.client.take()) else {
-            anyhow::bail!("canton stream already started");
-        };
-
-        Ok(Self::Indexer::new(
-            client,
-            self.state_manager.clone(),
-            self.telemetry.clone(),
-            events_tx,
-        ))
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.events_rx.recv().await
-    }
-}
 
 enum CantonConnection {
     Connected(CantonWsRead, CantonWsWrite),
@@ -131,7 +87,8 @@ impl CantonConnection {
         Ok(Self::Connected(ws_read, ws_write))
     }
 
-    /// Read the next message from the WebSocket. Closes the connection if the WebSocket is closed.
+    /// Read the next message from the WebSocket. Returns `None` (transitioning to
+    /// `Disconnected`) on close, error, or a 60s message stall.
     async fn next(&mut self) -> Option<Message> {
         let Self::Connected(ws_read, _) = self else {
             tracing::warn!("canton WebSocket not initialized");
@@ -184,33 +141,32 @@ pub struct CantonIndexer<S: StateManager, T: ChainTelemetry> {
     client: CantonClient,
     state_manager: S,
     telemetry: T,
-    events_tx: mpsc::Sender<ChainEvent>,
-    ws_conn: CantonConnection,
-    last_seen_offset: u64,
 }
 
 impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
-    pub fn new(
-        client: CantonClient,
-        state_manager: S,
-        telemetry: T,
-        events_tx: mpsc::Sender<ChainEvent>,
-    ) -> Self {
-        Self {
+    pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        let client = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?; // Indexer does not publish
+        Ok(Self {
             client,
             state_manager,
             telemetry,
-            events_tx,
-            ws_conn: CantonConnection::Disconnected,
-            last_seen_offset: 0,
-        }
+        })
     }
 
-    async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {
+    // TODO: ws_conn + last_seen_offset are threaded as explicit params because
+    // `run(&self)` is immutable. A cleaner shape (matching Solana/Ethereum) would
+    // spawn a WS-driver task owning the connection and emitting Updates on a
+    // channel, leaving `run()` to drain it; CantonClient is Clone so this is
+    // feasible. Revisit post-migration.
+    async fn connect_and_subscribe(
+        &self,
+        ws_conn: &mut CantonConnection,
+        begin_exclusive: u64,
+    ) -> anyhow::Result<()> {
         let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
-        self.ws_conn = CantonConnection::connect(
+        *ws_conn = CantonConnection::connect(
             &ws_url,
             &jwt_token,
             party_id,
@@ -221,22 +177,18 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         Ok(())
     }
 
-    async fn reconnect(&mut self, begin_exclusive: u64) {
+    async fn reconnect(&self, ws_conn: &mut CantonConnection, resume_offset: u64) {
         let mut backoff = Duration::from_secs(1);
-
         loop {
-            match self.connect_and_subscribe(begin_exclusive).await {
+            match self.connect_and_subscribe(ws_conn, resume_offset).await {
                 Ok(()) => {
-                    tracing::info!(
-                        resume_offset = self.last_seen_offset,
-                        "canton WebSocket reconnected"
-                    );
+                    tracing::info!(resume_offset, "canton WebSocket reconnected");
                     return;
                 }
                 Err(err) => {
                     tracing::warn!(
                         ?err,
-                        resume_offset = self.last_seen_offset,
+                        resume_offset,
                         backoff_secs = backoff.as_secs(),
                         "canton WebSocket reconnect failed; retrying"
                     );
@@ -247,10 +199,14 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         }
     }
 
-    async fn next_update(&mut self) -> Option<ledger_api::Update> {
+    async fn next_update(
+        &self,
+        ws_conn: &mut CantonConnection,
+        last_seen_offset: u64,
+    ) -> Option<ledger_api::Update> {
         loop {
-            let Some(msg) = self.ws_conn.next().await else {
-                self.reconnect(self.last_seen_offset).await;
+            let Some(msg) = ws_conn.next().await else {
+                self.reconnect(ws_conn, last_seen_offset).await;
                 continue;
             };
             let Message::Text(text) = msg else {
@@ -277,14 +233,21 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         }
     }
 
-    async fn process_update(&mut self, update: &ledger_api::Update) -> anyhow::Result<u64> {
+    /// Decode a ledger update, emit its events + a `Block(offset)`, and report the
+    /// offset so the caller can advance its cursor. Errors only when `events_tx` is
+    /// closed (supervisor shutdown) — there is no transient failure worth retrying.
+    async fn process_update(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        update: &ledger_api::Update,
+    ) -> anyhow::Result<u64> {
         let offset = match update {
             ledger_api::Update::Transaction { value } => {
                 for event in &value.events {
                     process_canton_event(
                         event,
                         &value.events,
-                        &self.events_tx,
+                        events_tx,
                         &self.client.config.signer_contract_id,
                     )
                     .await;
@@ -294,26 +257,40 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
             ledger_api::Update::OffsetCheckpoint { value } => value.offset,
         };
 
-        // Update the telemetry with the latest block number seen by the indexer
         self.telemetry.block_indexed(offset);
-
-        self.events_tx.send(ChainEvent::Block(offset)).await?;
-        self.last_seen_offset = offset;
+        events_tx.send(ChainEvent::Block(offset)).await?;
         Ok(offset)
     }
 
-    async fn process_catchup_offset(&mut self, target_offset: u64) -> anyhow::Result<()> {
-        // If we're already at or past the target offset, we're done
-        if self.last_seen_offset >= target_offset {
+    /// Drive the WebSocket until `last_seen_offset >= target_offset`. A 2s per-pull
+    /// timeout falls back to checking the ledger end: if the global ledger has passed
+    /// the target with no events for our party, catchup completes without emitting.
+    async fn process_catchup_offset(
+        &self,
+        ws_conn: &mut CantonConnection,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        last_seen_offset: &mut u64,
+        target_offset: u64,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        if *last_seen_offset >= target_offset {
             return Ok(());
         }
 
         loop {
             // Try to get the next update with a conservative timeout during catchup.
             // If the WebSocket is silent for a short period, we check the current ledger end.
-            match tokio::time::timeout(Duration::from_secs(2), self.next_update()).await {
+            let outcome = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                r = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.next_update(ws_conn, *last_seen_offset),
+                ) => r,
+            };
+            match outcome {
                 Ok(Some(update)) => {
-                    let offset = self.process_update(&update).await?;
+                    let offset = self.process_update(events_tx, &update).await?;
+                    *last_seen_offset = offset;
                     if offset >= target_offset {
                         return Ok(());
                     }
@@ -333,7 +310,7 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
                             target_offset,
                             "catchup timeout: ledger has passed target offset with no new updates for our party"
                         );
-                        self.last_seen_offset = target_offset;
+                        *last_seen_offset = target_offset;
                         return Ok(());
                     }
                 }
@@ -345,45 +322,50 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
-    type Block = u64;
-    type Iter = stream::Iter<Range<u64>>;
 
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+    // TODO: not used, required by trait, remove later
+    type Block = ();
+    type Iter = Empty<()>;
+
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
         let checkpoint = self
             .state_manager
             .get_processed_block(Chain::Canton)
             .await
             .unwrap_or(0);
-        self.last_seen_offset = checkpoint;
-        let anchor_height = self.client.fetch_ledger_end().await?;
-        self.reconnect(self.last_seen_offset).await;
-        Ok(Some(anchor_height))
-    }
+        let mut last_seen_offset = checkpoint;
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        // After a reconnect, we resume from last_seen_offset, so catchup should start there.
-        stream::iter(catchup_offset_range(self.last_seen_offset, anchor_height))
-    }
+        let anchor = self.client.fetch_ledger_end().await?;
+        let mut ws_conn = CantonConnection::Disconnected;
+        self.reconnect(&mut ws_conn, last_seen_offset).await;
 
-    async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {
-        self.process_catchup_offset(item).await
-    }
+        self.process_catchup_offset(
+            &mut ws_conn,
+            &events_tx,
+            &mut last_seen_offset,
+            anchor,
+            &cancel,
+        )
+        .await?;
 
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::CatchupCompleted).await?;
-        Ok(())
-    }
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("failed to send canton catchup completed event")?;
 
-    async fn process_next_block(&mut self) -> bool {
-        let Some(update) = self.next_update().await else {
-            return false;
-        };
-
-        while let Err(err) = self.process_update(&update).await {
-            tracing::warn!(?err, "live block processing failed; retrying");
-            tokio::time::sleep(Self::RETRY_DELAY).await;
+        loop {
+            let update = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                u = self.next_update(&mut ws_conn, last_seen_offset) => match u {
+                    Some(u) => u,
+                    None => anyhow::bail!("canton WebSocket producer terminated"),
+                },
+            };
+            last_seen_offset = self.process_update(&events_tx, &update).await?;
         }
-
-        true
     }
 }
