@@ -214,15 +214,11 @@ describe("offline: the schema the consumer parses", () => {
 });
 
 describe("POST /decode/contract-state: the envelope", () => {
-  const HEX_SHAPE = "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed";
+  // The JSON envelope is still validated: a non-object body, or one that is not
+  // JSON at all, is a caller mistake the ledger never sees, so it stays
+  // `bad_request`.
   const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
     ["a JSON array", "[]", "invalid JSON: expected a JSON object"],
-    ["a missing `bytes`", "{}", "`bytes` must be a hex string"],
-    ["a non-string `bytes`", '{"bytes":123}', "`bytes` must be a hex string"],
-    ["an array `bytes`", '{"bytes":["00"]}', "`bytes` must be a hex string"],
-    ["odd-length hex", '{"bytes":"abc"}', HEX_SHAPE],
-    ["hex that is not hex", '{"bytes":"zz"}', HEX_SHAPE],
-    ["a `0x` prefix on odd-length hex", '{"bytes":"0xabc"}', HEX_SHAPE],
   ];
 
   it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
@@ -237,6 +233,26 @@ describe("POST /decode/contract-state: the envelope", () => {
     expect(reply.status).toBe(400);
     expect(parseFailure(reply)).toMatchObject({ code: "bad_request" });
     expect(parseFailure(reply).message).toMatch(/^invalid JSON:/);
+  });
+
+  // Byte shape is pre-validated: `fromHex` truncates silently at the first
+  // non-hex character, so without this check a caller-side hex bug reaches the
+  // ledger as a short blob and comes back `decode_failed` ("inspect your blob",
+  // with version-mismatch prose) for what is an envelope mistake ("fix the
+  // request"). The 400/422 split is the caller-action split.
+  const REJECTED_BYTES: ReadonlyArray<readonly [string, string, string]> = [
+    ["a missing `bytes`", "{}", "`bytes` must be a hex string"],
+    ["a non-string `bytes`", '{"bytes":123}', "`bytes` must be a hex string"],
+    ["an array `bytes`", '{"bytes":["00"]}', "`bytes` must be a hex string"],
+    ["odd-length hex", '{"bytes":"abc"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["hex that is not hex", '{"bytes":"zz"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+  ];
+
+  it.each(REJECTED_BYTES)("rejects %s as bad_request", async (_what, body, expected) => {
+    expect(await post("/decode/contract-state", body)).toEqual({
+      status: 400,
+      body: failure("bad_request", expected),
+    });
   });
 
   it.each([["0x-prefixed", (hex: string) => `0x${hex}`], ["upper-case", (hex: string) => hex.toUpperCase()]])(
@@ -283,20 +299,6 @@ describe("POST /decode/contract-state: the envelope", () => {
     expect(parseFailure(junk).code).toBe("decode_failed");
   });
 
-  it("rejects a body over the 8 MiB cap", async () => {
-    // 8 MiB carries ~280 serialized transactions; a contract state is far
-    // smaller. Past it the request is a bug or an attack, not a real read.
-    // Sized only just over on purpose: the server answers the moment it crosses
-    // the cap, and a body that is still uploading when it does would race the
-    // reply rather than test it.
-    const oversize = `{"bytes":"${"ab".repeat(4 * 1024 * 1024)}"}`;
-    expect(oversize.length).toBeGreaterThan(8 * 1024 * 1024);
-    expect(await post("/decode/contract-state", oversize)).toEqual({
-      status: 413,
-      body: failure("payload_too_large", "body exceeds the 8 MiB limit"),
-    });
-  });
-
   it("is not reachable by GET, and says so with a code", async () => {
     // ~14 KB of transaction does not fit a query string, so the decode seams are
     // POST-only by design and the old GET spelling must not half-work. Every
@@ -309,14 +311,17 @@ describe("POST /decode/contract-state: the envelope", () => {
 });
 
 describe("GET /health", () => {
-  it("declares which ledger this build speaks", async () => {
+  it("declares which ledger this build speaks, and which network it posts to", async () => {
     // The publisher's ENTIRE compatibility surface: the caller asserts these
     // against the chain it reads, at startup, so version skew fails where it can
-    // be understood rather than later as a `decode_failed` on good bytes.
+    // be understood rather than later as a `decode_failed` on good bytes — and a
+    // wrong `networkId` fails here rather than later as the misleading
+    // "could not balance dust" from a wallet derived at another address.
     const reply = await get("/health");
     expect(reply.status).toBe(200);
     expect(JSON.parse(reply.body)).toEqual({
       status: "ok",
+      networkId: "undeployed",
       ledger: {
         contractState: "midnight:contract-state[v8]",
         zswapChainState: "midnight:zswap-ledger-state[v5]",

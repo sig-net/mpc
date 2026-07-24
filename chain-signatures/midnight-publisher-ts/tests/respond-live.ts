@@ -178,8 +178,20 @@ if (reply.status !== 200) {
   throw new Error(`respond did not succeed: ${reply.status} ${reply.body}`);
 }
 
-const submitted = lines.find((line) => line.includes("submitted tx"))?.split("submitted tx ")[1] ?? "(not logged)";
-console.log(`transaction id  ${submitted}`);
+// The success body is wire contract: the submitted transaction id, and the
+// finalized block the three reads were pinned to (bare hex). The log line is
+// kept only as a cross-check that body and log tell one story.
+const success = JSON.parse(reply.body) as { status?: string; tx_id?: string; block_hash?: string };
+if (success.status !== "ok" || typeof success.tx_id !== "string" || success.tx_id.length === 0) {
+  throw new Error(`the success body must carry a non-empty tx_id: ${reply.body}`);
+}
+if (typeof success.block_hash !== "string" || !isHex(success.block_hash, 32)) {
+  throw new Error(`the success body must carry the pinned block hash as bare 64-hex: ${reply.body}`);
+}
+const submitted = success.tx_id;
+const logged = lines.find((line) => line.includes("submitted tx"))?.split("submitted tx ")[1]?.split(" ")[0];
+console.log(`transaction id  ${submitted}${logged === submitted ? "" : `   (LOG DISAGREES: ${logged ?? "(not logged)"})`}`);
+console.log(`pinned reads at ${success.block_hash}`);
 
 // Walk finalized blocks forward from the pre-post head until the map grows;
 // that block is where the append landed.

@@ -24,11 +24,11 @@ export interface FundingWallet extends WalletProvider, MidnightProvider {
  * Ample for a prove-and-submit round, which measures ~20 s. But this value is
  * ALSO the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so it
  * is how long an abandoned finalize holds the fee coin: a post that dies between
- * finalize and submit strands it for up to 30 minutes, against the ~35 s the
- * concurrency design budgets. Lowering it to a few minutes would bound that;
- * left here deliberately for now, and recorded in the decision record §7.3.
+ * finalize and submit strands it for up to this long, which is why `respond.ts`
+ * puts no deadline past the balance stage. Five minutes is ~15x the measured
+ * round and bounds the stranded window (decision record §7.3; was 30 minutes).
  */
-const RECIPE_TTL_MS = 30 * 60 * 1000;
+const RECIPE_TTL_MS = 5 * 60 * 1000;
 
 /** Hex only, 16 to 64 bytes. The message never quotes the value. */
 export function parseFundingSeed(seed: string): Uint8Array {

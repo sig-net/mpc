@@ -17,7 +17,7 @@
 import { Data, Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { classify, RESPOND_STAGES, statusFor, type ErrorCode } from "../src/errors.js";
+import { classify, failRedacted, RESPOND_STAGES, statusFor, type ErrorCode } from "../src/errors.js";
 import { describeFailure } from "../src/respond.js";
 
 class InsufficientFundsError extends Data.TaggedError("Wallet.InsufficientFunds")<{
@@ -107,10 +107,45 @@ describe("the status map", () => {
 
   it("gives every code a non-2xx status", () => {
     const codes: readonly ErrorCode[] = [
-      "bad_request", "payload_too_large", "not_found", "decode_failed", "ledger_mismatch",
+      "bad_request", "not_found", "decode_failed", "ledger_mismatch",
       "contract_absent", "contract_mismatch", "state_conflict", "node_unavailable",
-      "prove_failed", "wallet_unfunded", "balance_failed", "submit_rejected", "internal",
+      "prove_failed", "wallet_unfunded", "wallet_unsynced", "wallet_busy",
+      "balance_failed", "submit_rejected", "internal",
     ];
     for (const code of codes) expect(statusFor(code)).toBeGreaterThanOrEqual(400);
+  });
+
+  it("marks every wallet condition 503: back off and retry, the request itself is fine", () => {
+    expect(statusFor("wallet_unfunded")).toBe(503);
+    expect(statusFor("wallet_unsynced")).toBe(503);
+    expect(statusFor("wallet_busy")).toBe(503);
+  });
+});
+
+describe("the redaction funnel", () => {
+  it("never lets a secret reach the reply body", () => {
+    // The invariant the manual server exists to hold: a dependency error that
+    // echoes the funding seed must not carry it out of the process.
+    const seed = "deadbeef".repeat(8);
+    const reply = failRedacted("internal", `node echoed the seed ${seed} back`, [seed]);
+    expect(reply.status).toBe(500);
+    expect(reply.body).not.toContain(seed);
+    expect(reply.body).toContain("<redacted>");
+    expect(JSON.parse(reply.body)).toMatchObject({ code: "internal" });
+  });
+
+  it("leaves a message that carries no secret untouched", () => {
+    const reply = failRedacted("contract_absent", "no contract at that address", ["a-secret-not-present"]);
+    expect(JSON.parse(reply.body)).toEqual({ code: "contract_absent", message: "no contract at that address" });
+  });
+
+  it("carries the stage when one is given, and omits the key when not", () => {
+    // The stage is the machine-readable half the caller's alerting branches on;
+    // an absent stage must be an absent key, not a null, so a strict parser on
+    // the Rust side can make the field optional.
+    const staged = failRedacted("submit_rejected", "the chain refused it", [], undefined, "submit");
+    expect(JSON.parse(staged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it", stage: "submit" });
+    const unstaged = failRedacted("submit_rejected", "the chain refused it", []);
+    expect(JSON.parse(unstaged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it" });
   });
 });

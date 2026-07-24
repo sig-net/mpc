@@ -309,25 +309,21 @@ describe("offline: a state diff yields the notify", () => {
 });
 
 describe("POST /decode/transactions: the envelope", () => {
+  // The envelope fails the whole request as `bad_request`; only bytes the LEDGER
+  // refuses survive per item into `skipped`. Without the pre-check, a caller-side
+  // hex typo would be `fromHex`-truncated silently and burn a whole batch as
+  // per-item skips, reading like ledger trouble instead of a request bug.
   const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
     ["a missing `bytes`", "{}", "`bytes` must be an array of hex strings"],
     ["a bare string `bytes`", '{"bytes":"00"}', "`bytes` must be an array of hex strings"],
     ["a non-string element", '{"bytes":["00",7]}', "`bytes[1]` must be a hex string"],
-    [
-      "an element that is not hex",
-      '{"bytes":["00","zz"]}',
-      "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed",
-    ],
+    ["a non-hex element", '{"bytes":["00","zz"]}', "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
   ];
 
   it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
-    // A malformed envelope fails the whole request: answering 200 with
-    // everything skipped would hide a caller's typo behind a success. Only bytes
-    // the LEDGER refuses survive per item.
-    expect(await post("/decode/transactions", body)).toEqual({
-      status: 400,
-      body: JSON.stringify({ code: "bad_request", message: expected }),
-    });
+    const reply = await post("/decode/transactions", body);
+    expect(reply.status).toBe(400);
+    expect(JSON.parse(reply.body)).toEqual({ code: "bad_request", message: expected });
   });
 
   it("accepts `0x`-prefixed hex", async () => {

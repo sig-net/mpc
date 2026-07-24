@@ -390,7 +390,7 @@ Three measured facts worth keeping, all from the same probe:
 
 - **The wallet tracks pending spends locally.** After `balanceUnboundTransaction`, `dustAvailable` 1→0 and `dustPending` 0→1; after `finalizeRecipe`, `pendingTxs` 0→1. A second respond attempted 0.4s later fails with `Wallet.InsufficientFunds: could not balance dust`. The dust view recovers at about **+35s**.
 - **`facade.submitTransaction` blocks for ~16.6s**, which supplies roughly half that recovery window as natural backpressure. Out-of-band submission returns immediately and removes it. Neither path can post two responds faster than dust recovery; the blocking path merely hides the limit. With one wallet the ceiling is roughly **one respond per 35 seconds**, and scaling means one wallet per worker (§2.6).
-- **An abandoned finalized transaction auto-reverts, but not on the shipped TTL.** Finalized but never submitted, the dust coin returned at +59.3s against a **60s** TTL. The service ships `RECIPE_TTL_MS = 30 minutes` (`wallet.ts`), and that value becomes the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so the measurement does not describe the shipped configuration: a respond that dies between finalize and submit plausibly strands the fee coin for up to **30 minutes**, roughly 50x the 35s the concurrency design budgets around. Lowering the TTL to a few minutes would bound it. Found by audit, not yet changed.
+- **An abandoned finalized transaction auto-reverts, on the TTL.** Finalized but never submitted, the dust coin returned at +59.3s against a **60s** TTL. That value becomes the dust-spending intent's TTL (`dust-wallet`'s `Intent.new(ttl)`), so it is how long a respond that dies between finalize and submit strands the fee coin. Found by audit at 30 minutes; `RECIPE_TTL_MS` is now **5 minutes** (`wallet.ts`), ~15x the measured ~20s round, and the reason `respond.ts` puts no deadline past the balance stage.
 
 So the publisher's network peers are the node (wallet operation and submission), the proof server (proving), and the indexer (wallet sync).
 
@@ -417,26 +417,27 @@ The caller asserts these against the chain it reads, at startup. Left implicit, 
 
 ### 7.5 Errors are codes, not prose
 
-Every non-200 is `{"code":"<machine>","message":"<prose>"}`. The caller branches on the code; the message is for the human reading the log. That split is what makes a wording improvement a non-event instead of a breaking change.
+Every non-200 is `{"code":"<machine>","message":"<prose>"}`, plus a `"stage"` (`boot|read|prove|balance|submit`) on respond-path failures so alerting can tell "proof server sick" from "chain rejecting" without string matching. The caller branches on code and stage; the message is for the human reading the log. That split is what makes a wording improvement a non-event instead of a breaking change. A respond 200 carries `{"status":"ok","tx_id":"<submitted>","block_hash":"<the finalized block the three reads were pinned to, bare hex>"}` for settlement observation and debugging.
 
 | code | HTTP | means | what the caller does |
 |---|---|---|---|
 | `bad_request` | 400 | malformed envelope, bad hex, failed validation | fix the request; never retry |
-| `payload_too_large` | 413 | body over the seam's cap | split the batch |
 | `not_found` | 404 | no such route | fix the client |
 | `decode_failed` | 422 | the ledger refused bytes the CALLER supplied | their blob is wrong, or from another ledger line |
 | `ledger_mismatch` | 502 | bytes read from the CHAIN carry a tag this build does not speak | version skew; compare against `/health` |
 | `contract_absent` | 409 | no contract state at that address in the pinned block | wrong address, or not deployed yet |
 | `contract_mismatch` | 409 | deployed verifier keys differ from this build's | redeploy, or repoint `MIDNIGHT_PUB_MANAGED_DIR` |
 | `state_conflict` | 409 | another post won the race for the same request id | retry as-is; the loser never entered a block and paid no fee |
-| `node_unavailable` | 502 | the node could not serve a pinned read | retry when the node is back |
-| `prove_failed` | 502 | the proof server refused or failed | retry |
+| `node_unavailable` | 502 | the node could not serve a pinned read, or the read hit its deadline | retry when the node is back |
+| `prove_failed` | 502 | the proof server refused, failed, or hit its deadline | retry |
 | `wallet_unfunded` | 503 | no spendable dust right now | back off; recovers in about 35 seconds |
+| `wallet_unsynced` | 503 | the funding wallet could not sync within the boot deadline | check the indexer, then retry |
+| `wallet_busy` | 503 | another respond currently holds the one dust UTXO | retry when it answers, ~35 s |
 | `balance_failed` | 502 | balancing failed for a reason other than funds | investigate |
 | `submit_rejected` | 502 | the chain refused the submission | investigate |
 | `internal` | 500 | unclassified | the message is the only detail |
 
-Several codes share a status on purpose. A 409 that is `state_conflict` should be retried unchanged; a 409 that is `contract_mismatch` will never succeed until this service is redeployed. The status cannot carry that and the code can.
+Several codes share a status on purpose. A 409 that is `state_conflict` should be retried unchanged; a 409 that is `contract_mismatch` will never succeed until this service is redeployed. The status cannot carry that and the code can. The three deadlines (`RESPOND_DEADLINES`: boot, read, prove) exist because a dead indexer or a mid-life node death otherwise leaves the request hanging forever, which is the one failure the error model cannot express; balance and submit are deliberately unbounded because abandoning a finalized recipe strands the fee coin for the dust-intent TTL.
 
 **Where the fragility is concentrated**, and a defect found by auditing it. Some causes are only visible in the text a dependency threw, so `errors.ts`'s `RESPOND_STAGES` is the one table that matches on it. An adversarial pass found the two entries have very different standing:
 

@@ -1,7 +1,11 @@
 /**
- * Every non-200 is `{"code","message"}`. The code is the stable half a caller
- * branches on; the message is prose and may be reworded in any release.
+ * Every non-200 is `{"code","message"}` plus, on the respond path, the `stage`
+ * that failed (`boot|read|prove|balance|submit`). The code and stage are the
+ * stable halves a caller branches on; the message is prose and may be reworded
+ * in any release.
  */
+
+import { redact } from "./config.js";
 
 /** An HTTP status and an already-serialized body. */
 export type Reply = { readonly status: number; readonly body: string };
@@ -10,8 +14,6 @@ export type Reply = { readonly status: number; readonly body: string };
 export type ErrorCode =
   /** Malformed envelope, bad hex, failed validation. Fix the request. */
   | "bad_request"
-  /** Body over the seam's cap. Split the batch. */
-  | "payload_too_large"
   | "not_found"
   /** The ledger refused bytes the CALLER supplied: wrong blob, or another ledger line. */
   | "decode_failed"
@@ -27,6 +29,10 @@ export type ErrorCode =
   | "prove_failed"
   /** No spendable dust right now. One wallet sustains roughly one post per 35 seconds. */
   | "wallet_unfunded"
+  /** The funding wallet could not sync within the boot deadline. Check the indexer, then retry. */
+  | "wallet_unsynced"
+  /** Another respond currently holds the one dust UTXO. Retry when it answers, ~35s. */
+  | "wallet_busy"
   /** Balancing failed for a reason other than funds. */
   | "balance_failed"
   | "submit_rejected"
@@ -35,7 +41,6 @@ export type ErrorCode =
 
 const STATUS: Readonly<Record<ErrorCode, number>> = {
   bad_request: 400,
-  payload_too_large: 413,
   not_found: 404,
   decode_failed: 422,
   ledger_mismatch: 502,
@@ -45,6 +50,8 @@ const STATUS: Readonly<Record<ErrorCode, number>> = {
   node_unavailable: 502,
   prove_failed: 502,
   wallet_unfunded: 503,
+  wallet_unsynced: 503,
+  wallet_busy: 503,
   balance_failed: 502,
   submit_rejected: 502,
   internal: 500,
@@ -52,7 +59,7 @@ const STATUS: Readonly<Record<ErrorCode, number>> = {
 
 /** Thrown wherever the cause is known at the throw site. */
 export class PublisherError extends Error {
-  constructor(readonly code: ErrorCode, message: string) {
+  constructor(readonly code: ErrorCode, message: string, readonly stage?: string) {
     super(message);
     this.name = "PublisherError";
   }
@@ -71,7 +78,7 @@ export function statusFor(code: ErrorCode): number {
  * measured substring names a cause worth acting on differently.
  */
 type Refinement = readonly [pattern: string, code: ErrorCode];
-export type RespondStage = { readonly fallback: ErrorCode; readonly refine: readonly Refinement[] };
+export type RespondStage = { readonly name: string; readonly fallback: ErrorCode; readonly refine: readonly Refinement[] };
 
 /**
  * The only place this service matches on a dependency's error text, pinned by
@@ -84,19 +91,39 @@ export type RespondStage = { readonly fallback: ErrorCode; readonly refine: read
  * at all is unverified.
  */
 export const RESPOND_STAGES = {
-  read: { fallback: "node_unavailable", refine: [] },
-  prove: { fallback: "prove_failed", refine: [] },
-  balance: { fallback: "balance_failed", refine: [["Wallet.InsufficientFunds", "wallet_unfunded"], ["could not balance dust", "wallet_unfunded"]] },
-  submit: { fallback: "submit_rejected", refine: [["ReadMismatch", "state_conflict"]] },
+  read: { name: "read", fallback: "node_unavailable", refine: [] },
+  prove: { name: "prove", fallback: "prove_failed", refine: [] },
+  balance: { name: "balance", fallback: "balance_failed", refine: [["Wallet.InsufficientFunds", "wallet_unfunded"], ["could not balance dust", "wallet_unfunded"]] },
+  submit: { name: "submit", fallback: "submit_rejected", refine: [["ReadMismatch", "state_conflict"]] },
 } as const satisfies Record<string, RespondStage>;
 
 export function classify(stage: RespondStage, described: string): ErrorCode {
   return stage.refine.find(([pattern]) => described.includes(pattern))?.[1] ?? stage.fallback;
 }
 
-/** Built from the code, so status and body cannot disagree. */
-export function fail(code: ErrorCode, message: string): Reply {
-  return { status: statusFor(code), body: JSON.stringify({ code, message }) };
+/**
+ * Built from the code, so status and body cannot disagree. Module-private on
+ * purpose: `failRedacted` is the only exported way to build an error reply, so
+ * nothing can answer the caller without passing through redaction first.
+ */
+function fail(code: ErrorCode, message: string, stage?: string): Reply {
+  return { status: statusFor(code), body: JSON.stringify(stage === undefined ? { code, message } : { code, message, stage }) };
+}
+
+/**
+ * The single funnel every error answer passes through, so the funding seed
+ * cannot reach a response body or a log line without going through `redact`
+ * first. Classification stays at the throw site; this owns only the
+ * redact-log-serialize tail. Keep every error path routed through here and the
+ * redaction stays total by construction rather than by remembering to add it.
+ *
+ * `logLabel` omitted means silent: a `bad_request` is the caller's own request
+ * coming back at it, not this service failing, and is never worth a log line.
+ */
+export function failRedacted(code: ErrorCode, rawMessage: string, secrets: readonly string[], logLabel?: string, stage?: string): Reply {
+  const message = redact(rawMessage, secrets);
+  if (logLabel !== undefined && code !== "bad_request") console.error(`${logLabel} [${code}${stage === undefined ? "" : ` @${stage}`}]: ${message}`);
+  return fail(code, message, stage);
 }
 
 /** The `invalid JSON:` preamble both seams answer with, byte for byte. */

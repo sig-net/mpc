@@ -18,11 +18,6 @@ export async function connect(nodeUrl: string): Promise<NodeClient> {
   return ApiPromise.create({ provider: new WsProvider(nodeUrl), noInitWarn: true });
 }
 
-/** Finalized, not best: an orphaned block is state that never existed. */
-export async function finalizedHead(client: NodeClient): Promise<BlockHashHex> {
-  return (await client.rpc.chain.getFinalizedHead()).toHex();
-}
-
 type RuntimeApiNamespace = Record<string, (...args: readonly unknown[]) => Promise<unknown>>;
 
 /**

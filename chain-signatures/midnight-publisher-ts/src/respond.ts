@@ -41,19 +41,19 @@ import {
 } from "@sig-net/midnight-contract";
 import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
 
-import { redact, type Config } from "./config.js";
+import { type Config } from "./config.js";
 import {
   badRequest,
   classify,
+  failRedacted,
   jsonObject,
   PublisherError,
   RESPOND_STAGES,
-  fail,
   type Reply,
   type RespondStage,
 } from "./errors.js";
 import { assertLedgerTag, LEDGER_TAGS } from "./ledger.js";
-import { finalizedHead, fromHex, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
+import { fromHex, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
 import { openFundingWallet } from "./wallet.js";
 
 // ---- the wire contract -----------------------------------------------------
@@ -252,7 +252,8 @@ type CallStates = PublicContractStates & { readonly blockHash: BlockHashHex };
  * per block — and the node connection exists for the wallet anyway.
  */
 async function readCallStates(client: NodeClient, address: string): Promise<CallStates> {
-  const blockHash = await finalizedHead(client);
+  // Finalized, not best: an orphaned block is state that never existed.
+  const blockHash = (await client.rpc.chain.getFinalizedHead()).toHex();
   const [rawContract, rawZswap, rawParams] = await Promise.all([
     runtimeApiBytes(client, blockHash, "getContractState", `0x${address}`),
     runtimeApiBytes(client, blockHash, "getZswapChainState", `0x${address}`),
@@ -284,10 +285,50 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
   };
 }
 
+// ---- deadlines ---------------------------------------------------------------
+
+/**
+ * Hangs, not latencies: a dead indexer leaves the wallet sync pending forever,
+ * and a node that dies mid-life leaves `@polkadot/api` queueing calls for a
+ * reconnect that may never come. Without these, the caller's `POST /respond`
+ * simply never answers, which is the one failure the error model cannot
+ * express. balance and submit are deliberately NOT bounded: abandoning a
+ * finalized recipe strands the fee coin for the dust-intent TTL (`wallet.ts`).
+ *
+ * Fields are mutable on purpose, as the test seam that lets a suite shrink a
+ * deadline instead of waiting one out.
+ */
+export const RESPOND_DEADLINES = {
+  /** First respond after boot pays for wallet sync; generous. */
+  boot: 90_000,
+  /** Three runtime-API reads over an open socket; anything near this is a hang. */
+  read: 15_000,
+  /** Proof-server p50 is ~0.4s; this covers a queue, not a hang. */
+  prove: 60_000,
+};
+
+/** Rejects with `timeoutError()` after `ms`; the abandoned attempt's own late failure is swallowed. */
+export async function withDeadline<T>(work: Promise<T>, ms: number, timeoutError: () => Error): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          work.catch(() => undefined);
+          reject(timeoutError());
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---- the publisher: wallet, keys, proof server -----------------------------
 
 /** Whatever {@link buildPublisher} assembles; stated once, there. */
-type Publisher = Readonly<Awaited<ReturnType<typeof buildPublisher>>>;
+export type Publisher = Readonly<Awaited<ReturnType<typeof buildPublisher>>>;
 
 let publisherPromise: Promise<Publisher> | undefined;
 
@@ -321,15 +362,33 @@ async function buildPublisher(config: Config) {
   };
 }
 
-/** Lazy: a failed attempt clears the memo so the next request retries. */
+/**
+ * Lazy: a failed OR timed-out attempt clears the memo so the next request
+ * retries. On timeout the build keeps running in the background; if it ever
+ * resolves it closes itself, so a timed-out boot cannot leak a synced facade.
+ */
 function publisher(config: Config): Promise<Publisher> {
   if (publisherPromise === undefined) {
-    publisherPromise = buildPublisher(config).catch((error: unknown) => {
+    const building = buildPublisher(config);
+    publisherPromise = withDeadline(building, RESPOND_DEADLINES.boot, () => {
+      void building.then((late) => late.wallet.close()).catch(() => undefined);
+      return new PublisherError(
+        "wallet_unsynced",
+        `publisher boot exceeded ${RESPOND_DEADLINES.boot} ms: the funding wallet could not sync. ` +
+          `Is the indexer at ${config.indexerUrl} reachable? Retry once it is.`,
+        "boot",
+      );
+    }).catch((error: unknown) => {
       publisherPromise = undefined;
       throw error;
     });
   }
   return publisherPromise;
+}
+
+/** Test seam: install a ready-made publisher, bypassing boot entirely. */
+export function primePublisher(ready: Promise<Publisher>): void {
+  publisherPromise = ready;
 }
 
 /** For tests and one-shot scripts. */
@@ -392,17 +451,19 @@ async function proveCall(ready: Publisher, call: RespondCall, address: string, s
   return ready.proofProvider.proveTx(unsubmitted.private.unprovenTx);
 }
 
-/** A {@link PublisherError} passes through; anything else is named by its stage. */
+/** A {@link PublisherError} passes through, gaining the stage if it lacks one; anything else is named by its stage. */
 async function inStage<T>(stage: RespondStage, run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    if (error instanceof PublisherError) throw error;
+    if (error instanceof PublisherError) {
+      throw error.stage === undefined ? new PublisherError(error.code, error.message, stage.name) : error;
+    }
     // A deserialization failure is NOT an unreachable node, which is what the
     // read stage's fallback would otherwise call it — telling the caller to
     // retry a condition no amount of retrying resolves.
     if (isDeserializationError(error) && error.context.extracted?.receivedVersion !== undefined) {
-      throw new PublisherError("ledger_mismatch", describeFailure(error));
+      throw new PublisherError("ledger_mismatch", describeFailure(error), stage.name);
     }
     const described = describeFailure(error);
     // Classified against a WIDER haystack than the message it answers with.
@@ -412,8 +473,17 @@ async function inStage<T>(stage: RespondStage, run: () => Promise<T>): Promise<T
     // `String(error)` runs Effect's own `Cause.pretty` and does render the
     // nested chain. It is multi-line with stack frames, so it is fit for
     // matching and not for a response body.
-    throw new PublisherError(classify(stage, `${described}\n${String(error)}`), described);
+    throw new PublisherError(classify(stage, `${described}\n${String(error)}`), described, stage.name);
   }
+}
+
+/** What a completed post hands back: the wire answer plus the ops log line. */
+interface Posted {
+  readonly txId: string;
+  /** The finalized block the three reads were pinned to, bare hex. */
+  readonly blockHash: string;
+  /** `read=12ms prove=350ms ...`, one token per stage. */
+  readonly timing: string;
 }
 
 /** The whole post: pinned reads, key check, prove, balance, submit. */
@@ -422,13 +492,29 @@ async function post(
   client: NodeClient,
   ready: Publisher,
   request: ValidatedRespondRequest,
-): Promise<string> {
-  const states = await inStage(RESPOND_STAGES.read, () => readCallStates(client, request.contract_address));
+): Promise<Posted> {
+  const timings: string[] = [];
+  const timed = async <T>(stage: RespondStage, run: () => Promise<T>): Promise<T> => {
+    const started = performance.now();
+    try {
+      return await inStage(stage, run);
+    } finally {
+      timings.push(`${stage.name}=${Math.round(performance.now() - started)}ms`);
+    }
+  };
+
+  const deadline = (what: string, ms: number) => () => new Error(`${what} exceeded the ${ms} ms deadline`);
+  const states = await timed(RESPOND_STAGES.read, () =>
+    withDeadline(readCallStates(client, request.contract_address), RESPOND_DEADLINES.read, deadline("reading the pinned states", RESPOND_DEADLINES.read)));
   assertCompiledContractMatches(ready, states.contractState, request.contract_address, config.managedDir);
   const call = respondCall(request);
-  const proven = await inStage(RESPOND_STAGES.prove, () => proveCall(ready, call, request.contract_address, states));
-  const balanced = await inStage(RESPOND_STAGES.balance, () => ready.wallet.balanceTx(proven));
-  return inStage(RESPOND_STAGES.submit, () => ready.wallet.submitTx(balanced));
+  const proven = await timed(RESPOND_STAGES.prove, () =>
+    withDeadline(proveCall(ready, call, request.contract_address, states), RESPOND_DEADLINES.prove, deadline("proving", RESPOND_DEADLINES.prove)));
+  // No deadline past this point: abandoning a finalized recipe strands the fee
+  // coin for the dust-intent TTL (`wallet.ts`), so balance and submit run out.
+  const balanced = await timed(RESPOND_STAGES.balance, () => ready.wallet.balanceTx(proven));
+  const txId = await timed(RESPOND_STAGES.submit, () => ready.wallet.submitTx(balanced));
+  return { txId, blockHash: states.blockHash.replace(/^0x/, ""), timing: timings.join(" ") };
 }
 
 function describeOne(value: unknown): string {
@@ -464,37 +550,52 @@ export function describeFailure(error: unknown): string {
   return parts.join(": ") || String(error);
 }
 
+/** The request id currently holding the wallet, from boot-or-read through submit. */
+let inFlightRid: string | undefined;
+
 /**
  * A 200 means finalized, equivalent to `SucceedEntirely` here: both circuits run
- * wholly in the guaranteed phase, so inclusion is success.
+ * wholly in the guaranteed phase, so inclusion is success. The body carries the
+ * submitted `tx_id` and the `block_hash` the reads were pinned to, for
+ * settlement observation and debugging.
  *
- * NOT SERIALIZED AND NOT RETRIED, so the caller owns two collisions: concurrent
- * posts share one dust UTXO and collide at balance time (`wallet_unfunded`,
- * ~35s), and two posts under one request id lose the ledger's optimistic-
- * concurrency check (`state_conflict`, never charged). Anyone adding a queue
- * must keep the state reads inside it, or the parameters go stale.
+ * ONE AT A TIME, NOT QUEUED: the wallet has a single dust UTXO, so a second
+ * concurrent post could only burn a prove and then fail at balance ~35s of
+ * recovery later. It is answered `wallet_busy` up front instead; retrying when
+ * the first answers is the caller's job. Same-rid duplicates still lose the
+ * ledger's optimistic-concurrency check (`state_conflict`, never charged).
+ * Anyone replacing this with a queue must keep the state reads inside it, or
+ * the parameters go stale.
  */
 export async function handleRespond(config: Config, client: NodeClient, body: string): Promise<Reply> {
+  let claimed = false;
   try {
     const validated = parseRespondRequest(body);
     validateRespondRequest(validated);
+    if (inFlightRid !== undefined) {
+      return failRedacted(
+        "wallet_busy",
+        `a respond for rid ${inFlightRid} holds the funding wallet; one post at a time, ~35s each`,
+        [config.fundingSeed],
+      );
+    }
+    inFlightRid = validated.request_id;
+    claimed = true;
     console.log(`respond: circuit=${validated.circuit} rid=${validated.request_id}`);
-    // Deliberately not staged: a failure here is this service failing to start
-    // (unreadable `managedDir`, unreachable indexer, bad seed), which no stage
-    // code describes better than `internal` plus the message itself.
+    // Boot failures other than the sync deadline stay unstaged `internal`: an
+    // unreadable `managedDir` or a bad seed is this service failing to start,
+    // which no stage code describes better than the message itself.
     const ready = await publisher(config);
-    const txId = await post(config, client, ready, validated);
-    console.log(`respond: rid=${validated.request_id} submitted tx ${txId}`);
-    return { status: 200, body: `{"status":"ok"}` };
+    const posted = await post(config, client, ready, validated);
+    console.log(`respond: rid=${validated.request_id} submitted tx ${posted.txId} block ${posted.blockHash} ${posted.timing}`);
+    return { status: 200, body: JSON.stringify({ status: "ok", tx_id: posted.txId, block_hash: posted.blockHash }) };
   } catch (error) {
     // Redacted at the source: wallet, proof-server and node errors can echo
     // values they were handed, and this text becomes both a response body and a
-    // log line. The funding seed must never survive the trip.
+    // log line. `failRedacted` is the single funnel; the seed never survives it.
     const failure = error instanceof PublisherError ? error : new PublisherError("internal", describeFailure(error));
-    const safe = redact(failure.message, [config.fundingSeed]);
-    // A 400 is the caller's own request coming back at it and is not worth a log
-    // line; everything else is this service failing to do its job.
-    if (failure.code !== "bad_request") console.error(`respond failed [${failure.code}]: ${safe}`);
-    return fail(failure.code, safe);
+    return failRedacted(failure.code, failure.message, [config.fundingSeed], "respond failed", failure.stage);
+  } finally {
+    if (claimed) inFlightRid = undefined;
   }
 }

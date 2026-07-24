@@ -15,43 +15,29 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 
 import { isDeserializationError } from "@midnight-ntwrk/midnight-js-utils";
 
-import { redact, type Config } from "./config.js";
-import { badRequest, fail, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
+import { type Config } from "./config.js";
+import { badRequest, failRedacted, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
 import { LEDGER_TAGS } from "./ledger.js";
 import { fromHex, type NodeClient } from "./node.js";
 import { decodeTransactions } from "./block.js";
 import { handleRespond } from "./respond.js";
 import { decodeContractState } from "./state.js";
 
-type BodyLimit = { readonly bytes: number; readonly label: string };
-
-/** A handful of 64-hex fields; past this is a bug or an attack. */
-const RESPOND_LIMIT: BodyLimit = { bytes: 64 * 1024, label: "64 KiB" };
-
-/** A transaction runs ~28 KB of hex, so this carries ~280 of them. */
-const DECODE_LIMIT: BodyLimit = { bytes: 8 * 1024 * 1024, label: "8 MiB" };
-
-/** Liveness plus the compatibility declaration. Deliberately not readiness. */
-const HEALTH_BODY = JSON.stringify({ status: "ok", ledger: LEDGER_TAGS });
-
-async function readBoundedBody(request: IncomingMessage, limit: BodyLimit): Promise<string | Reply> {
+/**
+ * Read unbounded: the only caller is the trusted in-node publisher over
+ * loopback, so there is no body-size cap to enforce here.
+ */
+async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request as AsyncIterable<Buffer>) {
-    if ((size += chunk.length) > limit.bytes) return fail("payload_too_large", `body exceeds the ${limit.label} limit`);
-    chunks.push(chunk);
-  }
+  for await (const chunk of request as AsyncIterable<Buffer>) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
-}
-
-function bytesMember(body: string): unknown {
-  return jsonObject(body)["bytes"];
 }
 
 /**
  * Checked, not coerced: `Buffer.from(_, "hex")` truncates silently at the first
  * non-hex character, which would hand the ledger a short blob and blame the
- * caller's bytes for it.
+ * caller's bytes for it — a caller-side hex bug must answer `bad_request`
+ * ("fix the request"), never `decode_failed` ("inspect the blob").
  */
 function hexBytes(value: unknown, what: string): Uint8Array {
   if (typeof value !== "string") throw badRequest(`${what} must be a hex string`);
@@ -79,40 +65,37 @@ function decodeFailureCode(error: unknown): ErrorCode {
 }
 
 export function buildServer(config: Config, client: NodeClient): Server {
+  /** Liveness plus the compatibility declaration (ledger line, network id). Deliberately not readiness. */
+  const healthBody = JSON.stringify({ status: "ok", networkId: config.networkId, ledger: LEDGER_TAGS });
+
   /** The envelope is the caller's, the bytes are the ledger's. */
   const decode = async (request: IncomingMessage, seam: (bytes: unknown) => unknown): Promise<Reply> => {
-    const text = await readBoundedBody(request, DECODE_LIMIT);
-    if (typeof text !== "string") return text;
+    const text = await readBody(request);
     try {
-      return { status: 200, body: JSON.stringify(seam(bytesMember(text))) };
+      return { status: 200, body: JSON.stringify(seam(jsonObject(text)["bytes"])) };
     } catch (error) {
       const code = error instanceof PublisherError ? error.code : decodeFailureCode(error);
-      const safe = redact(error instanceof Error ? error.message : String(error), [config.fundingSeed]);
-      if (code !== "bad_request") console.error(`decode failed [${code}]: ${safe}`);
-      return fail(code, safe);
+      return failRedacted(code, error instanceof Error ? error.message : String(error), [config.fundingSeed], "decode failed");
     }
   };
 
   const handle = async (request: IncomingMessage): Promise<Reply> => {
     const route = `${request.method ?? "GET"} ${new URL(request.url ?? "/", "http://localhost").pathname}`;
 
-    if (route === "GET /health") return { status: 200, body: HEALTH_BODY };
+    if (route === "GET /health") return { status: 200, body: healthBody };
     if (route === "POST /decode/contract-state") return decode(request, (b) => decodeContractState(hexBytes(b, "`bytes`")));
     if (route === "POST /decode/transactions") return decode(request, (b) => decodeTransactions(hexList(b)));
-    if (route !== "POST /respond") return fail("not_found", `no route ${route}`);
+    if (route !== "POST /respond") return failRedacted("not_found", `no route ${route}`, [config.fundingSeed]);
 
-    const text = await readBoundedBody(request, RESPOND_LIMIT);
-    return typeof text === "string" ? handleRespond(config, client, text) : text;
+    return handleRespond(config, client, await readBody(request));
   };
 
   return createServer((request, response) => void handle(request)
-      .catch((error: unknown) => {
-        // Reached in normal operation: `readBoundedBody` rejects with `aborted`
-        // when a client hangs up mid-body, so this log includes disconnects.
-        const safe = redact(error instanceof Error ? error.message : String(error), [config.fundingSeed]);
-        console.error(`unhandled: ${safe}`);
-        return fail("internal", safe);
-      })
+      // Reached in normal operation: `readBody` rejects with `aborted` when a
+      // client hangs up mid-body, so this catch includes disconnects.
+      .catch((error: unknown) =>
+        failRedacted("internal", error instanceof Error ? error.message : String(error), [config.fundingSeed], "unhandled"),
+      )
       .then(({ status, body }) => response.writeHead(status, { "content-type": "application/json" }).end(body)));
 }
 
