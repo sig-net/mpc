@@ -36,9 +36,7 @@ pub(super) fn test_mock_network(
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
-    // Participant info as of network start, consulted only for the recipient's
-    // encryption key. A node's active set may shrink during a test; delivery in
-    // the mock network must not depend on the sender's view of liveness.
+    // Participant info as of network start, consulted for recipient's encryption key
     let initial_participants = mesh.borrow().active().clone();
 
     tokio::spawn(async move {
