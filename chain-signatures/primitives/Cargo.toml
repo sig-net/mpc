@@ -2,6 +2,9 @@
 name = "mpc-primitives"
 version.workspace = true
 edition = "2021"
+description = "Node-internal primitives for the MPC network (not published; see signet-primitives for the public interface)"
+readme = "README.md"
+publish = false
 
 [dependencies]
 borsh.workspace = true
