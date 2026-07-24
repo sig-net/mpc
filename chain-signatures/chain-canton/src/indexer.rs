@@ -34,6 +34,8 @@ enum CantonConnection {
 
 impl CantonConnection {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    // TODO: this 60s message stall overlaps with the supervisor's per-chain
+    // `live_block_timeout` watchdog. Consolidate into one stall authority
     const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
     const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -327,6 +329,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     type Block = ();
     type Iter = Empty<()>;
 
+    // TODO: add unit tests for `run()` mirroring Ethereum's `RunFixture`
+    // (catchup ordering, live-after-catchup, cancel-during-catchup, cancel-while-live).
     async fn run(
         &self,
         events_tx: mpsc::Sender<ChainEvent>,
