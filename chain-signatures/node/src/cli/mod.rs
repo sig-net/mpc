@@ -21,7 +21,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::{run_stream, supervisor::run_supervised, StreamContext};
+use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
@@ -31,7 +31,7 @@ use deadpool_redis::Runtime;
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
-use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
+use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_near::NearClient;
@@ -857,11 +857,11 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
-            Ok(canton_stream) => {
-                tracing::info!("canton indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    canton_stream,
+        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+            Ok(canton_indexer) => {
+                tracing::info!("canton indexer created successfully");
+                tokio::spawn(run_supervised(
+                    canton_indexer,
                     StreamContext::new(
                         backlog,
                         sign_tx,
@@ -875,7 +875,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer stream");
+                tracing::error!(?err, "failed to create canton indexer");
             }
         }
     }
