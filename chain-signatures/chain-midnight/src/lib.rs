@@ -4,6 +4,7 @@ mod config;
 mod indexer;
 mod publisher;
 pub mod records;
+mod request_id;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
 pub use indexer::MidnightIndexer;
@@ -12,3 +13,4 @@ pub use records::{
     CompactMaybe, EvmType2TxParams, RespondBidirectionalEvent, SignBidirectionalEventNotification,
     SignBidirectionalRecord, SignatureRespondedEvent, SignetMapKey,
 };
+pub use request_id::compute_request_id;

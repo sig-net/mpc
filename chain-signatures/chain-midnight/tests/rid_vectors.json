@@ -1,0 +1,553 @@
+{
+  "generated_from": "@sig-net/midnight 0.11.0 (midnight-integration main 263d936, tag v0.11.0)",
+  "oracle": "calculateRequestId (packages/signet-midnight/src/signet-evtype2tx-requests.ts)",
+  "vectors": [
+    {
+      "name": "minimal-1word",
+      "capacities": {
+        "maxCalldataWords": 1,
+        "maxAccessListEntries": 0,
+        "maxStorageKeysPerEntry": 0,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf",
+      "preimage_atoms": 23,
+      "preimage_bytes": 372,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        1,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "1",
+              "words": [
+                "1111111111111111111111111111111111111111111111111111111111111111"
+              ]
+            }
+          },
+          "access_list_entry_count": "0",
+          "access_list": []
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "no-calldata",
+      "capacities": {
+        "maxCalldataWords": 1,
+        "maxAccessListEntries": 0,
+        "maxStorageKeysPerEntry": 0,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "4d1b4af40ec47c7ee016d16602c3bfffc74b4e852d7342922ae268bfd1d2cfb4",
+      "preimage_atoms": 23,
+      "preimage_bytes": 372,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        1,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": false,
+            "value": {
+              "selector": "00000000",
+              "no_words": "0",
+              "words": [
+                "0000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          },
+          "access_list_entry_count": "0",
+          "access_list": []
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "zero-words-capacity",
+      "capacities": {
+        "maxCalldataWords": 0,
+        "maxAccessListEntries": 0,
+        "maxStorageKeysPerEntry": 0,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "f94207b823c3dfab3f20da00dc6a43cc78daddafb648b685ec45538222148307",
+      "preimage_atoms": 22,
+      "preimage_bytes": 340,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        1,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "0",
+              "words": []
+            }
+          },
+          "access_list_entry_count": "0",
+          "access_list": []
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "unused-word-slot",
+      "capacities": {
+        "maxCalldataWords": 3,
+        "maxAccessListEntries": 0,
+        "maxStorageKeysPerEntry": 0,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "7f4d8ba3c80b24090af329a385303600be40c2c00dc322d1c6e4b377971407a0",
+      "preimage_atoms": 25,
+      "preimage_bytes": 436,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        32,
+        32,
+        1,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "1",
+              "words": [
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          },
+          "access_list_entry_count": "0",
+          "access_list": []
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "access-list-1x1",
+      "capacities": {
+        "maxCalldataWords": 1,
+        "maxAccessListEntries": 1,
+        "maxStorageKeysPerEntry": 1,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "b9d14414888ad9913b12a2c309180edd216ea649f6e8f616608260e0ffb9ac16",
+      "preimage_atoms": 26,
+      "preimage_bytes": 425,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        1,
+        20,
+        1,
+        32,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "1",
+              "words": [
+                "1111111111111111111111111111111111111111111111111111111111111111"
+              ]
+            }
+          },
+          "access_list_entry_count": "1",
+          "access_list": [
+            {
+              "address": "4040404040404040404040404040404040404040",
+              "storage_key_count": "1",
+              "storage_keys": [
+                "7070707070707070707070707070707070707070707070707070707070707070"
+              ]
+            }
+          ]
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "access-list-partial",
+      "capacities": {
+        "maxCalldataWords": 2,
+        "maxAccessListEntries": 2,
+        "maxStorageKeysPerEntry": 3,
+        "lenOutputDeserializationSchema": 34,
+        "lenRespondSerializationSchema": 34
+      },
+      "expected_request_id_hex": "e538119a35922d0a967a31e20117135705de25ed90dbea88a50583acb37a6de2",
+      "preimage_atoms": 34,
+      "preimage_bytes": 638,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        32,
+        1,
+        20,
+        1,
+        32,
+        32,
+        32,
+        20,
+        1,
+        32,
+        32,
+        32,
+        32,
+        34,
+        34
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "2",
+              "words": [
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "1212121212121212121212121212121212121212121212121212121212121212"
+              ]
+            }
+          },
+          "access_list_entry_count": "1",
+          "access_list": [
+            {
+              "address": "4040404040404040404040404040404040404040",
+              "storage_key_count": "2",
+              "storage_keys": [
+                "7070707070707070707070707070707070707070707070707070707070707070",
+                "7171717171717171717171717171717171717171717171717171717171717171",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            },
+            {
+              "address": "0000000000000000000000000000000000000000",
+              "storage_key_count": "0",
+              "storage_keys": [
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          ]
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e74323536000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "wide-schemas",
+      "capacities": {
+        "maxCalldataWords": 1,
+        "maxAccessListEntries": 0,
+        "maxStorageKeysPerEntry": 0,
+        "lenOutputDeserializationSchema": 128,
+        "lenRespondSerializationSchema": 96
+      },
+      "expected_request_id_hex": "9b9cfefee76599c63b4e9e8e7d5b8eb28f6dfebaef416b8b0ed759278fa9bf38",
+      "preimage_atoms": 23,
+      "preimage_bytes": 528,
+      "declared_widths": [
+        32,
+        8,
+        1,
+        32,
+        1,
+        1,
+        64,
+        1,
+        8,
+        8,
+        16,
+        16,
+        8,
+        20,
+        16,
+        1,
+        4,
+        2,
+        32,
+        1,
+        32,
+        128,
+        96
+      ],
+      "record": {
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "request_nonce": "7",
+        "key_version": "1",
+        "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+        "algo": 0,
+        "dest": 0,
+        "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tx_param_type": 0,
+        "tx_params": {
+          "chain_id": "31337",
+          "nonce": "3",
+          "max_priority_fee_per_gas": "1",
+          "max_fee_per_gas": "2",
+          "gas_limit": "21000",
+          "to": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "value": "5",
+          "calldata": {
+            "is_some": true,
+            "value": {
+              "selector": "ca11ab1e",
+              "no_words": "1",
+              "words": [
+                "1111111111111111111111111111111111111111111111111111111111111111"
+              ]
+            }
+          },
+          "access_list_entry_count": "0",
+          "access_list": []
+        },
+        "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+        "output_deserialization_schema": "75696e7432353600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "respond_serialization_schema": "75696e743235360000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ]
+}
