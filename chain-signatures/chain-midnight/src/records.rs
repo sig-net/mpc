@@ -11,6 +11,13 @@
 //! These are plain data mirrors: serialization, hashing, and decoding belong
 //! to later layers. Nothing may assume Rust memory layout matches the wire
 //! form, which is field by field at declared widths.
+//!
+//! Endianness splits by side and must not be over-generalised: every `Uint`
+//! integer in these records (`request_nonce`, `key_version`, the
+//! `EvmType2TxParams` integers, `no_words`, the count fields) is
+//! little-endian zero-padded to its declared width in the preimage and on
+//! the wire, while the big-endian rule documented on `AffinePoint` and
+//! `Signature` applies only to those respond-side byte arrays.
 
 /// One signing request, the contract's `SignBidirectionalEvent` record.
 ///
@@ -383,77 +390,62 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fixed_width_fields_match_their_declared_atom_widths() {
-        // Widths per the contract's alignment atoms. For u8/u16/u64/u128 and
-        // [u8; N] the Rust size equals the declared preimage width, so a
-        // type change (say no_words to u8) fails loudly here. The schema
-        // fields, access_list, and words are runtime-width vectors; only
-        // their element widths are pinned.
-        let record = minimal_record();
-        assert_eq!(size_of_val(&record.sender), 32);
-        assert_eq!(size_of_val(&record.request_nonce), 8);
-        assert_eq!(
-            size_of_val(&record.key_version),
-            1,
-            "key_version is Uint<8>: one preimage byte, not four"
-        );
-        assert_eq!(size_of_val(&record.path), 32);
-        assert_eq!(size_of_val(&record.algo), 1);
-        assert_eq!(size_of_val(&record.dest), 1);
-        assert_eq!(size_of_val(&record.params), 64);
-        assert_eq!(size_of_val(&record.tx_param_type), 1);
-        assert_eq!(size_of_val(&record.caip2_id), 32);
-
+    /// Atom count and total preimage width implied by the record's declared
+    /// field types and runtime capacities, walked in declaration order: one
+    /// `size_of_val` entry per fixed-width atom, vector lengths for the two
+    /// runtime-width schema fields. For `u8/u16/u64/u128` and `[u8; N]` the
+    /// Rust size equals the declared atom width, so the totals come off the
+    /// real types, never a retyped table. The sum is order-insensitive by
+    /// construction; order is `declaration_order_matches_the_preimage_order`'s
+    /// job.
+    fn declared_layout(record: &SignBidirectionalRecord) -> (usize, usize) {
         let tx = &record.tx_params;
-        assert_eq!(size_of_val(&tx.chain_id), 8);
-        assert_eq!(size_of_val(&tx.nonce), 8);
-        assert_eq!(size_of_val(&tx.max_priority_fee_per_gas), 16);
-        assert_eq!(size_of_val(&tx.max_fee_per_gas), 16);
-        assert_eq!(size_of_val(&tx.gas_limit), 8);
-        assert_eq!(size_of_val(&tx.to), 20);
-        assert_eq!(size_of_val(&tx.value), 16);
-        assert_eq!(size_of_val(&tx.access_list_entry_count), 1);
-
-        assert_eq!(size_of_val(&tx.calldata.is_some), 1);
-        assert_eq!(size_of_val(&tx.calldata.value.selector), 4);
-        assert_eq!(
+        let mut widths = vec![
+            size_of_val(&record.sender),
+            size_of_val(&record.request_nonce),
+            size_of_val(&record.key_version),
+            size_of_val(&record.path),
+            size_of_val(&record.algo),
+            size_of_val(&record.dest),
+            size_of_val(&record.params),
+            size_of_val(&record.tx_param_type),
+            size_of_val(&tx.chain_id),
+            size_of_val(&tx.nonce),
+            size_of_val(&tx.max_priority_fee_per_gas),
+            size_of_val(&tx.max_fee_per_gas),
+            size_of_val(&tx.gas_limit),
+            size_of_val(&tx.to),
+            size_of_val(&tx.value),
+            size_of_val(&tx.calldata.is_some),
+            size_of_val(&tx.calldata.value.selector),
             size_of_val(&tx.calldata.value.no_words),
-            2,
-            "no_words is Uint<16>: two preimage bytes, not one"
+        ];
+        widths.extend(tx.calldata.value.words.iter().map(size_of_val));
+        widths.push(size_of_val(&tx.access_list_entry_count));
+        for entry in &tx.access_list {
+            widths.push(size_of_val(&entry.address));
+            widths.push(size_of_val(&entry.storage_key_count));
+            widths.extend(entry.storage_keys.iter().map(size_of_val));
+        }
+        widths.push(size_of_val(&record.caip2_id));
+        widths.push(record.output_deserialization_schema.len());
+        widths.push(record.respond_serialization_schema.len());
+        (widths.len(), widths.iter().sum())
+    }
+
+    #[test]
+    fn declared_widths_sum_to_the_runtime_layout() {
+        // 23 atoms and 372 bytes are the runtime's own numbers for the
+        // one-word capacity tier (tests/rid_vectors.json, minimal-1word:
+        // preimage_atoms and preimage_bytes). Any scalar-width drift in the
+        // record or its nested structs (key_version widened to u32, no_words
+        // narrowed to u8, a resized byte array) moves the sum and fails here.
+        let (atoms, bytes) = declared_layout(&minimal_record());
+        assert_eq!(atoms, 23, "atom count drifted from the runtime layout");
+        assert_eq!(
+            bytes, 372,
+            "declared width sum drifted from the runtime layout"
         );
-        assert_eq!(size_of_val(&tx.calldata.value.words[0]), 32);
-
-        let entry = sample_access_list_entry();
-        assert_eq!(size_of_val(&entry.address), 20);
-        assert_eq!(size_of_val(&entry.storage_key_count), 1);
-        assert_eq!(size_of_val(&entry.storage_keys[0]), 32);
-
-        let notification = SignBidirectionalEventNotification {
-            version: 1,
-            payload: [0; 128],
-        };
-        assert_eq!(size_of_val(&notification.version), 1);
-        assert_eq!(size_of_val(&notification.payload), 128);
-
-        let key = SignetMapKey {
-            count: 7,
-            request_id: [0x22; 32],
-        };
-        assert_eq!(size_of_val(&key.count), 8);
-        assert_eq!(size_of_val(&key.request_id), 32);
-
-        let respond = RespondBidirectionalEvent {
-            serialized_output: [0; 128],
-            output_len: 32,
-            signature: sample_signature(),
-        };
-        assert_eq!(size_of_val(&respond.serialized_output), 128);
-        assert_eq!(size_of_val(&respond.output_len), 1);
-        assert_eq!(size_of_val(&respond.signature.big_r.x), 32);
-        assert_eq!(size_of_val(&respond.signature.big_r.y), 32);
-        assert_eq!(size_of_val(&respond.signature.s), 32);
-        assert_eq!(size_of_val(&respond.signature.recovery_id), 1);
     }
 
     #[test]
