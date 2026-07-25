@@ -1121,12 +1121,88 @@ mod tests {
         assert_eq!(digest, -6950551088322443092);
     }
 
+    /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
+    /// `--midnight-*` flags, so a polluted environment could silently
+    /// reconfigure any test that goes through clap parsing and make a gate
+    /// mutation look green. `midnight_off_by_default` builds its args
+    /// programmatically, so env cannot reach it today; the guard pins that
+    /// assumption and protects the parse-based forwarding test.
+    fn assert_midnight_env_unset() {
+        for var in [
+            "MPC_MIDNIGHT_SIDECAR_URL",
+            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_NETWORK_ID",
+        ] {
+            assert!(
+                std::env::var_os(var).is_none(),
+                "{var} is set: these tests require an unpolluted environment"
+            );
+        }
+    }
+
+    /// Dockerized test nodes receive their whole configuration as CLI strings
+    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
+    /// `Cli::Start` but missing from that extension, its config would be
+    /// accepted on the command line and then silently dropped on
+    /// reconstruction.
+    #[test]
+    fn into_str_args_forwards_midnight() {
+        assert_midnight_env_unset();
+
+        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let central_address = "ab".repeat(32);
+        let argv = [
+            "mpc-node",
+            "start",
+            "--account-id",
+            "test.near",
+            "--account-sk",
+            &account_sk,
+            "--cipher-sk",
+            "cipher",
+            "--env",
+            "unit-tests",
+            "--gcp-project-id",
+            "project",
+            "--redis-url",
+            "redis://127.0.0.1:6379",
+            "--midnight-sidecar-url",
+            "http://127.0.0.1:8790",
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:9944",
+            "--midnight-central-address",
+            &central_address,
+            "--midnight-network-id",
+            "undeployed",
+        ];
+        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
+
+        for expected in [
+            "--midnight-sidecar-url",
+            "http://127.0.0.1:8790",
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:9944",
+            "--midnight-central-address",
+            central_address.as_str(),
+            "--midnight-network-id",
+            "undeployed",
+        ] {
+            assert!(
+                out.contains(&expected.to_string()),
+                "into_str_args dropped {expected}"
+            );
+        }
+    }
+
     /// The Midnight config gate: with no Midnight flags supplied, the chain
     /// must be entirely absent from the node's wiring. `spawn_indexers` reads
     /// the same `chains.midnight` field, so `None` here also means no indexer
     /// is spawned.
     #[tokio::test]
     async fn midnight_off_by_default() {
+        assert_midnight_env_unset();
+
         let chains = ChainConfigs::from_args(
             EthArgs::from_config(None),
             SolArgs::from_config(None),
