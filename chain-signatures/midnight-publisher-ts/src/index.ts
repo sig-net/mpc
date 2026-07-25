@@ -6,11 +6,14 @@
 
 import { configFromEnv } from "./config.js";
 import { connect } from "./node.js";
+import { closePublisher } from "./respond.js";
 import { serve } from "./server.js";
 
 const config = configFromEnv();
 const client = await connect(config.nodeUrl);
 const server = await serve(config, client);
 
-const shutdown = () => server.close(() => void client.disconnect().finally(() => process.exit(0)));
+// The wallet facade needs the node connection to unwind, so it stops first.
+const shutdown = () =>
+  server.close(() => void closePublisher().then(() => client.disconnect()).finally(() => process.exit(0)));
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, shutdown);
