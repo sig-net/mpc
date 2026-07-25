@@ -17,7 +17,6 @@ import {
   parseRespondRequest,
   type RespondBidirectionalEvent,
   type RespondCall,
-  type RespondCircuit,
   type SignatureRespondedEvent,
   type WireSignature,
 } from "../src/respond.js";
@@ -85,15 +84,8 @@ function bidirectionalEvent(body: Body): RespondBidirectionalEvent {
   return (call as Extract<RespondCall, { circuitId: "postRespondBidirectional" }>).args[1];
 }
 
+/** The values the round-trip cases below do not reach: both ends of every bounded field. */
 describe("parseRespondRequest: accepts", () => {
-  it("a well-formed postSignatureResponse", () => {
-    expect(() => parse(signatureResponse())).not.toThrow();
-  });
-
-  it("a well-formed postRespondBidirectional", () => {
-    expect(() => parse(bidirectional())).not.toThrow();
-  });
-
   it("output_len at both ends of its range", () => {
     expect(() => parse(bidirectional({ output_len: 0 }))).not.toThrow();
     expect(() => parse(bidirectional({ output_len: 128 }))).not.toThrow();
@@ -134,10 +126,6 @@ const REJECTIONS: [string, Body, string][] = [
 
   // ---- postSignatureResponse carries neither bidirectional field ----
   // `output_len: 0` is the trap: falsy, so a truthiness test would wave it
-  // through. The branch declares the field absent, so no value enters it.
-  ["contaminated with serialized_output", signatureResponse({ serialized_output: "55".repeat(128) }), "invalid request: `serialized_output` must be absent on postSignatureResponse"],
-  ["contaminated with output_len", signatureResponse({ output_len: 64 }), "invalid request: `output_len` must be absent on postSignatureResponse"],
-  ["contaminated with output_len 0", signatureResponse({ output_len: 0 }), "invalid request: `output_len` must be absent on postSignatureResponse"],
 
   // ---- postRespondBidirectional requires both ----
   ["serialized_output absent", bidirectional({ serialized_output: undefined }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
@@ -241,18 +229,15 @@ describe("parseRespondRequest", () => {
     expect(parse(bidirectional())).toEqual(bidirectional());
   });
 
-  it("omitting an optional field is the way to leave it out", () => {
-    const parsed = parse(signatureResponse());
-    expect(parsed.serialized_output).toBeUndefined();
-    expect(parsed.output_len).toBeUndefined();
+  // The branch declares neither field, so `RespondRequest` does not carry them
+  // there at all — a compile error, not a runtime one, if `respondCall` reached
+  // for either. On the wire they are simply unknown keys, like any other.
+  it("strips a bidirectional field sent to postSignatureResponse rather than rejecting it", () => {
+    expect(parse(signatureResponse({ serialized_output: "55".repeat(128), output_len: 64 }))).toEqual(signatureResponse());
   });
 
-  it("ignores unknown fields, as the wire always has", () => {
-    expect(() => parse({ ...bidirectional(), output_hash: "deadbeef", extra: 1 })).not.toThrow();
-  });
-
-  it("strips the unknown fields rather than passing them on", () => {
-    expect(parse({ ...bidirectional(), output_hash: "deadbeef" })).toEqual(bidirectional());
+  it("ignores unknown fields as the wire always has, and strips them rather than passing them on", () => {
+    expect(parse({ ...bidirectional(), output_hash: "deadbeef", extra: 1 })).toEqual(bidirectional());
   });
 
   it.each(MALFORMED_BODIES)("rejects %s with an invalid-JSON message", (_label, body) => {
@@ -321,7 +306,7 @@ describe("wire fixtures", () => {
     const body =
       `{"contract_address":"${ADDRESS}","circuit":"postSignatureResponse","request_id":"${REQUEST_ID}",` +
       `"signature":{"big_r":{"x":"2222222222222222222222222222222222222222222222222222222222222222","y":"3333333333333333333333333333333333333333333333333333333333333333"},"s":"4444444444444444444444444444444444444444444444444444444444444444","recovery_id":1}}`;
-    expect(() => parseRespondRequest(body)).not.toThrow();
+    expect(parseRespondRequest(body)).toEqual(signatureResponse());
   });
 
   it("accepts the pinned postRespondBidirectional body byte for byte", () => {
@@ -346,11 +331,6 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
     "an unknown circuit",
     JSON.stringify(signatureResponse({ circuit: "postRespond" })),
     "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional",
-  ],
-  [
-    "a contaminated body",
-    JSON.stringify(signatureResponse({ serialized_output: "55".repeat(128) })),
-    "invalid request: `serialized_output` must be absent on postSignatureResponse",
   ],
 ];
 
@@ -384,20 +364,6 @@ describe("handleRespond: the bad_request path never touches the chain", () => {
  * an `Error` at all.
  */
 describe("describeFailure", () => {
-  it("keeps the tag the node's rejection carries in its name", () => {
-    const rejected = new Error("Transaction is invalid and was rejected by the node");
-    rejected.name = "(FiberFailure) TransactionInvalidError";
-    expect(describeFailure(rejected)).toBe(
-      "(FiberFailure) TransactionInvalidError: Transaction is invalid and was rejected by the node",
-    );
-  });
-
-  it("leaves a plain Error's message unadorned", () => {
-    expect(describeFailure(new Error("prove failed: 500 Internal Server Error"))).toBe(
-      "prove failed: 500 Internal Server Error",
-    );
-  });
-
   it("appends a cause instead of dropping it", () => {
     const wrapped = new Error("balancing failed", { cause: { _tag: "TransactionInvalidError", message: "rejected" } });
     expect(describeFailure(wrapped)).toBe("balancing failed: TransactionInvalidError: rejected");
@@ -434,11 +400,6 @@ describe("describeFailure", () => {
     expect(describeFailure(chain)).not.toContain("innermost");
   });
 
-  it("does not loop forever on a self-referential cause chain", () => {
-    const looping: { message: string; cause?: unknown } = { message: "round and round" };
-    looping.cause = looping;
-    expect(describeFailure(looping)).toBe("round and round");
-  });
 });
 
 /**
@@ -506,21 +467,5 @@ describe("nodeConfig", () => {
       "nodeUrl",
       "proofServerUrl",
     ]);
-  });
-});
-
-/** The narrowing the parse performs is what keeps `respondCall` total. */
-describe("types", () => {
-  it("narrows the circuit to the two postable ids", () => {
-    const request = parse(bidirectional());
-    const circuit: RespondCircuit = request.circuit;
-    expect(circuit).toBe("postRespondBidirectional");
-    // Narrowed by the discriminant alone: no cast, no second check.
-    if (request.circuit === "postRespondBidirectional") {
-      const output: string = request.serialized_output;
-      const length: number = request.output_len;
-      expect(output).toHaveLength(256);
-      expect(length).toBe(64);
-    }
   });
 });

@@ -52,14 +52,12 @@ import { openFundingWallet } from "./wallet.js";
 // ---- the wire contract -----------------------------------------------------
 
 // One message per field: absent, `null`, the wrong type and the wrong value all
-// read the same, because they are the same thing here. An absent key is the only
-// way to omit an optional field; `null` rejects like any other wrong value.
+// read the same, because they are the same thing here.
 
 const MUST_BE_AN_OBJECT = "must be an object";
 const MUST_BE_HEX_32 = "must be 64 lowercase hex";
 const MUST_BE_HEX_128 = "must be 256 lowercase hex (Bytes<128>)";
 const MUST_BE_A_CIRCUIT = "must be postSignatureResponse or postRespondBidirectional";
-const MUST_BE_ABSENT = "must be absent on postSignatureResponse";
 const MUST_BE_AN_OUTPUT_LEN = "must be an integer in 0..=128";
 
 const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
@@ -69,9 +67,6 @@ const wireHex = (bytes: number, message: string) =>
   z.string(message).regex(new RegExp(`^[0-9a-f]{${bytes * 2}}$`), message);
 
 const hex32 = wireHex(32, MUST_BE_HEX_32);
-
-/** A bidirectional field on the circuit that has none. */
-const absent = z.undefined(MUST_BE_ABSENT).optional();
 
 /**
  * The MPC's canonical `Signature { big_r, s, recovery_id }` verbatim, nested as
@@ -100,8 +95,6 @@ const RespondRequestSchema = z.discriminatedUnion(
       circuit: z.literal("postSignatureResponse"),
       request_id: hex32,
       signature: wireSignature,
-      serialized_output: absent,
-      output_len: absent,
     }),
     wireObject({
       contract_address: hex32,
