@@ -42,7 +42,7 @@ import {
   type Publisher,
 } from "../src/respond.js";
 import { deriveFundingKeys, type FundingWallet } from "../src/wallet.js";
-import { FIXTURES } from "./support.js";
+import { FIXTURES, listening } from "./support.js";
 
 const MANAGED = fileURLToPath(new URL("../node_modules/@sig-net/midnight-contract/dist/managed/", import.meta.url));
 
@@ -373,5 +373,86 @@ describe("POST /respond: the busy gate", () => {
     primeStub();
     expect((await handleRespond(TEST_CONFIG, stubClient(), "{")).status).toBe(400);
     expect((await handleRespond(TEST_CONFIG, stubClient(), respondBody("dd".repeat(32)))).status).toBe(200);
+  });
+});
+
+// ---- over the real HTTP server ---------------------------------------------
+
+/**
+ * Everything above calls `handleRespond` directly, which leaves the route
+ * itself untested: the `POST /respond` case in `server.ts`, the status the code
+ * maps to, and the content type. This is the one route that spends money, so it
+ * is the last one that should be reached only in process.
+ */
+describe("POST /respond: over the real HTTP server", () => {
+  it("routes, answers 200, and carries the wire body as JSON", async () => {
+    primeStub({ submitTx: async () => "cafe".repeat(16) });
+    const server = await listening(TEST_CONFIG, stubClient());
+    try {
+      const answer = await server.send("/respond", { method: "POST", body: respondBody("cd".repeat(32)) });
+      expect(answer.status).toBe(200);
+      expect(JSON.parse(answer.body)).toEqual({ status: "ok", tx_id: "cafe".repeat(16), block_hash: HEAD_BARE });
+      expect(answer.contentType).toBe("application/json");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("maps a rejected body to 400 through the route, not just through the handler", async () => {
+    primeStub();
+    const server = await listening(TEST_CONFIG, stubClient());
+    try {
+      const answer = await server.send("/respond", { method: "POST", body: "{" });
+      expect(answer.status).toBe(400);
+      expect(parseBody(answer)).toMatchObject({ code: "bad_request" });
+      expect(answer.contentType).toBe("application/json");
+    } finally {
+      server.close();
+    }
+  });
+
+  // 404, not the 400 an empty body would earn: the distinction is what proves
+  // the route never matched, rather than matching and rejecting the body.
+  it("is POST only, so a GET is not_found rather than bad_request", async () => {
+    primeStub();
+    const server = await listening(TEST_CONFIG, stubClient());
+    try {
+      const answer = await server.send("/respond");
+      expect(answer.status).toBe(404);
+      expect(parseBody(answer)).toMatchObject({ code: "not_found" });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("refuses a second concurrent post with 503 wallet_busy, on one server", async () => {
+    // The gate over HTTP, not over two in-process calls: a real second
+    // connection must be answered while the first still holds the wallet.
+    primeStub();
+    let releaseHead: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseHead = () => resolve();
+    });
+    const gated = stubClient({
+      head: async () => {
+        await gate;
+        return { toHex: () => `0x${HEAD_BARE}` };
+      },
+    });
+    const server = await listening(TEST_CONFIG, gated);
+    try {
+      const first = server.send("/respond", { method: "POST", body: respondBody("aa".repeat(32)) });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const second = await server.send("/respond", { method: "POST", body: respondBody("bb".repeat(32)) });
+      expect(second.status).toBe(503);
+      expect(parseBody(second)).toMatchObject({ code: "wallet_busy" });
+      expect(parseBody(second)["message"]).toContain("aa".repeat(32));
+
+      releaseHead?.();
+      expect((await first).status).toBe(200);
+    } finally {
+      server.close();
+    }
   });
 });

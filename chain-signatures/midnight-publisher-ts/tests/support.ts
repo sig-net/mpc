@@ -48,6 +48,34 @@ export function forbiddenClient(what: string): NodeClient {
   });
 }
 
+/** A reply plus the header no `Reply` carries, so a suite can pin the content type. */
+export interface Answer extends Reply {
+  readonly contentType: string | null;
+}
+
+/**
+ * The REAL server on an ephemeral port, held open so a suite can send more than
+ * one request to ONE instance. `close` when done.
+ *
+ * The decode seams get {@link request}, which builds its own; a suite that needs
+ * a live node client (the respond route) builds it here.
+ */
+export async function listening(config: Config, client: NodeClient) {
+  const server = buildServer(config, client);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  return {
+    async send(path: string, init?: RequestInit): Promise<Answer> {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
+      return { status: response.status, body: await response.text(), contentType: response.headers.get("content-type") };
+    },
+    close(): void {
+      server.closeAllConnections();
+      server.close();
+    },
+  };
+}
+
 /**
  * Round-trip a body through the REAL HTTP server, on an ephemeral port.
  *
@@ -56,14 +84,11 @@ export function forbiddenClient(what: string): NodeClient {
  * separate process.
  */
 export async function request(path: string, init?: RequestInit): Promise<Reply> {
-  const server = buildServer(TEST_CONFIG, forbiddenClient("a decode seam touched the node client"));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const server = await listening(TEST_CONFIG, forbiddenClient("a decode seam touched the node client"));
   try {
-    const { port } = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
-    return { status: response.status, body: await response.text() };
+    const { status, body } = await server.send(path, init);
+    return { status, body };
   } finally {
-    server.closeAllConnections();
     server.close();
   }
 }
