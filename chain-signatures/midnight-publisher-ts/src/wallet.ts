@@ -30,8 +30,7 @@ export interface FundingWallet extends WalletProvider, MidnightProvider {
 /**
  * Doubles as the dust-spending intent's TTL, so it is how long a post that
  * dies between finalize and submit strands the fee coin, and why `respond.ts`
- * bounds nothing past balance. ~15x the measured ~20 s round (was 30 min;
- * decision record §7.3).
+ * bounds nothing past balance. ~15x the measured ~20 s round.
  */
 const RECIPE_TTL_MS = 5 * 60 * 1000;
 

@@ -1,9 +1,8 @@
 /**
  * Live acceptance run for `POST /respond`. Run ON DEMAND, never from CI: it
  * needs the whole stack up (node, proof server, indexer) and a funded wallet,
- * it costs a real fee, and it writes to the chain. The automated end-to-end
- * flow will live on the Rust side; this stays the hand-run check. It is also
- * not a `*.test.ts`, so `vitest run` never picks it up.
+ * it costs a real fee, and it writes to the chain. It is also not a
+ * `*.test.ts`, so `vitest run` never picks it up.
  *
  * The whole runbook, from nothing. The stack is the midnight-integration repo's
  * `docker compose up -d` (node :9944, proof server :6300, indexer :8088), whose

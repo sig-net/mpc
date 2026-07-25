@@ -4,8 +4,7 @@
 #
 # The live end-to-end path (boot the dockerized stack, deploy a singleton,
 # prove/balance/submit, confirm on chain) is deliberately NOT automated here.
-# It is run on demand from `tests/respond-live.ts`, which carries the runbook;
-# the automated end-to-end flow will live on the Rust side.
+# It is run on demand from `tests/respond-live.ts`, which carries the runbook.
 name: midnight-publisher-ts
 
 on:
