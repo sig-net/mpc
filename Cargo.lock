@@ -7392,6 +7392,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-midnight"
+version = "1.16.8"
+dependencies = [
+ "alloy",
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "subxt",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-chain-near"
 version = "1.16.8"
 dependencies = [
@@ -7529,6 +7556,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-midnight",
  "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",

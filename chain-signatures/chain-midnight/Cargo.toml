@@ -1,0 +1,34 @@
+[package]
+name = "mpc-chain-midnight"
+edition = "2021"
+version.workspace = true
+description = "Midnight chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+borsh.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Declared crate-local rather than in `[workspace.dependencies]` because the node
+# also needs `unstable-light-client` for Hydration and this crate does not. Keep
+# the version in lockstep with `chain-signatures/node/Cargo.toml`.
+subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native"] }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true
