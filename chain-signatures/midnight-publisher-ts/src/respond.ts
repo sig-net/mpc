@@ -57,7 +57,7 @@ import { openFundingWallet } from "./wallet.js";
 const MUST_BE_AN_OBJECT = "must be an object";
 const MUST_BE_HEX_32 = "must be 64 lowercase hex";
 const MUST_BE_HEX_128 = "must be 256 lowercase hex (Bytes<128>)";
-const MUST_BE_A_CIRCUIT = "must be postSignatureResponse or postRespondBidirectional";
+const MUST_BE_A_CIRCUIT = "must be respond or respondBidirectional";
 const MUST_BE_AN_OUTPUT_LEN = "must be an integer in 0..=128";
 
 const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
@@ -92,13 +92,13 @@ const RespondRequestSchema = z.discriminatedUnion(
   [
     wireObject({
       contract_address: hex32,
-      circuit: z.literal("postSignatureResponse"),
+      circuit: z.literal("respond"),
       request_id: hex32,
       signature: wireSignature,
     }),
     wireObject({
       contract_address: hex32,
-      circuit: z.literal("postRespondBidirectional"),
+      circuit: z.literal("respondBidirectional"),
       request_id: hex32,
       signature: wireSignature,
       // Bytes<128>: the whole zero-padded ABI return data, not a digest of it.
@@ -142,8 +142,8 @@ type CircuitArgs<K extends RespondCircuit> = readonly [
   event: Readonly<Parameters<SignetContract<SignetContractPrivateState>["circuits"][K]>[2]>,
 ];
 
-export type SignatureRespondedEvent = CircuitArgs<"postSignatureResponse">[1];
-export type RespondBidirectionalEvent = CircuitArgs<"postRespondBidirectional">[1];
+export type SignatureRespondedEvent = CircuitArgs<"respond">[1];
+export type RespondBidirectionalEvent = CircuitArgs<"respondBidirectional">[1];
 
 export type RespondCall = {
   [K in RespondCircuit]: { readonly circuitId: K; readonly args: CircuitArgs<K> };
@@ -165,14 +165,14 @@ function signatureStruct(signature: WireSignature): SignatureRespondedEvent["sig
 
 export function respondCall(request: RespondRequest): RespondCall {
   const requestId = fromHex(request.request_id);
-  if (request.circuit === "postSignatureResponse") {
+  if (request.circuit === "respond") {
     return {
-      circuitId: "postSignatureResponse",
+      circuitId: "respond",
       args: [requestId, { signature: signatureStruct(request.signature) }],
     };
   }
   return {
-    circuitId: "postRespondBidirectional",
+    circuitId: "respondBidirectional",
     args: [
       requestId,
       {

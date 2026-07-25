@@ -41,8 +41,8 @@ const NOTIFY_HEIGHT = 1366;
  * compiled circuit against this state, so its embedded verifier keys must
  * match `dist/managed` — redeploy and recapture on every contract change.
  */
-const RESPOND_SINGLETON = "82ebe184cd00e19e422f0e7aa246012e11160ba3b98c09aace67dab1664af182";
-const RESPOND_STATE_HEIGHT = 25087;
+const RESPOND_SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
+const RESPOND_STATE_HEIGHT = 37571;
 
 const provider = new WsProvider(process.env["MIDNIGHT_NODE_URL"] ?? "ws://127.0.0.1:9944");
 const api = await ApiPromise.create({ provider, noInitWarn: true });

@@ -48,7 +48,7 @@ import { FIXTURES, listening } from "./support.js";
 const MANAGED = fileURLToPath(new URL("../node_modules/@sig-net/midnight-contract/dist/managed/", import.meta.url));
 
 /** The deployed singleton the state fixture was captured from. */
-const SINGLETON = "82ebe184cd00e19e422f0e7aa246012e11160ba3b98c09aace67dab1664af182";
+const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 
 /** The finalized head every stub client pins, bare and `0x`-prefixed. */
 const HEAD_BARE = "ab".repeat(32);
@@ -64,11 +64,11 @@ const TEST_CONFIG: Config = {
   networkId: "undeployed",
 };
 
-/** A valid `postSignatureResponse` body; the circuit is a blind append, so any 32-byte values do. */
+/** A valid `respond` body; the circuit is a blind append, so any 32-byte values do. */
 function respondBody(rid: string): string {
   return JSON.stringify({
     contract_address: SINGLETON,
-    circuit: "postSignatureResponse",
+    circuit: "respond",
     request_id: rid,
     signature: {
       big_r: { x: "11".repeat(32), y: "22".repeat(32) },
@@ -104,7 +104,7 @@ interface StubReads {
 function stubClient(overrides: StubReads = {}): NodeClient {
   const reads: Required<StubReads> = {
     head: async () => ({ toHex: () => `0x${HEAD_BARE}` }),
-    contract: async () => ok(Uint8Array.from(readFileSync(`${FIXTURES}respond-singleton-state-25087.mn`))),
+    contract: async () => ok(Uint8Array.from(readFileSync(`${FIXTURES}respond-singleton-state-37571.mn`))),
     zswap: async () => ok(new ZswapChainState().serialize()),
     params: async () => ok(LedgerParameters.initialParameters().serialize()),
     ...overrides,
@@ -215,7 +215,7 @@ describe("withDeadline", () => {
 
 /** The fixture with its leading version stamp bumped one past what this build links. */
 function skewedContractState(): Uint8Array {
-  const real = Buffer.from(readFileSync(`${FIXTURES}respond-singleton-state-25087.mn`));
+  const real = Buffer.from(readFileSync(`${FIXTURES}respond-singleton-state-37571.mn`));
   const offset = real.indexOf("midnight:contract-state[v") + "midnight:contract-state[v".length;
   const skewed = Uint8Array.from(real);
   skewed[offset] = "9".charCodeAt(0);

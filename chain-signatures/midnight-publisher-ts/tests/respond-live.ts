@@ -20,7 +20,7 @@
  *   MIDNIGHT_PUB_MANAGED_DIR=$PWD/node_modules/@sig-net/midnight-contract/dist/managed \
  *   MIDNIGHT_PUB_FUNDING_SEED=0000000000000000000000000000000000000000000000000000000000000001 \
  *   MIDNIGHT_PUB_NETWORK_ID=undeployed \
- *   npx tsx tests/respond-live.ts <64-hex contract address> [64-hex request id]
+ *   npx tsx tests/respond-live.ts <64-hex contract address> [respond|respondBidirectional] [64-hex request id]
  *
  * The seed is the public genesis dev wallet of a fresh `undeployed` chain, not a
  * secret. Port and bind host are inert here but still required: `configFromEnv`
@@ -30,7 +30,7 @@
  * path and not a parallel re-implementation. It then establishes three things
  * independently:
  *
- *  - the append landed, by decoding `respondBidirectionalMap` over the node's
+ *  - the append landed, by decoding the circuit's own map over the node's
  *    runtime API before and after;
  *  - which block it landed in, by walking finalized blocks from the pre-post
  *    head until the map grows;
@@ -55,17 +55,20 @@ const isHex = (value: string, bytes: number): boolean => value.length === bytes 
 const config = configFromEnv();
 
 const address = process.argv[2] ?? "";
-if (!isHex(address, 32)) {
-  throw new Error(`usage: tsx tests/respond-live.ts <64-hex contract address> [64-hex request id]`);
+const circuit = process.argv[3] ?? "respondBidirectional";
+if (!isHex(address, 32) || (circuit !== "respond" && circuit !== "respondBidirectional")) {
+  throw new Error(
+    `usage: tsx tests/respond-live.ts <64-hex contract address> [respond|respondBidirectional] [64-hex request id]`,
+  );
 }
 // A fresh throwaway request id by default, so a re-run never contends with an
 // earlier one on the ledger-level optimistic-concurrency check.
-const requestId = process.argv[3] ?? toHex(randomBytes(32));
+const requestId = process.argv[4] ?? toHex(randomBytes(32));
 if (!isHex(requestId, 32)) throw new Error(`request id must be 64 lowercase hex, got ${requestId}`);
 
 const client = await connect(config.nodeUrl);
 
-/** The singleton's respond state at one block, read over the runtime API only. */
+/** The singleton's state for the posted circuit at one block, read over the runtime API only. */
 async function readRespondState(
   at: BlockHashHex,
 ): Promise<{ size: bigint; counter: bigint | undefined; landed: string[] }> {
@@ -73,20 +76,32 @@ async function readRespondState(
   if (raw === undefined) throw new Error(`no contract state at ${address} in ${at}`);
   const decoded = signetLedger(ContractState.deserialize(raw).data);
   const key = Uint8Array.from(Buffer.from(requestId, "hex"));
+  const mine = (entry: { requestId: Uint8Array }): boolean => toHex(entry.requestId) === requestId;
+  const signed = (value: { bigR: { x: Uint8Array }; s: Uint8Array; recoveryId: bigint }): string =>
+    `bigR.x=${toHex(value.bigR.x).slice(0, 12)}… s=${toHex(value.s).slice(0, 12)}… recoveryId=${value.recoveryId}`;
+
+  // Two maps, two value shapes: the branch is the circuit's, not a test path's.
+  if (circuit === "respond") {
+    const landed: string[] = [];
+    for (const [entry, value] of decoded.respondMap) {
+      if (mine(entry)) landed.push(`count=${entry.count} ${signed(value.signature)}`);
+    }
+    const counters = decoded.respondCounterMap;
+    return { size: decoded.respondMap.size(), counter: counters.member(key) ? counters.lookup(key).read() : undefined, landed };
+  }
+
   const landed: string[] = [];
-  for (const [entryKey, value] of decoded.respondBidirectionalMap) {
-    if (toHex(entryKey.requestId) !== requestId) continue;
+  for (const [entry, value] of decoded.respondBidirectionalMap) {
+    if (!mine(entry)) continue;
     landed.push(
-      `count=${entryKey.count} serializedOutput=${toHex(value.serializedOutput).slice(0, 16)}… ` +
-        `outputLen=${value.outputLen} bigR.x=${toHex(value.signature.bigR.x).slice(0, 12)}… ` +
-        `s=${toHex(value.signature.s).slice(0, 12)}… recoveryId=${value.signature.recoveryId}`,
+      `count=${entry.count} serializedOutput=${toHex(value.serializedOutput).slice(0, 16)}… ` +
+        `outputLen=${value.outputLen} ${signed(value.signature)}`,
     );
   }
+  const counters = decoded.respondBidirectionalCounterMap;
   return {
     size: decoded.respondBidirectionalMap.size(),
-    counter: decoded.respondBidirectionalCounterMap.member(key)
-      ? decoded.respondBidirectionalCounterMap.lookup(key).read()
-      : undefined,
+    counter: counters.member(key) ? counters.lookup(key).read() : undefined,
     landed,
   };
 }
@@ -158,24 +173,29 @@ async function indexerStatus(height: number, transactionId: string): Promise<str
 const before = await head(client);
 const beforeState = await readRespondState(before.hash);
 console.log(`contract        ${address}`);
+console.log(`circuit         ${circuit}`);
 console.log(`request id      ${requestId}   (fresh, throwaway)`);
 console.log(`before          height=${before.height} map.size=${beforeState.size} counter=${beforeState.counter ?? "(absent)"}`);
 
 // A recognisable payload: the request id's first four bytes, then zero padding
 // to the full Bytes<128> the event stores.
-const serializedOutput = `${requestId.slice(0, 8)}${"00".repeat(124)}`;
-const body = JSON.stringify({
-  contract_address: address,
-  circuit: "postRespondBidirectional",
-  request_id: requestId,
-  serialized_output: serializedOutput,
-  output_len: 4,
-  signature: {
-    big_r: { x: `${"00".repeat(31)}01`, y: `${"00".repeat(31)}02` },
-    s: `${"00".repeat(31)}03`,
-    recovery_id: 1,
-  },
-});
+const signature = {
+  big_r: { x: `${"00".repeat(31)}01`, y: `${"00".repeat(31)}02` },
+  s: `${"00".repeat(31)}03`,
+  recovery_id: 1,
+};
+const body = JSON.stringify(
+  circuit === "respond"
+    ? { contract_address: address, circuit, request_id: requestId, signature }
+    : {
+        contract_address: address,
+        circuit,
+        request_id: requestId,
+        serialized_output: `${requestId.slice(0, 8)}${"00".repeat(124)}`,
+        output_len: 4,
+        signature,
+      },
+);
 
 // The handler logs the submitted transaction id; tap it rather than duplicating
 // the submit path here, so this script exercises the shipped code and nothing else.
