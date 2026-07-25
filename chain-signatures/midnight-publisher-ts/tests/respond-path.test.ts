@@ -7,7 +7,7 @@
  * derived keys, and stub proof and wallet edges. The circuit itself really runs
  * (`createUnprovenCallTxFromInitialStates` executes the compact-generated
  * JavaScript against the fixture state), so what these tests prove is the flow:
- * staging, deadlines, the busy gate, error classification, and the success wire
+ * the deadline, the busy gate, error classification, and the success wire
  * shape.
  *
  * Deliberately NOT covered here, and covered by `tests/respond-live.ts`
@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 
 import { LedgerParameters, ZswapChainState } from "@midnightntwrk/ledger-v9";
 import { ContractExecutable } from "@midnight-ntwrk/midnight-js-protocol/compact-js";
+import { deserializeCompactContractState } from "@midnight-ntwrk/midnight-js-utils";
 import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
 import {
@@ -37,7 +38,7 @@ import {
   closePublisher,
   handleRespond,
   primePublisher,
-  RESPOND_DEADLINES,
+  RESPOND_TIMEOUT,
   withDeadline,
   type Publisher,
 } from "../src/respond.js";
@@ -174,11 +175,11 @@ function primeStub(edges: StubEdges = {}): void {
   );
 }
 
+const PRODUCTION_TIMEOUT = RESPOND_TIMEOUT.ms;
+
 afterEach(async () => {
   await closePublisher();
-  RESPOND_DEADLINES.boot = 90_000;
-  RESPOND_DEADLINES.read = 15_000;
-  RESPOND_DEADLINES.prove = 60_000;
+  RESPOND_TIMEOUT.ms = PRODUCTION_TIMEOUT;
 });
 
 // ---- withDeadline --------------------------------------------------------------
@@ -190,13 +191,8 @@ describe("withDeadline", () => {
 
   it("rejects with the factory's error once the deadline passes", async () => {
     const hang = new Promise<never>(() => undefined);
-    const timeout = withDeadline(hang, 20, () => new PublisherError("wallet_unsynced", "took too long", "boot"));
-    await expect(timeout).rejects.toMatchObject({ code: "wallet_unsynced", stage: "boot" });
-  });
-
-  it("names the operation and the budget in the plain-string form", async () => {
-    const hang = new Promise<never>(() => undefined);
-    await expect(withDeadline(hang, 20, "proving")).rejects.toThrow("proving exceeded the 20 ms deadline");
+    const timeout = withDeadline(hang, 20, () => new PublisherError("internal", "took too long"));
+    await expect(timeout).rejects.toMatchObject({ code: "internal" });
   });
 
   it("swallows the abandoned attempt's late failure", async () => {
@@ -208,7 +204,26 @@ describe("withDeadline", () => {
   });
 });
 
-// ---- the respond flow, stage by stage -------------------------------------------
+/** The fixture with its leading version stamp bumped one past what this build links. */
+function skewedContractState(): Uint8Array {
+  const real = Buffer.from(readFileSync(`${FIXTURES}respond-singleton-state-25087.mn`));
+  const offset = real.indexOf("midnight:contract-state[v") + "midnight:contract-state[v".length;
+  const skewed = Uint8Array.from(real);
+  skewed[offset] = "9".charCodeAt(0);
+  return skewed;
+}
+
+/** What a call threw, as a value: the library's own error, never a hand-built stand-in. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected a throw");
+}
+
+// ---- the respond flow, step by step -------------------------------------------
 
 describe("POST /respond: the flow against stubbed edges", () => {
   it("answers ok with the tx id and the pinned block hash", async () => {
@@ -225,32 +240,38 @@ describe("POST /respond: the flow against stubbed edges", () => {
     });
   });
 
-  it("names the read stage when the node read fails", async () => {
+  it("names the read failure when the node read fails", async () => {
     primeStub();
     const client = stubClient({ head: async () => Promise.reject(new Error("socket dropped")) });
     const reply = await handleRespond(TEST_CONFIG, client, respondBody("cd".repeat(32)));
     expect(reply.status).toBe(502);
-    expect(parseBody(reply)).toMatchObject({ code: "node_unavailable", stage: "read" });
+    expect(parseBody(reply)).toMatchObject({ code: "node_unavailable" });
   });
 
-  it("converts a hung node read into node_unavailable instead of never answering", async () => {
-    // THE dead-dependency conversion: `@polkadot/api` queues calls forever
-    // across reconnects, so without the deadline this request simply hangs.
+  it("answers a hung dependency instead of holding the gate forever", async () => {
+    // THE dead-dependency conversion, and the only thing bounding the gate:
+    // every dependency here waits forever by default, so without this the
+    // request never answers and no later one is ever admitted.
     primeStub();
-    RESPOND_DEADLINES.read = 50;
+    RESPOND_TIMEOUT.ms = 50;
     const client = stubClient({ head: () => new Promise(() => undefined) });
-    const reply = await handleRespond(TEST_CONFIG, client, respondBody("cd".repeat(32)));
-    expect(reply.status).toBe(502);
-    expect(parseBody(reply)).toMatchObject({ code: "node_unavailable", stage: "read" });
+    const rid = "cd".repeat(32);
+    const reply = await handleRespond(TEST_CONFIG, client, respondBody(rid));
+    expect(reply.status).toBe(500);
+    expect(parseBody(reply)).toMatchObject({ code: "internal" });
     expect(parseBody(reply)["message"]).toMatch(/deadline/);
+    // Load-bearing: a timeout past submit may still land on chain, so the
+    // answer must name the rid and warn rather than imply the post failed.
+    expect(parseBody(reply)["message"]).toContain(rid);
+    expect(parseBody(reply)["message"]).toMatch(/may still land/);
   });
 
-  it("answers contract_absent, staged, when the address has no state", async () => {
+  it("answers contract_absent when the address has no state", async () => {
     primeStub();
     const client = stubClient({ contract: async () => runtimeError });
     const reply = await handleRespond(TEST_CONFIG, client, respondBody("cd".repeat(32)));
     expect(reply.status).toBe(409);
-    expect(parseBody(reply)).toMatchObject({ code: "contract_absent", stage: "read" });
+    expect(parseBody(reply)).toMatchObject({ code: "contract_absent" });
     expect(parseBody(reply)["message"]).toContain(SINGLETON);
   });
 
@@ -267,27 +288,114 @@ describe("POST /respond: the flow against stubbed edges", () => {
     expect(parseBody(reply)["message"]).toContain("MIDNIGHT_PUB_MANAGED_DIR");
   });
 
-  it("names the prove stage when the proof server refuses", async () => {
+  it("carries the proof provider's output through balance and into submit", async () => {
+    // The wallet stubs are identity functions, so a sentinel is the only thing
+    // that notices the proven transaction being dropped for the unproven one.
+    const proven = { proven: true };
+    let balanced: unknown;
+    let submitted: unknown;
+    primeStub({
+      proveTx: async () => proven,
+      balanceTx: async (tx) => {
+        balanced = tx;
+        return tx;
+      },
+      submitTx: async (tx) => {
+        submitted = tx;
+        return "ab".repeat(32);
+      },
+    });
+    expect((await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)))).status).toBe(200);
+    expect(balanced).toBe(proven);
+    expect(submitted).toBe(proven);
+  });
+
+  it("names prove_failed when the proof server refuses", async () => {
     // Reaching this stage at all means the circuit really ran: the unproven
     // transaction was built from the fixture state before the stub refused it.
     primeStub({ proveTx: async () => Promise.reject(new Error("proof server refused")) });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(502);
-    expect(parseBody(reply)).toMatchObject({ code: "prove_failed", stage: "prove" });
+    expect(parseBody(reply)).toMatchObject({ code: "prove_failed" });
   });
 
-  it("refines the balance stage's dust shortfall into wallet_unfunded", async () => {
+  it("separates a chain this build cannot read from an unreachable node", async () => {
+    // Both arrive at the read step and both are 502, but the codes send the
+    // operator to opposite places: `node_unavailable` says retry,
+    // `ledger_mismatch` says no amount of retrying will help, upgrade.
+    primeStub();
+    const reply = await handleRespond(
+      TEST_CONFIG,
+      stubClient({ contract: async () => ok(skewedContractState()) }),
+      respondBody("cd".repeat(32)),
+    );
+    expect(reply.status).toBe(502);
+    expect(parseBody(reply)).toMatchObject({ code: "ledger_mismatch" });
+  });
+
+  it("rejects an untagged read before the deserializer sees it", async () => {
+    // What a wrong runtime-API argument encoding looks like, and the reason the
+    // tag check carries the hint: the deserializer would only say "malformed".
+    primeStub();
+    const reply = await handleRespond(
+      TEST_CONFIG,
+      stubClient({ zswap: async () => ok(Uint8Array.of(1, 2, 3)) }),
+      respondBody("cd".repeat(32)),
+    );
+    expect(parseBody(reply)).toMatchObject({ code: "ledger_mismatch" });
+    expect(parseBody(reply)["message"]).toContain("0x-prefixed hex");
+  });
+
+  it("names a dependency's ledger skew rather than the step it surfaced in", async () => {
+    // The reads are tag-checked before any deserializer runs, so a skew that
+    // gets past them came out of a dependency's own blob. `prove_failed` would
+    // send the operator to the proof server's logic instead of its version.
+    const skew = thrownBy(() => deserializeCompactContractState(skewedContractState(), { caller: "test" }));
+    primeStub({ proveTx: async () => Promise.reject(skew) });
+    const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
+    expect(parseBody(reply)).toMatchObject({ code: "ledger_mismatch" });
+  });
+
+  it("keeps a merely malformed blob at the step that produced it", async () => {
+    // The negative half, and why the guard is on the received version rather
+    // than the classification: the library calls this `version-mismatch` too,
+    // and it means nothing more than "these bytes are not a contract state".
+    const corrupt = Uint8Array.from(skewedContractState());
+    corrupt[0] = 0;
+    const malformed = thrownBy(() => deserializeCompactContractState(corrupt, { caller: "test" }));
+    primeStub({ proveTx: async () => Promise.reject(malformed) });
+    const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
+    expect(parseBody(reply)).toMatchObject({ code: "prove_failed" });
+  });
+
+  it("keeps balance_failed and submit_rejected apart", async () => {
+    // The only thing naming where an unrefined wallet failure happened, now
+    // that nothing else on the wire does.
+    primeStub({ balanceTx: async () => Promise.reject(new Error("dust actions rejected")) });
+    expect(parseBody(await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32))))).toMatchObject({
+      code: "balance_failed",
+    });
+  });
+
+  it("names submit_rejected when the chain refuses the balanced transaction", async () => {
+    primeStub({ submitTx: async () => Promise.reject(new Error("transaction rejected")) });
+    expect(parseBody(await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32))))).toMatchObject({
+      code: "submit_rejected",
+    });
+  });
+
+  it("refines a dust shortfall into wallet_unfunded", async () => {
     primeStub({ balanceTx: async () => Promise.reject(new Error("Wallet.InsufficientFunds: could not balance dust")) });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(503);
-    expect(parseBody(reply)).toMatchObject({ code: "wallet_unfunded", stage: "balance" });
+    expect(parseBody(reply)).toMatchObject({ code: "wallet_unfunded" });
   });
 
-  it("refines the submit stage's optimistic-concurrency loss into state_conflict", async () => {
+  it("refines an optimistic-concurrency loss into state_conflict", async () => {
     primeStub({ submitTx: async () => Promise.reject(new Error("Transcript(Execution(ReadMismatch { expected: 06 }))")) });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(409);
-    expect(parseBody(reply)).toMatchObject({ code: "state_conflict", stage: "submit" });
+    expect(parseBody(reply)).toMatchObject({ code: "state_conflict" });
   });
 
   it("forwards the rendered cause chain as detail when Effect flattens the message", async () => {
@@ -311,19 +419,19 @@ describe("POST /respond: the flow against stubbed edges", () => {
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(409);
     const body = parseBody(reply);
-    expect(body).toMatchObject({ code: "state_conflict", stage: "submit" });
+    expect(body).toMatchObject({ code: "state_conflict" });
     expect(String(body["message"])).toContain("Transaction submission error");
     expect(String(body["detail"])).toContain("ReadMismatch");
     expect(String(body["detail"])).not.toMatch(/^\s+at /m);
   });
 
-  it("plumbs a boot failure's code and stage out to the wire", async () => {
+  it("plumbs a boot failure's code out to the wire", async () => {
     // The deadline that MAKES boot fail this way is unit-tested above; this
-    // pins the rest of the trip: code, status, and stage reach the caller.
+    // pins the rest of the trip: the code and status reach the caller.
     primePublisher(Promise.reject(new PublisherError("wallet_unsynced", "publisher boot exceeded 90000 ms", "boot")));
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(503);
-    expect(parseBody(reply)).toMatchObject({ code: "wallet_unsynced", stage: "boot" });
+    expect(parseBody(reply)).toMatchObject({ code: "wallet_unsynced" });
   });
 });
 
@@ -368,6 +476,44 @@ describe("POST /respond: the busy gate", () => {
     expect((await handleRespond(TEST_CONFIG, stubClient(), respondBody("bb".repeat(32)))).status).toBe(200);
   });
 
+  it("keeps the gate claimed while an abandoned post is still running", async () => {
+    // The answer is not the end of the work. Releasing here would admit a second
+    // post onto the one dust UTXO the first has not finished with, which is the
+    // whole reason the gate exists; the process stops instead.
+    primeStub();
+    RESPOND_TIMEOUT.ms = 50;
+    const hung = stubClient({ head: () => new Promise(() => undefined) });
+    expect((await handleRespond(TEST_CONFIG, hung, respondBody("aa".repeat(32)))).status).toBe(500);
+
+    RESPOND_TIMEOUT.ms = PRODUCTION_TIMEOUT;
+    const refused = await handleRespond(TEST_CONFIG, stubClient(), respondBody("bb".repeat(32)));
+    expect(refused.status).toBe(503);
+    expect(parseBody(refused)).toMatchObject({ code: "wallet_busy" });
+    expect(parseBody(refused)["message"]).toContain("aa".repeat(32));
+  });
+
+  it("never lets two posts balance at once, even across a blown deadline", async () => {
+    // The invariant the gate is FOR, measured rather than argued: the wallet has
+    // one dust UTXO, so a second `balanceTx` is a lost race at best.
+    let live = 0;
+    let peak = 0;
+    const slowBalance = async (tx: unknown): Promise<unknown> => {
+      live += 1;
+      peak = Math.max(peak, live);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      live -= 1;
+      return tx;
+    };
+    primeStub({ balanceTx: slowBalance });
+    RESPOND_TIMEOUT.ms = 100;
+    expect((await handleRespond(TEST_CONFIG, stubClient(), respondBody("aa".repeat(32)))).status).toBe(500);
+
+    RESPOND_TIMEOUT.ms = PRODUCTION_TIMEOUT;
+    await handleRespond(TEST_CONFIG, stubClient(), respondBody("bb".repeat(32)));
+    expect(peak).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  });
+
   it("never claims the gate for a request that fails validation", async () => {
     primeStub();
     expect((await handleRespond(TEST_CONFIG, stubClient(), "{")).status).toBe(400);
@@ -392,6 +538,41 @@ describe("POST /respond: over the real HTTP server", () => {
       expect(answer.status).toBe(200);
       expect(JSON.parse(answer.body)).toEqual({ status: "ok", tx_id: "cafe".repeat(16), block_hash: HEAD_BARE });
       expect(answer.contentType).toBe("application/json");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("answers a blown deadline first, and only then stops the process", async () => {
+    // The order is the whole point: stopping before the reply is flushed would
+    // leave the caller with a dropped connection and no way to learn that its
+    // post may still land.
+    primeStub();
+    RESPOND_TIMEOUT.ms = 50;
+    let stop!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      stop = resolve;
+    });
+    const hung = stubClient({ head: () => new Promise(() => undefined) });
+    const server = await listening(TEST_CONFIG, hung, stop);
+    try {
+      const answer = await server.send("/respond", { method: "POST", body: respondBody("cd".repeat(32)) });
+      expect(answer.status).toBe(500);
+      expect(parseBody(answer)["message"]).toMatch(/may still land/);
+      await stopped;
+    } finally {
+      server.close();
+    }
+  });
+
+  it("does not stop the process for an ordinary failure", async () => {
+    primeStub();
+    let stops = 0;
+    const failing = stubClient({ head: async () => Promise.reject(new Error("socket dropped")) });
+    const server = await listening(TEST_CONFIG, failing, () => (stops += 1));
+    try {
+      expect((await server.send("/respond", { method: "POST", body: respondBody("cd".repeat(32)) })).status).toBe(502);
+      expect(stops).toBe(0);
     } finally {
       server.close();
     }

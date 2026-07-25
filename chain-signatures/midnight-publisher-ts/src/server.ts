@@ -8,8 +8,7 @@
  *
  * The decode seams are pure codecs and open no connection. They are POST only
  * because a serialized transaction runs ~14 KB and does not fit a query string.
- * Every failure is `{code, message}` plus `stage` on the respond path; see
- * `errors.ts`.
+ * Every failure is `{code, message}`; see `errors.ts`.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -17,7 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isDeserializationError, isHex as isWholeBytesHex } from "@midnight-ntwrk/midnight-js-utils";
 
 import { type Config } from "./config.js";
-import { badRequest, fail, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
+import { fail, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
 import { LEDGER_TAGS } from "./ledger.js";
 import { fromHex, type NodeClient } from "./node.js";
 import { decodeTransactions } from "./block.js";
@@ -41,14 +40,14 @@ async function readBody(request: IncomingMessage): Promise<string> {
  * caller's bytes (`decode_failed`) for an envelope mistake (`bad_request`).
  */
 function hexBytes(value: unknown, what: string): Uint8Array {
-  if (typeof value !== "string") throw badRequest(`${what} must be a hex string`);
-  if (!isWholeBytesHex(value)) throw badRequest(`${what} must be a whole number of bytes of hex, optionally \`0x\`-prefixed`);
+  if (typeof value !== "string") throw new PublisherError("bad_request", `${what} must be a hex string`);
+  if (!isWholeBytesHex(value)) throw new PublisherError("bad_request", `${what} must be a whole number of bytes of hex, optionally \`0x\`-prefixed`);
   return fromHex(value);
 }
 
 /** The envelope fails the whole request; only bytes the LEDGER refuses survive per item. */
 function hexList(value: unknown): Uint8Array[] {
-  if (!Array.isArray(value)) throw badRequest("`bytes` must be an array of hex strings");
+  if (!Array.isArray(value)) throw new PublisherError("bad_request", "`bytes` must be an array of hex strings");
   return value.map((item: unknown, index) => hexBytes(item, `\`bytes[${index}]\``));
 }
 
@@ -67,7 +66,11 @@ function decodeFailureCode(error: unknown): ErrorCode {
   return skewed && error.context.classification === "version-mismatch" ? "ledger_mismatch" : "decode_failed";
 }
 
-export function buildServer(config: Config, client: NodeClient): Server {
+/**
+ * `onFatal` runs after a {@link Reply} marked `fatal` has been flushed, which is
+ * the only safe point to stop: the caller must learn its post may still land.
+ */
+export function buildServer(config: Config, client: NodeClient, onFatal?: () => void): Server {
   /** Liveness plus the compatibility declaration (ledger line, network id). Deliberately not readiness. */
   const healthBody = JSON.stringify({ status: "ok", networkId: config.networkId, ledger: LEDGER_TAGS });
 
@@ -104,16 +107,16 @@ export function buildServer(config: Config, client: NodeClient): Server {
   const answer = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     // Reached in normal operation: `readBody` rejects with `aborted` when a
     // client hangs up mid-body, so this catch includes disconnects.
-    const { status, body } = await handle(request).catch((error: unknown) =>
-      fail("internal", messageOf(error), "unhandled"));
-    response.writeHead(status, { "content-type": "application/json" }).end(body);
+    const reply = await handle(request).catch((error: unknown) => fail("internal", messageOf(error), "unhandled"));
+    const stop = reply.fatal === true ? onFatal : undefined;
+    response.writeHead(reply.status, { "content-type": "application/json" }).end(reply.body, stop);
   };
 
   return createServer((request, response) => void answer(request, response));
 }
 
-export async function serve(config: Config, client: NodeClient): Promise<Server> {
-  const server = buildServer(config, client);
+export async function serve(config: Config, client: NodeClient, onFatal?: () => void): Promise<Server> {
+  const server = buildServer(config, client, onFatal);
   await new Promise<void>((resolve, reject) => server.once("error", reject).listen(config.port, config.bindHost, resolve));
   console.log(`midnight-publisher listening on ${config.bindHost}:${config.port}`);
   return server;

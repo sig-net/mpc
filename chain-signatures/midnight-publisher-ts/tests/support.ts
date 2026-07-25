@@ -59,8 +59,8 @@ export interface Answer extends Reply {
  * The decode seams get {@link request}, which builds its own; a suite that needs
  * a live node client (the respond route) builds it here.
  */
-export async function listening(config: Config, client: NodeClient) {
-  const server = buildServer(config, client);
+export async function listening(config: Config, client: NodeClient, onFatal?: () => void) {
+  const server = buildServer(config, client, onFatal);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const { port } = server.address() as AddressInfo;
   return {

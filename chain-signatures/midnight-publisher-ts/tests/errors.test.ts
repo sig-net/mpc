@@ -17,7 +17,7 @@
 import { Data, Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { classify, fail, RESPOND_STAGES, statusFor, type ErrorCode } from "../src/errors.js";
+import { fail, STATUS, type ErrorCode } from "../src/errors.js";
 import { describeFailure } from "../src/respond.js";
 
 class InsufficientFundsError extends Data.TaggedError("Wallet.InsufficientFunds")<{
@@ -41,13 +41,13 @@ async function fiberFailure(error: unknown): Promise<unknown> {
   }
 }
 
-/** What `inStage` classifies against: the message plus Effect's rendered cause chain. */
-function haystack(error: unknown): string {
-  return `${describeFailure(error)}\n${String(error)}`;
-}
-
-describe("the wallet's dust shortfall", () => {
-  it("survives into describeFailure and reaches wallet_unfunded", async () => {
+/**
+ * What `step` matches against: the message ALONE is not enough, which is why it
+ * searches the rendered cause chain too. The code each text maps to is pinned
+ * end to end in `respond-path.test.ts`, through the real handler.
+ */
+describe("what the wallet and the submission wrapper actually render", () => {
+  it("keeps the dust shortfall's tag and message intact", async () => {
     // `DustWallet` runs its Effect with no outer wrapper, so `Data.TaggedError`'s
     // tag lands in `name` and the message is the balancer's own template.
     const error = await fiberFailure(
@@ -56,14 +56,12 @@ describe("the wallet's dust shortfall", () => {
     expect(describeFailure(error)).toBe(
       "(FiberFailure) Wallet.InsufficientFunds: Insufficient Funds: could not balance dust",
     );
-    expect(classify(RESPOND_STAGES.balance, haystack(error))).toBe("wallet_unfunded");
   });
-});
 
-describe("the submission wrapper", () => {
-  it("flattens the message, so the message alone cannot classify", async () => {
+  it("flattens every submit failure to one constant message", async () => {
     // The defect this file exists to catch: every submit failure renders
-    // identically, whatever went wrong underneath.
+    // identically, whatever went wrong underneath, so `ReadMismatch` survives
+    // only in `String(error)` and never in the message.
     const error = await fiberFailure(
       new SubmissionError({
         message: "Transaction submission error",
@@ -73,36 +71,15 @@ describe("the submission wrapper", () => {
       }),
     );
     expect(describeFailure(error)).toBe("(FiberFailure) SubmissionError: Transaction submission error");
-    expect(classify(RESPOND_STAGES.submit, describeFailure(error))).toBe("submit_rejected");
-  });
-
-  it("still reaches state_conflict once the rendered cause chain is included", async () => {
-    const error = await fiberFailure(
-      new SubmissionError({
-        message: "Transaction submission error",
-        cause: new TransactionInvalidError({
-          message: "Transaction is invalid and was rejected by the node: Transcript(Execution(ReadMismatch))",
-        }),
-      }),
-    );
-    expect(classify(RESPOND_STAGES.submit, haystack(error))).toBe("state_conflict");
-  });
-});
-
-describe("the fallbacks", () => {
-  it("name the stage when nothing matches", async () => {
-    const error = await fiberFailure(new SubmissionError({ message: "Transaction submission error" }));
-    expect(classify(RESPOND_STAGES.submit, haystack(error))).toBe("submit_rejected");
-    expect(classify(RESPOND_STAGES.balance, haystack(error))).toBe("balance_failed");
-    expect(classify(RESPOND_STAGES.read, haystack(error))).toBe("node_unavailable");
-    expect(classify(RESPOND_STAGES.prove, haystack(error))).toBe("prove_failed");
+    expect(describeFailure(error)).not.toContain("ReadMismatch");
+    expect(`${describeFailure(error)}\n${String(error)}`).toContain("ReadMismatch");
   });
 });
 
 describe("the status map", () => {
   it("separates retry-as-is from never-retry inside one status", () => {
-    expect(statusFor("state_conflict")).toBe(409);
-    expect(statusFor("contract_mismatch")).toBe(409);
+    expect(STATUS.state_conflict).toBe(409);
+    expect(STATUS.contract_mismatch).toBe(409);
   });
 
   it("gives every code a non-2xx status", () => {
@@ -112,13 +89,13 @@ describe("the status map", () => {
       "prove_failed", "wallet_unfunded", "wallet_unsynced", "wallet_busy",
       "balance_failed", "submit_rejected", "internal",
     ];
-    for (const code of codes) expect(statusFor(code)).toBeGreaterThanOrEqual(400);
+    for (const code of codes) expect(STATUS[code]).toBeGreaterThanOrEqual(400);
   });
 
   it("marks every wallet condition 503: back off and retry, the request itself is fine", () => {
-    expect(statusFor("wallet_unfunded")).toBe(503);
-    expect(statusFor("wallet_unsynced")).toBe(503);
-    expect(statusFor("wallet_busy")).toBe(503);
+    expect(STATUS.wallet_unfunded).toBe(503);
+    expect(STATUS.wallet_unsynced).toBe(503);
+    expect(STATUS.wallet_busy).toBe(503);
   });
 });
 
@@ -131,21 +108,11 @@ describe("the reply funnel", () => {
   });
 
   it("carries detail when given, and omits the key when not", () => {
-    const withDetail = fail("submit_rejected", "flat message", undefined, "submit", "the node's rendered cause chain");
+    const withDetail = fail("submit_rejected", "flat message", undefined, "the node's rendered cause chain");
     expect(JSON.parse(withDetail.body)).toMatchObject({ detail: "the node's rendered cause chain" });
     expect(JSON.parse(fail("submit_rejected", "flat message").body)).toEqual({
       code: "submit_rejected",
       message: "flat message",
     });
-  });
-
-  it("carries the stage when one is given, and omits the key when not", () => {
-    // The stage is the machine-readable half the caller's alerting branches on;
-    // an absent stage must be an absent key, not a null, so the caller's strict
-    // parser can make the field optional.
-    const staged = fail("submit_rejected", "the chain refused it", undefined, "submit");
-    expect(JSON.parse(staged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it", stage: "submit" });
-    const unstaged = fail("submit_rejected", "the chain refused it");
-    expect(JSON.parse(unstaged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it" });
   });
 });
