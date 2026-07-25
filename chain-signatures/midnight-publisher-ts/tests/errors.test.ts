@@ -17,7 +17,7 @@
 import { Data, Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { classify, failRedacted, RESPOND_STAGES, statusFor, type ErrorCode } from "../src/errors.js";
+import { classify, fail, RESPOND_STAGES, statusFor, type ErrorCode } from "../src/errors.js";
 import { describeFailure } from "../src/respond.js";
 
 class InsufficientFundsError extends Data.TaggedError("Wallet.InsufficientFunds")<{
@@ -122,39 +122,30 @@ describe("the status map", () => {
   });
 });
 
-describe("the redaction funnel", () => {
-  it("never lets a secret reach the reply body", () => {
-    // The invariant the manual server exists to hold: a dependency error that
-    // echoes the funding seed must not carry it out of the process.
-    const seed = "deadbeef".repeat(8);
-    const reply = failRedacted("internal", `node echoed the seed ${seed} back`, [seed]);
-    expect(reply.status).toBe(500);
-    expect(reply.body).not.toContain(seed);
-    expect(reply.body).toContain("<redacted>");
-    expect(JSON.parse(reply.body)).toMatchObject({ code: "internal" });
-  });
-
-  it("leaves a message that carries no secret untouched", () => {
-    const reply = failRedacted("contract_absent", "no contract at that address", ["a-secret-not-present"]);
+/** Scrubs nothing, deliberately: secrecy is held upstream in `wallet.ts`. These pin the reply shape. */
+describe("the reply funnel", () => {
+  it("carries the message through verbatim, status from the code", () => {
+    const reply = fail("contract_absent", "no contract at that address");
+    expect(reply.status).toBe(409);
     expect(JSON.parse(reply.body)).toEqual({ code: "contract_absent", message: "no contract at that address" });
   });
 
-  it("redacts the detail too, and omits the key when there is none", () => {
-    const seed = "deadbeef".repeat(8);
-    const withDetail = failRedacted("submit_rejected", "flat message", [seed], undefined, "submit", `the node echoed ${seed} in its cause chain`);
-    expect(withDetail.body).not.toContain(seed);
-    expect(JSON.parse(withDetail.body)).toMatchObject({ detail: expect.stringContaining("<redacted>") as unknown });
-    const without = failRedacted("submit_rejected", "flat message", [seed]);
-    expect(JSON.parse(without.body)).toEqual({ code: "submit_rejected", message: "flat message" });
+  it("carries detail when given, and omits the key when not", () => {
+    const withDetail = fail("submit_rejected", "flat message", undefined, "submit", "the node's rendered cause chain");
+    expect(JSON.parse(withDetail.body)).toMatchObject({ detail: "the node's rendered cause chain" });
+    expect(JSON.parse(fail("submit_rejected", "flat message").body)).toEqual({
+      code: "submit_rejected",
+      message: "flat message",
+    });
   });
 
   it("carries the stage when one is given, and omits the key when not", () => {
     // The stage is the machine-readable half the caller's alerting branches on;
     // an absent stage must be an absent key, not a null, so the caller's strict
     // parser can make the field optional.
-    const staged = failRedacted("submit_rejected", "the chain refused it", [], undefined, "submit");
+    const staged = fail("submit_rejected", "the chain refused it", undefined, "submit");
     expect(JSON.parse(staged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it", stage: "submit" });
-    const unstaged = failRedacted("submit_rejected", "the chain refused it", []);
+    const unstaged = fail("submit_rejected", "the chain refused it");
     expect(JSON.parse(unstaged.body)).toEqual({ code: "submit_rejected", message: "the chain refused it" });
   });
 });

@@ -47,7 +47,7 @@ import { type Config } from "./config.js";
 import {
   badRequest,
   classify,
-  failRedacted,
+  fail,
   jsonObject,
   PublisherError,
   RESPOND_STAGES,
@@ -542,10 +542,9 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
   try {
     const request = parseRespondRequest(body);
     if (inFlightRid !== undefined) {
-      return failRedacted(
+      return fail(
         "wallet_busy",
         `a respond for rid ${inFlightRid} holds the funding wallet; one post at a time, ~35s each`,
-        [config.fundingSeed],
       );
     }
     inFlightRid = request.request_id;
@@ -559,11 +558,8 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
     console.log(`respond: rid=${request.request_id} submitted tx ${posted.txId} block ${posted.blockHash} ${posted.timing}`);
     return { status: 200, body: JSON.stringify({ status: "ok", tx_id: posted.txId, block_hash: posted.blockHash }) };
   } catch (error) {
-    // Redacted at the source: wallet, proof-server and node errors can echo
-    // values they were handed, and this text becomes both a response body and a
-    // log line. `failRedacted` is the single funnel; the seed never survives it.
     const failure = error instanceof PublisherError ? error : new PublisherError("internal", describeFailure(error));
-    return failRedacted(failure.code, failure.message, [config.fundingSeed], "respond failed", failure.stage, failure.detail);
+    return fail(failure.code, failure.message, "respond failed", failure.stage, failure.detail);
   } finally {
     if (claimed) inFlightRid = undefined;
   }

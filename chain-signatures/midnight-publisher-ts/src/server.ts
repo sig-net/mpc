@@ -17,7 +17,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isDeserializationError, isHex as isWholeBytesHex } from "@midnight-ntwrk/midnight-js-utils";
 
 import { type Config } from "./config.js";
-import { badRequest, failRedacted, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
+import { badRequest, fail, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
 import { LEDGER_TAGS } from "./ledger.js";
 import { fromHex, type NodeClient } from "./node.js";
 import { decodeTransactions } from "./block.js";
@@ -79,7 +79,7 @@ export function buildServer(config: Config, client: NodeClient): Server {
       return { status: 200, body: JSON.stringify(seam(bytes)) };
     } catch (error) {
       const code = error instanceof PublisherError ? error.code : decodeFailureCode(error);
-      return failRedacted(code, messageOf(error), [config.fundingSeed], "decode failed");
+      return fail(code, messageOf(error), "decode failed");
     }
   };
 
@@ -96,7 +96,7 @@ export function buildServer(config: Config, client: NodeClient): Server {
       case "POST /respond":
         return handleRespond(config, client, await readBody(request));
       default:
-        return failRedacted("not_found", `no route ${route}`, [config.fundingSeed]);
+        return fail("not_found", `no route ${route}`);
     }
   };
 
@@ -105,7 +105,7 @@ export function buildServer(config: Config, client: NodeClient): Server {
     // Reached in normal operation: `readBody` rejects with `aborted` when a
     // client hangs up mid-body, so this catch includes disconnects.
     const { status, body } = await handle(request).catch((error: unknown) =>
-      failRedacted("internal", messageOf(error), [config.fundingSeed], "unhandled"));
+      fail("internal", messageOf(error), "unhandled"));
     response.writeHead(status, { "content-type": "application/json" }).end(body);
   };
 

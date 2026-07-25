@@ -8,9 +8,16 @@
  */
 
 import type { MidnightProvider, WalletProvider } from "@midnight-ntwrk/midnight-js-types";
-import { deriveAccountKeys, initialiseWalletFacade, parseSeed, SeedFormat, type AccountKeys } from "@sig-net/midnight-contract-deploy";
+import {
+  deriveAccountKeys,
+  initialiseWalletFacade,
+  parseSeed,
+  SeedFormat,
+  type AccountKeys,
+  type MidnightNodeConfig,
+} from "@sig-net/midnight-contract-deploy";
 
-import type { Config } from "./config.js";
+import { fundingSeed, type Config } from "./config.js";
 
 /**
  * `balanceTx` adds the dust and unshielded inputs that pay the fee, signs them
@@ -46,10 +53,18 @@ export function deriveFundingKeys(seed: string, networkId: string): AccountKeys 
   return deriveAccountKeys(seed, networkId);
 }
 
-/** Opens and blocks until synced: an unsynced wallet fails every balance. */
-export async function openFundingWallet(config: Config): Promise<FundingWallet> {
-  const keys = deriveFundingKeys(config.fundingSeed, config.networkId);
+/** The five fields the facade declares, not the whole `Config`. */
+export function nodeConfig(config: Config): MidnightNodeConfig {
+  return {
+    indexerUrl: config.indexerUrl,
+    indexerWsUrl: config.indexerWsUrl,
+    nodeUrl: config.nodeUrl,
+    proofServerUrl: config.proofServerUrl,
+    networkId: config.networkId,
+  };
+}
 
+async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
   const facade = await initialiseWalletFacade(keys, config);
 
   await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
@@ -70,4 +85,9 @@ export async function openFundingWallet(config: Config): Promise<FundingWallet> 
     submitTx: (tx) => facade.submitTransaction(tx),
     close: () => facade.stop(),
   };
+}
+
+/** Opens and blocks until synced: an unsynced wallet fails every balance. */
+export async function openFundingWallet(config: Config): Promise<FundingWallet> {
+  return openFacade(deriveFundingKeys(fundingSeed(), config.networkId), nodeConfig(config));
 }

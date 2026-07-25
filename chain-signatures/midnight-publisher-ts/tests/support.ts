@@ -31,7 +31,6 @@ export const TEST_CONFIG: Config = {
   indexerUrl: "http://127.0.0.1:1",
   indexerWsUrl: "ws://127.0.0.1:1",
   managedDir: FIXTURES,
-  fundingSeed: "deadbeef".repeat(8),
   networkId: "undeployed",
 };
 

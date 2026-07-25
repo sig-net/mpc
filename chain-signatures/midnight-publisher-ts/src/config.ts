@@ -17,8 +17,6 @@ export interface Config {
   readonly indexerWsUrl: string;
   /** Root of the compiled-contract assets (`contract/`, `compiler/`, `keys/`, `zkir/`). */
   readonly managedDir: string;
-  /** Hot gas-wallet seed. Injected at runtime, never baked into an image. */
-  readonly fundingSeed: string;
   readonly networkId: string;
 }
 
@@ -66,14 +64,15 @@ export function configFromEnv(): Config {
     indexerUrl: env.MIDNIGHT_PUB_INDEXER_URL,
     indexerWsUrl: env.MIDNIGHT_PUB_INDEXER_WS_URL,
     managedDir: env.MIDNIGHT_PUB_MANAGED_DIR,
-    fundingSeed: env.MIDNIGHT_PUB_FUNDING_SEED,
     networkId: env.MIDNIGHT_PUB_NETWORK_ID,
   };
 }
 
-/** Dependency errors echo values they were handed, and that text becomes a response body. */
-export function redact(text: string, values: readonly string[]): string {
-  // Load-bearing: `split("")` would explode the text into characters and rejoin
-  // it with a placeholder between every one.
-  return values.reduce((out, value) => (value ? out.split(value).join("<redacted>") : out), text);
+const FUNDING_SEED_VAR = "MIDNIGHT_PUB_FUNDING_SEED" satisfies keyof z.infer<typeof EnvSchema>;
+
+/** The hot gas-wallet seed. Read at the point of use; `EnvSchema` requires it, so a missing one fails at boot. */
+export function fundingSeed(): string {
+  const seed = process.env[FUNDING_SEED_VAR];
+  if (seed === undefined || seed.length === 0) throw new Error(`${FUNDING_SEED_VAR} is required`);
+  return seed;
 }

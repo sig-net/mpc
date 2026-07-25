@@ -6,8 +6,6 @@
  * branches on; message and detail are evidence, reworded freely.
  */
 
-import { redact } from "./config.js";
-
 /** An HTTP status and an already-serialized body. */
 export type Reply = { readonly status: number; readonly body: string };
 
@@ -100,28 +98,15 @@ export function classify(stage: RespondStage, described: string): ErrorCode {
 }
 
 /**
- * Built from the code, so status and body cannot disagree. Module-private on
- * purpose: `failRedacted` is the only exported way to build an error reply, so
- * nothing can answer the caller without passing through redaction first.
+ * The single funnel, so status and body cannot disagree. `logLabel` omitted
+ * means silent; a `bad_request` is the caller's own mistake.
  */
-function fail(code: ErrorCode, message: string, stage?: string, detail?: string): Reply {
-  const body = { code, message, ...(stage === undefined ? {} : { stage }), ...(detail === undefined ? {} : { detail }) };
-  return { status: statusFor(code), body: JSON.stringify(body) };
-}
-
-/**
- * The single funnel every error answer passes through: the funding seed cannot
- * reach a body or a log line except via `redact`, by construction rather than
- * by remembering. `logLabel` omitted means silent; a `bad_request` is the
- * caller's own mistake and never worth a log line.
- */
-export function failRedacted(code: ErrorCode, rawMessage: string, secrets: readonly string[], logLabel?: string, stage?: string, rawDetail?: string): Reply {
-  const message = redact(rawMessage, secrets);
-  const detail = rawDetail === undefined ? undefined : redact(rawDetail, secrets);
+export function fail(code: ErrorCode, message: string, logLabel?: string, stage?: string, detail?: string): Reply {
   if (logLabel !== undefined && code !== "bad_request") {
     console.error(`${logLabel} [${code}${stage === undefined ? "" : ` @${stage}`}]: ${message}${detail === undefined ? "" : `\n${detail}`}`);
   }
-  return fail(code, message, stage, detail);
+  const body = { code, message, ...(stage === undefined ? {} : { stage }), ...(detail === undefined ? {} : { detail }) };
+  return { status: statusFor(code), body: JSON.stringify(body) };
 }
 
 /** The `invalid JSON:` preamble both seams answer with, byte for byte. */

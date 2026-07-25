@@ -8,7 +8,6 @@
  * types, unknown fields, check ordering), all of it decided by one schema.
  */
 
-import { GENESIS_MINT_WALLET_SEED } from "@sig-net/midnight-contract-deploy";
 import { describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
@@ -23,7 +22,7 @@ import {
   type SignatureRespondedEvent,
   type WireSignature,
 } from "../src/respond.js";
-import { deriveFundingKeys, parseFundingSeed } from "../src/wallet.js";
+import { deriveFundingKeys, nodeConfig, parseFundingSeed } from "../src/wallet.js";
 import { forbiddenClient, TEST_CONFIG } from "./support.js";
 
 const ADDRESS = "ab".repeat(32);
@@ -338,11 +337,7 @@ describe("wire fixtures", () => {
 const forbidden = forbiddenClient("no I/O may happen for an invalid request");
 
 /** A managed dir that cannot resolve, so reaching boot at all is a visible failure. */
-const offlineConfig: Config = {
-  ...TEST_CONFIG,
-  managedDir: "/nonexistent",
-  fundingSeed: GENESIS_MINT_WALLET_SEED,
-};
+const offlineConfig: Config = { ...TEST_CONFIG, managedDir: "/nonexistent" };
 
 const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ["a malformed body", "{", /^invalid JSON:/],
@@ -499,6 +494,18 @@ describe("deriveFundingKeys", () => {
 
   it("derives from a hex seed", () => {
     expect(deriveFundingKeys("ab".repeat(32), "undeployed").shieldedSecretKeys.coinPublicKey).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("nodeConfig", () => {
+  it("hands the facade the five fields it declares, and nothing else", () => {
+    expect(Object.keys(nodeConfig(offlineConfig)).sort()).toStrictEqual([
+      "indexerUrl",
+      "indexerWsUrl",
+      "networkId",
+      "nodeUrl",
+      "proofServerUrl",
+    ]);
   });
 });
 

@@ -60,7 +60,6 @@ const TEST_CONFIG: Config = {
   indexerUrl: "http://127.0.0.1:1",
   indexerWsUrl: "ws://127.0.0.1:1",
   managedDir: MANAGED,
-  fundingSeed: GENESIS_MINT_WALLET_SEED,
   networkId: "undeployed",
 };
 
