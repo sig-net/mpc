@@ -44,8 +44,3 @@ export async function runtimeApiBytes(
 export function fromHex(hex: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex.replace(/^0x/, ""), "hex"));
 }
-
-/** Lowercase and bare, unlike the library's `isHex`/`fromHex`, which also accept uppercase and `0x`. */
-export function isHex(value: string, bytes: number): boolean {
-  return value.length === bytes * 2 && /^[0-9a-f]+$/.test(value);
-}

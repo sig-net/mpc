@@ -2,9 +2,9 @@
  * `POST /respond`: validate, prove, pay, submit.
  *
  * MECHANISM, NEVER AUTHORITY. The signature was computed by the MPC threshold
- * before anything reached this service, and both circuits are blind appends. The
- * validation below is a shape check that keeps malformed input away from the
- * prover, not an authorization check.
+ * before anything reached this service, and both circuits are blind appends.
+ * `RespondRequestSchema` keeps malformed input away from the prover; it decides
+ * nothing about who may write, and no check downstream of it does either.
  *
  * The escape hatch rather than `findDeployedContract`: three pinned reads, then
  * `createUnprovenCallTxFromInitialStates`, the stock proof provider, balance,
@@ -55,10 +55,32 @@ import {
   type RespondStage,
 } from "./errors.js";
 import { assertLedgerTag, LEDGER_TAGS } from "./ledger.js";
-import { fromHex, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
+import { fromHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
 import { openFundingWallet } from "./wallet.js";
 
 // ---- the wire contract -----------------------------------------------------
+
+// One message per field: absent, `null`, the wrong type and the wrong value all
+// read the same, because they are the same thing here. An absent key is the only
+// way to omit an optional field; `null` rejects like any other wrong value.
+
+const MUST_BE_AN_OBJECT = "must be an object";
+const MUST_BE_HEX_32 = "must be 64 lowercase hex";
+const MUST_BE_HEX_128 = "must be 256 lowercase hex (Bytes<128>)";
+const MUST_BE_A_CIRCUIT = "must be postSignatureResponse or postRespondBidirectional";
+const MUST_BE_ABSENT = "must be absent on postSignatureResponse";
+const MUST_BE_AN_OUTPUT_LEN = "must be an integer in 0..=128";
+
+const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
+
+/** Bare lowercase hex: no `0x`, no uppercase. */
+const wireHex = (bytes: number, message: string) =>
+  z.string(message).regex(new RegExp(`^[0-9a-f]{${bytes * 2}}$`), message);
+
+const hex32 = wireHex(32, MUST_BE_HEX_32);
+
+/** A bidirectional field on the circuit that has none. */
+const absent = z.undefined(MUST_BE_ABSENT).optional();
 
 /**
  * The MPC's canonical `Signature { big_r, s, recovery_id }` verbatim, nested
@@ -68,128 +90,66 @@ import { openFundingWallet } from "./wallet.js";
  * and `s` are SEC1 BIG-ENDIAN hex, `recovery_id` the parity of R.y, and the
  * components reach the ledger untouched — the publisher converts nothing.
  */
-export interface WireSignature {
-  readonly big_r: { readonly x: string; readonly y: string };
-  readonly s: string;
-  readonly recovery_id: number;
-}
-
-/**
- * BOTH circuits carry a signature, so it is a required field rather than one
- * of the per-circuit optionals. `serialized_output` is the whole zero-padded
- * ABI return data, not a digest, and belongs to `postRespondBidirectional`
- * alone. The contract checks none of it: consumers verify on claim.
- */
-export interface RespondRequest {
-  readonly contract_address: string;
-  readonly circuit: string;
-  readonly request_id: string;
-  readonly signature: WireSignature;
-  /** `postRespondBidirectional` only: the foreign execution's output. */
-  readonly serialized_output?: string;
-  readonly output_len?: number;
-}
-
-export type ValidatedRespondRequest =
-  | (RespondRequest & { readonly circuit: "postSignatureResponse" })
-  | (RespondRequest & {
-      readonly circuit: "postRespondBidirectional";
-      readonly serialized_output: string;
-      readonly output_len: number;
-    });
-
-/** Derived from the validated union so the two cannot drift. */
-export type RespondCircuit = ValidatedRespondRequest["circuit"];
-
-// ---- parsing and validation ------------------------------------------------
-
-// Each leaf carries the tail of its own rejection; `toBadRequest` prefixes the
-// field path. An absent key is the ONLY way to omit a field — `null` is a value
-// of the wrong type and rejects like any other. Strict on purpose: this seam has
-// one caller and we write it, so tolerating `null` would spend a loosening we can
-// still make later if a serde `Option` ever needs it, and can never take back.
-
-const MUST_BE_A_STRING = "must be a string";
-const MUST_BE_A_BYTE = "must be an integer in 0..=255";
-const MUST_BE_AN_OBJECT = "must be an object";
-
-const wireString = z.string(MUST_BE_A_STRING);
-const wireByte = z.number(MUST_BE_A_BYTE).int(MUST_BE_A_BYTE).min(0, MUST_BE_A_BYTE).max(255, MUST_BE_A_BYTE);
-const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
-
-/**
- * The request body's SHAPE only. Hex widths, the 0..=128 output length and the
- * per-circuit field sets are semantics, and stay in {@link validateRespondRequest}
- * so the two concerns keep separate messages. Unknown keys are stripped, never
- * rejected. Field order is wire contract: zod reports issues in declaration
- * order and only the first is surfaced, so a caller fixing one field at a time
- * walks them top to bottom.
- */
-const RespondRequestSchema = wireObject({
-  contract_address: wireString,
-  circuit: wireString,
-  request_id: wireString,
-  signature: wireObject({
-    big_r: wireObject({ x: wireString, y: wireString }),
-    s: wireString,
-    recovery_id: wireByte,
-  }),
-  serialized_output: wireString.optional(),
-  output_len: wireByte.optional(),
+const wireSignature = wireObject({
+  big_r: wireObject({ x: hex32, y: hex32 }),
+  s: hex32,
+  recovery_id: z.literal([0, 1], "must be 0|1"),
 });
 
 /**
- * The first issue, as `field must be X`. One message shape for every way a
- * field can be wrong — absent, null, or the wrong type all read the same,
- * because they are the same thing to this seam: no usable value there.
+ * Unknown keys are stripped, never rejected. Field order is wire contract: only
+ * the first issue is surfaced and zod reports them in declaration order, so a
+ * caller fixing one field at a time walks them top to bottom. `circuit` is the
+ * exception — as the discriminator it resolves before any other field, so an
+ * unrecognized circuit answers even when the address is also wrong.
+ */
+const RespondRequestSchema = z.discriminatedUnion(
+  "circuit",
+  [
+    wireObject({
+      contract_address: hex32,
+      circuit: z.literal("postSignatureResponse"),
+      request_id: hex32,
+      signature: wireSignature,
+      serialized_output: absent,
+      output_len: absent,
+    }),
+    wireObject({
+      contract_address: hex32,
+      circuit: z.literal("postRespondBidirectional"),
+      request_id: hex32,
+      signature: wireSignature,
+      // Bytes<128>: the whole zero-padded ABI return data, not a digest of it.
+      // The contract checks none of it; consumers verify on claim.
+      serialized_output: wireHex(128, MUST_BE_HEX_128),
+      output_len: z.int(MUST_BE_AN_OUTPUT_LEN).min(0, MUST_BE_AN_OUTPUT_LEN).max(128, MUST_BE_AN_OUTPUT_LEN),
+    }),
+  ],
+  { error: MUST_BE_A_CIRCUIT },
+);
+
+/** Read off the schema, so the type cannot drift from what the parse accepts. */
+export type RespondRequest = z.infer<typeof RespondRequestSchema>;
+export type RespondCircuit = RespondRequest["circuit"];
+export type WireSignature = RespondRequest["signature"];
+
+// ---- parsing ---------------------------------------------------------------
+
+/**
+ * Deliberately not `jsonObject`'s `invalid JSON:`, which means the body was not
+ * a JSON object at all; past that point the JSON is fine and the request is not.
  */
 function toBadRequest(error: z.ZodError): PublisherError {
   const issue = error.issues[0]!;
-  return badRequest(`invalid JSON: \`${issue.path.join(".")}\` ${issue.message}`);
+  const path = issue.path.join(".");
+  return badRequest(`invalid request: ${path.length === 0 ? "" : `\`${path}\` `}${issue.message}`);
 }
 
-/** Unknown fields are ignored; only a missing or mistyped known field rejects. */
+/** The only way in: what this returns is valid, so nothing downstream re-checks. */
 export function parseRespondRequest(body: string): RespondRequest {
   const parsed = RespondRequestSchema.safeParse(jsonObject(body));
   if (!parsed.success) throw toBadRequest(parsed.error);
   return parsed.data;
-}
-
-/** Present and exactly 32 bytes of lowercase hex. */
-const isHex32 = (value: string | undefined): boolean => value !== undefined && isHex(value, 32);
-
-/** The checks AND their order are wire contract, pinned by `tests/respond.test.ts`. */
-export function validateRespondRequest(request: RespondRequest): asserts request is ValidatedRespondRequest {
-  if (!isHex(request.contract_address, 32)) throw badRequest("contract_address must be 64 lowercase hex");
-  if (!isHex(request.request_id, 32)) throw badRequest("request_id must be 64 hex");
-
-  // The signature is circuit-independent, so it is checked once here rather
-  // than per branch.
-  const { big_r, s, recovery_id } = request.signature;
-  if (!(isHex32(big_r.x) && isHex32(big_r.y) && isHex32(s))) {
-    throw badRequest("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
-  }
-  if (recovery_id > 1) throw badRequest("signature.recovery_id must be 0|1");
-
-  switch (request.circuit) {
-    case "postSignatureResponse":
-      if (request.serialized_output !== undefined || request.output_len !== undefined) {
-        throw badRequest("postSignatureResponse takes no bidirectional fields");
-      }
-      return;
-    case "postRespondBidirectional":
-      // serialized_output is Bytes<128>: the whole zero-padded ABI return data,
-      // not a digest of it.
-      if (!(request.serialized_output !== undefined && isHex(request.serialized_output, 128))) {
-        throw badRequest("postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)");
-      }
-      if (!(request.output_len !== undefined && request.output_len <= 128)) {
-        throw badRequest("postRespondBidirectional output_len must be 0..=128");
-      }
-      return;
-    default:
-      throw badRequest(`unknown circuit ${request.circuit}`);
-  }
 }
 
 // ---- circuit arguments -----------------------------------------------------
@@ -221,7 +181,7 @@ function signatureStruct(signature: WireSignature): SignatureRespondedEvent["sig
   };
 }
 
-export function respondCall(request: ValidatedRespondRequest): RespondCall {
+export function respondCall(request: RespondRequest): RespondCall {
   const requestId = fromHex(request.request_id);
   if (request.circuit === "postSignatureResponse") {
     return {
@@ -504,7 +464,7 @@ async function post(
   config: Config,
   client: NodeClient,
   ready: Publisher,
-  request: ValidatedRespondRequest,
+  request: RespondRequest,
 ): Promise<Posted> {
   /** Classifies (`inStage`), bounds (`RESPOND_DEADLINES`), and clocks one stage. */
   const timings: string[] = [];
@@ -580,8 +540,7 @@ let inFlightRid: string | undefined;
 export async function handleRespond(config: Config, client: NodeClient, body: string): Promise<Reply> {
   let claimed = false;
   try {
-    const validated = parseRespondRequest(body);
-    validateRespondRequest(validated);
+    const request = parseRespondRequest(body);
     if (inFlightRid !== undefined) {
       return failRedacted(
         "wallet_busy",
@@ -589,15 +548,15 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
         [config.fundingSeed],
       );
     }
-    inFlightRid = validated.request_id;
+    inFlightRid = request.request_id;
     claimed = true;
-    console.log(`respond: circuit=${validated.circuit} rid=${validated.request_id}`);
+    console.log(`respond: circuit=${request.circuit} rid=${request.request_id}`);
     // Boot failures other than the sync deadline stay unstaged `internal`: an
     // unreadable `managedDir` or a bad seed is this service failing to start,
     // which no stage code describes better than the message itself.
     const ready = await publisher(config);
-    const posted = await post(config, client, ready, validated);
-    console.log(`respond: rid=${validated.request_id} submitted tx ${posted.txId} block ${posted.blockHash} ${posted.timing}`);
+    const posted = await post(config, client, ready, request);
+    console.log(`respond: rid=${request.request_id} submitted tx ${posted.txId} block ${posted.blockHash} ${posted.timing}`);
     return { status: 200, body: JSON.stringify({ status: "ok", tx_id: posted.txId, block_hash: posted.blockHash }) };
   } catch (error) {
     // Redacted at the source: wallet, proof-server and node errors can echo

@@ -5,32 +5,34 @@
  *
  * These tests are the seam's specification: every acceptance, every rejection
  * with its exact body, and the JSON-shape negatives (absent, `null`, wrong
- * types, unknown fields, check ordering).
+ * types, unknown fields, check ordering), all of it decided by one schema.
  */
 
+import { GENESIS_MINT_WALLET_SEED } from "@sig-net/midnight-contract-deploy";
 import { describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
-import type { NodeClient } from "../src/node.js";
 import {
   describeFailure,
   handleRespond,
   respondCall,
-  validateRespondRequest,
   parseRespondRequest,
   type RespondBidirectionalEvent,
   type RespondCall,
   type RespondCircuit,
-  type RespondRequest,
   type SignatureRespondedEvent,
   type WireSignature,
 } from "../src/respond.js";
 import { deriveFundingKeys, parseFundingSeed } from "../src/wallet.js";
+import { forbiddenClient, TEST_CONFIG } from "./support.js";
 
 const ADDRESS = "ab".repeat(32);
 const REQUEST_ID = "11".repeat(32);
 
-/** The shared signature both circuits carry; vary it with an explicit spread. */
+/** Loose on purpose: half the cases below are values the wire type does not admit. */
+type Body = Record<string, unknown>;
+
+/** The shared signature both circuits carry; typed, so the schema's own shape pins it. */
 const SIGNATURE: WireSignature = {
   big_r: { x: "22".repeat(32), y: "33".repeat(32) },
   s: "44".repeat(32),
@@ -38,10 +40,10 @@ const SIGNATURE: WireSignature = {
 };
 
 /** SIGNATURE with one component replaced, for the rejection rows. */
-const withSignature = (delta: Partial<WireSignature>): WireSignature => ({ ...SIGNATURE, ...delta });
+const withSignature = (delta: Body): Body => ({ ...SIGNATURE, ...delta });
 
 /** A valid `postSignatureResponse` request, with fields optionally replaced. */
-function signatureResponse(overrides: Partial<RespondRequest> = {}): RespondRequest {
+function signatureResponse(overrides: Body = {}): Body {
   return {
     contract_address: ADDRESS,
     circuit: "postSignatureResponse",
@@ -52,7 +54,7 @@ function signatureResponse(overrides: Partial<RespondRequest> = {}): RespondRequ
 }
 
 /** A valid `postRespondBidirectional` request, with fields optionally replaced. */
-function bidirectional(overrides: Partial<RespondRequest> = {}): RespondRequest {
+function bidirectional(overrides: Body = {}): Body {
   return {
     contract_address: ADDRESS,
     circuit: "postRespondBidirectional",
@@ -64,128 +66,158 @@ function bidirectional(overrides: Partial<RespondRequest> = {}): RespondRequest 
   };
 }
 
+/** `JSON.stringify` drops a key set to `undefined`, so the rows below spell an omission `{ field: undefined }`. */
+const parse = (body: Body) => parseRespondRequest(JSON.stringify(body));
+
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 
-/** Validate, then take the event argument of a `postSignatureResponse` call. */
-function signatureEvent(request: RespondRequest): SignatureRespondedEvent {
-  validateRespondRequest(request);
-  const call = respondCall(request);
+/** Parse, then take the event argument of a `postSignatureResponse` call. */
+function signatureEvent(body: Body): SignatureRespondedEvent {
+  const call = respondCall(parse(body));
   expect(call.circuitId).toBe("postSignatureResponse");
   // Safe after the assertion above; the union cannot be narrowed by `expect`.
   return (call as Extract<RespondCall, { circuitId: "postSignatureResponse" }>).args[1];
 }
 
-/** Validate, then take the event argument of a `postRespondBidirectional` call. */
-function bidirectionalEvent(request: RespondRequest): RespondBidirectionalEvent {
-  validateRespondRequest(request);
-  const call = respondCall(request);
+/** Parse, then take the event argument of a `postRespondBidirectional` call. */
+function bidirectionalEvent(body: Body): RespondBidirectionalEvent {
+  const call = respondCall(parse(body));
   expect(call.circuitId).toBe("postRespondBidirectional");
   return (call as Extract<RespondCall, { circuitId: "postRespondBidirectional" }>).args[1];
 }
 
-describe("validateRespondRequest: accepts", () => {
+describe("parseRespondRequest: accepts", () => {
   it("a well-formed postSignatureResponse", () => {
-    expect(() => validateRespondRequest(signatureResponse())).not.toThrow();
+    expect(() => parse(signatureResponse())).not.toThrow();
   });
 
   it("a well-formed postRespondBidirectional", () => {
-    expect(() => validateRespondRequest(bidirectional())).not.toThrow();
+    expect(() => parse(bidirectional())).not.toThrow();
   });
 
   it("output_len at both ends of its range", () => {
-    expect(() => validateRespondRequest(bidirectional({ output_len: 0 }))).not.toThrow();
-    expect(() => validateRespondRequest(bidirectional({ output_len: 128 }))).not.toThrow();
+    expect(() => parse(bidirectional({ output_len: 0 }))).not.toThrow();
+    expect(() => parse(bidirectional({ output_len: 128 }))).not.toThrow();
   });
 
   it("recovery_id 0 and 1 on both circuits", () => {
-    expect(() =>
-      validateRespondRequest(signatureResponse({ signature: withSignature({ recovery_id: 0 }) })),
-    ).not.toThrow();
-    expect(() =>
-      validateRespondRequest(bidirectional({ signature: withSignature({ recovery_id: 1 }) })),
-    ).not.toThrow();
+    expect(() => parse(signatureResponse({ signature: withSignature({ recovery_id: 0 }) }))).not.toThrow();
+    expect(() => parse(bidirectional({ signature: withSignature({ recovery_id: 1 }) }))).not.toThrow();
   });
 });
 
-/** Every rejection, with the exact 400 body. */
-const REJECTIONS: [string, RespondRequest, string][] = [
-  // ---- address and request id, checked before the circuit ----
-  ["address too short", signatureResponse({ contract_address: "ab".repeat(31) }), "contract_address must be 64 lowercase hex"],
-  ["address uppercase", signatureResponse({ contract_address: "AB".repeat(32) }), "contract_address must be 64 lowercase hex"],
-  ["address empty", signatureResponse({ contract_address: "" }), "contract_address must be 64 lowercase hex"],
-  ["address non-hex", signatureResponse({ contract_address: "zz".repeat(32) }), "contract_address must be 64 lowercase hex"],
-  ["address 0x-prefixed", signatureResponse({ contract_address: `0x${"ab".repeat(32)}` }), "contract_address must be 64 lowercase hex"],
-  ["request id too long", signatureResponse({ request_id: "11".repeat(33) }), "request_id must be 64 hex"],
-  ["request id uppercase", signatureResponse({ request_id: "AA".repeat(32) }), "request_id must be 64 hex"],
+/**
+ * Every rejection, with the exact 400 body. One message per field, so the value
+ * rows and the shape rows below say the same sentence and neither needs to
+ * re-cross the other's cases.
+ */
+const REJECTIONS: [string, Body, string][] = [
+  // ---- the address and the request id ----
+  ["address too short", signatureResponse({ contract_address: "ab".repeat(31) }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["address uppercase", signatureResponse({ contract_address: "AB".repeat(32) }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["address empty", signatureResponse({ contract_address: "" }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["address non-hex", signatureResponse({ contract_address: "zz".repeat(32) }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["address 0x-prefixed", signatureResponse({ contract_address: `0x${"ab".repeat(32)}` }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["request id too long", signatureResponse({ request_id: "11".repeat(33) }), "invalid request: `request_id` must be 64 lowercase hex"],
+  ["request id uppercase", signatureResponse({ request_id: "AA".repeat(32) }), "invalid request: `request_id` must be 64 lowercase hex"],
 
-  // ---- the signature, checked once for both circuits ----
-  ["big_r.x uppercase", signatureResponse({ signature: withSignature({ big_r: { x: "AA".repeat(32), y: "33".repeat(32) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["big_r.x short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(31), y: "33".repeat(32) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["big_r.y short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(32), y: "33".repeat(31) } }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["s uppercase", signatureResponse({ signature: withSignature({ s: "AA".repeat(32) }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["s empty", signatureResponse({ signature: withSignature({ s: "" }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["the same signature rejected on the other circuit", bidirectional({ signature: withSignature({ s: "AA".repeat(32) }) }), "signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each"],
-  ["recovery_id 2", signatureResponse({ signature: withSignature({ recovery_id: 2 }) }), "signature.recovery_id must be 0|1"],
-  ["recovery_id 255", signatureResponse({ signature: withSignature({ recovery_id: 255 }) }), "signature.recovery_id must be 0|1"],
+  // ---- the signature, named component by component ----
+  ["big_r.x uppercase", signatureResponse({ signature: withSignature({ big_r: { x: "AA".repeat(32), y: "33".repeat(32) } }) }), "invalid request: `signature.big_r.x` must be 64 lowercase hex"],
+  ["big_r.x short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(31), y: "33".repeat(32) } }) }), "invalid request: `signature.big_r.x` must be 64 lowercase hex"],
+  ["big_r.y short", signatureResponse({ signature: withSignature({ big_r: { x: "22".repeat(32), y: "33".repeat(31) } }) }), "invalid request: `signature.big_r.y` must be 64 lowercase hex"],
+  ["s uppercase", signatureResponse({ signature: withSignature({ s: "AA".repeat(32) }) }), "invalid request: `signature.s` must be 64 lowercase hex"],
+  ["s empty", signatureResponse({ signature: withSignature({ s: "" }) }), "invalid request: `signature.s` must be 64 lowercase hex"],
+  ["the same signature rejected on the other circuit", bidirectional({ signature: withSignature({ s: "AA".repeat(32) }) }), "invalid request: `signature.s` must be 64 lowercase hex"],
+  ["recovery_id 2", signatureResponse({ signature: withSignature({ recovery_id: 2 }) }), "invalid request: `signature.recovery_id` must be 0|1"],
+  ["recovery_id 255", signatureResponse({ signature: withSignature({ recovery_id: 255 }) }), "invalid request: `signature.recovery_id` must be 0|1"],
+  ["recovery_id negative", signatureResponse({ signature: withSignature({ recovery_id: -1 }) }), "invalid request: `signature.recovery_id` must be 0|1"],
+  ["recovery_id fractional", signatureResponse({ signature: withSignature({ recovery_id: 0.5 }) }), "invalid request: `signature.recovery_id` must be 0|1"],
 
-  // ---- postSignatureResponse ----
-  ["contaminated with serialized_output", signatureResponse({ serialized_output: "55".repeat(128) }), "postSignatureResponse takes no bidirectional fields"],
-  ["contaminated with output_len", signatureResponse({ output_len: 64 }), "postSignatureResponse takes no bidirectional fields"],
+  // ---- postSignatureResponse carries neither bidirectional field ----
+  // `output_len: 0` is the trap: falsy, so a truthiness test would wave it
+  // through. The branch declares the field absent, so no value enters it.
+  ["contaminated with serialized_output", signatureResponse({ serialized_output: "55".repeat(128) }), "invalid request: `serialized_output` must be absent on postSignatureResponse"],
+  ["contaminated with output_len", signatureResponse({ output_len: 64 }), "invalid request: `output_len` must be absent on postSignatureResponse"],
+  ["contaminated with output_len 0", signatureResponse({ output_len: 0 }), "invalid request: `output_len` must be absent on postSignatureResponse"],
 
-  // ---- postRespondBidirectional ----
-  ["serialized_output absent", bidirectional({ serialized_output: undefined }), "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)"],
-  ["serialized_output 254 hex", bidirectional({ serialized_output: "55".repeat(127) }), "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)"],
-  ["serialized_output uppercase", bidirectional({ serialized_output: "AA".repeat(128) }), "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)"],
-  ["output_len absent", bidirectional({ output_len: undefined }), "postRespondBidirectional output_len must be 0..=128"],
-  ["output_len 129", bidirectional({ output_len: 129 }), "postRespondBidirectional output_len must be 0..=128"],
-  ["output_len 255", bidirectional({ output_len: 255 }), "postRespondBidirectional output_len must be 0..=128"],
+  // ---- postRespondBidirectional requires both ----
+  ["serialized_output absent", bidirectional({ serialized_output: undefined }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
+  ["serialized_output 254 hex", bidirectional({ serialized_output: "55".repeat(127) }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
+  ["serialized_output uppercase", bidirectional({ serialized_output: "AA".repeat(128) }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
+  ["output_len absent", bidirectional({ output_len: undefined }), "invalid request: `output_len` must be an integer in 0..=128"],
+  ["output_len 129", bidirectional({ output_len: 129 }), "invalid request: `output_len` must be an integer in 0..=128"],
+  ["output_len 255", bidirectional({ output_len: 255 }), "invalid request: `output_len` must be an integer in 0..=128"],
+  ["output_len negative", bidirectional({ output_len: -1 }), "invalid request: `output_len` must be an integer in 0..=128"],
+  ["output_len fractional", bidirectional({ output_len: 1.5 }), "invalid request: `output_len` must be an integer in 0..=128"],
 
   // ---- circuit names ----
-  ["an unrecognized circuit name", signatureResponse({ circuit: "postRespond" }), "unknown circuit postRespond"],
-  ["empty circuit", signatureResponse({ circuit: "" }), "unknown circuit "],
-  ["wrong case", signatureResponse({ circuit: "postsignatureresponse" }), "unknown circuit postsignatureresponse"],
-  ["the notify circuit is not postable here", signatureResponse({ circuit: "signBidirectionalEvent" }), "unknown circuit signBidirectionalEvent"],
+  ["an unrecognized circuit name", signatureResponse({ circuit: "postRespond" }), "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional"],
+  ["empty circuit", signatureResponse({ circuit: "" }), "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional"],
+  ["wrong case", signatureResponse({ circuit: "postsignatureresponse" }), "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional"],
+  ["the notify circuit is not postable here", signatureResponse({ circuit: "signBidirectionalEvent" }), "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional"],
+
+  // ---- the three modes, on one field: absent, null, wrong type ----
+  ["contract_address absent", signatureResponse({ contract_address: undefined }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["contract_address null", signatureResponse({ contract_address: null }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["contract_address as a number", signatureResponse({ contract_address: 1 }), "invalid request: `contract_address` must be 64 lowercase hex"],
+  ["circuit absent", signatureResponse({ circuit: undefined }), "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional"],
+
+  // ---- each type, at each nesting depth ----
+  ["signature as a string", signatureResponse({ signature: "nope" }), "invalid request: `signature` must be an object"],
+  ["signature as an array", signatureResponse({ signature: [] }), "invalid request: `signature` must be an object"],
+  ["signature null", signatureResponse({ signature: null }), "invalid request: `signature` must be an object"],
+  ["signature.big_r absent", signatureResponse({ signature: { s: SIGNATURE.s, recovery_id: 1 } }), "invalid request: `signature.big_r` must be an object"],
+  ["signature.big_r.x as a number", signatureResponse({ signature: withSignature({ big_r: { x: 1, y: SIGNATURE.big_r.y } }) }), "invalid request: `signature.big_r.x` must be 64 lowercase hex"],
+  ["signature.s null", signatureResponse({ signature: withSignature({ s: null }) }), "invalid request: `signature.s` must be 64 lowercase hex"],
+  ["signature.recovery_id as a string", signatureResponse({ signature: withSignature({ recovery_id: "1" }) }), "invalid request: `signature.recovery_id` must be 0|1"],
+  ["serialized_output as a number", bidirectional({ serialized_output: 1 }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
+  ["serialized_output null", bidirectional({ serialized_output: null }), "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)"],
+  ["output_len null", bidirectional({ output_len: null }), "invalid request: `output_len` must be an integer in 0..=128"],
+  ["output_len as a string", bidirectional({ output_len: "64" }), "invalid request: `output_len` must be an integer in 0..=128"],
 ];
 
-describe.each(REJECTIONS)("validateRespondRequest rejects %s", (_label, request, message) => {
+describe.each(REJECTIONS)("parseRespondRequest rejects %s", (_label, body, message) => {
   it(`with "${message}"`, () => {
-    expect(() => validateRespondRequest(request)).toThrowError(message);
+    expect(() => parse(body)).toThrowError(message);
   });
 });
 
-describe("validateRespondRequest: checks fire in their pinned wire order", () => {
-  it("reports the address before the request id", () => {
-    expect(() => validateRespondRequest(signatureResponse({ contract_address: "nope", request_id: "nope" }))).toThrowError(
-      "contract_address must be 64 lowercase hex",
+describe("parseRespondRequest: checks fire in their pinned wire order", () => {
+  it("answers the circuit before ANY other field, because it is the discriminator", () => {
+    // No branch matched, so no branch's fields were ever looked at.
+    expect(() => parse(signatureResponse({ circuit: "nope", contract_address: "nope" }))).toThrowError(
+      "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional",
     );
   });
 
-  it("reports the request id before the circuit", () => {
-    expect(() => validateRespondRequest(signatureResponse({ request_id: "nope", circuit: "nope" }))).toThrowError(
-      "request_id must be 64 hex",
+  it("reports the address before the request id", () => {
+    expect(() => parse(signatureResponse({ contract_address: "nope", request_id: "nope" }))).toThrowError(
+      "invalid request: `contract_address` must be 64 lowercase hex",
     );
+  });
+
+  it("reports the request id before the signature", () => {
+    expect(() =>
+      parse(signatureResponse({ request_id: "nope", signature: withSignature({ s: "nope" }) })),
+    ).toThrowError("invalid request: `request_id` must be 64 lowercase hex");
   });
 
   it("reports a malformed scalar before a bad recovery id", () => {
     expect(() =>
-      validateRespondRequest(
-        signatureResponse({ signature: withSignature({ s: "zz".repeat(32), recovery_id: 9 }) }),
-      ),
-    ).toThrowError("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
+      parse(signatureResponse({ signature: withSignature({ s: "zz".repeat(32), recovery_id: 9 }) })),
+    ).toThrowError("invalid request: `signature.s` must be 64 lowercase hex");
   });
 
   it("reports the signature before the circuit's own fields", () => {
-    // The signature is shared, so it is checked before the circuit splits.
+    // The signature is shared, so it is declared before the fields that split.
     expect(() =>
-      validateRespondRequest(
-        bidirectional({ signature: withSignature({ s: "" }), serialized_output: "55" }),
-      ),
-    ).toThrowError("signature.big_r.x, signature.big_r.y and signature.s must be 64 lowercase hex each");
+      parse(bidirectional({ signature: withSignature({ s: "" }), serialized_output: "55" })),
+    ).toThrowError("invalid request: `signature.s` must be 64 lowercase hex");
   });
 
   it("reports a bad serialized_output before a bad output_len", () => {
-    expect(() => validateRespondRequest(bidirectional({ serialized_output: "55", output_len: 200 }))).toThrowError(
-      "postRespondBidirectional needs serialized_output as 256 lowercase hex (Bytes<128>)",
+    expect(() => parse(bidirectional({ serialized_output: "55", output_len: 200 }))).toThrowError(
+      "invalid request: `serialized_output` must be 256 lowercase hex (Bytes<128>)",
     );
   });
 });
@@ -199,88 +231,34 @@ const MALFORMED_BODIES: [string, string][] = [
   ["an empty body", ""],
 ];
 
-/**
- * Every way a field can be unusable, and the exact 400 it earns. Absent, `null`
- * and the wrong type all read the same, because they are the same thing to this
- * seam — so the rows below cover each MODE once, then each field TYPE and each
- * nesting DEPTH once, rather than re-crossing them.
- */
-const BAD_FIELDS: [string, Record<string, unknown>, string][] = [
-  // ---- the three modes, on one field ----
-  ["contract_address absent", { ...bidirectional(), contract_address: undefined }, "invalid JSON: `contract_address` must be a string"],
-  ["contract_address null", { ...bidirectional(), contract_address: null }, "invalid JSON: `contract_address` must be a string"],
-  ["contract_address as a number", { ...bidirectional(), contract_address: 1 }, "invalid JSON: `contract_address` must be a string"],
-
-  // ---- each type, at each depth ----
-  ["circuit absent", { ...bidirectional(), circuit: undefined }, "invalid JSON: `circuit` must be a string"],
-  ["signature as a string", { ...bidirectional(), signature: "nope" }, "invalid JSON: `signature` must be an object"],
-  ["signature as an array", { ...bidirectional(), signature: [] }, "invalid JSON: `signature` must be an object"],
-  ["signature null", { ...bidirectional(), signature: null }, "invalid JSON: `signature` must be an object"],
-  ["signature.big_r absent", { ...bidirectional(), signature: { s: SIGNATURE.s, recovery_id: 1 } }, "invalid JSON: `signature.big_r` must be an object"],
-  ["signature.big_r.x as a number", { ...bidirectional(), signature: { ...SIGNATURE, big_r: { x: 1, y: SIGNATURE.big_r.y } } }, "invalid JSON: `signature.big_r.x` must be a string"],
-  ["signature.s null", { ...bidirectional(), signature: { ...SIGNATURE, s: null } }, "invalid JSON: `signature.s` must be a string"],
-  ["signature.recovery_id as a string", { ...bidirectional(), signature: { ...SIGNATURE, recovery_id: "1" } }, "invalid JSON: `signature.recovery_id` must be an integer in 0..=255"],
-  ["serialized_output as a number", { ...bidirectional(), serialized_output: 1 }, "invalid JSON: `serialized_output` must be a string"],
-
-  // An OPTIONAL field is a different schema path from a required one, so `null`
-  // has to be rejected on both: tolerating it here would otherwise go unnoticed.
-  ["serialized_output null", { ...bidirectional(), serialized_output: null }, "invalid JSON: `serialized_output` must be a string"],
-  ["output_len null", { ...bidirectional(), output_len: null }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-
-  // ---- the byte range, whose four zod checks must speak with one voice ----
-  ["output_len as a string", { ...bidirectional(), output_len: "64" }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-  ["output_len negative", { ...bidirectional(), output_len: -1 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-  ["output_len fractional", { ...bidirectional(), output_len: 1.5 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-  ["output_len beyond u8", { ...bidirectional(), output_len: 256 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-];
-
 describe("parseRespondRequest", () => {
   // `toEqual`, not `toStrictEqual`: an absent optional key and one set to
   // `undefined` are the same request, and the schema omits what it did not see.
   it("round-trips the postSignatureResponse body", () => {
-    expect(parseRespondRequest(JSON.stringify(signatureResponse()))).toEqual(signatureResponse());
+    expect(parse(signatureResponse())).toEqual(signatureResponse());
   });
 
   it("round-trips the postRespondBidirectional body", () => {
-    expect(parseRespondRequest(JSON.stringify(bidirectional()))).toEqual(bidirectional());
+    expect(parse(bidirectional())).toEqual(bidirectional());
   });
 
   it("omitting an optional field is the way to leave it out", () => {
-    // The counterpart to BAD_FIELDS: absent is accepted where null is not.
-    const parsed = parseRespondRequest(JSON.stringify(signatureResponse()));
+    const parsed = parse(signatureResponse());
     expect(parsed.serialized_output).toBeUndefined();
     expect(parsed.output_len).toBeUndefined();
-    expect(() => validateRespondRequest(parsed)).not.toThrow();
-  });
-
-  it("reports fields in declaration order, so the FIRST bad one answers", () => {
-    // Parse precedence is wire contract just as validation precedence is: a
-    // caller fixing one field at a time must see them in a stable order.
-    const bad = { contract_address: 1, request_id: 1, signature: "nope", output_len: "x" };
-    expect(() => parseRespondRequest(JSON.stringify({ ...bidirectional(), ...bad }))).toThrowError(
-      "invalid JSON: `contract_address` must be a string",
-    );
-    expect(() =>
-      parseRespondRequest(JSON.stringify({ ...bidirectional(), ...bad, contract_address: ADDRESS })),
-    ).toThrowError("invalid JSON: `request_id` must be a string");
-    expect(() =>
-      parseRespondRequest(
-        JSON.stringify({ ...bidirectional(), ...bad, contract_address: ADDRESS, request_id: REQUEST_ID }),
-      ),
-    ).toThrowError("invalid JSON: `signature` must be an object");
   });
 
   it("ignores unknown fields, as the wire always has", () => {
-    const body = JSON.stringify({ ...bidirectional(), output_hash: "deadbeef", extra: 1 });
-    expect(() => validateRespondRequest(parseRespondRequest(body))).not.toThrow();
+    expect(() => parse({ ...bidirectional(), output_hash: "deadbeef", extra: 1 })).not.toThrow();
+  });
+
+  it("strips the unknown fields rather than passing them on", () => {
+    expect(parse({ ...bidirectional(), output_hash: "deadbeef" })).toEqual(bidirectional());
   });
 
   it.each(MALFORMED_BODIES)("rejects %s with an invalid-JSON message", (_label, body) => {
+    // Never reaches the schema, so it keeps the `invalid JSON:` preamble.
     expect(() => parseRespondRequest(body)).toThrowError(/^invalid JSON:/);
-  });
-
-  it.each(BAD_FIELDS)("rejects %s", (_label, body, message) => {
-    expect(() => parseRespondRequest(JSON.stringify(body))).toThrowError(message);
   });
 });
 
@@ -293,13 +271,11 @@ describe("parseRespondRequest", () => {
  */
 describe("respondCall", () => {
   it("builds requestId plus one SignatureRespondedEvent", () => {
-    const request = signatureResponse();
-    validateRespondRequest(request);
-    const call = respondCall(request);
+    const call = respondCall(parse(signatureResponse()));
 
     expect(call.args).toHaveLength(2);
     expect(hex(call.args[0])).toBe(REQUEST_ID);
-    const event = signatureEvent(request);
+    const event = signatureEvent(signatureResponse());
     expect(Object.keys(event)).toStrictEqual(["signature"]);
     expect(Object.keys(event.signature).sort()).toStrictEqual(["bigR", "recoveryId", "s"]);
     expect(Object.keys(event.signature.bigR).sort()).toStrictEqual(["x", "y"]);
@@ -315,12 +291,10 @@ describe("respondCall", () => {
   });
 
   it("builds requestId plus one RespondBidirectionalEvent", () => {
-    const request = bidirectional();
-    validateRespondRequest(request);
-    const call = respondCall(request);
+    const call = respondCall(parse(bidirectional()));
 
     expect(hex(call.args[0])).toBe(REQUEST_ID);
-    const event = bidirectionalEvent(request);
+    const event = bidirectionalEvent(bidirectional());
     expect(Object.keys(event).sort()).toStrictEqual([
       "outputLen",
       "serializedOutput",
@@ -348,7 +322,7 @@ describe("wire fixtures", () => {
     const body =
       `{"contract_address":"${ADDRESS}","circuit":"postSignatureResponse","request_id":"${REQUEST_ID}",` +
       `"signature":{"big_r":{"x":"2222222222222222222222222222222222222222222222222222222222222222","y":"3333333333333333333333333333333333333333333333333333333333333333"},"s":"4444444444444444444444444444444444444444444444444444444444444444","recovery_id":1}}`;
-    expect(() => validateRespondRequest(parseRespondRequest(body))).not.toThrow();
+    expect(() => parseRespondRequest(body)).not.toThrow();
   });
 
   it("accepts the pinned postRespondBidirectional body byte for byte", () => {
@@ -356,41 +330,32 @@ describe("wire fixtures", () => {
       `{"contract_address":"${ADDRESS}","circuit":"postRespondBidirectional","request_id":"${REQUEST_ID}",` +
       `"serialized_output":"${"55".repeat(128)}","output_len":64,` +
       `"signature":{"big_r":{"x":"${"22".repeat(32)}","y":"${"33".repeat(32)}"},"s":"${"44".repeat(32)}","recovery_id":0}}`;
-    const request = parseRespondRequest(body);
-    expect(() => validateRespondRequest(request)).not.toThrow();
-    expect(request).toEqual(bidirectional());
+    expect(parseRespondRequest(body)).toEqual(bidirectional());
   });
 
 });
 
-/** A node client that must never be reached: validation happens before any I/O. */
-const forbiddenClient = new Proxy({} as NodeClient, {
-  get(_target, property) {
-    throw new Error(`no I/O may happen for an invalid request (touched ${String(property)})`);
-  },
-});
+const forbidden = forbiddenClient("no I/O may happen for an invalid request");
 
-/** Endpoints that would fail loudly if the handler ever tried to use them. */
+/** A managed dir that cannot resolve, so reaching boot at all is a visible failure. */
 const offlineConfig: Config = {
-  port: 0,
-  bindHost: "127.0.0.1",
-  nodeUrl: "ws://127.0.0.1:1",
-  proofServerUrl: "http://127.0.0.1:1",
-  indexerUrl: "http://127.0.0.1:1/api/v3/graphql",
-  indexerWsUrl: "ws://127.0.0.1:1/api/v3/graphql/ws",
+  ...TEST_CONFIG,
   managedDir: "/nonexistent",
-  fundingSeed: `${"00".repeat(31)}01`,
-  networkId: "undeployed",
+  fundingSeed: GENESIS_MINT_WALLET_SEED,
 };
 
 const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ["a malformed body", "{", /^invalid JSON:/],
-  ["a bad address", JSON.stringify(bidirectional({ contract_address: "nope" })), "contract_address must be 64 lowercase hex"],
-  ["an unknown circuit", JSON.stringify(signatureResponse({ circuit: "postRespond" })), "unknown circuit postRespond"],
+  ["a bad address", JSON.stringify(bidirectional({ contract_address: "nope" })), "invalid request: `contract_address` must be 64 lowercase hex"],
+  [
+    "an unknown circuit",
+    JSON.stringify(signatureResponse({ circuit: "postRespond" })),
+    "invalid request: `circuit` must be postSignatureResponse or postRespondBidirectional",
+  ],
   [
     "a contaminated body",
     JSON.stringify(signatureResponse({ serialized_output: "55".repeat(128) })),
-    "postSignatureResponse takes no bidirectional fields",
+    "invalid request: `serialized_output` must be absent on postSignatureResponse",
   ],
 ];
 
@@ -404,7 +369,7 @@ describe("the JSON preamble", () => {
 
 describe("handleRespond: the bad_request path never touches the chain", () => {
   it.each(BAD_REQUESTS)("returns bad_request for %s", async (_label, body, expected) => {
-    const reply = await handleRespond(offlineConfig, forbiddenClient, body);
+    const reply = await handleRespond(offlineConfig, forbidden, body);
     expect(reply.status).toBe(400);
     // The code is the stable half and the message is the free half; a caller
     // branches on the first and shows the second.
@@ -537,12 +502,18 @@ describe("deriveFundingKeys", () => {
   });
 });
 
-/** The narrowing `validateRespondRequest` performs is what keeps `respondCall` total. */
+/** The narrowing the parse performs is what keeps `respondCall` total. */
 describe("types", () => {
   it("narrows the circuit to the two postable ids", () => {
-    const request = bidirectional();
-    validateRespondRequest(request);
+    const request = parse(bidirectional());
     const circuit: RespondCircuit = request.circuit;
     expect(circuit).toBe("postRespondBidirectional");
+    // Narrowed by the discriminant alone: no cast, no second check.
+    if (request.circuit === "postRespondBidirectional") {
+      const output: string = request.serialized_output;
+      const length: number = request.output_len;
+      expect(output).toHaveLength(256);
+      expect(length).toBe(64);
+    }
   });
 });
