@@ -21,13 +21,7 @@ pub(crate) async fn process_sign_request(
 
     ctx.backlog.insert(sign_request.clone()).await;
 
-    if ctx.caught_up {
-        let chain = sign_request.chain;
-        ctx.sign_tx
-            .send(SignCommand::Request(sign_request))
-            .await
-            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
-    }
+    ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
     Ok(())
 }
@@ -114,12 +108,7 @@ pub(crate) async fn process_respond_event(
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             ctx.backlog.remove(source_chain, &sign_id).await;
-            if ctx.caught_up {
-                ctx.sign_tx
-                    .send(SignCommand::Completion(sign_id))
-                    .await
-                    .context("failed to send completion for respond event")?;
-            }
+            ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
             Ok(())
         }
         SignKind::SignBidirectional(event) => {
@@ -254,16 +243,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     }
 
-    if ctx.caught_up {
-        ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to send completion for respond bidirectional for sign id {sign_id:?}"
-                )
-            })?;
-    }
+    ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
 }

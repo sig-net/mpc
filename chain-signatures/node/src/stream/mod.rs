@@ -51,6 +51,18 @@ impl StreamContext {
             caught_up: false,
         }
     }
+
+    /// Forward a sign command to the signing pipeline, but only when caught up.
+    /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
+    pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
+        if self.caught_up {
+            self.sign_tx
+                .send(cmd)
+                .await
+                .context("sign command channel closed")?;
+        }
+        Ok(())
+    }
 }
 
 /// Dispatch a single chain event to the appropriate processor.
