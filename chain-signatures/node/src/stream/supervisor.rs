@@ -228,14 +228,11 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::MeshState;
-    use crate::node_client::NodeClient;
-    use crate::rpc::ContractStateWatcher;
-    use crate::stream::test_utils::test_rpc_channel;
+    use crate::stream::test_utils::make_test_stream_context;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
-    use near_account_id::AccountId;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -248,26 +245,14 @@ mod tests {
         watch::Sender<Option<CheckpointDigest>>,
         watch::Sender<MeshState>,
     ) {
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            ProjectivePoint::GENERATOR.to_affine(),
-            0,
-            Default::default(),
-        );
-        let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (cp_tx, cp_rx) = watch::channel(None);
-        let (rpc, _rpc_rx) = test_rpc_channel(8);
-        let ctx = StreamContext::new(
+        // threshold 0 so `recover_backlog` doesn't block on the empty mesh.
+        make_test_stream_context(
             backlog,
             sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_rx,
-            NodeClient::new(&Default::default()),
-            cp_rx,
-        );
-        (ctx, cp_tx, mesh_tx)
+            false,
+            ProjectivePoint::GENERATOR.to_affine(),
+            0,
+        )
     }
 
     fn make_digest(
