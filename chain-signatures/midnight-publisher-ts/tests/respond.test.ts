@@ -4,8 +4,8 @@
  * `tests/respond-live.ts`.
  *
  * These tests are the seam's specification: every acceptance, every rejection
- * with its exact body, and the JSON-shape negatives (wrong types, `null`
- * versus absent, unknown fields, check ordering).
+ * with its exact body, and the JSON-shape negatives (absent, `null`, wrong
+ * types, unknown fields, check ordering).
  */
 
 import { describe, expect, it } from "vitest";
@@ -199,34 +199,44 @@ const MALFORMED_BODIES: [string, string][] = [
   ["an empty body", ""],
 ];
 
-const MISSING_FIELDS: [string, string][] = [
-  ["contract_address", JSON.stringify({ ...bidirectional(), contract_address: undefined })],
-  ["circuit", JSON.stringify({ ...bidirectional(), circuit: undefined })],
-  ["request_id", JSON.stringify({ ...bidirectional(), request_id: undefined })],
-  ["signature", JSON.stringify({ ...bidirectional(), signature: undefined })],
-  ["signature.big_r", JSON.stringify({ ...bidirectional(), signature: { s: SIGNATURE.s, recovery_id: 1 } })],
-  ["signature.big_r.x", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, big_r: { y: SIGNATURE.big_r.y } } })],
-  ["signature.s", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, s: undefined } })],
-  ["signature.recovery_id", JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, recovery_id: undefined } })],
-];
-
-const WRONG_JSON_TYPES: [string, Record<string, unknown>, string][] = [
+/**
+ * Every way a field can be unusable, and the exact 400 it earns. Absent, `null`
+ * and the wrong type all read the same, because they are the same thing to this
+ * seam — so the rows below cover each MODE once, then each field TYPE and each
+ * nesting DEPTH once, rather than re-crossing them.
+ */
+const BAD_FIELDS: [string, Record<string, unknown>, string][] = [
+  // ---- the three modes, on one field ----
+  ["contract_address absent", { ...bidirectional(), contract_address: undefined }, "invalid JSON: `contract_address` must be a string"],
+  ["contract_address null", { ...bidirectional(), contract_address: null }, "invalid JSON: `contract_address` must be a string"],
   ["contract_address as a number", { ...bidirectional(), contract_address: 1 }, "invalid JSON: `contract_address` must be a string"],
+
+  // ---- each type, at each depth ----
+  ["circuit absent", { ...bidirectional(), circuit: undefined }, "invalid JSON: `circuit` must be a string"],
   ["signature as a string", { ...bidirectional(), signature: "nope" }, "invalid JSON: `signature` must be an object"],
   ["signature as an array", { ...bidirectional(), signature: [] }, "invalid JSON: `signature` must be an object"],
-  ["big_r as a string", { ...bidirectional(), signature: { ...SIGNATURE, big_r: "nope" } }, "invalid JSON: `signature.big_r` must be an object"],
-  ["big_r.x as a number", { ...bidirectional(), signature: { ...SIGNATURE, big_r: { x: 1, y: SIGNATURE.big_r.y } } }, "invalid JSON: `signature.big_r.x` must be a string"],
+  ["signature null", { ...bidirectional(), signature: null }, "invalid JSON: `signature` must be an object"],
+  ["signature.big_r absent", { ...bidirectional(), signature: { s: SIGNATURE.s, recovery_id: 1 } }, "invalid JSON: `signature.big_r` must be an object"],
+  ["signature.big_r.x as a number", { ...bidirectional(), signature: { ...SIGNATURE, big_r: { x: 1, y: SIGNATURE.big_r.y } } }, "invalid JSON: `signature.big_r.x` must be a string"],
+  ["signature.s null", { ...bidirectional(), signature: { ...SIGNATURE, s: null } }, "invalid JSON: `signature.s` must be a string"],
+  ["signature.recovery_id as a string", { ...bidirectional(), signature: { ...SIGNATURE, recovery_id: "1" } }, "invalid JSON: `signature.recovery_id` must be an integer in 0..=255"],
+  ["serialized_output as a number", { ...bidirectional(), serialized_output: 1 }, "invalid JSON: `serialized_output` must be a string"],
+
+  // An OPTIONAL field is a different schema path from a required one, so `null`
+  // has to be rejected on both: tolerating it here would otherwise go unnoticed.
+  ["serialized_output null", { ...bidirectional(), serialized_output: null }, "invalid JSON: `serialized_output` must be a string"],
+  ["output_len null", { ...bidirectional(), output_len: null }, "invalid JSON: `output_len` must be an integer in 0..=255"],
+
+  // ---- the byte range, whose four zod checks must speak with one voice ----
   ["output_len as a string", { ...bidirectional(), output_len: "64" }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len negative", { ...bidirectional(), output_len: -1 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len fractional", { ...bidirectional(), output_len: 1.5 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
   ["output_len beyond u8", { ...bidirectional(), output_len: 256 }, "invalid JSON: `output_len` must be an integer in 0..=255"],
-  ["recovery_id as a string", { ...signatureResponse(), signature: { ...SIGNATURE, recovery_id: "1" } }, "invalid JSON: `signature.recovery_id` must be an integer in 0..=255"],
 ];
 
 describe("parseRespondRequest", () => {
-  // `toEqual`, not `toStrictEqual`: the parser materialises every optional
-  // field as `undefined`, and an absent field and an `undefined` one are the
-  // same thing in this contract, as the null-versus-absent case below pins.
+  // `toEqual`, not `toStrictEqual`: an absent optional key and one set to
+  // `undefined` are the same request, and the schema omits what it did not see.
   it("round-trips the postSignatureResponse body", () => {
     expect(parseRespondRequest(JSON.stringify(signatureResponse()))).toEqual(signatureResponse());
   });
@@ -235,43 +245,8 @@ describe("parseRespondRequest", () => {
     expect(parseRespondRequest(JSON.stringify(bidirectional()))).toEqual(bidirectional());
   });
 
-  /** `null` is a value of the wrong type, never a way to omit a field. */
-  const NULLS: [string, Record<string, unknown>, string][] = [
-    [
-      "an optional field nulled rather than omitted",
-      { ...signatureResponse(), serialized_output: null },
-      "invalid JSON: `serialized_output` must be a string",
-    ],
-    [
-      "an optional number nulled rather than omitted",
-      { ...signatureResponse(), output_len: null },
-      "invalid JSON: `output_len` must be an integer in 0..=255",
-    ],
-    [
-      "a required scalar nulled",
-      { ...bidirectional(), signature: { ...SIGNATURE, s: null } },
-      "invalid JSON: `signature.s` must be a string",
-    ],
-    [
-      // typeof null === "object", so this is the one null the object check has
-      // to reject explicitly.
-      "a required object nulled",
-      { ...bidirectional(), signature: null },
-      "invalid JSON: `signature` must be an object",
-    ],
-    [
-      "a nested object nulled",
-      { ...bidirectional(), signature: { ...SIGNATURE, big_r: null } },
-      "invalid JSON: `signature.big_r` must be an object",
-    ],
-  ];
-
-  it.each(NULLS)("rejects %s", (_label, body, message) => {
-    expect(() => parseRespondRequest(JSON.stringify(body))).toThrowError(message);
-  });
-
   it("omitting an optional field is the way to leave it out", () => {
-    // The counterpart to the table above: absent is accepted where null is not.
+    // The counterpart to BAD_FIELDS: absent is accepted where null is not.
     const parsed = parseRespondRequest(JSON.stringify(signatureResponse()));
     expect(parsed.serialized_output).toBeUndefined();
     expect(parsed.output_len).toBeUndefined();
@@ -304,11 +279,7 @@ describe("parseRespondRequest", () => {
     expect(() => parseRespondRequest(body)).toThrowError(/^invalid JSON:/);
   });
 
-  it.each(MISSING_FIELDS)("rejects a body missing %s", (field, body) => {
-    expect(() => parseRespondRequest(body)).toThrowError(`invalid JSON: missing field \`${field}\``);
-  });
-
-  it.each(WRONG_JSON_TYPES)("rejects %s", (_label, body, message) => {
+  it.each(BAD_FIELDS)("rejects %s", (_label, body, message) => {
     expect(() => parseRespondRequest(JSON.stringify(body))).toThrowError(message);
   });
 });

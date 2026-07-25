@@ -138,32 +138,20 @@ const RespondRequestSchema = wireObject({
   output_len: wireByte.optional(),
 });
 
-/** The raw value a zod issue points at, for telling "absent" from "wrong type" apart. */
-function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
-  return path.reduce<unknown>(
-    (value, key) => (value === undefined || value === null ? undefined : (value as Record<PropertyKey, unknown>)[key]),
-    root,
-  );
-}
-
 /**
- * The first issue, rendered in this seam's own vocabulary. zod reports a missing
- * field and a mistyped one identically, so the source is consulted: absent means
- * `missing field`, anything else names the type it should have been.
+ * The first issue, as `field must be X`. One message shape for every way a
+ * field can be wrong — absent, null, or the wrong type all read the same,
+ * because they are the same thing to this seam: no usable value there.
  */
-function toBadRequest(error: z.ZodError, source: unknown): PublisherError {
+function toBadRequest(error: z.ZodError): PublisherError {
   const issue = error.issues[0]!;
-  const label = issue.path.join(".");
-  return valueAt(source, issue.path) === undefined
-    ? badRequest(`invalid JSON: missing field \`${label}\``)
-    : badRequest(`invalid JSON: \`${label}\` ${issue.message}`);
+  return badRequest(`invalid JSON: \`${issue.path.join(".")}\` ${issue.message}`);
 }
 
 /** Unknown fields are ignored; only a missing or mistyped known field rejects. */
 export function parseRespondRequest(body: string): RespondRequest {
-  const source = jsonObject(body);
-  const parsed = RespondRequestSchema.safeParse(source);
-  if (!parsed.success) throw toBadRequest(parsed.error, source);
+  const parsed = RespondRequestSchema.safeParse(jsonObject(body));
+  if (!parsed.success) throw toBadRequest(parsed.error);
   return parsed.data;
 }
 
@@ -450,12 +438,10 @@ async function proveCall(ready: Publisher, call: RespondCall, address: string, s
     initialPrivateState: createSignetContractPrivateState(),
   };
 
-  // Collapsing the ternary does not compile: `createCallTxOptions` types `args`
-  // against the circuit id, so each arm needs a literal one.
-  const options =
-    call.circuitId === "postSignatureResponse"
-      ? createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [call.args[0], call.args[1]])
-      : createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [call.args[0], call.args[1]]);
+  const options = createCallTxOptions(ready.compiledContract, call.circuitId, address, undefined, undefined, [
+    call.args[0],
+    call.args[1],
+  ]);
 
   const unsubmitted = await createUnprovenCallTxFromInitialStates(
     ready.zkConfigProvider,
