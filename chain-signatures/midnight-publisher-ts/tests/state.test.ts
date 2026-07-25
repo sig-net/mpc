@@ -3,11 +3,20 @@
  *
  * All offline, and that is the point: the seam is a pure codec, so there is
  * nothing left that a running node could tell us. The `.mn` fixtures are
- * contract-state blobs read off the live local chain over RPC; the goldens in
- * `tests/fixtures/golden-state-*.json` are their expected decoded trees,
- * captured and independently cross-verified byte for byte before this suite
- * froze them. Correctness is anchored to those captures, not to hand-written
- * expectations.
+ * contract-state blobs read off the live local chain over RPC, so the INPUT is
+ * real.
+ *
+ * The goldens are NOT an independent oracle. `tests/fixtures/regenerate.ts`
+ * writes them by calling `decodeContractState` itself, so they pin what the
+ * decoder did at capture time, not what it should do: a golden that changes is
+ * a wire change and needs review, but a golden that holds proves only that
+ * nothing moved. Never regenerate one to green a failing test.
+ *
+ * What anchors correctness is the smaller set of tests that check against
+ * something OUTSIDE the decoder: `sorts map entries by key hex` walks a
+ * synthetic `StateMap` inserted out of order, and the v8 -> v9 tag flip drives
+ * the ledger's own deserializer. Those kill a mutation; the goldens mostly
+ * detect one.
  */
 
 import { StateMap, StateValue, type AlignedValue } from "@midnightntwrk/ledger-v9";

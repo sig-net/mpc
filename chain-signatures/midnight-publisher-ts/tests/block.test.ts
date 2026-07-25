@@ -3,14 +3,21 @@
  *
  * All offline, and that is the point: the seam is a pure codec, so there is
  * nothing left that a running node could tell us. `notify-tx.mn` holds block
- * 1366's one transaction, read off the live local chain;
- * `tests/fixtures/golden-block-1366.json` is its expected decode, captured and
- * independently cross-verified byte for byte before this suite froze it. Block
- * 1366 carried exactly one transaction slot, so decoding that single blob must
- * still reproduce the golden byte for byte: correctness stays anchored to a
- * verified capture rather than to hand-written expectations, even though the
- * caller now hands the bytes over instead of this service walking the block
- * for them.
+ * 1366's one transaction, read off the live local chain, so the INPUT is real.
+ * Block 1366 carried exactly one transaction slot, so decoding that single blob
+ * reproduces the whole response even though the caller now hands the bytes over
+ * instead of this service walking the block for them.
+ *
+ * `golden-block-1366.json` is NOT an independent oracle.
+ * `tests/fixtures/regenerate.ts` writes it by calling `decodeTransactions`
+ * itself, so it pins what the decoder did at capture time, not what it should
+ * do. Never regenerate it to green a failing test.
+ *
+ * What anchors correctness is the smaller set of tests that check against
+ * something OUTSIDE the decoder: `the ledger-v9 Fr tag` reads the tagged
+ * 66-hex value straight off `ContractCall` before asserting the seam emits 64,
+ * and `links the caller to the singleton` equates two independent ledger
+ * locations. Those kill a mutation; the golden mostly detects one.
  *
  * Unwrapping the blob out of a block is the caller's job, and its traps are
  * recorded in `src/block.ts`.
