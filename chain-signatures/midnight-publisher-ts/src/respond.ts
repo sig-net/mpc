@@ -41,6 +41,7 @@ import {
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
 import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
+import { z } from "zod";
 
 import { type Config } from "./config.js";
 import {
@@ -102,77 +103,68 @@ export type RespondCircuit = ValidatedRespondRequest["circuit"];
 
 // ---- parsing and validation ------------------------------------------------
 
-/** The wire treats `null` and a missing key alike. */
-const absent = (value: unknown): boolean => value === undefined || value === null;
+// Each leaf carries the tail of its own rejection; `toBadRequest` prefixes the
+// field path. An absent key is the ONLY way to omit a field — `null` is a value
+// of the wrong type and rejects like any other. Strict on purpose: this seam has
+// one caller and we write it, so tolerating `null` would spend a loosening we can
+// still make later if a serde `Option` ever needs it, and can never take back.
 
-// Nested fields are reported by their full path (`signature.big_r.x`), so
-// `label` carries that path while `field` stays the plain key to read.
+const MUST_BE_A_STRING = "must be a string";
+const MUST_BE_A_BYTE = "must be an integer in 0..=255";
+const MUST_BE_AN_OBJECT = "must be an object";
 
-function requiredString(source: Record<string, unknown>, field: string, label = field): string {
-  const value = optionalString(source, field, label);
-  if (value !== undefined) return value;
-  throw badRequest(`invalid JSON: missing field \`${label}\``);
-}
+const wireString = z.string(MUST_BE_A_STRING);
+const wireByte = z.number(MUST_BE_A_BYTE).int(MUST_BE_A_BYTE).min(0, MUST_BE_A_BYTE).max(255, MUST_BE_A_BYTE);
+const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
 
-function optionalString(source: Record<string, unknown>, field: string, label = field): string | undefined {
-  const value = source[field];
-  if (absent(value)) return undefined;
-  if (typeof value === "string") return value;
-  throw badRequest(`invalid JSON: \`${label}\` must be a string`);
-}
+/**
+ * The request body's SHAPE only. Hex widths, the 0..=128 output length and the
+ * per-circuit field sets are semantics, and stay in {@link validateRespondRequest}
+ * so the two concerns keep separate messages. Unknown keys are stripped, never
+ * rejected. Field order is wire contract: zod reports issues in declaration
+ * order and only the first is surfaced, so a caller fixing one field at a time
+ * walks them top to bottom.
+ */
+const RespondRequestSchema = wireObject({
+  contract_address: wireString,
+  circuit: wireString,
+  request_id: wireString,
+  signature: wireObject({
+    big_r: wireObject({ x: wireString, y: wireString }),
+    s: wireString,
+    recovery_id: wireByte,
+  }),
+  serialized_output: wireString.optional(),
+  output_len: wireByte.optional(),
+});
 
-function requiredByte(source: Record<string, unknown>, field: string, label = field): number {
-  const value = optionalByte(source, field, label);
-  if (value !== undefined) return value;
-  throw badRequest(`invalid JSON: missing field \`${label}\``);
-}
-
-function optionalByte(source: Record<string, unknown>, field: string, label = field): number | undefined {
-  const value = source[field];
-  if (absent(value)) return undefined;
-  if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255) return value;
-  throw badRequest(`invalid JSON: \`${label}\` must be an integer in 0..=255`);
-}
-
-function requiredObject(source: Record<string, unknown>, field: string, label = field): Record<string, unknown> {
-  const value = source[field];
-  if (absent(value)) throw badRequest(`invalid JSON: missing field \`${label}\``);
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw badRequest(`invalid JSON: \`${label}\` must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-/** The nested `signature` object. Every field is required: both circuits carry one. */
-function parseSignature(source: Record<string, unknown>): WireSignature {
-  const signature = requiredObject(source, "signature");
-  const bigR = requiredObject(signature, "big_r", "signature.big_r");
-  return {
-    big_r: {
-      x: requiredString(bigR, "x", "signature.big_r.x"),
-      y: requiredString(bigR, "y", "signature.big_r.y"),
-    },
-    s: requiredString(signature, "s", "signature.s"),
-    recovery_id: requiredByte(signature, "recovery_id", "signature.recovery_id"),
-  };
+/** The raw value a zod issue points at, for telling "absent" from "wrong type" apart. */
+function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
+  return path.reduce<unknown>(
+    (value, key) => (value === undefined || value === null ? undefined : (value as Record<PropertyKey, unknown>)[key]),
+    root,
+  );
 }
 
 /**
- * Unknown fields are ignored; only a missing or mistyped known field rejects.
- * Fields are read in declaration order, so the FIRST malformed one is what the
- * caller hears about — pinned by `tests/respond.test.ts`.
+ * The first issue, rendered in this seam's own vocabulary. zod reports a missing
+ * field and a mistyped one identically, so the source is consulted: absent means
+ * `missing field`, anything else names the type it should have been.
  */
+function toBadRequest(error: z.ZodError, source: unknown): PublisherError {
+  const issue = error.issues[0]!;
+  const label = issue.path.join(".");
+  return valueAt(source, issue.path) === undefined
+    ? badRequest(`invalid JSON: missing field \`${label}\``)
+    : badRequest(`invalid JSON: \`${label}\` ${issue.message}`);
+}
+
+/** Unknown fields are ignored; only a missing or mistyped known field rejects. */
 export function parseRespondRequest(body: string): RespondRequest {
   const source = jsonObject(body);
-
-  return {
-    contract_address: requiredString(source, "contract_address"),
-    circuit: requiredString(source, "circuit"),
-    request_id: requiredString(source, "request_id"),
-    signature: parseSignature(source),
-    serialized_output: optionalString(source, "serialized_output"),
-    output_len: optionalByte(source, "output_len"),
-  };
+  const parsed = RespondRequestSchema.safeParse(source);
+  if (!parsed.success) throw toBadRequest(parsed.error, source);
+  return parsed.data;
 }
 
 /** Present and exactly 32 bytes of lowercase hex. */

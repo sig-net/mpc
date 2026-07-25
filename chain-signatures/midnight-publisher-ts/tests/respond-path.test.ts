@@ -1,15 +1,14 @@
 /**
  * `POST /respond` orchestration tests, offline.
  *
- * The write path used to have no offline coverage past the `bad_request`
- * branch: everything else needed a live stack. This file closes the
- * ORCHESTRATION half of that gap: a stub node client whose runtime API serves
- * captured fixture blobs, and a publisher primed through the test seam from the
- * real compiled-contract assets, real derived keys, and stub proof and wallet
- * edges. The circuit itself really runs (`createUnprovenCallTxFromInitialStates`
- * executes the compact-generated JavaScript against the fixture state), so what
- * these tests prove is the flow: staging, deadlines, the busy gate, error
- * classification, and the success wire shape.
+ * The write path past `bad_request` is covered here without a stack: a stub
+ * node client whose runtime API serves captured fixture blobs, and a publisher
+ * primed through the test seam from the real compiled-contract assets, real
+ * derived keys, and stub proof and wallet edges. The circuit itself really runs
+ * (`createUnprovenCallTxFromInitialStates` executes the compact-generated
+ * JavaScript against the fixture state), so what these tests prove is the flow:
+ * staging, deadlines, the busy gate, error classification, and the success wire
+ * shape.
  *
  * Deliberately NOT covered here, and covered by `tests/respond-live.ts`
  * instead: the real wallet facade, real proving, and real submission.

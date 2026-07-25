@@ -235,23 +235,64 @@ describe("parseRespondRequest", () => {
     expect(parseRespondRequest(JSON.stringify(bidirectional()))).toEqual(bidirectional());
   });
 
-  it("treats null exactly as absent, matching serde's Option", () => {
-    // A serde caller serializes the fields its circuit does not use as nulls;
-    // rejecting those as contamination would reject every standard caller. The
-    // nulled fields here are bidirectional-only — this body's own signature
-    // (big_r_x/big_r_y/s/recovery_id) is present and stays required.
-    const parsed = parseRespondRequest(
-      JSON.stringify({ ...signatureResponse(), serialized_output: null, output_len: null }),
-    );
+  /** `null` is a value of the wrong type, never a way to omit a field. */
+  const NULLS: [string, Record<string, unknown>, string][] = [
+    [
+      "an optional field nulled rather than omitted",
+      { ...signatureResponse(), serialized_output: null },
+      "invalid JSON: `serialized_output` must be a string",
+    ],
+    [
+      "an optional number nulled rather than omitted",
+      { ...signatureResponse(), output_len: null },
+      "invalid JSON: `output_len` must be an integer in 0..=255",
+    ],
+    [
+      "a required scalar nulled",
+      { ...bidirectional(), signature: { ...SIGNATURE, s: null } },
+      "invalid JSON: `signature.s` must be a string",
+    ],
+    [
+      // typeof null === "object", so this is the one null the object check has
+      // to reject explicitly.
+      "a required object nulled",
+      { ...bidirectional(), signature: null },
+      "invalid JSON: `signature` must be an object",
+    ],
+    [
+      "a nested object nulled",
+      { ...bidirectional(), signature: { ...SIGNATURE, big_r: null } },
+      "invalid JSON: `signature.big_r` must be an object",
+    ],
+  ];
+
+  it.each(NULLS)("rejects %s", (_label, body, message) => {
+    expect(() => parseRespondRequest(JSON.stringify(body))).toThrowError(message);
+  });
+
+  it("omitting an optional field is the way to leave it out", () => {
+    // The counterpart to the table above: absent is accepted where null is not.
+    const parsed = parseRespondRequest(JSON.stringify(signatureResponse()));
     expect(parsed.serialized_output).toBeUndefined();
+    expect(parsed.output_len).toBeUndefined();
     expect(() => validateRespondRequest(parsed)).not.toThrow();
   });
 
-  it("rejects a required signature field sent as null, since null is absent", () => {
-    // The flip side of null-equals-absent: nulling a field the circuit NEEDS
-    // is a missing signature, never a present-but-empty one.
-    const body = JSON.stringify({ ...bidirectional(), signature: { ...SIGNATURE, s: null } });
-    expect(() => parseRespondRequest(body)).toThrowError("invalid JSON: missing field `signature.s`");
+  it("reports fields in declaration order, so the FIRST bad one answers", () => {
+    // Parse precedence is wire contract just as validation precedence is: a
+    // caller fixing one field at a time must see them in a stable order.
+    const bad = { contract_address: 1, request_id: 1, signature: "nope", output_len: "x" };
+    expect(() => parseRespondRequest(JSON.stringify({ ...bidirectional(), ...bad }))).toThrowError(
+      "invalid JSON: `contract_address` must be a string",
+    );
+    expect(() =>
+      parseRespondRequest(JSON.stringify({ ...bidirectional(), ...bad, contract_address: ADDRESS })),
+    ).toThrowError("invalid JSON: `request_id` must be a string");
+    expect(() =>
+      parseRespondRequest(
+        JSON.stringify({ ...bidirectional(), ...bad, contract_address: ADDRESS, request_id: REQUEST_ID }),
+      ),
+    ).toThrowError("invalid JSON: `signature` must be an object");
   });
 
   it("ignores unknown fields, as the wire always has", () => {
