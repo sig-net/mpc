@@ -8,11 +8,9 @@ export interface Config {
   readonly port: number;
   /** The loopback boundary IS the access control: no auth, and it holds a funding wallet. */
   readonly bindHost: string;
-  /** Substrate ws endpoint. */
   readonly nodeUrl: string;
   /** Mandatory: these contracts are zkir-v3 and cannot be proven locally. */
   readonly proofServerUrl: string;
-  /** Where the wallet syncs UTXO and dust state from. */
   readonly indexerUrl: string;
   readonly indexerWsUrl: string;
   /** Root of the compiled-contract assets (`contract/`, `compiler/`, `keys/`, `zkir/`). */

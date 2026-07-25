@@ -12,7 +12,8 @@
  */
 
 // Dual instance: everything here is ledger-v9's. The near-namesake
-// `deserializeCompactContractState` yields a class this walker cannot traverse.
+// `deserializeCompactContractState` yields the same class name from the OTHER
+// wasm copy, so its values are foreign to these types.
 import { deserializeContractState, toHex } from "@midnight-ntwrk/midnight-js-utils";
 import type { StateValue } from "@midnightntwrk/ledger-v9";
 
