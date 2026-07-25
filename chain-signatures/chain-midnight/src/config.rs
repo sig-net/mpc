@@ -3,18 +3,16 @@
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
 
-/// Timeouts and retry budget for outbound Midnight calls. Shared by the subxt
-/// node RPC client and the sidecar HTTP client.
+/// Timeouts and retry budget for the subxt node RPC client. The sidecar has its
+/// own budget in [`SidecarConfig`]: a node call slow enough to be a proving run
+/// is a fault, not a wait.
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     /// Timeout for establishing the node WebSocket connection
     pub connect_timeout: Duration,
-    /// Timeout for a single node RPC or sidecar request
+    /// Timeout for a single node RPC request
     pub request_timeout: Duration,
-    /// How long the finalized-head subscription may go silent before `run()`
-    /// returns and lets the supervisor restart it
-    pub stall_timeout: Duration,
-    /// Retry strategy shared by all outbound calls
+    /// Retry strategy for node RPC calls
     pub retry: RetryConfig,
 }
 
@@ -23,11 +21,42 @@ impl Default for RpcConfig {
         Self {
             connect_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(10),
-            stall_timeout: Duration::from_secs(60),
             retry: RetryConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
                 max_times: 5,
+                jitter: true,
+            },
+        }
+    }
+}
+
+/// Timeouts and retry budget for the `midnight-publisher-ts` sidecar. Kept apart
+/// from [`RpcConfig`] because the two have incomparable budgets: a decode call
+/// is cheap, but `POST /respond` proves a circuit and takes minutes.
+#[derive(Clone, Debug)]
+pub struct SidecarConfig {
+    /// Timeout for the decode and health routes, which do no proving
+    pub request_timeout: Duration,
+    /// Timeout for `POST /respond`. Must exceed the sidecar's own six-minute
+    /// `RESPOND_TIMEOUT` so its structured error wins over a client-side abort
+    /// part way through a proof
+    pub respond_timeout: Duration,
+    /// Retry strategy for sidecar calls. Slower and shorter than the node RPC
+    /// budget: a sidecar call can be queued behind the single-dust-UTXO wallet,
+    /// where retrying hard only deepens the contention
+    pub retry: RetryConfig,
+}
+
+impl Default for SidecarConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            respond_timeout: Duration::from_secs(420),
+            retry: RetryConfig {
+                min_delay: Duration::from_secs(1),
+                max_delay: Duration::from_secs(30),
+                max_times: 3,
                 jitter: true,
             },
         }
@@ -42,6 +71,9 @@ pub struct IndexerConfig {
     pub archive_probe_window: u64,
     /// Capacity of the live-block channel
     pub live_block_buffer: usize,
+    /// How long the finalized-head subscription may go silent before `run()`
+    /// returns and lets the supervisor restart it
+    pub stall_timeout: Duration,
 }
 
 impl Default for IndexerConfig {
@@ -49,6 +81,7 @@ impl Default for IndexerConfig {
         Self {
             archive_probe_window: 1024,
             live_block_buffer: 16384,
+            stall_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -66,5 +99,6 @@ pub struct MidnightConfig {
     /// Ledger network id. Must equal the sidecar's `MIDNIGHT_PUB_NETWORK_ID`
     pub network_id: String,
     pub rpc: RpcConfig,
+    pub sidecar: SidecarConfig,
     pub indexer: IndexerConfig,
 }
