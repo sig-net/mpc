@@ -1,8 +1,8 @@
 /**
- * Every non-200 is `{"code","message"}` and, when a dependency's rendered cause
- * chain says more than its one-line message, a `detail` carrying that chain.
- * The code is the stable half a caller branches on and names where the request
- * died on its own; message and detail are evidence, reworded freely.
+ * Every non-200 is `{"code","message"}`, and nothing else. The code is the stable
+ * half a caller branches on, and it names where the request died on its own; the
+ * message is evidence, reworded freely. A dependency's rendered cause chain goes
+ * to the LOG, never the wire — see {@link fail}.
  */
 
 /**
@@ -30,14 +30,14 @@ export type ErrorCode =
   | "prove_failed"
   /** No spendable dust right now. One wallet sustains roughly one post per 35 seconds. */
   | "wallet_unfunded"
-  /** The funding wallet could not sync within the boot deadline. Check the indexer, then retry. */
+  /** The funding wallet could not open or sync. Check the indexer, then retry. */
   | "wallet_unsynced"
   /** Another respond currently holds the one dust UTXO. Retry when it answers, ~35s. */
   | "wallet_busy"
   /** Balancing failed for a reason other than funds. */
   | "balance_failed"
   | "submit_rejected"
-  /** Unclassified. The message is the only detail. */
+  /** Unclassified: the message is all there is, and the log has the rest. */
   | "internal";
 
 export const STATUS: Readonly<Record<ErrorCode, number>> = {
@@ -58,27 +58,65 @@ export const STATUS: Readonly<Record<ErrorCode, number>> = {
   internal: 500,
 };
 
-/** Thrown wherever the cause is known at the throw site. */
+/** Thrown wherever the cause is known at the throw site; `options.cause` carries whatever it wrapped. */
 export class PublisherError extends Error {
-  constructor(readonly code: ErrorCode, message: string, readonly detail?: string) {
-    super(message);
+  constructor(readonly code: ErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "PublisherError";
   }
 }
 
-/** A substring that sharpens a step's default code into one the caller acts on differently. */
-export type Refinement = readonly [pattern: string, code: ErrorCode];
+function describeOne(value: unknown): string {
+  if (value instanceof Error) {
+    return [value.name === "Error" ? "" : value.name, value.message].filter(Boolean).join(": ");
+  }
+  if (typeof value !== "object" || value === null) return String(value);
+  const { _tag, message } = value as { _tag?: unknown; message?: unknown };
+  const named = [_tag, message].filter((part) => typeof part === "string" && part.length > 0).join(": ");
+  if (named.length > 0) return named;
+  try {
+    // Anything else: better an object literal than `[object Object]`.
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 /**
- * The single funnel, so status and body cannot disagree. `logLabel` omitted
- * means silent; a `bad_request` is the caller's own mistake.
+ * One line that NAMES a thrown value, causes innermost last. `message` alone is
+ * not enough: Effect's `FiberFailure` keeps the failing class in `name`, and
+ * `midnight-js-contracts` rewraps with `new Error(msg, { cause })`.
  */
-export function fail(code: ErrorCode, message: string, logLabel?: string, detail?: string): Reply {
-  if (logLabel !== undefined && code !== "bad_request") {
-    console.error(`${logLabel} [${code}]: ${message}${detail === undefined ? "" : `\n${detail}`}`);
+export function describeFailure(error: unknown): string {
+  const parts: string[] = [];
+  // Bounded, so a self-referential `cause` chain terminates rather than hangs.
+  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 8; depth += 1) {
+    const text = describeOne(current);
+    // A wrapper usually quotes what it wrapped; do not say it twice.
+    if (text.length > 0 && !parts.some((part) => part.includes(text))) parts.push(text);
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
   }
-  const body = { code, message, ...(detail === undefined ? {} : { detail }) };
-  return { status: STATUS[code], body: JSON.stringify(body) };
+  return parts.join(": ") || String(error);
+}
+
+/**
+ * The single funnel, so status and body cannot disagree. `logLabel` omitted means
+ * silent; a `bad_request` is the caller's own mistake. `evidence` is LOG-ONLY:
+ * `String` renders Effect's whole cause chain, which an operator wants and a
+ * caller branching on `code` does not.
+ */
+export function fail(code: ErrorCode, message: string, logLabel?: string, evidence?: unknown): Reply {
+  if (logLabel !== undefined && code !== "bad_request") {
+    console.error(`${logLabel} [${code}]: ${String(evidence ?? message).slice(0, 4_000)}`);
+  }
+  return { status: STATUS[code], body: JSON.stringify({ code, message }) };
+}
+
+/** Any thrown value as its answer: a {@link PublisherError} names itself, anything else is `unclassified`. */
+export function replyTo(error: unknown, logLabel: string, unclassified: ErrorCode = "internal"): Reply {
+  const named = error instanceof PublisherError;
+  const evidence = named && error.cause !== undefined ? error.cause : error;
+  return fail(named ? error.code : unclassified, named ? error.message : describeFailure(error), logLabel, evidence);
 }
 
 /** The `invalid JSON:` preamble both seams answer with, byte for byte. */

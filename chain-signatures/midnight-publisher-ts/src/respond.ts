@@ -44,7 +44,7 @@ import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
 import { z } from "zod";
 
 import { type Config } from "./config.js";
-import { fail, jsonObject, PublisherError, type ErrorCode, type Refinement, type Reply } from "./errors.js";
+import { describeFailure, fail, jsonObject, PublisherError, replyTo, type ErrorCode, type Reply } from "./errors.js";
 import { assertLedgerTag, LEDGER_TAGS } from "./ledger.js";
 import { fromHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "./node.js";
 import { openFundingWallet } from "./wallet.js";
@@ -254,18 +254,13 @@ async function readCallStates(client: NodeClient, address: string): Promise<Call
  */
 export const RESPOND_TIMEOUT = { ms: 6 * 60 * 1000 };
 
-/** Rejects with `onTimeout()` after `ms`; the abandoned attempt's own late failure is swallowed. */
+/** Rejects with `onTimeout()` after `ms`. `Promise.race` handles the loser, so the abandoned attempt's own late failure surfaces nowhere. */
 export async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          work.catch(() => undefined);
-          reject(onTimeout());
-        }, ms);
-      }),
+      new Promise<never>((_, reject) => void (timer = setTimeout(() => reject(onTimeout()), ms))),
     ]);
   } finally {
     clearTimeout(timer);
@@ -384,21 +379,8 @@ async function proveCall(ready: Publisher, call: RespondCall, address: string, s
   return ready.proofProvider.proveTx(unsubmitted.private.unprovenTx);
 }
 
-/**
- * The failure's rendered cause chain as wire evidence, when it says more than
- * the one-line message: Effect's `FiberFailure` hides its cause on a Symbol
- * where `describeFailure` cannot reach it, while `String(error)` runs
- * `Cause.pretty` and renders the whole chain. Stack frames stripped, capped;
- * single-line renderings carry nothing `describeFailure` did not already say.
- */
-function failureDetail(error: unknown): string | undefined {
-  const lines = String(error)
-    .split("\n")
-    .filter((line) => !/^\s+at /.test(line) && line.trim().length > 0);
-  if (lines.length <= 1) return undefined;
-  const rendered = lines.join("\n");
-  return rendered.length > 2_000 ? `${rendered.slice(0, 2_000)}…` : rendered;
-}
+/** A substring that sharpens a step's default code into one the caller acts on differently. */
+type Refinement = readonly [pattern: string, code: ErrorCode];
 
 /** The dust shortfall the wallet reports two ways; either means back off, not that the request was wrong. */
 const DUST_SHORTFALL: readonly Refinement[] = [
@@ -425,10 +407,10 @@ async function step<T>(code: ErrorCode, run: () => Promise<T>, refine: readonly 
       throw new PublisherError("ledger_mismatch", describeFailure(error));
     }
     const described = describeFailure(error);
-    // Matched against a WIDER haystack than the answered message, for the same
-    // Symbol-hidden-cause reason `failureDetail` exists.
+    // Matched against a WIDER haystack than the answered message: Effect hides
+    // the real cause on a Symbol that only `String` renders.
     const sharpened = refine.find(([pattern]) => `${described}\n${String(error)}`.includes(pattern))?.[1];
-    throw new PublisherError(sharpened ?? code, described, failureDetail(error));
+    throw new PublisherError(sharpened ?? code, described, { cause: error });
   }
 }
 
@@ -448,39 +430,6 @@ async function post(config: Config, client: NodeClient, request: RespondRequest)
   const balanced = await step("balance_failed", () => ready.wallet.balanceTx(proven), DUST_SHORTFALL);
   const txId = await step("submit_rejected", () => ready.wallet.submitTx(balanced), LOST_THE_RACE);
   return { txId, blockHash: states.blockHash.replace(/^0x/, "") };
-}
-
-function describeOne(value: unknown): string {
-  if (value instanceof Error) {
-    return [value.name === "Error" ? "" : value.name, value.message].filter(Boolean).join(": ");
-  }
-  if (typeof value !== "object" || value === null) return String(value);
-  const { _tag, message } = value as { _tag?: unknown; message?: unknown };
-  const named = [_tag, message].filter((part) => typeof part === "string" && part.length > 0).join(": ");
-  if (named.length > 0) return named;
-  try {
-    // Anything else: better an object literal than `[object Object]`.
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/**
- * One line that NAMES the failure, causes innermost last. `message` alone is not
- * enough: Effect's `FiberFailure` keeps the failing class in `name`, and
- * the refinements in `step` match against this output.
- */
-export function describeFailure(error: unknown): string {
-  const parts: string[] = [];
-  // Bounded, so a self-referential `cause` chain terminates rather than hangs.
-  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 8; depth += 1) {
-    const text = describeOne(current);
-    // A wrapper usually quotes what it wrapped; do not say it twice.
-    if (text.length > 0 && !parts.some((part) => part.includes(text))) parts.push(text);
-    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
-  }
-  return parts.join(": ") || String(error);
 }
 
 /** The request id currently holding the wallet, from boot-or-read through submit. */
@@ -542,8 +491,7 @@ export async function handleRespond(config: Config, client: NodeClient, body: st
     console.log(`respond: rid=${request.request_id} submitted tx ${posted.txId} block ${posted.blockHash} in ${elapsed}ms`);
     return { status: 200, body: JSON.stringify({ status: "ok", tx_id: posted.txId, block_hash: posted.blockHash }) };
   } catch (error) {
-    const failure = error instanceof PublisherError ? error : new PublisherError("internal", describeFailure(error));
-    const reply = fail(failure.code, failure.message, "respond failed", failure.detail);
-    return failure instanceof DeadlineExceeded ? { ...reply, fatal: true } : reply;
+    const reply = replyTo(error, "respond failed");
+    return error instanceof DeadlineExceeded ? { ...reply, fatal: true } : reply;
   }
 }

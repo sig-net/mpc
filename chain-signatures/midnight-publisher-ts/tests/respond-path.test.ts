@@ -29,7 +29,7 @@ import {
 } from "@sig-net/midnight-contract";
 import { GENESIS_MINT_WALLET_SEED, makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
 import { Data, Effect } from "effect";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../src/config.js";
 import { PublisherError, type Reply } from "../src/errors.js";
@@ -195,12 +195,21 @@ describe("withDeadline", () => {
     await expect(timeout).rejects.toMatchObject({ code: "internal" });
   });
 
-  it("swallows the abandoned attempt's late failure", async () => {
-    // The losing side of the race may still reject; that must not surface as an
-    // unhandled rejection after the caller already got its answer.
-    const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("late")), 20));
-    await expect(withDeadline(late, 5, () => new Error("deadline"))).rejects.toThrow("deadline");
-    await new Promise((resolve) => setTimeout(resolve, 40));
+  it("leaves the abandoned attempt's late failure handled", async () => {
+    // Node's default is to throw on an unhandled rejection, so the losing side
+    // of the race rejecting after the caller already has its answer would kill a
+    // process holding a hot wallet. `Promise.race` is what makes it not.
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => void unhandled.push(reason);
+    process.on("unhandledRejection", record);
+    try {
+      const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("late")), 20));
+      await expect(withDeadline(late, 5, () => new Error("deadline"))).rejects.toThrow("deadline");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
   });
 });
 
@@ -398,11 +407,13 @@ describe("POST /respond: the flow against stubbed edges", () => {
     expect(parseBody(reply)).toMatchObject({ code: "state_conflict" });
   });
 
-  it("forwards the rendered cause chain as detail when Effect flattens the message", async () => {
+  it("logs the rendered cause chain when Effect flattens the message", async () => {
     // The submission service wraps every node error in a constant-message
     // SubmissionError whose cause Effect stores on a Symbol, out of
-    // `describeFailure`'s reach. The caller must still receive the evidence:
-    // classification alone could be wrong, and the chain is what proves it.
+    // `describeFailure`'s reach. The classification alone could be wrong, so the
+    // chain that proves it has to survive somewhere: the log, not the wire.
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => void logged.push(line));
     class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
     class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{ message: string }> {}
     primeStub({
@@ -417,18 +428,15 @@ describe("POST /respond: the flow against stubbed edges", () => {
         ) as Promise<string>,
     });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
+    spy.mockRestore();
     expect(reply.status).toBe(409);
     const body = parseBody(reply);
-    expect(body).toMatchObject({ code: "state_conflict" });
-    expect(String(body["message"])).toContain("Transaction submission error");
-    expect(String(body["detail"])).toContain("ReadMismatch");
-    expect(String(body["detail"])).not.toMatch(/^\s+at /m);
+    expect(body).toEqual({ code: "state_conflict", message: expect.stringContaining("Transaction submission error") });
+    expect(logged.join("\n")).toContain("ReadMismatch");
   });
 
   it("plumbs a boot failure's code out to the wire", async () => {
-    // The deadline that MAKES boot fail this way is unit-tested above; this
-    // pins the rest of the trip: the code and status reach the caller.
-    primePublisher(Promise.reject(new PublisherError("wallet_unsynced", "publisher boot exceeded 90000 ms", "boot")));
+    primePublisher(Promise.reject(new PublisherError("wallet_unsynced", "the funding wallet could not sync")));
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(503);
     expect(parseBody(reply)).toMatchObject({ code: "wallet_unsynced" });

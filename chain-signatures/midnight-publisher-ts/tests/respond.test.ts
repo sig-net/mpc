@@ -12,7 +12,6 @@ import { describe, expect, it } from "vitest";
 
 import type { Config } from "../src/config.js";
 import {
-  describeFailure,
   handleRespond,
   respondCall,
   parseRespondRequest,
@@ -22,6 +21,7 @@ import {
   type SignatureRespondedEvent,
   type WireSignature,
 } from "../src/respond.js";
+import { describeFailure } from "../src/errors.js";
 import { deriveFundingKeys, nodeConfig, parseFundingSeed } from "../src/wallet.js";
 import { forbiddenClient, TEST_CONFIG } from "./support.js";
 

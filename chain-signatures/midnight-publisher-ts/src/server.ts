@@ -16,7 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isDeserializationError, isHex as isWholeBytesHex } from "@midnight-ntwrk/midnight-js-utils";
 
 import { type Config } from "./config.js";
-import { fail, jsonObject, PublisherError, type ErrorCode, type Reply } from "./errors.js";
+import { fail, jsonObject, PublisherError, replyTo, type ErrorCode, type Reply } from "./errors.js";
 import { LEDGER_TAGS } from "./ledger.js";
 import { fromHex, type NodeClient } from "./node.js";
 import { decodeTransactions } from "./block.js";
@@ -51,11 +51,6 @@ function hexList(value: unknown): Uint8Array[] {
   return value.map((item: unknown, index) => hexBytes(item, `\`bytes[${index}]\``));
 }
 
-/** The prose a thrown value carries, whatever its shape. */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * Classification alone cannot separate a version skew from garbage: the library
  * reports `version-mismatch` for any unexpected header tag, `deadbeef` included.
@@ -81,8 +76,7 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
       const bytes = jsonObject(text)["bytes"];
       return { status: 200, body: JSON.stringify(seam(bytes)) };
     } catch (error) {
-      const code = error instanceof PublisherError ? error.code : decodeFailureCode(error);
-      return fail(code, messageOf(error), "decode failed");
+      return replyTo(error, "decode failed", decodeFailureCode(error));
     }
   };
 
@@ -107,7 +101,7 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
   const answer = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     // Reached in normal operation: `readBody` rejects with `aborted` when a
     // client hangs up mid-body, so this catch includes disconnects.
-    const reply = await handle(request).catch((error: unknown) => fail("internal", messageOf(error), "unhandled"));
+    const reply = await handle(request).catch((error: unknown) => replyTo(error, "unhandled"));
     const stop = reply.fatal === true ? onFatal : undefined;
     response.writeHead(reply.status, { "content-type": "application/json" }).end(reply.body, stop);
   };

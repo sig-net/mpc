@@ -15,10 +15,10 @@
  */
 
 import { Data, Effect } from "effect";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { fail, STATUS, type ErrorCode } from "../src/errors.js";
-import { describeFailure } from "../src/respond.js";
+import { describeFailure, fail, STATUS, type ErrorCode } from "../src/errors.js";
+
 
 class InsufficientFundsError extends Data.TaggedError("Wallet.InsufficientFunds")<{
   readonly message: string;
@@ -107,12 +107,17 @@ describe("the reply funnel", () => {
     expect(JSON.parse(reply.body)).toEqual({ code: "contract_absent", message: "no contract at that address" });
   });
 
-  it("carries detail when given, and omits the key when not", () => {
-    const withDetail = fail("submit_rejected", "flat message", undefined, "the node's rendered cause chain");
-    expect(JSON.parse(withDetail.body)).toMatchObject({ detail: "the node's rendered cause chain" });
-    expect(JSON.parse(fail("submit_rejected", "flat message").body)).toEqual({
-      code: "submit_rejected",
-      message: "flat message",
-    });
+  it("keeps the evidence in the log and out of the body", () => {
+    // The split that lets the wire stay `{code, message}`: an operator gets the
+    // whole rendered chain, a caller that branches on `code` gets none of it.
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => void logged.push(line));
+    try {
+      const reply = fail("submit_rejected", "flat message", "submit failed", new Error("Transcript(ReadMismatch)"));
+      expect(JSON.parse(reply.body)).toEqual({ code: "submit_rejected", message: "flat message" });
+      expect(logged.join("\n")).toContain("Transcript(ReadMismatch)");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
