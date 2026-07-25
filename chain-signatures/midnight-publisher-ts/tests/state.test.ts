@@ -10,57 +10,17 @@
  * expectations.
  */
 
-import { readFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
-import { fileURLToPath } from "node:url";
-
 import { StateMap, StateValue, type AlignedValue } from "@midnightntwrk/ledger-v9";
 import { describe, expect, it } from "vitest";
 
 import { toHex } from "@midnight-ntwrk/midnight-js-utils";
-import type { Config } from "../src/config.js";
-import { type NodeClient } from "../src/node.js";
 import type { Reply } from "../src/errors.js";
-import { buildServer } from "../src/server.js";
 import { decodeContractState, walk } from "../src/state.js";
-
-const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
+import { fixtureBytes, get, goldenText, post } from "./support.js";
 
 /** The deployed hub (singleton) and the caller's one captured request, on the capture chain. */
 const SINGLETON = "aa5d96c2de9af9dfc9fe046c30954a07c32ae1e1c976bf6088f8757d06ff3f47";
 const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
-
-function fixtureBytes(name: string): Uint8Array {
-  return Uint8Array.from(readFileSync(`${FIXTURES}${name}`));
-}
-
-function goldenText(name: string): string {
-  return readFileSync(`${FIXTURES}${name}`, "utf8");
-}
-
-/** A config with only the fields the server itself could consult. */
-const TEST_CONFIG: Config = {
-  port: 0,
-  bindHost: "127.0.0.1",
-  nodeUrl: "ws://127.0.0.1:1",
-  proofServerUrl: "http://127.0.0.1:1",
-  indexerUrl: "http://127.0.0.1:1",
-  indexerWsUrl: "ws://127.0.0.1:1",
-  managedDir: FIXTURES,
-  fundingSeed: "deadbeef".repeat(8),
-  networkId: "undeployed",
-};
-
-/**
- * A node client that must never be reached. The decode seams are pure codecs, so
- * ANY property access here is a bug: this is what proves the read path opens no
- * connection, rather than merely not needing one.
- */
-const FORBIDDEN_CLIENT = new Proxy({} as NodeClient, {
-  get(_target, property) {
-    throw new Error(`a decode seam touched the node client (${String(property)})`);
-  },
-});
 
 /**
  * The exact bytes a failure reply carries, spelled out rather than imported, so
@@ -78,40 +38,6 @@ function failure(code: string, message: string): string {
 /** A failure reply's two halves, parsed. */
 function parseFailure(reply: Reply): { code: string; message: string } {
   return JSON.parse(reply.body) as { code: string; message: string };
-}
-
-/**
- * Round-trip a body through the REAL HTTP server, on an ephemeral port.
- *
- * Not a direct handler call: the envelope (method, path, body cap, JSON, hex) is
- * as much of the contract as the tree is, and the caller on the other side is a
- * separate process.
- *
- * @param path - Request path.
- * @param body - Raw request body.
- * @returns The status and body the server answered with.
- */
-async function request(path: string, init?: RequestInit): Promise<Reply> {
-  const server = buildServer(TEST_CONFIG, FORBIDDEN_CLIENT);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  try {
-    const { port } = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, init);
-    return { status: response.status, body: await response.text() };
-  } finally {
-    server.closeAllConnections();
-    server.close();
-  }
-}
-
-/** {@link request}, as a `POST` carrying a body. */
-function post(path: string, body: string): Promise<Reply> {
-  return request(path, { method: "POST", body });
-}
-
-/** {@link request}, as a bare `GET`. */
-function get(path: string): Promise<Reply> {
-  return request(path);
 }
 
 /** A `POST /decode/contract-state` body carrying a fixture's bytes. */

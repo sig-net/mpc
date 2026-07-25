@@ -26,7 +26,7 @@ import {
   type SignetContractCircuitId,
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
-import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
+import { GENESIS_MINT_WALLET_SEED, makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
 import { Data, Effect } from "effect";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -42,15 +42,12 @@ import {
   type Publisher,
 } from "../src/respond.js";
 import { deriveFundingKeys, type FundingWallet } from "../src/wallet.js";
+import { FIXTURES } from "./support.js";
 
-const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const MANAGED = fileURLToPath(new URL("../node_modules/@sig-net/midnight-contract/dist/managed/", import.meta.url));
 
 /** The deployed singleton the state fixture was captured from. */
 const SINGLETON = "82ebe184cd00e19e422f0e7aa246012e11160ba3b98c09aace67dab1664af182";
-
-/** The public genesis dev seed, as in `tests/respond-live.ts`. Not a secret. */
-const DEV_SEED = "0000000000000000000000000000000000000000000000000000000000000001";
 
 /** The finalized head every stub client pins, bare and `0x`-prefixed. */
 const HEAD_BARE = "ab".repeat(32);
@@ -63,7 +60,7 @@ const TEST_CONFIG: Config = {
   indexerUrl: "http://127.0.0.1:1",
   indexerWsUrl: "ws://127.0.0.1:1",
   managedDir: MANAGED,
-  fundingSeed: DEV_SEED,
+  fundingSeed: GENESIS_MINT_WALLET_SEED,
   networkId: "undeployed",
 };
 
@@ -158,7 +155,7 @@ beforeAll(async () => {
 
 /** Real assets and keys, stubbed proof and wallet edges; installed via the test seam. */
 function primeStub(edges: StubEdges = {}): void {
-  const keys = deriveFundingKeys(DEV_SEED, TEST_CONFIG.networkId);
+  const keys = deriveFundingKeys(GENESIS_MINT_WALLET_SEED, TEST_CONFIG.networkId);
   const wallet = {
     getCoinPublicKey: () => keys.shieldedSecretKeys.coinPublicKey,
     getEncryptionPublicKey: () => keys.shieldedSecretKeys.encryptionPublicKey,
