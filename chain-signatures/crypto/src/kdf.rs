@@ -646,6 +646,36 @@ mod tests {
         );
     }
 
+    // Pins the wrapper to the generic derivation it is sugar for: the chain
+    // variant, the address/path argument order, and that key_version is
+    // threaded through rather than hardcoded (only version 0 derives a
+    // different string, so it is the one that catches a hardcoded version).
+    #[test]
+    fn test_derive_epsilon_midnight_matches_generic() {
+        assert_eq!(
+            derive_epsilon_midnight(0, "sender", "path"),
+            derive_epsilon(&DerivationParams::UserAccount(
+                0,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            ))
+        );
+        assert_eq!(
+            derive_epsilon_midnight(1, "sender", "path"),
+            derive_epsilon(&DerivationParams::UserAccount(
+                1,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            ))
+        );
+        assert_ne!(
+            derive_epsilon_midnight(1, "path", "sender"),
+            derive_epsilon_midnight(1, "sender", "path")
+        );
+    }
+
     #[test]
     fn test_derive_epsilon_checkpoint() {
         let p = DerivationParams::SystemKey("checkpoint".to_string()).derivation_path();
