@@ -6,7 +6,7 @@ use std::time::Duration;
 /// Timeouts and retry budget for the subxt node RPC client. The sidecar has its
 /// own budget in [`SidecarConfig`]: a node call slow enough to be a proving run
 /// is a fault, not a wait.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RpcConfig {
     /// Timeout for establishing the node WebSocket connection
     pub connect_timeout: Duration,
@@ -34,7 +34,7 @@ impl Default for RpcConfig {
 /// Timeouts and retry budget for the `midnight-publisher-ts` sidecar. Kept apart
 /// from [`RpcConfig`] because the two have incomparable budgets: a decode call
 /// is cheap, but `POST /respond` proves a circuit and takes minutes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SidecarConfig {
     /// Timeout for the decode and health routes, which do no proving
     pub request_timeout: Duration,
@@ -64,7 +64,7 @@ impl Default for SidecarConfig {
 }
 
 /// Tuning for the indexing pipeline (catchup and the live finalized-head loop).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IndexerConfig {
     /// How many blocks back a contract-state read may walk when the node has
     /// pruned the state at the block being asked for
@@ -88,7 +88,7 @@ impl Default for IndexerConfig {
 
 /// Midnight chain integration configuration. Supplying it is what turns the
 /// integration on; the node leaves Midnight unspawned when it is absent.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MidnightConfig {
     /// Base URL of the `midnight-publisher-ts` sidecar
     pub sidecar_url: String,

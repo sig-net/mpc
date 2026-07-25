@@ -23,7 +23,10 @@ use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
-pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
+pub use args::{
+    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
+    solana::SolArgs,
+};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
