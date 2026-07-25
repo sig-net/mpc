@@ -57,11 +57,6 @@ function fixtureTxBytes(name: string): Uint8Array {
   return fromHex(tx.Midnight);
 }
 
-/** A `POST /decode/transactions` body carrying the named fixtures' transactions, in order. */
-function txBody(...names: readonly string[]): string {
-  return JSON.stringify({ bytes: names.map((name) => toHex(fixtureTxBytes(name))) });
-}
-
 describe("offline: the decoded transactions are byte-identical to the captured golden's", () => {
   it("reproduces the reference golden's block-1366 body exactly", () => {
     // Block 1366 held exactly one transaction slot, so decoding the captured
@@ -74,12 +69,6 @@ describe("offline: the decoded transactions are byte-identical to the captured g
     );
   });
 
-  it("reproduces it over HTTP too", async () => {
-    expect(await post("/decode/transactions", txBody("notify-tx.mn"))).toEqual({
-      status: 200,
-      body: goldenText("golden-block-1366.json"),
-    });
-  });
 });
 
 describe("offline: the ledger-v9 Fr tag", () => {

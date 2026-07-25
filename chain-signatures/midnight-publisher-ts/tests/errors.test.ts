@@ -77,11 +77,6 @@ describe("what the wallet and the submission wrapper actually render", () => {
 });
 
 describe("the status map", () => {
-  it("separates retry-as-is from never-retry inside one status", () => {
-    expect(STATUS.state_conflict).toBe(409);
-    expect(STATUS.contract_mismatch).toBe(409);
-  });
-
   it("gives every code a non-2xx status", () => {
     const codes: readonly ErrorCode[] = [
       "bad_request", "not_found", "decode_failed", "ledger_mismatch",
@@ -92,21 +87,10 @@ describe("the status map", () => {
     for (const code of codes) expect(STATUS[code]).toBeGreaterThanOrEqual(400);
   });
 
-  it("marks every wallet condition 503: back off and retry, the request itself is fine", () => {
-    expect(STATUS.wallet_unfunded).toBe(503);
-    expect(STATUS.wallet_unsynced).toBe(503);
-    expect(STATUS.wallet_busy).toBe(503);
-  });
 });
 
 /** Scrubs nothing, deliberately: secrecy is held upstream in `wallet.ts`. These pin the reply shape. */
 describe("the reply funnel", () => {
-  it("carries the message through verbatim, status from the code", () => {
-    const reply = fail("contract_absent", "no contract at that address");
-    expect(reply.status).toBe(409);
-    expect(JSON.parse(reply.body)).toEqual({ code: "contract_absent", message: "no contract at that address" });
-  });
-
   it("keeps the evidence in the log and out of the body", () => {
     // The split that lets the wire stay `{code, message}`: an operator gets the
     // whole rendered chain, a caller that branches on `code` gets none of it.

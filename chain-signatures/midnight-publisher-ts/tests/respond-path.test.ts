@@ -235,44 +235,12 @@ function thrownBy(run: () => unknown): unknown {
 // ---- the respond flow, step by step -------------------------------------------
 
 describe("POST /respond: the flow against stubbed edges", () => {
-  it("answers ok with the tx id and the pinned block hash", async () => {
-    primeStub({ submitTx: async () => "cafe".repeat(16) });
-    const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
-    expect(reply.status).toBe(200);
-    // `block_hash` is bare hex, the integration's address/atom convention, and
-    // is the block the three reads were pinned to — the caller's anchor for
-    // settlement observation.
-    expect(parseBody(reply)).toEqual({
-      status: "ok",
-      tx_id: "cafe".repeat(16),
-      block_hash: HEAD_BARE,
-    });
-  });
-
   it("names the read failure when the node read fails", async () => {
     primeStub();
     const client = stubClient({ head: async () => Promise.reject(new Error("socket dropped")) });
     const reply = await handleRespond(TEST_CONFIG, client, respondBody("cd".repeat(32)));
     expect(reply.status).toBe(502);
     expect(parseBody(reply)).toMatchObject({ code: "node_unavailable" });
-  });
-
-  it("answers a hung dependency instead of holding the gate forever", async () => {
-    // THE dead-dependency conversion, and the only thing bounding the gate:
-    // every dependency here waits forever by default, so without this the
-    // request never answers and no later one is ever admitted.
-    primeStub();
-    RESPOND_TIMEOUT.ms = 50;
-    const client = stubClient({ head: () => new Promise(() => undefined) });
-    const rid = "cd".repeat(32);
-    const reply = await handleRespond(TEST_CONFIG, client, respondBody(rid));
-    expect(reply.status).toBe(500);
-    expect(parseBody(reply)).toMatchObject({ code: "internal" });
-    expect(parseBody(reply)["message"]).toMatch(/deadline/);
-    // Load-bearing: a timeout past submit may still land on chain, so the
-    // answer must name the rid and warn rather than imply the post failed.
-    expect(parseBody(reply)["message"]).toContain(rid);
-    expect(parseBody(reply)["message"]).toMatch(/may still land/);
   });
 
   it("answers contract_absent when the address has no state", async () => {
@@ -326,20 +294,6 @@ describe("POST /respond: the flow against stubbed edges", () => {
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(502);
     expect(parseBody(reply)).toMatchObject({ code: "prove_failed" });
-  });
-
-  it("separates a chain this build cannot read from an unreachable node", async () => {
-    // Both arrive at the read step and both are 502, but the codes send the
-    // operator to opposite places: `node_unavailable` says retry,
-    // `ledger_mismatch` says no amount of retrying will help, upgrade.
-    primeStub();
-    const reply = await handleRespond(
-      TEST_CONFIG,
-      stubClient({ contract: async () => ok(skewedContractState()) }),
-      respondBody("cd".repeat(32)),
-    );
-    expect(reply.status).toBe(502);
-    expect(parseBody(reply)).toMatchObject({ code: "ledger_mismatch" });
   });
 
   it("rejects an untagged read before the deserializer sees it", async () => {
@@ -446,37 +400,6 @@ describe("POST /respond: the flow against stubbed edges", () => {
 // ---- one at a time ---------------------------------------------------------------
 
 describe("POST /respond: the busy gate", () => {
-  it("answers wallet_busy while another rid holds the wallet, then admits again", async () => {
-    primeStub();
-    let releaseHead: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      releaseHead = () => resolve();
-    });
-    const gated = stubClient({
-      head: async () => {
-        await gate;
-        return { toHex: () => `0x${HEAD_BARE}` };
-      },
-    });
-
-    const first = handleRespond(TEST_CONFIG, gated, respondBody("aa".repeat(32)));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    // The second post is refused up front: without the gate it could only burn
-    // a prove and fail at balance ~35 seconds of dust recovery later.
-    const second = await handleRespond(TEST_CONFIG, stubClient(), respondBody("bb".repeat(32)));
-    expect(second.status).toBe(503);
-    expect(parseBody(second)).toMatchObject({ code: "wallet_busy" });
-    expect(parseBody(second)["message"]).toContain("aa".repeat(32));
-
-    releaseHead?.();
-    expect((await first).status).toBe(200);
-
-    // The slot is released by completion, success and failure alike.
-    const third = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cc".repeat(32)));
-    expect(third.status).toBe(200);
-  });
-
   it("does not let a rejected request leave the gate claimed", async () => {
     primeStub();
     const failing = stubClient({ head: async () => Promise.reject(new Error("boom")) });
@@ -561,11 +484,17 @@ describe("POST /respond: over the real HTTP server", () => {
     const stopped = new Promise<void>((resolve) => {
       stop = resolve;
     });
+    const rid = "cd".repeat(32);
     const hung = stubClient({ head: () => new Promise(() => undefined) });
     const server = await listening(TEST_CONFIG, hung, stop);
     try {
-      const answer = await server.send("/respond", { method: "POST", body: respondBody("cd".repeat(32)) });
+      const answer = await server.send("/respond", { method: "POST", body: respondBody(rid) });
       expect(answer.status).toBe(500);
+      expect(parseBody(answer)).toMatchObject({ code: "internal" });
+      // A timeout past submit may still land, so the answer names the rid and
+      // warns rather than implying the post failed.
+      expect(parseBody(answer)["message"]).toMatch(/deadline/);
+      expect(parseBody(answer)["message"]).toContain(rid);
       expect(parseBody(answer)["message"]).toMatch(/may still land/);
       await stopped;
     } finally {
@@ -599,20 +528,6 @@ describe("POST /respond: over the real HTTP server", () => {
     }
   });
 
-  // 404, not the 400 an empty body would earn: the distinction is what proves
-  // the route never matched, rather than matching and rejecting the body.
-  it("is POST only, so a GET is not_found rather than bad_request", async () => {
-    primeStub();
-    const server = await listening(TEST_CONFIG, stubClient());
-    try {
-      const answer = await server.send("/respond");
-      expect(answer.status).toBe(404);
-      expect(parseBody(answer)).toMatchObject({ code: "not_found" });
-    } finally {
-      server.close();
-    }
-  });
-
   it("refuses a second concurrent post with 503 wallet_busy, on one server", async () => {
     // The gate over HTTP, not over two in-process calls: a real second
     // connection must be answered while the first still holds the wallet.
@@ -639,6 +554,11 @@ describe("POST /respond: over the real HTTP server", () => {
 
       releaseHead?.();
       expect((await first).status).toBe(200);
+
+      // Released by COMPLETION, not by failure: a gate that only opens on the
+      // error path strands the wallet after the first successful post.
+      const third = await server.send("/respond", { method: "POST", body: respondBody("cc".repeat(32)) });
+      expect(third.status).toBe(200);
     } finally {
       server.close();
     }

@@ -139,14 +139,10 @@ describe("POST /decode/contract-state: the envelope", () => {
   // The JSON envelope is still validated: a non-object body, or one that is not
   // JSON at all, is a caller mistake the ledger never sees, so it stays
   // `bad_request`.
-  const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
-    ["a JSON array", "[]", "invalid JSON: expected a JSON object"],
-  ];
-
-  it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
-    expect(await post("/decode/contract-state", body)).toEqual({
+  it("rejects a JSON array as bad_request", async () => {
+    expect(await post("/decode/contract-state", "[]")).toEqual({
       status: 400,
-      body: failure("bad_request", expected),
+      body: failure("bad_request", "invalid JSON: expected a JSON object"),
     });
   });
 
