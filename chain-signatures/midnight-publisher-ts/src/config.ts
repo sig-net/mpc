@@ -37,7 +37,9 @@ const EnvSchema = z.object({
   MIDNIGHT_PUB_INDEXER_WS_URL: z.string().min(1),
   MIDNIGHT_PUB_MANAGED_DIR: z.string().min(1),
   MIDNIGHT_PUB_FUNDING_SEED: z.string().min(1),
-  MIDNIGHT_PUB_NETWORK_ID: z.string().min(1),
+  // A typo here builds a wallet at a DIFFERENT unshielded address, proves a call,
+  // and spends dust, failing only later at the node. The library owns the closed set.
+  MIDNIGHT_PUB_NETWORK_ID: z.literal(NETWORK_IDS, `must be one of ${NETWORK_IDS.join(", ")}`),
 });
 
 export function configFromEnv(): Config {
@@ -54,12 +56,6 @@ export function configFromEnv(): Config {
         `authentication and holds a funding wallet; set MIDNIGHT_PUB_ALLOW_NON_LOOPBACK=1 only ` +
         `when an authenticated boundary fronts it.`,
     );
-  }
-
-  // A typo here builds a wallet at a DIFFERENT unshielded address, proves a call,
-  // and spends dust, failing only later at the node. The library owns the closed set.
-  if (!(NETWORK_IDS as readonly string[]).includes(env.MIDNIGHT_PUB_NETWORK_ID)) {
-    throw new Error(`MIDNIGHT_PUB_NETWORK_ID=${env.MIDNIGHT_PUB_NETWORK_ID} is not one of ${NETWORK_IDS.join(", ")}`);
   }
 
   return {
