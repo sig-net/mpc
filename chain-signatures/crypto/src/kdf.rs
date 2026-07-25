@@ -151,6 +151,15 @@ pub fn derive_epsilon_bitcoin(key_version: KeyVersion, address: &str, path: &str
     ))
 }
 
+pub fn derive_epsilon_midnight(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
+    derive_epsilon(&DerivationParams::UserAccount(
+        key_version,
+        Chain::Midnight,
+        address.to_string(),
+        path.to_string(),
+    ))
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
@@ -423,6 +432,20 @@ mod tests {
             DerivationParams::SystemAccount(1, Chain::Ethereum, "path".to_string())
                 .derivation_path(),
             "sig.network v2.0.0 epsilon derivation:eip155:1:%admin#:path"
+        );
+    }
+
+    #[test]
+    fn midnight_derivation_path_stays_the_same() {
+        assert_eq!(
+            DerivationParams::UserAccount(
+                1,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            )
+            .derivation_path(),
+            "sig.network v2.0.0 epsilon derivation:midnight:testnet:sender:path"
         );
     }
 
