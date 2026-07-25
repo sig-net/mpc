@@ -455,8 +455,9 @@ impl PresignatureSpawner {
 
         match internal_action {
             PositInternalAction::None => {}
-            PositInternalAction::Abort => {
+            PositInternalAction::Abort(triples) => {
                 tracing::warn!(?id, "presignature posit aborted due to too many rejections");
+                triples.restore().await;
             }
             PositInternalAction::Reply(action) => {
                 self.msg
@@ -713,15 +714,19 @@ impl PresignatureSpawner {
             tokio::select! {
                 _ = expiration_interval.tick() => {
                     for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
-                        let PositInternalAction::StartProtocol(participants, positor) = action else {
-                            tracing::warn!(
-                                ?id,
-                                "presignature posit expired: insufficient accepts"
-                            );
-                            continue;
-                        };
-                        let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
-                        self.start_generation(id, positor, participants, timeout).await;
+                        match action {
+                            PositInternalAction::StartProtocol(participants, positor) => {
+                                let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                                self.start_generation(id, positor, participants, timeout).await;
+                            }
+                            // The pair was taken out of storage to propose it;
+                            // put it back or it is lost for good.
+                            PositInternalAction::Abort(triples) => {
+                                tracing::warn!(?id, "presignature posit expired: insufficient accepts");
+                                triples.restore().await;
+                            }
+                            PositInternalAction::Reply(_) | PositInternalAction::None => {}
+                        }
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {

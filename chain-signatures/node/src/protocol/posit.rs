@@ -82,7 +82,9 @@ impl PositAction {
 pub enum PositInternalAction<S> {
     StartProtocol(Vec<Participant>, Positor<S>),
     Reply(PositAction),
-    Abort,
+    /// Carries the proposer's intermediary state so the caller can put any
+    /// taken artifact back into storage.
+    Abort(S),
     None,
 }
 
@@ -310,8 +312,10 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                         ?counter.rejects,
                         "received enough REJECTs, aborting protocol",
                     );
-                    entry.remove();
-                    return PositInternalAction::Abort;
+                    let (Positor::Proposer(_, counter), _) = entry.remove() else {
+                        unreachable!("we already checked that we are the proposer");
+                    };
+                    return PositInternalAction::Abort(counter.store);
                 }
 
                 if !counter.meets_totality() {
@@ -418,7 +422,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 ));
             } else {
                 expired_proposers.push(*id);
-                actions.push((*id, PositInternalAction::Abort));
+                actions.push((*id, PositInternalAction::Abort(counter.store)));
             }
         }
 
@@ -496,8 +500,94 @@ impl SinglePositCounter {
 mod tests {
     use super::*;
     use cait_sith::protocol::Participant;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::Arc;
 
     type Id = u64;
+
+    /// Stands in for `TriplesTaken`: the proposer's store holds an artifact that
+    /// was physically removed from storage, so dropping it instead of handing it
+    /// back destroys the artifact. Records whether that happened.
+    #[derive(Debug)]
+    struct DropSpy(Arc<AtomicBool>);
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.0.store(true, AtomicOrdering::SeqCst);
+        }
+    }
+
+    /// An expired posit that never reached threshold must return the proposer's
+    /// store, not drop it. Dropping it is the triple-pair leak: the pair is gone
+    /// from storage and every peer keeps an orphan copy.
+    #[test]
+    fn expired_proposer_hands_back_store() {
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let mut posits = Posits::<Id, DropSpy>::new(Participant::from(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        // Only the proposer's own self-accept, so this expires below threshold.
+        posits.propose(202, DropSpy(dropped.clone()), &participants);
+
+        let base_delay = Duration::from_millis(50);
+        let deliberator_extra_delay = Duration::from_millis(10);
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(50));
+        let actions = posits.expire_and_start(threshold, base_delay, deliberator_extra_delay);
+
+        assert_eq!(actions.len(), 1);
+        let (_, action) = actions.into_iter().next().unwrap();
+        let PositInternalAction::Abort(store) = action else {
+            panic!("expired posit must hand the taken artifact back to the caller");
+        };
+        assert!(
+            !dropped.load(AtomicOrdering::SeqCst),
+            "store was dropped instead of returned: the artifact is lost"
+        );
+        drop(store);
+        assert!(dropped.load(AtomicOrdering::SeqCst));
+    }
+
+    /// Same for the other abort path: enough rejects to give up on the round.
+    #[test]
+    fn rejected_proposer_hands_back_store() {
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let mut posits = Posits::<Id, DropSpy>::new(Participant::from(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        posits.propose(101, DropSpy(dropped.clone()), &participants);
+
+        // enough_rejects is `rejects > participants - threshold`, so 2 of 3 here.
+        posits.act(
+            101,
+            Participant::from(1),
+            threshold,
+            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+        );
+        let action = posits.act(
+            101,
+            Participant::from(2),
+            threshold,
+            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+        );
+
+        let PositInternalAction::Abort(store) = action else {
+            panic!("rejected posit must hand the taken artifact back to the caller");
+        };
+        assert!(
+            !dropped.load(AtomicOrdering::SeqCst),
+            "store was dropped instead of returned: the artifact is lost"
+        );
+        drop(store);
+        assert!(dropped.load(AtomicOrdering::SeqCst));
+    }
 
     #[test]
     fn test_posits_non_proposer() {
@@ -623,7 +713,7 @@ mod tests {
             threshold,
             &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
         );
-        assert!(matches!(action, PositInternalAction::Abort));
+        assert!(matches!(action, PositInternalAction::Abort(_)));
     }
 
     #[test]
@@ -665,7 +755,7 @@ mod tests {
                 PositInternalAction::StartProtocol(_, Positor::Proposer(_, _))
             ),
         ));
-        assert!(matches!(actions[1], (202, PositInternalAction::Abort)));
+        assert!(matches!(actions[1], (202, PositInternalAction::Abort(_))));
 
         // the posit for id101 should have expired after not receiving a start action.
         let mut posits1 = Posits::<Id, ()>::new(Participant::from(1));

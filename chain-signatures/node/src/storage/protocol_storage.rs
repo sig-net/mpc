@@ -91,6 +91,10 @@ impl<A: ProtocolArtifact> Drop for ArtifactSlot<A> {
 
 pub struct ArtifactTaken<A: ProtocolArtifact> {
     pub artifact: A,
+    /// Who owned the artifact when it was taken. `restore` must put it back
+    /// under this owner: re-inserting a peer-owned artifact under ourselves
+    /// would make two nodes think they may consume it.
+    owner: Participant,
     storage: ArtifactTakenDropper<A>,
 }
 
@@ -108,18 +112,44 @@ impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
 }
 
 impl<A: ProtocolArtifact> ArtifactTaken<A> {
-    pub(crate) fn new(artifact: A, storage: ProtocolStorage<A>) -> Self {
+    pub(crate) fn new(artifact: A, owner: Participant, storage: ProtocolStorage<A>) -> Self {
         Self {
             storage: ArtifactTakenDropper {
                 id: artifact.id(),
                 dropper: Some(storage),
             },
+            owner,
             artifact,
         }
     }
 
     pub fn take(self) -> (A, ArtifactTakenDropper<A>) {
         (self.artifact, self.storage)
+    }
+
+    /// Put a taken artifact back into storage, under its original owner.
+    ///
+    /// `take`/`take_mine` physically remove the artifact from Redis, so an
+    /// attempt that aborts *before* consuming it must call this or the
+    /// artifact is lost for good: `Drop` only clears the in-memory `Using`
+    /// reservation, it does not re-insert.
+    pub async fn restore(self) -> bool {
+        let (owner, id) = (self.owner, self.artifact.id());
+        let (artifact, dropper) = self.take();
+        // `dropper` releases the `Using` reservation as it goes out of scope.
+        let restored = match dropper.dropper.as_ref() {
+            Some(storage) => storage.insert(artifact, owner).await,
+            None => false,
+        };
+        if restored {
+            tracing::info!(id, "returned artifact to storage");
+        } else {
+            tracing::warn!(id, "failed to return artifact to storage, it is lost");
+        }
+        crate::metrics::storage::ARTIFACT_RESTORES
+            .with_label_values(&[A::METRIC_LABEL, if restored { "ok" } else { "failed" }])
+            .inc();
+        restored
     }
 }
 
@@ -659,7 +689,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
                 tracing::info!(id, ?elapsed, "took artifact");
-                Some(ArtifactTaken::new(artifact, self.clone()))
+                Some(ArtifactTaken::new(artifact, owner, self.clone()))
             }
             Err(err) => {
                 self.reserved.write().await.using.remove(&id);
@@ -804,7 +834,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 artifact.set_holders(holders);
                 let id = artifact.id();
                 self.reserved.write().await.using.insert(id, true);
-                let taken = ArtifactTaken::new(artifact, self.clone());
+                let taken = ArtifactTaken::new(artifact, me, self.clone());
                 tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)
             }
@@ -953,7 +983,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
                 tracing::info!(id, ?elapsed, "committed reservation, took artifact");
-                Some(ArtifactTaken::new(artifact, self.clone()))
+                Some(ArtifactTaken::new(artifact, owner, self.clone()))
             }
             Err(err) => {
                 self.reserved.write().await.using.remove(&id);
