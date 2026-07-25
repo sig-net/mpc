@@ -123,9 +123,15 @@ mod tests {
         "calculateRequestId (packages/signet-midnight/src/signet-evtype2tx-requests.ts)";
 
     /// Every tier the fixture covers. Listed here so dropping a vector is a
-    /// test failure: each one is the only vector that catches its own class
-    /// of layout bug.
-    const VECTOR_NAMES: [&str; 7] = [
+    /// test failure: several are the only vector that catches their own class
+    /// of layout bug, and which ones is not obvious from reading them.
+    /// `no-calldata` alone catches an absent `Maybe` that emits nothing,
+    /// `access-list-partial` alone catches unused access-list slots,
+    /// `wide-schemas` alone catches the two schemas being swapped (every
+    /// other vector carries two identical 34-byte schemas), and the three
+    /// `enum-*` vectors are the only ones whose one-byte enums and `params`
+    /// are not all zero.
+    const VECTOR_NAMES: [&str; 13] = [
         "minimal-1word",
         "no-calldata",
         "zero-words-capacity",
@@ -133,9 +139,16 @@ mod tests {
         "access-list-1x1",
         "access-list-partial",
         "wide-schemas",
+        "enum-algo-set",
+        "enum-dest-set",
+        "enum-txparamtype-set",
+        "al-entry-zero-keys",
+        "no-calldata-wide",
+        "al-capacity-unused",
     ];
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct VectorFile {
         generated_from: String,
         oracle: String,
