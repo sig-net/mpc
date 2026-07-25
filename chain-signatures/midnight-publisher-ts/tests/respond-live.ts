@@ -1,15 +1,31 @@
 /**
- * Live acceptance run for `POST /respond`. Deliberately NOT part of
- * `vitest run`: it needs the whole stack up (node, proof server, indexer) and a
- * funded wallet, it costs a real fee, and it writes to the chain.
+ * Live acceptance run for `POST /respond`. Run ON DEMAND, never from CI: it
+ * needs the whole stack up (node, proof server, indexer) and a funded wallet,
+ * it costs a real fee, and it writes to the chain. The automated end-to-end
+ * flow will live on the Rust side; this stays the hand-run check. It is also
+ * not a `*.test.ts`, so `vitest run` never picks it up.
  *
+ * The whole runbook, from nothing. The stack is the midnight-integration repo's
+ * `docker compose up -d` (node :9944, proof server :6300, indexer :8088), whose
+ * image tags are the matched ledger-9 set this package's `@midnightntwrk/ledger-v9`
+ * pin belongs to.
+ *
+ *   npx tsx tests/bootstrap-live.ts          # prints the fresh singleton address last
+ *
+ *   MIDNIGHT_PUB_PORT=0 \
+ *   MIDNIGHT_PUB_BIND_HOST=127.0.0.1 \
  *   MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
  *   MIDNIGHT_PUB_PROOF_SERVER_URL=http://127.0.0.1:6300 \
  *   MIDNIGHT_PUB_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
  *   MIDNIGHT_PUB_INDEXER_WS_URL=ws://127.0.0.1:8088/api/v3/graphql/ws \
  *   MIDNIGHT_PUB_MANAGED_DIR=$PWD/node_modules/@sig-net/midnight-contract/dist/managed \
- *   MIDNIGHT_PUB_FUNDING_SEED=<hex> \
+ *   MIDNIGHT_PUB_FUNDING_SEED=0000000000000000000000000000000000000000000000000000000000000001 \
+ *   MIDNIGHT_PUB_NETWORK_ID=undeployed \
  *   npx tsx tests/respond-live.ts <64-hex contract address> [64-hex request id]
+ *
+ * The seed is the public genesis dev wallet of a fresh `undeployed` chain, not a
+ * secret. Port and bind host are inert here but still required: `configFromEnv`
+ * takes the full set or throws.
  *
  * It drives the real `handleRespond`, so what it exercises is the shipped code
  * path and not a parallel re-implementation. It then establishes three things
@@ -31,8 +47,11 @@ import { ledger as signetLedger } from "@sig-net/midnight-contract";
 
 import { toHex } from "@midnight-ntwrk/midnight-js-utils";
 import { configFromEnv } from "../src/config.js";
-import { connect, isHex, runtimeApiBytes, type BlockHashHex, type NodeClient } from "../src/node.js";
+import { connect, runtimeApiBytes, type BlockHashHex, type NodeClient } from "../src/node.js";
 import { closePublisher, handleRespond } from "../src/respond.js";
+
+/** The schema's own rule; the library's `isHex` would also take uppercase and `0x`. */
+const isHex = (value: string, bytes: number): boolean => value.length === bytes * 2 && /^[0-9a-f]+$/.test(value);
 
 const config = configFromEnv();
 

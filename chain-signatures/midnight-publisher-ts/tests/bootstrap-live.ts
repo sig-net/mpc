@@ -1,7 +1,7 @@
 /**
  * Live-tier bootstrap: make the deployer wallet fee-ready and deploy a fresh
- * signet singleton. The LAST line printed is the contract address; CI hands it
- * to `tests/respond-live.ts` via `... | tail -1`.
+ * signet singleton. The LAST line printed is the contract address; pass it to
+ * `tests/respond-live.ts`, or capture it with `... | tail -1`.
  *
  * Config comes from the environment with local-stack defaults
  * (`getMidnightNodeConfig`): NETWORK_ID, MIDNIGHT_NODE_URL,
@@ -10,7 +10,7 @@
  *
  * Dust registration is idempotent: on a wallet whose NIGHT already generates
  * dust it registers nothing and the wait returns immediately, so this runs the
- * same against a fresh CI chain and a long-lived local one.
+ * same against a fresh chain and a long-lived local one.
  */
 
 import {
