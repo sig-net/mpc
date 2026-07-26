@@ -25,8 +25,17 @@ export type StateNode =
   | { readonly kind: "null" }
   | { readonly kind: "cell"; readonly atoms: readonly string[] }
   | { readonly kind: "array"; readonly children: readonly StateNode[] }
-  // A map entry's `key` is that key's atoms, hex, concatenated into one string.
-  | { readonly kind: "map"; readonly entries: readonly { readonly key: string; readonly value: StateNode }[] };
+  // A map entry's `key` is that key's atoms, hex, one string PER ATOM.
+  //
+  // Not concatenated. A composite key (`SignetMapKey { count: Uint<64>,
+  // requestId: Bytes<32> }`) joins to a single hex run whose split point is
+  // unrecoverable, because atoms are trailing-zero-trimmed: `count = 0` trims
+  // to nothing, `count = 1` to one byte, and a `requestId` ending in `0x00`
+  // trims too. Any consumer that has to RECOVER a request id from such a key
+  // (the MPC indexer's notification diff does) cannot parse a joined form at
+  // all. Keeping the atoms separate costs one array per key and removes that
+  // whole class of ambiguity.
+  | { readonly kind: "map"; readonly entries: readonly { readonly key: readonly string[]; readonly value: StateNode }[] };
 
 /** Exported so tests walk a tree the way the seam does. */
 export function walk(value: StateValue): StateNode {
@@ -42,10 +51,18 @@ export function walk(value: StateValue): StateNode {
       return { kind: "array", children: value.asArray()!.map(walk) };
     case "map": {
       const map = value.asMap()!;
-      const entries = map.keys().map((key) => ({ key: key.value.map(toHex).join(""), value: walk(map.get(key)!) }));
+      const entries = map.keys().map((key) => ({ key: key.value.map(toHex), value: walk(map.get(key)!) }));
       // Byte order, deliberately: `localeCompare` reorders under a non-C
-      // collation.
-      entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      // collation. The join is HERE and only here, so entry order is
+      // unchanged from when `key` was itself the joined string: comparing the
+      // arrays directly would coerce them via a COMMA-join, which keeps
+      // working by accident while ordering differently wherever atom
+      // boundaries shift.
+      entries.sort((a, b) => {
+        const x = a.key.join("");
+        const y = b.key.join("");
+        return x < y ? -1 : x > y ? 1 : 0;
+      });
       return { kind: "map", entries };
     }
     // BoundedMerkleTree never occurs in the signet contracts' ledgers.

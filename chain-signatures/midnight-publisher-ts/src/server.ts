@@ -2,8 +2,8 @@
  * The localhost HTTP seam.
  *
  *   GET  /health                  -> {status, networkId, ledger}
- *   POST /decode/contract-state   -> the state tree
- *   POST /decode/transactions     -> {transactions, skipped}
+ *   POST /decode/contract-state   {state: hex}          -> the state tree
+ *   POST /decode/transactions     {transactions: [hex]} -> {transactions, skipped}
  *   POST /respond                 -> {status, tx_id, block_hash}
  *
  * The decode seams are pure codecs and open no connection. They are POST only
@@ -46,9 +46,9 @@ function hexBytes(value: unknown, what: string): Uint8Array {
 }
 
 /** The envelope fails the whole request; only bytes the LEDGER refuses survive per item. */
-function hexList(value: unknown): Uint8Array[] {
-  if (!Array.isArray(value)) throw new PublisherError("bad_request", "`bytes` must be an array of hex strings");
-  return value.map((item: unknown, index) => hexBytes(item, `\`bytes[${index}]\``));
+function hexList(value: unknown, what: string): Uint8Array[] {
+  if (!Array.isArray(value)) throw new PublisherError("bad_request", `\`${what}\` must be an array of hex strings`);
+  return value.map((item: unknown, index) => hexBytes(item, `\`${what}[${index}]\``));
 }
 
 /**
@@ -69,12 +69,18 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
   /** Liveness plus the compatibility declaration (ledger line, network id). Deliberately not readiness. */
   const healthBody = JSON.stringify({ status: "ok", networkId: config.networkId, ledger: LEDGER_TAGS });
 
-  /** The envelope is the caller's, the bytes are the ledger's. */
-  const decode = async (request: IncomingMessage, seam: (bytes: unknown) => unknown): Promise<Reply> => {
+  /**
+   * The envelope is the caller's, the bytes are the ledger's.
+   *
+   * `field` names the body key per route rather than sharing one generic name:
+   * the two seams take semantically different payloads (one state blob against
+   * a list of transactions), so a shared `bytes` made the list read as a blob
+   * and put both routes one silent typo away from each other.
+   */
+  const decode = async (request: IncomingMessage, field: string, seam: (value: unknown) => unknown): Promise<Reply> => {
     const text = await readBody(request);
     try {
-      const bytes = jsonObject(text)["bytes"];
-      return { status: 200, body: JSON.stringify(seam(bytes)) };
+      return { status: 200, body: JSON.stringify(seam(jsonObject(text)[field])) };
     } catch (error) {
       return replyTo(error, "decode failed", decodeFailureCode(error));
     }
@@ -87,9 +93,9 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
       case "GET /health":
         return { status: 200, body: healthBody };
       case "POST /decode/contract-state":
-        return decode(request, (b) => decodeContractState(hexBytes(b, "`bytes`")));
+        return decode(request, "state", (v) => decodeContractState(hexBytes(v, "`state`")));
       case "POST /decode/transactions":
-        return decode(request, (b) => decodeTransactions(hexList(b)));
+        return decode(request, "transactions", (v) => decodeTransactions(hexList(v, "transactions")));
       case "POST /respond":
         return handleRespond(config, client, await readBody(request));
       default:

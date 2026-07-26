@@ -52,7 +52,7 @@ export interface DecodedCall {
 
 /** Grouped per transaction: a block-flat list could not say which one made both calls. */
 export interface DecodedTransaction {
-  /** Position in the request's `bytes` array, which is what maps a result to its input. */
+  /** Position in the request's `transactions` array, which is what maps a result to its input. */
   readonly index: number;
   readonly calls: readonly DecodedCall[];
 }

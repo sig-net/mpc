@@ -164,12 +164,12 @@ describe("offline: one bad transaction costs that transaction only", () => {
   });
 
   it("survives per item over HTTP, and never renumbers what follows a drop", async () => {
-    // `index` is the position in the REQUEST's `bytes` array, so the caller can
+    // `index` is the position in the REQUEST's `transactions` array, so the caller can
     // map a result back to the blob it sent. Numbering by rank among the
     // successful ones instead would shift every transaction after a dropped one,
     // silently, and only for callers unlucky enough to hit an unknown shape.
     const bytes = ["deadbeef", toHex(fixtureTxBytes("notify-tx.mn"))];
-    const reply = await post("/decode/transactions", JSON.stringify({ bytes }));
+    const reply = await post("/decode/transactions", JSON.stringify({ transactions: bytes }));
     expect(reply.status).toBe(200);
 
     const decoded = JSON.parse(reply.body) as { transactions: { index: number }[]; skipped: string[] };
@@ -190,8 +190,8 @@ describe("offline: one bad transaction costs that transaction only", () => {
  * Lives with these tests because it demonstrates the seam's central design
  * claim: a state diff already answers "what did this block write".
  */
-function mapEntries(node: StateNode): Array<[string, readonly string[]]> {
-  const out: Array<[string, readonly string[]]> = [];
+function mapEntries(node: StateNode): Array<[readonly string[], readonly string[]]> {
+  const out: Array<[readonly string[], readonly string[]]> = [];
   if (node.kind === "map") {
     for (const entry of node.entries) {
       if (entry.value.kind === "cell") out.push([entry.key, entry.value.atoms]);
@@ -203,9 +203,15 @@ function mapEntries(node: StateNode): Array<[string, readonly string[]]> {
   return out;
 }
 
-/** Stable identity for a `(key, atoms)` pair, for set membership. */
-function entryKey([key, atoms]: readonly [string, readonly string[]]): string {
-  return `${key}|${atoms.join(",")}`;
+/**
+ * Stable identity for a `(key, atoms)` pair, for set membership.
+ *
+ * The key's atoms join with a separator, never bare concatenation: `["", X]`
+ * and `[X]` are different keys that concatenate to the same string, and this
+ * fixture contains exactly that pair.
+ */
+function entryKey([key, atoms]: readonly [readonly string[], readonly string[]]): string {
+  return `${key.join(",")}|${atoms.join(",")}`;
 }
 
 describe("offline: a state diff yields the notify", () => {
@@ -227,8 +233,12 @@ describe("offline: a state diff yields the notify", () => {
     // Exactly two writes: the per-request notification counter, and the
     // notification itself.
     expect(written).toHaveLength(2);
-    expect(written).toContainEqual([REQUEST_ID, ["01"]]);
-    expect(written).toContainEqual([REQUEST_ID, ["01", `${CALLER}04`]]);
+    // The two keys are structurally different and the atom form says so: the
+    // counter map is keyed by one `RequestId` atom, the notification map by a
+    // `SignetMapKey` whose `count` of 0 trims to the empty atom. Both used to
+    // render as the same bare `REQUEST_ID` string.
+    expect(written).toContainEqual([[REQUEST_ID], ["01"]]);
+    expect(written).toContainEqual([["", REQUEST_ID], ["01", `${CALLER}04`]]);
   });
 });
 
@@ -238,11 +248,11 @@ describe("POST /decode/transactions: the envelope", () => {
   // hex typo would be `fromHex`-truncated silently and burn a whole batch as
   // per-item skips, reading like ledger trouble instead of a request bug.
   const REJECTED: ReadonlyArray<readonly [string, string, string]> = [
-    ["a missing `bytes`", "{}", "`bytes` must be an array of hex strings"],
-    ["a bare string `bytes`", '{"bytes":"00"}', "`bytes` must be an array of hex strings"],
-    ["a non-string element", '{"bytes":["00",7]}', "`bytes[1]` must be a hex string"],
-    ["a non-hex element", '{"bytes":["00","zz"]}', "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
-    ["an empty element", '{"bytes":["00",""]}', "`bytes[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["a missing `transactions`", "{}", "`transactions` must be an array of hex strings"],
+    ["a bare string `transactions`", '{"transactions":"00"}', "`transactions` must be an array of hex strings"],
+    ["a non-string element", '{"transactions":["00",7]}', "`transactions[1]` must be a hex string"],
+    ["a non-hex element", '{"transactions":["00","zz"]}', "`transactions[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["an empty element", '{"transactions":["00",""]}', "`transactions[1]` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
   ];
 
   it.each(REJECTED)("rejects %s as bad_request", async (_what, body, expected) => {
@@ -253,7 +263,7 @@ describe("POST /decode/transactions: the envelope", () => {
 
   it("accepts `0x`-prefixed hex", async () => {
     const bytes = [`0x${toHex(fixtureTxBytes("notify-tx.mn"))}`];
-    expect(await post("/decode/transactions", JSON.stringify({ bytes }))).toEqual({
+    expect(await post("/decode/transactions", JSON.stringify({ transactions: bytes }))).toEqual({
       status: 200,
       body: goldenText("golden-block-1366.json"),
     });

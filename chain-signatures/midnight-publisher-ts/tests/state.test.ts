@@ -51,7 +51,7 @@ function parseFailure(reply: Reply): { code: string; message: string } {
 
 /** A `POST /decode/contract-state` body carrying a fixture's bytes. */
 function stateBody(fixture: string): string {
-  return JSON.stringify({ bytes: toHex(fixtureBytes(fixture)) });
+  return JSON.stringify({ state: toHex(fixtureBytes(fixture)) });
 }
 
 describe("offline: the decoded tree is byte-identical to the captured golden's", () => {
@@ -114,7 +114,8 @@ describe("offline: the schema the consumer parses", () => {
     // Ordinal 4 is the request map, keyed by the request id.
     const requests = tree.children[4];
     if (requests?.kind !== "map") throw new Error("ordinal 4 is the request map");
-    expect(requests.entries.map((entry) => entry.key)).toEqual([REQUEST_ID]);
+    // One atom per key, so a `Bytes<32>`-keyed map yields a one-element array.
+    expect(requests.entries.map((entry) => entry.key)).toEqual([[REQUEST_ID]]);
   });
 
   it("sorts map entries by key hex", () => {
@@ -131,7 +132,7 @@ describe("offline: the schema the consumer parses", () => {
 
     const node = walk(StateValue.newMap(map));
     if (node.kind !== "map") throw new Error(`expected a map node, got ${node.kind}`);
-    expect(node.entries.map((entry) => entry.key)).toEqual(["01", "02", "03"]);
+    expect(node.entries.map((entry) => entry.key)).toEqual([["01"], ["02"], ["03"]]);
   });
 });
 
@@ -159,13 +160,13 @@ describe("POST /decode/contract-state: the envelope", () => {
   // with version-mismatch prose) for what is an envelope mistake ("fix the
   // request"). The 400/422 split is the caller-action split.
   const REJECTED_BYTES: ReadonlyArray<readonly [string, string, string]> = [
-    ["a missing `bytes`", "{}", "`bytes` must be a hex string"],
-    ["a non-string `bytes`", '{"bytes":123}', "`bytes` must be a hex string"],
-    ["an array `bytes`", '{"bytes":["00"]}', "`bytes` must be a hex string"],
-    ["odd-length hex", '{"bytes":"abc"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
-    ["hex that is not hex", '{"bytes":"zz"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
-    ["an empty `bytes`", '{"bytes":""}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
-    ["a bare `0x`", '{"bytes":"0x"}', "`bytes` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["a missing `state`", "{}", "`state` must be a hex string"],
+    ["a non-string `state`", '{"state":123}', "`state` must be a hex string"],
+    ["an array `state`", '{"state":["00"]}', "`state` must be a hex string"],
+    ["odd-length hex", '{"state":"abc"}', "`state` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["hex that is not hex", '{"state":"zz"}', "`state` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["an empty `state`", '{"state":""}', "`state` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
+    ["a bare `0x`", '{"state":"0x"}', "`state` must be a whole number of bytes of hex, optionally `0x`-prefixed"],
   ];
 
   it.each(REJECTED_BYTES)("rejects %s as bad_request", async (_what, body, expected) => {
@@ -181,7 +182,7 @@ describe("POST /decode/contract-state: the envelope", () => {
       // The sender is another service. Both spellings decode unambiguously, and
       // both must reach the same tree as the bare lower-case form.
       const bytes = spell(toHex(fixtureBytes("singleton-post-state-1366.mn")));
-      expect(await post("/decode/contract-state", JSON.stringify({ bytes }))).toEqual({
+      expect(await post("/decode/contract-state", JSON.stringify({ state: bytes }))).toEqual({
         status: 200,
         body: goldenText("golden-state-singleton-1366.json"),
       });
@@ -193,7 +194,7 @@ describe("POST /decode/contract-state: the envelope", () => {
     // `bad_request` means "fix your request", `decode_failed` means "these bytes
     // are not a contract state this build can read", which is also how a
     // ledger-version skew arrives.
-    const reply = await post("/decode/contract-state", '{"bytes":"deadbeef"}');
+    const reply = await post("/decode/contract-state", '{"state":"deadbeef"}');
     expect(reply.status).toBe(422);
     expect(parseFailure(reply).code).toBe("decode_failed");
     expect(parseFailure(reply).message.length).toBeGreaterThan(0);
@@ -212,10 +213,10 @@ describe("POST /decode/contract-state: the envelope", () => {
     expect(tag).toBeGreaterThanOrEqual(0);
     skewed[tag + "midnight:contract-state[v".length] = "9".charCodeAt(0);
 
-    const ahead = await post("/decode/contract-state", JSON.stringify({ bytes: toHex(skewed) }));
+    const ahead = await post("/decode/contract-state", JSON.stringify({ state: toHex(skewed) }));
     expect(parseFailure(ahead).code).toBe("ledger_mismatch");
 
-    const junk = await post("/decode/contract-state", '{"bytes":"deadbeef"}');
+    const junk = await post("/decode/contract-state", '{"state":"deadbeef"}');
     expect(parseFailure(junk).code).toBe("decode_failed");
   });
 
