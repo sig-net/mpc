@@ -9,9 +9,11 @@
 //! It is a field-aligned byte layout, not an ABI or EIP-712 encoding, so it
 //! shares the hash family with the other chains but none of their padding.
 //!
-//! A wrong byte here is silent: either the recomputed id never matches and
-//! every request is dropped, or a request is signed under a key nobody
-//! expects. The vectors in `tests/rid_vectors.json` were produced by the
+//! A wrong byte here fails in one direction only: the recomputed id stops
+//! matching and every request is dropped. It cannot missign, because
+//! epsilon derivation never consumes the request id; a broken twin starves
+//! the node of requests rather than signing under an unexpected key.
+//! The vectors in `tests/rid_vectors.json` were produced by the
 //! contract package's `calculateRequestId`, which its simulator tests pin to
 //! the compiled circuit, and are the only authority for what is correct
 //! here. Never hand-author one.
@@ -352,6 +354,10 @@ mod tests {
         file
     }
 
+    // These goldens pin the emitted byte layout, not the Rust declaration
+    // order: binary_repr reads fields by name, so a reordered declaration
+    // that keeps the emitted layout intact stays green here. Declaration
+    // order is pinned by the records module's own order tests.
     #[test]
     fn request_id_matches_the_ts_oracle() {
         let file = load_vectors();
@@ -404,6 +410,21 @@ mod tests {
             "an absent calldata must occupy the same preimage width as a present one"
         );
         assert_ne!(present_id, absent_id);
+
+        // wide-schemas only does its job (pinning that per-integrator schema
+        // widths reach the preimage) while its two schemas actually differ;
+        // a fixture edit that equalised them would quietly demote it to a
+        // duplicate of the identical-schema tiers.
+        let wide = file
+            .vectors
+            .iter()
+            .find(|v| v.name == "wide-schemas")
+            .expect("wide-schemas vector present");
+        assert_ne!(
+            wide.record.output_deserialization_schema.len(),
+            wide.record.respond_serialization_schema.len(),
+            "wide-schemas must carry two schemas of different widths"
+        );
     }
 
     #[test]

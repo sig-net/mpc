@@ -88,7 +88,10 @@ impl Default for IndexerConfig {
 
 /// Midnight chain integration configuration. Supplying it is what turns the
 /// integration on; the node leaves Midnight unspawned when it is absent.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Deliberately NOT `Default`: a defaulted config has empty endpoints, so
+/// any `unwrap_or_default()` on the gate would spawn a Midnight indexer
+/// pointed at nothing. Keeping the derive off makes that a compile error.
+#[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
     /// Base URL of the `midnight-publisher-ts` sidecar
     pub sidecar_url: String,

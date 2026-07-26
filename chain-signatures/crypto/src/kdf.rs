@@ -830,6 +830,26 @@ mod tests {
         );
     }
 
+    // Fixture integrity: every scalar in the fixture is distinct, including
+    // the two NEGATIVE controls. `NEGATIVE-mainnet-chain-id` feeds only an
+    // `assert_ne`, so a silently corrupted copy of that value would neuter
+    // the caip2 tripwire without failing anything; this is the assertion
+    // that notices.
+    #[test]
+    fn test_midnight_epsilon_vectors_are_pairwise_distinct() {
+        let vectors = midnight_epsilon_vectors();
+        assert_eq!(vectors.len(), 8, "the fixture carries eight vectors");
+        for (i, a) in vectors.iter().enumerate() {
+            for b in &vectors[i + 1..] {
+                assert_ne!(
+                    a.epsilon_be, b.epsilon_be,
+                    "vectors `{}` and `{}` carry the same scalar",
+                    a.name, b.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_derive_epsilon_checkpoint() {
         let p = DerivationParams::SystemKey("checkpoint".to_string()).derivation_path();

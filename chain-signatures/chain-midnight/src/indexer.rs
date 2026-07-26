@@ -10,6 +10,14 @@ use mpc_primitives::{Chain, ChainEvent};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Scaffold indexer: emits `CatchupCompleted`, then parks until cancelled.
+///
+/// When Midnight is ENABLED, this scaffold restart-loops roughly every
+/// 5m15s: the pipeline watchdog fires on `live_block_timeout(Midnight)`,
+/// which is `expected_finality_time_secs` (15) plus the 300-second buffer,
+/// because the scaffold never emits `ChainEvent::Block`. Harmless log noise
+/// until the read path lands; written down here so it is read rather than
+/// rediscovered in production logs.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
     state_manager: S,
@@ -82,7 +90,15 @@ mod tests {
         assert_eq!(TestIndexer::CHAIN, Chain::Midnight);
 
         let indexer = TestIndexer::new(
-            MidnightConfig::default(),
+            MidnightConfig {
+                sidecar_url: "http://127.0.0.1:8790".to_string(),
+                node_ws_url: "ws://127.0.0.1:9944".to_string(),
+                central_address: "ab".repeat(32),
+                network_id: "undeployed".to_string(),
+                rpc: Default::default(),
+                sidecar: Default::default(),
+                indexer: Default::default(),
+            },
             MockStateManager::new(),
             NoopChainTelemetry,
         )

@@ -1122,12 +1122,16 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a polluted environment could silently
-    /// reconfigure any test that goes through clap parsing and make a gate
-    /// mutation look green. `midnight_off_by_default` builds its args
-    /// programmatically, so env cannot reach it today; the guard pins that
-    /// assumption and protects the parse-based forwarding test.
-    fn assert_midnight_env_unset() {
+    /// `--midnight-*` flags, so a set variable reconfigures any test that
+    /// parses argv. The hazard differs per caller. For the parse-based
+    /// tests (`into_str_args_forwards_midnight` here and the round-trip in
+    /// `args::midnight`), a flag dropped by `into_str_args` would be
+    /// silently backfilled from env and the equality assertions would still
+    /// pass: a genuine false green. For `midnight_off_by_default`, which
+    /// builds its args programmatically, env cannot reach the parse at all;
+    /// the guard pins that assumption, and pollution there could only push
+    /// the config toward `Some` and fail loudly, never mask a mutation.
+    pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_SIDECAR_URL",
             "MPC_MIDNIGHT_NODE_WS_URL",

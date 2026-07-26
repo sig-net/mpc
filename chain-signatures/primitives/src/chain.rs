@@ -201,6 +201,7 @@ mod tests {
         assert_eq!(Chain::Midnight.as_str(), "Midnight");
         assert_eq!(Chain::Midnight.caip2_chain_id(), "midnight:testnet");
         assert_eq!(Chain::Midnight.expected_finality_time_secs(), 15);
+        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
         assert_eq!(
             Chain::Midnight.respond_serialization_format(),
             SerDeserFormat::Abi

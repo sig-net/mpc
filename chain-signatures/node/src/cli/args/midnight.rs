@@ -106,12 +106,20 @@ mod tests {
 
     #[test]
     fn into_str_args_round_trips_into_config() {
+        // Load-bearing here: this test reparses via try_parse_from and then
+        // asserts equality, so a flag dropped by into_str_args would be
+        // silently backfilled from a set MPC_MIDNIGHT_* env var and the
+        // assertion would still pass.
+        crate::cli::tests::assert_midnight_env_unset();
+
         let cfg = MidnightConfig {
             sidecar_url: "http://127.0.0.1:8790".into(),
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".into(),
-            ..Default::default()
+            rpc: Default::default(),
+            sidecar: Default::default(),
+            indexer: Default::default(),
         };
         let args = MidnightArgs::from_config(Some(cfg.clone()));
         let reparsed = MidnightArgs::try_parse_from(
