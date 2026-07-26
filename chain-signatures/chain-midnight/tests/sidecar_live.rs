@@ -1,19 +1,14 @@
-//! The sidecar client against the RUNNING sidecar, over real HTTP.
+//! The sidecar client against the running sidecar, over real HTTP.
 //!
-//! `src/sidecar.rs`'s own tests answer mockito servers whose bodies this crate
-//! wrote, so they can only prove the client agrees with itself. Three real
-//! mismatches shipped behind exactly that: a `{"state":..}` body the server read
-//! as `bytes`, and `kind`-tagged nodes this enum tried to read untagged. Here
-//! nothing is authored on both sides. The requests are the shipped client's, the
+//! Nothing is authored on both sides: the requests are the shipped client's, the
 //! answers are `midnight-publisher-ts`'s own, and the inputs are the real chain
-//! blobs that package captured (`tests/fixtures/*.mn`), decoded by the real
-//! ledger. The `golden-*.json` files are that decoder's frozen output for those
-//! same bytes, so a golden comparison here is cross-language, not circular.
+//! blobs that package captured, decoded by the real ledger. The `golden-*.json`
+//! files are that decoder's frozen output for those same bytes, so a golden
+//! comparison here is cross-language rather than circular.
 //!
-//! No chain is involved: `/decode/*` and `/health` are pure codecs, and
-//! `tests/serve-decode-only.ts` in that package serves them with a node client
-//! that throws on any access. `POST /respond` needs the stack and is not
-//! exercised here; `tests/respond-live.ts` over there is its runbook.
+//! No chain is involved: `/decode/*` and `/health` are pure codecs, served by
+//! `tests/serve-decode-only.ts` with a node client that throws on any access.
+//! `POST /respond` needs the stack and is covered by `tests/respond-live.ts`.
 //!
 //! # Running
 //!
@@ -22,12 +17,10 @@
 //! cargo test -p mpc-chain-midnight --test sidecar_live -- --ignored
 //! ```
 //!
-//! Every test is `#[ignore]`d, matching `rpc.rs`'s live node test: an ordinary
-//! `cargo test` reports them as ignored rather than passing them silently, and
-//! CI, which installs nothing for that package, never runs them. Asking for them
-//! explicitly is what makes a missing prerequisite an ERROR here rather than a
-//! skip: `boot` fails with the `npm ci` line to run, and never lets a test pass
-//! because it could not find the service.
+//! Every test is `#[ignore]`d, matching `rpc.rs`'s live node test, so CI (which
+//! installs nothing for that package) never runs them. `boot` fails with the
+//! `npm ci` line rather than letting a test pass because it could not find the
+//! service.
 
 use std::io::{BufRead as _, BufReader};
 use std::net::TcpListener;
@@ -210,7 +203,7 @@ fn count_nulls(node: &StateNode) -> usize {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn health_satisfies_the_startup_compatibility_gate() {
+async fn health_satisfies_startup_compatibility_gate() {
     // The whole of `assert_compatible`, against the tags the sidecar really
     // declares. Offline, all four `EXPECTED_*_TAG` constants are compared to a
     // body this crate typed out, so the two could drift together and nothing
@@ -255,7 +248,7 @@ async fn health_satisfies_the_startup_compatibility_gate() {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn decodes_the_captured_states_into_the_sidecars_own_goldens() {
+async fn decode_contract_state_matches_sidecar_goldens() {
     // Real chain blobs in, the sidecar's frozen output for those same blobs out,
     // over HTTP. This is what a mock cannot do at any fidelity: the request body
     // key is read by the SERVER (`{"state":..}` as `bytes` is the mismatch that
@@ -299,7 +292,7 @@ async fn decodes_the_captured_states_into_the_sidecars_own_goldens() {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn decodes_the_captured_transaction_and_its_provenance_join() {
+async fn decode_transactions_yields_provenance_join() {
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
@@ -323,7 +316,7 @@ async fn decodes_the_captured_transaction_and_its_provenance_join() {
         "the live decode diverges from the sidecar's own committed golden"
     );
 
-    // The provenance join B4 implements, over a real cross-contract call rather
+    // The provenance join, over a real cross-contract call rather
     // than over a body this crate wrote: one call claims another call in the
     // SAME transaction, and the claim names that call's communication
     // commitment. Both field names are the server's here, so a rename on either
@@ -379,7 +372,7 @@ async fn decodes_the_captured_transaction_and_its_provenance_join() {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn a_malformed_body_is_the_sidecars_own_bad_request_and_is_not_retried() {
+async fn malformed_body_is_bad_request_and_not_retried() {
     // The real `bad_request`, provoked rather than canned. Empty bytes are what
     // the client hex-encodes to `""`, which the sidecar's whole-bytes hex check
     // rejects: it never reaches the ledger, so it is the caller's mistake
@@ -420,7 +413,7 @@ async fn a_malformed_body_is_the_sidecars_own_bad_request_and_is_not_retried() {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn bytes_the_ledger_refuses_are_decode_failed_and_are_retried() {
+async fn unreadable_bytes_are_decode_failed_and_retried() {
     // The 400/422 split, live: the envelope is fine and the LEDGER refuses the
     // bytes. Nothing about this can be mocked honestly: the ledger decides it.
     let sidecar = Sidecar::boot().await;
@@ -447,7 +440,7 @@ async fn bytes_the_ledger_refuses_are_decode_failed_and_are_retried() {
 
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn a_chain_ahead_of_this_build_is_named_ledger_mismatch() {
+async fn newer_ledger_is_named_ledger_mismatch() {
     // The diagnosis `assert_compatible` exists to preempt, taken from the other
     // end: a real captured state whose version tag has been advanced by one
     // byte. The library classifies this and plain garbage identically, so what

@@ -1,29 +1,20 @@
 //! Mirrors of the Midnight Signet contract's on-chain record types.
 //!
-//! Field declaration order is load-bearing. The contract's request id is a
-//! keccak256 over `toBinaryRepr(record)`: every field re-padded to its
-//! declared width and concatenated in declaration order, with no tags,
-//! framing, or length prefixes. A reordering here fails no compile and no
-//! decode; it silently changes every request id. The tests below pin the
-//! field sets, the declaration order, and the fixed scalar widths. The
-//! request-id twin and its golden vectors are the end-to-end authority.
+//! Declaration order is load-bearing: the request id is keccak256 over
+//! `toBinaryRepr(record)`, every field re-padded to its declared width and
+//! concatenated in declaration order with no tags, framing or length prefixes.
+//! Reordering compiles and decodes fine, and silently changes every request id.
 //!
-//! These are plain data mirrors: serialization, hashing, and decoding belong
-//! to later layers. Nothing may assume Rust memory layout matches the wire
-//! form, which is field by field at declared widths.
-//!
-//! Every `Uint` integer in these records (`request_nonce`, `key_version`, the
-//! `EvmType2TxParams` integers, `no_words`, the count fields) is little-endian
-//! zero-padded to its declared width in the preimage and on the wire.
+//! Plain data mirrors only. Every `Uint` here is little-endian zero-padded to
+//! its declared width, both in the preimage and on the wire, so nothing may
+//! assume Rust's memory layout matches it.
 
 /// One signing request, the contract's `SignBidirectionalEvent` record.
 ///
-/// Named `Record` rather than `Event` because `mpc-primitives` already
-/// exports a chain-agnostic `SignBidirectionalEvent` and both end up in
-/// scope in the conversion layer.
+/// Named `Record` because `mpc-primitives` already exports a chain-agnostic
+/// `SignBidirectionalEvent` and both are in scope in the conversion layer.
 ///
-/// The 12 fields are in keccak preimage order; `tx_params` expands in place
-/// at its own declared widths.
+/// The 12 fields are in keccak preimage order; `tx_params` expands in place.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignBidirectionalRecord {
     /// `ContractAddress { bytes: Bytes<32> }`, a single-field wrapper that
@@ -50,12 +41,10 @@ pub struct SignBidirectionalRecord {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-/// EIP-1559 transaction parameters in the contract's canonical payload
-/// order, which is also the request-id hash order. The order is read off
-/// the contract, not off how an EVM transaction usually reads: the priority
-/// fee comes before the fee cap, `to` sits sixth, and `calldata` comes
-/// before the access-list pair. Each count field sits directly before the
-/// vector it bounds.
+/// EIP-1559 parameters in the contract's payload order, which is the hash
+/// order and reads backwards against EVM habit: the priority fee precedes the
+/// fee cap, `to` sits sixth, and `calldata` precedes the access-list pair.
+/// Each count field sits directly before the vector it bounds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvmType2TxParams {
     pub chain_id: u64,
@@ -74,12 +63,11 @@ pub struct EvmType2TxParams {
     pub access_list: Vec<EvmAccessListEntry>,
 }
 
-/// Compact's `Maybe<T>`. Not Rust's `Option<T>`: `value` carries a full
-/// default-valued `T` even when `is_some` is false, so vector capacities
-/// stay inferable from the record itself. Serializers must emit one
-/// `is_some` byte then `T` at full declared width regardless of the flag;
-/// an `Option`-based model would emit a short preimage and a wrong request
-/// id for every request without calldata.
+/// Compact's `Maybe<T>`, which is not `Option<T>`: `value` carries a full
+/// default-valued `T` even when `is_some` is false, so vector capacities stay
+/// inferable from the record. Serializers emit the flag byte then `T` at full
+/// width regardless of the flag; an `Option` would emit a short preimage and a
+/// wrong request id for every request without calldata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactMaybe<T> {
     pub is_some: bool,
@@ -106,10 +94,9 @@ pub struct EvmAccessListEntry {
 
 /// Entry of the central singleton's notification map.
 ///
-/// The V1 payload is `caller_address(32)` then `requests_index_field(1)`
-/// then `zeros(95)`, and names no decode selector. Decoders must fail
-/// closed on an unrecognised `version`, never reinterpret the payload under
-/// V1 offsets.
+/// The V1 payload is `caller_address(32) || requests_index_field(1) ||
+/// zeros(95)` and names no decode selector, so decoders must fail closed on an
+/// unrecognised `version` rather than reinterpret bytes under V1 offsets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignBidirectionalEventNotification {
     pub version: u8,
@@ -214,12 +201,10 @@ mod tests {
         }
     }
 
-    /// Top-level field labels of one struct's `{:#?}` output, in printed
-    /// order. The struct's own fields sit at exactly one indent level;
-    /// nested values sit deeper and closing brackets carry no `: `, so both
-    /// drop out. Derived `Debug` prints fields in declaration order, which
-    /// is what makes this the declaration order; the structs must keep
-    /// `#[derive(Debug)]` for this pin to hold.
+    /// Top-level field labels of one struct's `{:#?}` output. Derived `Debug`
+    /// prints in declaration order, which is what makes this the declaration
+    /// order, so the structs must keep `#[derive(Debug)]`. Nested values sit
+    /// deeper than one indent and closing brackets carry no `: `, so both drop.
     fn top_level_debug_fields(pretty: &str) -> Vec<String> {
         pretty
             .lines()
@@ -244,9 +229,9 @@ mod tests {
         );
     }
 
-    /// Declared wire width of a `Maybe<EvmCalldata>`: one flag byte then the
-    /// full inner value regardless of the flag. Widths are read off the
-    /// actual declared field types, so a type change fails the tests below.
+    /// Declared wire width of a `Maybe<EvmCalldata>`: the flag byte plus the
+    /// full inner value regardless of the flag. Read off the declared field
+    /// types, so a type change fails the tests below.
     fn maybe_calldata_declared_width(maybe: &CompactMaybe<EvmCalldata>) -> usize {
         size_of_val(&maybe.is_some)
             + size_of_val(&maybe.value.selector)
@@ -255,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn declaration_order_matches_the_preimage_order() {
+    fn declaration_order_matches_preimage_order() {
         let record = minimal_record();
         assert_declaration_order(&record, &SIGN_BIDIRECTIONAL_RECORD_FIELDS);
         assert_declaration_order(&record.tx_params, &EVM_TYPE2_TX_PARAMS_FIELDS);
@@ -271,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn order_traps_that_read_backwards_against_habit() {
+    fn tx_params_order_reads_backwards_against_evm_habit() {
         let record = minimal_record();
         let tx_fields = top_level_debug_fields(&format!("{:#?}", record.tx_params));
         let idx = |name: &str| {
@@ -291,13 +276,10 @@ mod tests {
     }
 
     /// Atom count and total preimage width implied by the record's declared
-    /// field types and runtime capacities, walked in declaration order: one
-    /// `size_of_val` entry per fixed-width atom, vector lengths for the two
-    /// runtime-width schema fields. For `u8/u16/u64/u128` and `[u8; N]` the
+    /// types and runtime capacities. For `u8/u16/u64/u128` and `[u8; N]` the
     /// Rust size equals the declared atom width, so the totals come off the
-    /// real types, never a retyped table. The sum is order-insensitive by
-    /// construction; order is `declaration_order_matches_the_preimage_order`'s
-    /// job.
+    /// real types rather than a retyped table. Order-insensitive by
+    /// construction; order is the declaration-order test's job.
     fn declared_layout(record: &SignBidirectionalRecord) -> (usize, usize) {
         let tx = &record.tx_params;
         let mut widths = vec![
@@ -335,11 +317,8 @@ mod tests {
 
     #[test]
     fn declared_widths_sum_to_the_runtime_layout() {
-        // 23 atoms and 372 bytes are the runtime's own numbers for the
-        // one-word capacity tier (tests/rid_vectors.json, minimal-1word:
-        // preimage_atoms and preimage_bytes). Any scalar-width drift in the
-        // record or its nested structs (key_version widened to u32, no_words
-        // narrowed to u8, a resized byte array) moves the sum and fails here.
+        // The runtime's own numbers for the one-word tier (rid_vectors.json,
+        // minimal-1word). Any scalar-width drift moves the sum and fails here.
         let (atoms, bytes) = declared_layout(&minimal_record());
         assert_eq!(atoms, 23, "atom count drifted from the runtime layout");
         assert_eq!(
@@ -349,11 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn compact_maybe_none_still_carries_a_full_capacity_value() {
-        // An Option-based model would drop the inner value for None and emit
-        // one byte instead of 1 + 4 + 2 + 32 = 39 at the one-word tier,
-        // shortening the preimage and changing the request id of every
-        // request without calldata.
+    fn compact_maybe_none_carries_full_capacity_value() {
+        // An Option would drop the inner value for None and emit one byte
+        // instead of 1 + 4 + 2 + 32 = 39 at the one-word tier, changing the
+        // request id of every request without calldata.
         let none = CompactMaybe {
             is_some: false,
             value: EvmCalldata {
@@ -381,9 +359,8 @@ mod tests {
 
     #[test]
     fn field_sets_are_exhaustive() {
-        // Exhaustive patterns with no `..`: adding, removing, or renaming
-        // any field is a compile error here. Together with the order test
-        // this pins the exact ordered field list of every struct.
+        // No `..`, so adding, removing or renaming a field is a compile error.
+        // With the order test this pins every struct's ordered field list.
         let SignBidirectionalRecord {
             sender: _,
             request_nonce: _,

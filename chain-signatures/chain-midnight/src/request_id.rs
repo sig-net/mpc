@@ -1,22 +1,18 @@
-//! The request-id twin: a keccak256 over the contract's own byte layout for
-//! a `SignBidirectionalRecord`.
+//! The request-id twin: keccak256 over the contract's byte layout for a
+//! `SignBidirectionalRecord`.
 //!
-//! The Compact circuit mints a request id as `keccak256<T>(record)`, which
-//! hashes `toBinaryRepr(record)`: every field re-padded to its declared width
-//! and concatenated in declaration order, with no tags, framing, or length
-//! prefixes. This module rebuilds that preimage in Rust so the node can
-//! recompute the id of an indexed request and drop anything that disagrees.
-//! It is a field-aligned byte layout, not an ABI or EIP-712 encoding, so it
-//! shares the hash family with the other chains but none of their padding.
+//! The Compact circuit mints ids as `keccak256(toBinaryRepr(record))`, a
+//! field-aligned layout rather than an ABI or EIP-712 encoding: each field
+//! re-padded to its declared width and concatenated in declaration order, no
+//! tags, framing or length prefixes. Rebuilding it here lets the node
+//! recompute an indexed request's id and drop anything that disagrees.
 //!
-//! A wrong byte here fails in one direction only: the recomputed id stops
-//! matching and every request is dropped. It cannot missign, because
-//! epsilon derivation never consumes the request id; a broken twin starves
-//! the node of requests rather than signing under an unexpected key.
-//! The vectors in `tests/rid_vectors.json` were produced by the
-//! contract package's `calculateRequestId`, which its simulator tests pin to
-//! the compiled circuit, and are the only authority for what is correct
-//! here. Never hand-author one.
+//! A wrong byte fails in one direction only. Epsilon never consumes the request
+//! id, so a broken twin starves the node of requests rather than signing under
+//! an unexpected key.
+//!
+//! `tests/rid_vectors.json` comes from the contract package's
+//! `calculateRequestId` and is the only authority here. Never hand-author one.
 
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 
@@ -26,24 +22,20 @@ use crate::records::{
 
 /// The request id the contract mints for `record`.
 ///
-/// The id is capacity-sensitive: unused vector slots and an absent
-/// `calldata`'s value are all part of the preimage. `record` must therefore
-/// arrive at its declared capacities with unused slots zero-filled, and its
-/// two schema buffers at their per-integrator widths, exactly as the wire
-/// form is re-padded on decode. A `Vec` that arrives short declares a
-/// narrower type and yields a different id.
+/// Capacity-sensitive: unused vector slots and an absent `calldata`'s value are
+/// part of the preimage, so `record` must arrive at its declared capacities
+/// with unused slots zero-filled and both schema buffers at their
+/// per-integrator widths. A short `Vec` declares a narrower type and yields a
+/// different id.
 pub fn compute_request_id(record: &SignBidirectionalRecord) -> [u8; 32] {
     hash_payload(&binary_repr(record))
 }
 
-/// The hash preimage: each field at its declared width, in declaration
-/// order.
+/// The hash preimage: each field at its declared width, in declaration order.
 ///
-/// Every multi-byte integer is emitted little-endian through `to_le_bytes`
-/// on its declared Rust type, so the emitted width is the declared atom
-/// width and the two can only change together. Byte fields are emitted whole
-/// and never trimmed: the wire form drops trailing zeros, the preimage pads
-/// them back.
+/// Integers go through `to_le_bytes` on their declared Rust type, so emitted
+/// width and declared width can only change together. Byte fields are never
+/// trimmed: the wire form drops trailing zeros, the preimage pads them back.
 fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&record.sender);
@@ -56,8 +48,8 @@ fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
     buf.push(record.tx_param_type);
     push_tx_params(&mut buf, &record.tx_params);
     buf.extend_from_slice(&record.caip2_id);
-    // The two schemas are `Bytes<N>` at per-integrator widths, so the buffer
-    // the record carries is itself the declared width.
+    // `Bytes<N>` at per-integrator widths, so the carried buffer is itself the
+    // declared width.
     buf.extend_from_slice(&record.output_deserialization_schema);
     buf.extend_from_slice(&record.respond_serialization_schema);
     buf
@@ -66,34 +58,30 @@ fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
 fn push_tx_params(buf: &mut Vec<u8>, params: &EvmType2TxParams) {
     buf.extend_from_slice(&params.chain_id.to_le_bytes());
     buf.extend_from_slice(&params.nonce.to_le_bytes());
-    // The priority fee precedes the fee cap, and `to` sits after the gas
-    // limit rather than first: the contract's payload order is the hash
-    // order and reads backwards against EVM habit.
+    // Priority fee before the fee cap, `to` after the gas limit: the contract's
+    // payload order is the hash order, and it reads backwards against habit.
     buf.extend_from_slice(&params.max_priority_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.max_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.gas_limit.to_le_bytes());
     buf.extend_from_slice(&params.to);
     buf.extend_from_slice(&params.value.to_le_bytes());
-    // Calldata precedes the access-list pair, also backwards against habit.
     push_calldata(buf, &params.calldata);
     buf.push(params.access_list_entry_count);
-    // Every slot of the declared capacity, including the entries past
-    // `access_list_entry_count`, which are zero-filled but still hashed.
+    // Every slot of the declared capacity: entries past the count are
+    // zero-filled and still hashed.
     for entry in &params.access_list {
         push_access_list_entry(buf, entry);
     }
 }
 
 fn push_calldata(buf: &mut Vec<u8>, calldata: &CompactMaybe<EvmCalldata>) {
-    // Compact's `Maybe<T>` is a plain struct, not a tagged union: the flag
-    // byte is followed by a full-width `T` whether or not the flag is set.
-    // Emitting nothing for an absent calldata shortens the preimage and
-    // changes the id of every request that carries none.
+    // `Maybe<T>` is a plain struct, not a tagged union: the flag byte is
+    // followed by a full-width `T` either way. Emitting nothing for an absent
+    // calldata changes the id of every request that carries none.
     buf.push(u8::from(calldata.is_some));
     buf.extend_from_slice(&calldata.value.selector);
     buf.extend_from_slice(&calldata.value.no_words.to_le_bytes());
-    // Every slot of the declared capacity, including the ones past
-    // `no_words`, which are zero-filled but still hashed.
+    // Slots past `no_words` are zero-filled and still hashed.
     for word in &calldata.value.words {
         buf.extend_from_slice(word);
     }
@@ -113,25 +101,20 @@ mod tests {
     use crate::test_fixtures::RecordDef;
     use serde::Deserialize;
 
-    /// Copied verbatim from the generator's output. Regenerating it is a
-    /// deliberate act: a record and its digest only agree because the oracle
-    /// produced them together, so never hand-edit one.
+    /// Oracle output, verbatim. A record and its digest agree only because the
+    /// oracle produced them together, so never hand-edit one.
     const VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
 
-    /// The oracle these vectors came from. Pinned so a fixture generated by
-    /// anything else has to be reviewed rather than silently adopted.
+    /// Pinned so a fixture from any other generator is reviewed, not adopted.
     const ORACLE: &str =
         "calculateRequestId (packages/signet-midnight/src/signet-evtype2tx-requests.ts)";
 
-    /// Every tier the fixture covers. Listed here so dropping a vector is a
-    /// test failure: several are the only vector that catches their own class
-    /// of layout bug, and which ones is not obvious from reading them.
-    /// `no-calldata` alone catches an absent `Maybe` that emits nothing,
-    /// `access-list-partial` alone catches unused access-list slots,
-    /// `wide-schemas` alone catches the two schemas being swapped (every
-    /// other vector carries two identical 34-byte schemas), and the three
-    /// `enum-*` vectors are the only ones whose one-byte enums and `params`
-    /// are not all zero.
+    /// Listed so dropping a vector fails the suite. Several are the sole cover
+    /// for their own class of layout bug, which is not obvious from reading
+    /// them: `no-calldata` for an absent `Maybe` that emits nothing,
+    /// `access-list-partial` for unused access-list slots, `wide-schemas` for
+    /// the two schemas being swapped, and the `enum-*` trio for one-byte enums
+    /// and `params` that are not all zero.
     const VECTOR_NAMES: [&str; 13] = [
         "minimal-1word",
         "no-calldata",
@@ -164,10 +147,9 @@ mod tests {
         expected_request_id_hex: String,
         /// Alignment atom count the runtime reported for this record.
         preimage_atoms: usize,
-        /// Total preimage width the runtime reported. Asserting it alongside
-        /// the digest localises a layout bug: a length mismatch names the
-        /// tier that is misaligned, where a digest mismatch only says
-        /// something somewhere is wrong.
+        /// Total preimage width the runtime reported. Asserted alongside the
+        /// digest because it localises the fault: a width mismatch names the
+        /// misaligned tier, a digest mismatch only says something is wrong.
         preimage_bytes: usize,
         declared_widths: Vec<usize>,
         #[serde(with = "RecordDef")]
@@ -195,17 +177,13 @@ mod tests {
         file
     }
 
-    // These goldens pin the emitted byte layout, not the Rust declaration
-    // order: binary_repr reads fields by name, so a reordered declaration
-    // stays green here. Declaration order is pinned by the records module's
-    // own order tests.
+    // Pins the emitted byte layout, not the Rust declaration order:
+    // `binary_repr` reads fields by name, so a reordered declaration stays
+    // green here. The records module's order tests cover that.
     #[test]
-    fn request_id_matches_the_ts_oracle() {
+    fn compute_request_id_matches_ts_oracle() {
         let file = load_vectors();
         for vector in &file.vectors {
-            // The width is asserted alongside the digest because it
-            // localises the fault: a length mismatch names the misaligned
-            // tier, where a digest mismatch only says something is wrong.
             assert_eq!(
                 binary_repr(&vector.record).len(),
                 vector.preimage_bytes,
@@ -222,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn every_tier_is_covered() {
+    fn rid_vectors_cover_every_tier() {
         let file = load_vectors();
         let names: Vec<&str> = file.vectors.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(
@@ -230,9 +208,9 @@ mod tests {
             "a vector was dropped, renamed, or reordered; each one is the only cover for its own layout bug"
         );
 
-        // The D8 pin, stated as an identity: an absent calldata occupies the
-        // same width as a present one and differs only in the bytes, so a
-        // twin that skips the value of an empty `Maybe` fails here alone.
+        // An absent calldata occupies the same width as a present one and
+        // differs only in bytes, so a twin that skips an empty `Maybe`'s value
+        // fails here alone.
         let by_name = |name: &str| {
             let vector = file
                 .vectors
@@ -252,10 +230,9 @@ mod tests {
         );
         assert_ne!(present_id, absent_id);
 
-        // wide-schemas only does its job (pinning that per-integrator schema
-        // widths reach the preimage) while its two schemas actually differ;
-        // a fixture edit that equalised them would quietly demote it to a
-        // duplicate of the identical-schema tiers.
+        // wide-schemas only pins that per-integrator widths reach the preimage
+        // while its two schemas differ; equalising them would quietly demote it
+        // to a duplicate of the identical-schema tiers.
         let wide = file
             .vectors
             .iter()
@@ -269,10 +246,9 @@ mod tests {
     }
 
     #[test]
-    fn vectors_sit_at_their_declared_capacities() {
-        // The oracle recovers the capacity generics from the record itself,
-        // so a vector whose vectors are short of capacity silently pins a
-        // narrower type than it claims.
+    fn rid_vectors_sit_at_declared_capacities() {
+        // The oracle recovers capacity generics from the record itself, so a
+        // vector short of capacity silently pins a narrower type than it claims.
         let file = load_vectors();
         for vector in &file.vectors {
             let name = &vector.name;
@@ -306,8 +282,8 @@ mod tests {
                 "vector {name}: respond schema is not at its declared width"
             );
 
-            // The runtime's own alignment, checked against itself: the
-            // widths it declared must add up to the width it reported.
+            // The runtime's own alignment checked against itself: declared
+            // widths must add up to the width it reported.
             assert_eq!(
                 vector.declared_widths.len(),
                 vector.preimage_atoms,

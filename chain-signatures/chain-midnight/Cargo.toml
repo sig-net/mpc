@@ -19,16 +19,11 @@ mpc-primitives.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Declared crate-local so this manifest states the features this crate itself
-# needs: `cargo build -p mpc-chain-midnight` pulls exactly these. It does NOT keep
-# `unstable-light-client` off in a workspace build, where cargo unifies features
-# across this crate and `node`, so nothing here may rely on that feature being
-# absent. Keep this version in lockstep with `chain-signatures/node/Cargo.toml`;
-# the two declarations must move together.
+# Crate-local rather than workspace so this manifest states its own features.
+# Cargo unifies features across this crate and `node` in a workspace build, so
+# nothing here may rely on `unstable-light-client` being absent. Keep the
+# version in lockstep with `chain-signatures/node/Cargo.toml`.
 subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-mockito.workspace = true

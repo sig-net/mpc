@@ -124,14 +124,11 @@ mod tests {
     #[test]
     fn tuning_fields_do_not_survive_the_cli_round_trip() {
         // Known limitation, pinned deliberately: only the four
-        // endpoint/identity fields have CLI flags, so from_config discards
-        // the rpc/sidecar/indexer tuning sub-structs and into_config
-        // reinstates their defaults on the other side. In particular,
-        // archive_probe_window and require_archive_state cannot traverse the
-        // recommended process-restart path. Dropping MidnightConfig's
-        // Default derive closed the accidental empty-config path; it did NOT
-        // close this one. If operators need to tune these, the fix is real
-        // flags, at which point this pin flips into a round-trip assert.
+        // endpoint/identity fields have flags, so `from_config` discards the
+        // tuning sub-structs and `into_config` reinstates their defaults.
+        // `archive_probe_window` and `require_archive_state` therefore cannot
+        // traverse a process restart. Adding real flags flips this into a
+        // round-trip assert.
         crate::cli::tests::assert_midnight_env_unset();
 
         let mut cfg = MidnightConfig {

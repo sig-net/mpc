@@ -1,7 +1,8 @@
-//! Midnight indexer implementation: catchup from the persisted checkpoint,
-//! then the live finalized loop, with per-block processing ordered by the
-//! D5 authority split (state diff triggers, decoded transactions attribute
-//! advisorily, the caller-ledger read plus the rid gate authorise).
+//! Catchup from the persisted checkpoint, then the live finalized loop.
+//!
+//! Per-block processing follows one authority split: the state diff triggers,
+//! decoded transactions attribute advisorily, and the caller-ledger read plus
+//! the request-id gate authorise.
 
 use crate::config::MidnightConfig;
 use crate::convert::to_sign_request;
@@ -25,55 +26,45 @@ use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Delay between anchor-sampling retries, mirroring Canton's shape.
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// The central singleton's notification map ordinal (D6 field 1), the only
-/// field the diff reads.
+/// The central singleton's notification map ordinal, the only field the diff
+/// reads.
 const NOTIFICATION_MAP_FIELD: u8 = 1;
 
-/// What a contract-state read found. The `Err` of the enclosing
-/// `anyhow::Result` is reserved for "the node could not answer", which is
-/// the only class where restarting the indexer is the right response.
+/// What a contract-state read found. The enclosing `Err` is reserved for "the
+/// node could not answer", the only class where restarting the indexer helps.
 pub(crate) enum ContractState {
     Tree(StateNode),
-    /// The contract is not present at that block. Ordinary during catchup
-    /// from before deployment, and for a caller address that names nothing.
+    /// Not present at that block. Ordinary during catchup from before
+    /// deployment, and for a caller address that names nothing.
     Absent,
-    /// The node served the bytes and the SIDECAR refused to decode them.
+    /// The node served the bytes and the sidecar refused to decode them.
     ///
-    /// A separate arm because the bytes belong to whoever owns that
-    /// contract, so for a CALLER address this is a per-entry data property
-    /// and must be a drop. It is reachable without an adversary: the
-    /// sidecar's state walk fails closed on any `StateValue` variant outside
-    /// null/cell/array/map (`midnight-publisher-ts/src/state.ts`), and a
-    /// `MerkleTree` ledger field is the ordinary way a Midnight contract
-    /// holds commitments. Folding this into `Err` made one such integrator
-    /// enough to restart-loop the indexer forever on the same block.
+    /// Separate from `Err` because the bytes belong to whoever owns that
+    /// contract, so for a caller address this is a per-entry data property and
+    /// must be a drop. Reachable without an adversary: the sidecar's state walk
+    /// fails closed on any `StateValue` outside null/cell/array/map, and a
+    /// `MerkleTree` field is the ordinary way a contract holds commitments.
+    /// Folded into `Err`, one such integrator restart-loops the indexer forever.
     Undecodable(anyhow::Error),
 }
 
 /// Midnight indexer: `run()` owns the whole read path.
 ///
-/// BLOCK EMISSION IS LIVE, for a correctness reason before an operational
-/// one: without `ChainEvent::Block` and `set_processed_block`, the
-/// checkpoint never advances, so every supervised restart re-walks catchup
-/// from the same stale checkpoint and re-emits the same `SignRequest`s,
-/// independent of any watchdog tuning. Secondarily, the 315s
-/// `live_block_timeout(Midnight)` watchdog (15 + 300, `stream/pipeline.rs`)
-/// restart-loops a silent indexer every 5m15s by design.
+/// Block emission is live because the checkpoint cannot advance without
+/// `ChainEvent::Block` and `set_processed_block`, and a stale checkpoint makes
+/// every supervised restart re-walk catchup and re-emit the same requests.
+/// The 315s `live_block_timeout(Midnight)` watchdog also restart-loops a silent
+/// indexer by design.
 ///
-/// The scaffold era's hazard note is updated rather than removed:
-/// `checkpoint_interval(Midnight)` is `Some(120)`, so
-/// emitting `ChainEvent::Block` while recording progress starts checkpoint
-/// creation (`stream/ops.rs::process_block_event`), a threshold signing
-/// request. Checkpoint signing stalls unless threshold-many nodes have
-/// Midnight enabled, and a node WITHOUT Midnight still buffers peer posits
-/// for checkpoint ids it never sees locally, in `posit_queues` entries that
-/// only `retire_task` removes. That binds the ROLLOUT, not this code: the
-/// off-by-default config gate keeps Midnight out of production config, and
-/// network-wide enablement plus a `posit_queues` bound remain preconditions
-/// for enabling Midnight where real value lives.
+/// Rollout hazard: `checkpoint_interval(Midnight)` is `Some(120)`, so emitting
+/// a block starts checkpoint creation, which is a threshold signing request.
+/// That stalls unless threshold-many nodes have Midnight enabled, and a node
+/// without it still buffers peer posits for checkpoint ids it never sees, in
+/// `posit_queues` entries only `retire_task` removes. The off-by-default config
+/// gate keeps this out of production; network-wide enablement plus a
+/// `posit_queues` bound are preconditions for turning it on.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
     state_manager: S,
@@ -86,21 +77,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         state_manager: S,
         telemetry: T,
     ) -> anyhow::Result<Self> {
-        // The crate's own guard, kept because `MidnightConfig` is publicly
-        // constructible with `String` fields: the CLI boundary validates too,
-        // but a non-CLI caller reaches this constructor without passing it.
-        // Ethereum needs no equivalent because `Url`/`Address`/`PrivateKeySigner`
-        // make an invalid value unrepresentable; until these fields are parsed
-        // types, this is the one runtime check that cannot be dropped.
+        // `MidnightConfig` is publicly constructible with `String` fields, so a
+        // non-CLI caller reaches here without passing the CLI's own check.
+        // Ethereum needs no equivalent: `Url`/`Address`/`PrivateKeySigner` make
+        // an invalid value unrepresentable.
         config.validate()?;
-        // Deliberately network-free beyond that: the CLI gate calls new()
-        // once and logs the error without retrying, so a dial here would
-        // turn a transient outage at boot into a permanently disabled
-        // chain. The archive-state probe and catchup-mode selection run at
-        // the start of each supervised run() instead, via
-        // MidnightRpc::probe_archive_state and select_catchup_mode: B6
-        // wires that call when it writes run(), B7 implements the catchup
-        // modes the result selects.
+        // Network-free beyond that. The CLI gate calls new() once and logs the
+        // error without retrying, so a dial here would turn a transient outage
+        // at boot into a permanently disabled chain. The archive probe runs at
+        // the start of each supervised run() instead.
         Ok(Self {
             config,
             state_manager,
@@ -109,19 +94,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 }
 
-/// Applies the startup policy to the archive probe's answer:
-/// probe-and-degrade by default, strict refusal when the operator set
-/// `require_archive_state`.
+/// Applies the startup policy to the archive probe's answer: degrade by
+/// default, refuse when the operator set `require_archive_state`.
 ///
-/// Degrading means catchup falls back to the WATERMARK path (resume from
-/// the last processed block using only data the node still serves) instead
-/// of exact-block contract-state reads. B6's `run()` consumes the returned
-/// mode at its start, right after `MidnightRpc::connect`, and threads it
-/// into the catchup step; B7 implements the two modes it selects; see
-/// `probe_archive_state` for why the probe does not run at construction.
-/// The degraded state is dashboardable via
-/// `ChainTelemetry::catchup_degraded`, which `run()` reports each
-/// supervised run; the warning below stays as the log-side signal.
+/// Degrading means catchup takes the watermark path, resuming from latest state
+/// instead of exact-block contract-state reads. `ChainTelemetry::catchup_degraded`
+/// carries this to a dashboard; the warning below is the log-side signal.
 pub fn select_catchup_mode(
     state: ArchiveState,
     require_archive_state: bool,
@@ -146,11 +124,10 @@ pub fn select_catchup_mode(
     }
 }
 
-/// The node-and-sidecar reads `run()` consumes, as a seam: Ethereum's run
-/// tests mock its HTTP transport, but subxt's WebSocket cannot be stubbed
-/// (an `OnlineClient` fetches runtime metadata at construction), so the
-/// fixture boundary is this trait instead. `LiveSource` is the production
-/// composition; the test fixture is the other implementor.
+/// The node-and-sidecar reads `run()` consumes, as a test seam. Ethereum mocks
+/// its HTTP transport, but subxt's WebSocket cannot be stubbed because an
+/// `OnlineClient` fetches runtime metadata at construction, so the fixture
+/// boundary is this trait. `LiveSource` is the production composition.
 #[async_trait]
 pub(crate) trait ChainSource: Send + Sync {
     async fn assert_sidecar_compatible(&self) -> anyhow::Result<()>;
@@ -159,12 +136,9 @@ pub(crate) trait ChainSource: Send + Sync {
     async fn block_at(&self, number: u64) -> anyhow::Result<BlockRef>;
     /// The decoded state tree of `address_64hex` at `at_hash`.
     ///
-    /// THREE-WAY, and the third arm is the whole point: `Err` must mean only
-    /// "the node could not answer", so that propagating it (which restarts
-    /// the indexer) is always the right response. A contract whose STATE the
-    /// sidecar refuses is a property of one caller's own data, and folding
-    /// it into `Err` is what let a single integrator's ledger take the whole
-    /// chain down. See [`ContractState::Undecodable`].
+    /// Three-way for the third arm's sake: `Err` must mean only "the node could
+    /// not answer", so propagating it, which restarts the indexer, is always
+    /// right. See [`ContractState::Undecodable`].
     async fn contract_state_tree(
         &self,
         address_64hex: &str,
@@ -216,10 +190,9 @@ impl ChainSource for LiveSource {
         address_64hex: &str,
         at_hash: &str,
     ) -> anyhow::Result<ContractState> {
-        // The node read propagates: a transport fault or the pruning
-        // signature is exactly the "could not answer" class. The sidecar
-        // decode does NOT, because the bytes it refuses are the contract
-        // owner's, not the node's.
+        // The node read propagates: a transport fault or the pruning signature
+        // is the "could not answer" class. The sidecar decode does not, because
+        // the bytes it refuses are the contract owner's, not the node's.
         match self.rpc.contract_state(address_64hex, at_hash).await? {
             None => Ok(ContractState::Absent),
             Some(state) => match self.sidecar.decode_contract_state(&state).await {
@@ -239,8 +212,8 @@ impl ChainSource for LiveSource {
         }
         let decoded = self.sidecar.decode_transactions(&blobs).await?;
         if !decoded.skipped.is_empty() {
-            // Advisory, like the rest of provenance: a blob the sidecar could
-            // not read costs attribution for this block, never a request.
+            // Advisory, like the rest of provenance: an unreadable blob costs
+            // attribution for this block, never a request.
             tracing::warn!(
                 height = block.number,
                 reason = "provenance-blob-skipped",
@@ -268,14 +241,14 @@ impl ChainSource for LiveSource {
     }
 }
 
-/// Advisory CCC provenance (D5): the address of the call CLAIMING the
-/// central call's communication commitment within the same transaction, if
-/// any pair exists. There is no entry-point field on the callee side, so
-/// the commitment join is the only link; the central contract's own call is
-/// never the caller. Advisory means exactly that: the result feeds a
-/// counter and a comparison against the notification's caller, never a
-/// gate, because a direct call to the notify entry point has no CCC frame
-/// at all and requiring one would drop legitimate requests.
+/// Advisory cross-contract-call provenance: the address of the call claiming
+/// the central call's communication commitment in the same transaction.
+///
+/// The callee side carries no entry-point field, so the commitment join is the
+/// only link, and the central contract's own call is never the caller.
+/// Advisory means the result only feeds a log comparison, never a gate: a
+/// direct call to the notify entry point has no such frame at all, so requiring
+/// one would drop legitimate requests.
 fn attribute_caller(txs: &DecodedTransactions, central_address: &str) -> Option<String> {
     for tx in &txs.transactions {
         let Some(central_call) = tx.calls.iter().find(|call| call.address == central_address)
@@ -299,12 +272,12 @@ fn attribute_caller(txs: &DecodedTransactions, central_address: &str) -> Option<
 }
 
 /// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`
-/// recovered from its atom-preserving wire key (D9 option 1): exactly two
-/// trailing-zero-trimmed atoms, `[count, requestId]`, the count folded
-/// little-endian and the rid re-padded to 32 bytes. This is the ONE place
-/// the key layout is assumed; everything downstream passes the recovered
-/// pair around. Any other atom count or a non-hex or overlong atom is a
-/// malformed key, dropped by the caller with its own reason.
+/// recovered from its atom-preserving wire key: two trimmed atoms, the count
+/// folded little-endian and the rid re-padded.
+///
+/// The one place the key layout is assumed; downstream passes the pair around.
+/// Any other atom count, or a non-hex or overlong atom, is a malformed key that
+/// the caller drops with its own reason.
 fn signet_map_key_rid(key_atoms: &[String]) -> Option<(u64, [u8; 32])> {
     let [count_hex, rid_hex] = key_atoms else {
         return None;
@@ -312,12 +285,12 @@ fn signet_map_key_rid(key_atoms: &[String]) -> Option<(u64, [u8; 32])> {
     Some((fold_le_u64(count_hex)?, repad_atom_32(rid_hex)?))
 }
 
-/// The central singleton's respondCounterMap ordinal (D6 field 2): the
-/// on-chain per-rid watermark the degraded catchup reads. Field 2, the
-/// PHASE-1 signature response counter (`respond` appends "a signature
-/// response"), deliberately NOT field 4: `respondBidirectionalCounterMap`
-/// counts phase-2 execution outputs, and reading it would re-emit the
-/// whole in-flight signed-but-not-yet-executed set on every degraded
+/// The central singleton's `respondCounterMap` ordinal: the on-chain per-rid
+/// watermark the degraded catchup reads.
+///
+/// Field 2 counts phase-1 signature responses. Deliberately not field 4,
+/// `respondBidirectionalCounterMap`, which counts phase-2 execution outputs and
+/// would re-emit the whole signed-but-not-yet-executed set on every degraded
 /// catchup.
 const RESPOND_COUNTER_FIELD: u8 = 2;
 
@@ -328,27 +301,16 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// The entries of a central-tree field that must be a map, or `None` when
-/// the field could not be READ at all.
+/// The entries of a central-tree field that must be a map, or `None` when the
+/// field could not be read at all.
 ///
-/// ONE helper because there were two copies with different constants that
-/// disagreed on the middle arm: the notification-map walk named a
-/// `central-field-not-a-map` degradation, while the respond-counter walk
-/// returned an empty map in silence. A field-2 shape change therefore made
-/// every notification look unanswered on the degraded catchup path with no
-/// line in the log at all. All three failure arms now answer the same way,
-/// a named degraded read, and the field is named in the message so the two
-/// counters stay comparable across both call sites.
+/// `None` rather than an empty slice: the block diff subtracts the parent's
+/// entries from this block's, and an unread parent that reads as empty makes
+/// every entry look new. Only a genuinely empty map is safe to diff against, so
+/// each caller answers "could not read" for itself.
 ///
-/// `None` RATHER THAN AN EMPTY SLICE, because the two are not the same fact
-/// and one caller cannot treat them alike: the block diff subtracts the
-/// parent's entries from this block's, and an unread parent that reads as
-/// empty makes every entry at this block look new. Only a genuinely empty
-/// map is safe to diff against. Each caller states its own answer to "could
-/// not read" instead of inheriting one silently.
-///
-/// Returns a borrowed slice: the respond-counter walk only reads, and the
-/// notification walk clones only because the block diff caches the result.
+/// One helper rather than one per field, so both call sites report a failed
+/// walk the same way and their drop counters stay comparable.
 fn central_map_entries<'a>(
     tree: &'a StateNode,
     field: u8,
@@ -379,20 +341,16 @@ fn central_map_entries<'a>(
     }
 }
 
-/// Per-rid response COUNTS from the central tree's field 2. The `respond`
-/// circuit insertDefault-then-increments that counter per rid, and the
-/// count matters, not membership: a notification entry `(count = C, rid)`
-/// is unanswered iff `C >= respondCount(rid)` (an absent rid reads 0), so
-/// a caller re-notifying AFTER a response, including after a failed one
-/// (the 0xdeadbeef encoding), is processed rather than skipped forever.
-/// An absent or empty field is the ordinary nothing-responded-yet state,
-/// never an error; an undecodable counter reads 0, which only ever
-/// PROCESSES more, never skips.
+/// Per-rid response counts from the central tree's field 2.
 ///
-/// An UNREADABLE field is answered the same way here, and that is safe for
-/// the same reason: no counts means nothing is above its watermark, so the
-/// walk processes every entry rather than skipping any. Unlike the block
-/// diff, this caller's "could not read" and "empty" genuinely do coincide.
+/// The count matters, not membership: entry `(count = C, rid)` is unanswered
+/// iff `C >= respondCount(rid)`, an absent rid reading 0. So a caller
+/// re-notifying after a response, including a failed one, is processed rather
+/// than skipped forever.
+///
+/// Absent, empty, undecodable and unreadable all read as no counts, which is
+/// safe because it only ever processes more and never skips. Unlike the block
+/// diff, this caller's "could not read" and "empty" genuinely coincide.
 fn response_counts(tree: &StateNode, height: u64) -> HashMap<[u8; 32], u64> {
     central_map_entries(tree, RESPOND_COUNTER_FIELD, "respondCounterMap", height)
         .unwrap_or_default()
@@ -435,38 +393,27 @@ fn fold_le_u64(atom_hex: &str) -> Option<u64> {
     )
 }
 
-// ----------------------------------------------------------------------
-// The reporting contract. `ChainTelemetry` has no counter hook, so the
-// `reason` label IS the metric and every one of these sinks feeds the same
-// namespace. That only works if a label means one thing, which is why there
-// are three sinks and not one:
+// The reporting contract. `ChainTelemetry` has no counter hook, so the `reason`
+// label is the metric and all three sinks feed one namespace. That only works
+// if a label means one thing, hence three sinks:
 //
 //   drop_entry      this entry produces no sign request
-//   degraded_read   a whole field or block read degraded; not about an entry
-//   advisory_note   the advisory provenance join observed something; the
-//                   request still signs
+//   degraded_read   a field or block read degraded; not about an entry
+//   advisory_note   provenance observed something; the request still signs
 //
-// All three are WARN or below, deliberately: every one is manufacturable at
-// will by a caller writing junk into its own contract state, and ERROR would
-// hand an adversary a free alarm bell.
-//
-// Reporting happens HERE and nowhere below. `resolve_verified_record` used
-// to log its own reason and then be logged again by its caller; it now
-// returns [`Resolved`] and says nothing.
-// ----------------------------------------------------------------------
+// All are WARN or below: every one is manufacturable at will by a caller
+// writing junk into its own state, and ERROR would hand an adversary a free
+// alarm bell. Reporting happens here and nowhere below, so a resolution is
+// logged once rather than by both callee and caller.
 
-/// One drop, one WARN, one distinct reason label (binding 10): the label is
-/// the countable signal (log-pipeline counters key on it), the line is the
-/// diagnosis.
+/// One drop, one WARN, one distinct reason label. The label is the countable
+/// signal, the line is the diagnosis.
 ///
-/// RETURNS the `None` that ends the entry, so every call site reads
-/// `return Ok(drop_entry(..))` and it is not possible to log a drop and then
-/// carry on. Three sites used to do exactly that: they reported an entry as
-/// dropped and signed it anyway, which put successfully signed requests into
-/// the drop counter.
+/// Returns the `None` that ends the entry, so call sites read
+/// `return Ok(drop_entry(..))` and cannot report a drop and then sign anyway.
 ///
-/// `request_id` stays optional for exactly one caller: `malformed-map-key`
-/// is a genuine drop of an entry whose id could not be recovered.
+/// `request_id` is optional for one caller: `malformed-map-key` drops an entry
+/// whose id could not be recovered.
 fn drop_entry(
     reason: &'static str,
     height: u64,
@@ -482,30 +429,25 @@ fn drop_entry(
     None
 }
 
-/// A field or block read that degraded: no entry is being decided, so there
-/// is no request id and the line must not claim a drop. Its consequence is
-/// stated by the caller (an empty entry list, an empty counter map), never
-/// implied by the label.
+/// A field or block read that degraded. No entry is being decided, so there is
+/// no request id and the line must not claim a drop; the caller states the
+/// consequence rather than letting the label imply one.
 fn degraded_read(reason: &'static str, height: u64, detail: &str) {
     tracing::warn!(reason, height, "midnight read degraded: {detail}");
 }
 
-/// Labels the pruning signature at the three sites that CANNOT switch
-/// catchup modes in place: the live loop, the finality-gap walk, and the
-/// per-entry caller read. Only the catchup range walk owns a mode variable,
-/// so only it can degrade to the watermark path where it stands.
+/// Labels the pruning signature at the three sites that cannot switch catchup
+/// modes in place: the live loop, the finality-gap walk, and the per-entry
+/// caller read. Only the catchup range walk owns a mode variable.
 ///
-/// Propagating at the other three is the recovery ROUTE, not an unhandled
-/// case: the supervised restart re-anchors, re-probes, and re-enters catchup,
-/// which does switch and recovers whatever the block or entry would have
-/// produced from latest state. The two alternatives are both worse. Dropping
-/// would lose a legitimate request whose only fault is that the node's
-/// retention moved. Switching modes in place would jump the processed block
-/// to the anchor and silently abandon block granularity mid-flight, for a
-/// condition the restart already handles in about a second.
+/// Propagating there is the recovery route rather than an unhandled case: the
+/// supervised restart re-anchors, re-probes and re-enters catchup, which does
+/// switch. Dropping would lose a request whose only fault is that the node's
+/// retention moved; switching in place would jump the processed block to the
+/// anchor and abandon block granularity for a condition the restart handles in
+/// about a second.
 ///
-/// So this changes no control flow; it exists because an operator watching a
-/// restart deserves to see the reason rather than an anonymous error.
+/// Changes no control flow. It exists so an operator sees why a run restarted.
 fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
     if is_state_unservable(&err) {
         tracing::warn!(
@@ -518,10 +460,8 @@ fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
     err
 }
 
-/// An observation from the ADVISORY provenance join. The request proceeds:
-/// a direct call to the notify entry point carries no cross-contract-call
-/// frame at all, so requiring one would drop legitimate requests, and these
-/// labels must never be read as request loss.
+/// An observation from the advisory provenance join. The request proceeds, so
+/// these labels must never be read as request loss.
 fn advisory_note(reason: &'static str, height: u64, request_id: Option<[u8; 32]>, detail: &str) {
     tracing::warn!(
         reason,
@@ -531,33 +471,30 @@ fn advisory_note(reason: &'static str, height: u64, request_id: Option<[u8; 32]>
     );
 }
 
-/// Whether step 4 (advisory attribution) ran for the entries being
-/// processed. The watermark path skips it BY CONSTRUCTION (there is no
-/// per-tx context in a latest-state walk), and a skipped attribution must
-/// not warn `provenance-absent`: that label means attribution RAN and found
-/// no pair, which is a different fact.
+/// Whether advisory attribution ran for the entries being processed. The
+/// watermark path skips it by construction, having no per-tx context, and a
+/// skipped attribution must not warn `provenance-absent`: that label means
+/// attribution ran and found no pair, a different fact.
 enum Attribution {
     Skipped,
     Ran(Option<String>),
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
-    /// The central singleton's tree at `at_hash`, or `None` when the
-    /// contract is not present there (ordinary during catchup from before
-    /// deployment). Every error propagates, INCLUDING the unservable
-    /// pruning signature: policy for that lives in the catchup loop (switch
-    /// to the watermark mode), never down here where it could only lose
-    /// requests.
+    /// The central singleton's tree at `at_hash`, or `None` when the contract
+    /// is not present there, which is ordinary during catchup from before
+    /// deployment.
     ///
-    /// An UNDECODABLE central state also propagates, and unlike the caller
-    /// path that is deliberate rather than an oversight. There is no entry
-    /// to drop: the notification map is the only source of work, so treating
-    /// a state this node cannot read as "no entries" would lose every
-    /// request while the indexer reported itself healthy. Restarting is the
-    /// louder of two bad answers. Note the exposure it leaves: the central
-    /// state's SIZE is caller-driven (one map entry per notify, forever) and
-    /// nothing bounds the sidecar's response, so a large enough map fails
-    /// this read for reasons no caller-level drop policy can reach.
+    /// Everything else propagates, the pruning signature included: the policy
+    /// for that lives in the catchup loop, never down here where it could only
+    /// lose requests. An undecodable central state also propagates, unlike the
+    /// caller path, because there is no entry to drop: the notification map is
+    /// the only source of work, so reading it as "no entries" would lose every
+    /// request while the indexer reported itself healthy.
+    ///
+    /// Known exposure: the central state's size is caller-driven, one map entry
+    /// per notify forever, and nothing bounds the sidecar's response, so a large
+    /// enough map fails this read beyond the reach of any drop policy.
     async fn central_tree<C: ChainSource>(
         &self,
         source: &C,
@@ -587,34 +524,26 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         .map(<[MapEntry]>::to_vec)
     }
 
-    /// Per-block processing, shared by catchup and live, ordered by the D5
-    /// authority split: the state diff triggers, decoded transactions
-    /// attribute advisorily, the caller-ledger read plus the rid gate
-    /// authorise, B5 converts. Every per-entry failure is a counted drop,
-    /// never a block abort: a poisoned entry must not stall the chain, and
-    /// a sibling entry's conversion must still run.
+    /// Per-block processing, shared by catchup and live. Every per-entry
+    /// failure is a counted drop, never a block abort: a poisoned entry must
+    /// not stall the chain, and its siblings must still convert.
     ///
-    /// Retry-budget arithmetic (binding 3): with the parent tree cached,
-    /// the worst-case degraded cost per block is three node reads wrapped
-    /// in `retry_rpc!` (central state, caller state, block-by-hash for the
-    /// advisory decode), each up to ~75s under `RpcConfig` defaults (6
-    /// attempts x 10s per-attempt timeouts plus ~15s backoff), so ~225s
-    /// against the 315s `live_block_timeout(Midnight)` watchdog, BEFORE
-    /// sidecar budgets. The cache below keeps the central read at one per
-    /// block on both the happy and the degraded path (it is keyed on the
-    /// parent hash, not on success); anyone changing the shared retry
-    /// budget or adding a per-block call must redo this arithmetic.
+    /// Retry budget: with the parent tree cached, the worst-case degraded cost
+    /// is three `retry_rpc!` node reads (central state, caller state,
+    /// block-by-hash for the advisory decode), each up to ~75s under `RpcConfig`
+    /// defaults, so ~225s against the 315s `live_block_timeout(Midnight)`
+    /// watchdog, before sidecar budgets. The cache below keeps the central read
+    /// at one per block on both paths, being keyed on the parent hash rather
+    /// than on success. Redo this arithmetic before adding a per-block call.
     async fn process_block<C: ChainSource>(
         &self,
         source: &C,
         cache: &mut Option<(String, Vec<MapEntry>)>,
         block: &BlockRef,
     ) -> anyhow::Result<Vec<IndexedSignRequest>> {
-        // `None` means the map could not be read, which the cache at the end
-        // must NOT record as an empty parent for the next block: doing that
-        // would hand the next diff a confident "the parent held nothing" it
-        // has no basis for, and hide the re-emission burst behind a cache
-        // hit instead of naming it.
+        // `None` means the map could not be read. The cache at the end must not
+        // record that as an empty parent, which would hand the next diff a
+        // confident "the parent held nothing" it has no basis for.
         let read_entries: Option<Vec<MapEntry>> =
             match self.central_tree(source, &block.hash).await? {
                 Some(tree) => Self::notification_entries(&tree, block.number),
@@ -624,11 +553,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             };
         let entries = read_entries.clone().unwrap_or_default();
 
-        // `None` here is "I could not read the parent", which is NOT the
-        // same fact as "the parent had no entries" and is the one state the
-        // diff below must refuse to subtract. A contract genuinely absent at
-        // the parent block really did hold no notifications, so that stays
-        // an empty list.
+        // `None` is "could not read the parent", not "the parent had no
+        // entries", and is the one state the diff below must refuse to
+        // subtract. A contract genuinely absent at the parent really did hold
+        // no notifications, so that stays an empty list.
         let parent_entries: Option<Vec<MapEntry>> = match cache.take() {
             Some((hash, entries)) if hash == block.parent_hash => Some(entries),
             _ => match self.central_tree(source, &block.parent_hash).await? {
@@ -645,33 +573,25 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     .filter(|entry| !parent_keys.contains(entry.key.as_slice()))
                     .collect()
             }
-            // No diff is possible, so this block emits nothing, and BOTH
-            // alternatives are worse.
+            // No diff is possible, so this block emits nothing. Both
+            // alternatives are worse and unbounded where this is bounded.
             //
-            // Treating the parent as empty would make every entry look new,
-            // and the notification map is insert-only, so that is not one
-            // duplicate but a re-emission of the entire history: a
-            // caller-state read plus a sidecar decode per entry ever filed.
-            // Past the 315s `live_block_timeout(Midnight)` watchdog the block
-            // never emits, the checkpoint never advances, the restart re-reads
-            // the same unreadable parent, and the burst repeats. That is H1's
-            // shape again, and during it EVERY request is lost rather than
-            // this block's. Propagating instead puts the same permanent fault
-            // into the same restart loop.
+            // Treating the parent as empty would make every entry look new, and
+            // the map is insert-only, so that re-emits the entire history: a
+            // caller-state read and a sidecar decode per entry ever filed. Past
+            // the watchdog the block never emits, the checkpoint never advances,
+            // the restart re-reads the same unreadable parent and the burst
+            // repeats, losing every request rather than this block's.
+            // Propagating puts the same permanent fault into the same loop.
             //
-            // So the bad case here is BOUNDED where the other two are not:
-            // only entries filed at exactly this height are given up. The
-            // block still emits and the checkpoint still advances, the
-            // readable current map below becomes the next block's parent, and
-            // the next diff is therefore correct rather than degraded.
+            // Here only entries filed at exactly this height are given up. The
+            // block still emits, the checkpoint still advances, and the readable
+            // current map becomes the next block's parent, so the next diff is
+            // correct rather than degraded.
             //
-            // Note when this can even happen: a walk failure inside an
-            // already-fetched tree is a shape or address fault, so if it were
-            // permanent the CURRENT read would fail too and there would be no
-            // entries to emit and no burst. Reaching here means the parent
-            // failed and this block did not, which is a shape TRANSITION (a
-            // contract upgrade), so the bounded loss is one block at one
-            // upgrade rather than an ongoing bleed.
+            // Reaching this arm at all means the parent walk failed and this
+            // block's did not, which is a shape transition such as a contract
+            // upgrade, so the loss is one block at one upgrade.
             None => {
                 degraded_read(
                     "parent-notification-map-unreadable",
@@ -720,25 +640,23 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
         }
 
-        // Only a map that was actually READ becomes the next block's parent.
-        // An unreadable one leaves the cache empty so the next block re-reads
-        // and reaches the same `None`, which re-emits and says so, rather
-        // than silently diffing against a list this block never saw.
+        // Only a map that was actually read becomes the next block's parent. An
+        // unreadable one leaves the cache empty, so the next block re-reads and
+        // reaches the same `None` rather than silently diffing against a list
+        // this block never saw.
         *cache = read_entries.map(|entries| (block.hash.clone(), entries));
         Ok(requests)
     }
 
-    /// Steps 3, 5 and 6 for one notification entry: decode and unpack the
-    /// notification, read the caller's ledger at `at_hash`, gate through
-    /// `resolve_verified_record`, convert. Shared verbatim by the per-block
-    /// diff and the watermark walk; only step 1 (the diff) and step 4
-    /// (attribution) differ between the two, which is exactly the
-    /// documented trade of the watermark mode.
+    /// One notification entry: decode and unpack it, read the caller's ledger
+    /// at `at_hash`, gate through `resolve_verified_record`, convert. Shared
+    /// verbatim by the per-block diff and the watermark walk, which differ only
+    /// in how they select entries and whether attribution runs.
     ///
-    /// `Ok(None)` is a counted drop. `Err` means ONLY that the node could
-    /// not answer, so that propagating it (which restarts the indexer) is
-    /// always right: no property of one caller's own data may reach it. That
-    /// is the whole reason `contract_state_tree` is three-way.
+    /// `Ok(None)` is a counted drop. `Err` means only that the node could not
+    /// answer, so propagating it and restarting is always right; no property of
+    /// a caller's own data may reach it, which is why `contract_state_tree` is
+    /// three-way.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -780,14 +698,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // Advisory comparison, never a gate (D5): absence and disagreement
-        // are notes, and the read below proceeds regardless. They go through
-        // `advisory_note` rather than `drop_entry` for exactly that reason:
-        // reporting these as drops put every signed request from a direct
-        // notify call, the documented common case, into the drop counter. A
-        // SKIPPED attribution (the watermark walk) says nothing at all:
-        // provenance-absent means attribution ran and found no pair, which
-        // is a different fact from it never running.
+        // Advisory, never a gate: absence and disagreement are notes and the
+        // read below proceeds regardless, which is why they go through
+        // `advisory_note`. Reporting them as drops would put every signed
+        // request from a direct notify call, the common case, into the drop
+        // counter. A skipped attribution says nothing at all.
         match attribution {
             Attribution::Ran(Some(address)) if *address != caller_hex => {
                 advisory_note(
@@ -824,11 +739,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &caller_hex,
                 ));
             }
-            // The caller's own bytes, refused by the sidecar: a per-entry
-            // data property like every other one here. Propagating it made
-            // one integrator whose ledger the sidecar cannot walk enough to
-            // restart-loop the indexer on the same block forever, since the
-            // checkpoint cannot advance past a block that never emits.
+            // The caller's own bytes, refused by the sidecar: a per-entry data
+            // property like the rest. Propagating it lets one integrator whose
+            // ledger the sidecar cannot walk restart-loop the indexer on the
+            // same block forever, since the checkpoint cannot advance past a
+            // block that never emits.
             ContractState::Undecodable(err) => {
                 return Ok(drop_entry(
                     "caller-state-undecodable",
@@ -842,8 +757,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             match signet_field_node(&caller_tree, usize::from(unpacked.requests_index_field)) {
                 Ok(field) => field,
                 Err(err) => {
-                    // The field position is producer-supplied data, so an
-                    // out-of-range walk is a per-entry drop, never an abort.
+                    // Producer-supplied data, so an out-of-range walk is a
+                    // per-entry drop rather than an abort.
                     return Ok(drop_entry(
                         "requests-field-walk",
                         height,
@@ -852,16 +767,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     ));
                 }
             };
-        // One outcome, one line: the resolver reports nothing and hands back
-        // the reason, so this is the only place a resolution is logged.
+        // The resolver reports nothing and hands back the reason, so this is
+        // the only place a resolution is logged.
         let record = match resolve_verified_record(field, rid) {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
-                // Not a fault: the caller notified an id its own index does
-                // not hold, having notified before its write landed or
-                // computed the id wrong. DEBUG, not WARN, because it is
-                // manufacturable at will; not silent, because it is the
-                // failure an integrator is most likely to hit.
+                // Not a fault: the caller notified an id its own index does not
+                // hold, having notified before its write landed or computed the
+                // id wrong. DEBUG because it is manufacturable at will, not
+                // silent because integrators hit it most and cannot otherwise
+                // diagnose it.
                 tracing::debug!(
                     reason = "request-absent",
                     height,
@@ -883,9 +798,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         ) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
-                // Binding 9/10: every conversion failure is a per-record
-                // data property; drop with the id and reason together, WARN
-                // not ERROR, and continue.
+                // Every conversion failure is a per-record data property, so
+                // drop with the id and reason and continue.
                 Ok(drop_entry(
                     "convert-rejected",
                     height,
@@ -896,31 +810,22 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// The watermark catchup (D10's degraded mode, B7): read the central
-    /// contract's LATEST state once, at the anchor, and process every
-    /// field-1 entry whose rid is above the persisted per-rid watermark
-    /// through steps 3, 5 and 6. Steps 1 and 4 are skipped by construction,
-    /// so this path has no per-tx provenance and no per-block granularity;
-    /// that is the documented trade, and the rid gate holds because it
-    /// never depended on the block.
+    /// The degraded catchup: read the central contract's latest state once at
+    /// the anchor and process every field-1 entry above the per-rid watermark.
     ///
-    /// THE WATERMARK IS THE LEDGER'S OWN, twice over, because StateManager
-    /// persists exactly one u64 per chain and no per-rid store exists
-    /// locally. Coarse: the notification map is insert-only in the contract
-    /// (`signBidirectional` reads-then-increments a per-rid counter and
-    /// only ever inserts), so the anchor's latest state contains every
-    /// notification ever filed and `set_processed_block(anchor)` afterwards
-    /// loses nothing; the modes interleave safely because both resume from
-    /// that one slot, and over-coverage lands as keyed backlog inserts
-    /// (signing is gated on caught_up). Per-rid: the on-chain
-    /// respondCounterMap (D6 field 2, the PHASE-1 signature responses,
-    /// deliberately not field 4's phase-2 execution outputs), read from the
-    /// SAME anchored tree as a COUNT: entry `(count = C, rid)` is
-    /// unanswered iff `C >= respondCount(rid)`, absent reading 0. The count
-    /// comparison rather than membership keeps re-notifications after a
-    /// response, including after a failed one, processable: re-emission is
-    /// idempotent, a silent skip is not, and the watermark path therefore
-    /// agrees with the block path on post-response re-notifications.
+    /// No per-tx provenance and no per-block granularity, which is the trade.
+    /// The request-id gate still holds, having never depended on the block.
+    ///
+    /// Both watermarks are the ledger's own, because `StateManager` persists
+    /// one u64 per chain and no per-rid store exists locally. The coarse one is
+    /// safe because the notification map is insert-only, so the anchor's latest
+    /// state contains every notification ever filed and
+    /// `set_processed_block(anchor)` loses nothing; the two modes interleave
+    /// because both resume from that slot, and over-coverage lands as keyed
+    /// backlog inserts. The per-rid one is `respondCounterMap` read from the
+    /// same anchored tree as a count, so a re-notification after a response,
+    /// including a failed one, is still processed: re-emission is idempotent
+    /// where a silent skip is not.
     async fn catchup_from_latest_state<C: ChainSource>(
         &self,
         source: &C,
@@ -937,8 +842,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             );
             return self.emit_block(events_tx, anchor, Vec::new()).await;
         };
-        // This walk subtracts nothing, so an unreadable notification map is
-        // simply no work to do; `central_map_entries` already named it.
+        // This walk subtracts nothing, so an unreadable map is simply no work
+        // to do, and `central_map_entries` has already named it.
         let entries = Self::notification_entries(&tree, anchor.number).unwrap_or_default();
         let responses = response_counts(&tree, anchor.number);
 
@@ -952,13 +857,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
             if let Some((count, rid)) = signet_map_key_rid(&entry.key) {
                 if count < responses.get(&rid).copied().unwrap_or(0) {
-                    // Below the per-rid watermark: this notification
-                    // instance predates the latest phase-1 response, so its
-                    // answer already exists on-chain. A re-notification AT
-                    // or ABOVE the response count processes, so the
-                    // watermark path AGREES with the block path on
-                    // post-response re-notifications, including after a
-                    // failed (0xdeadbeef) answer. Ordinary, not a drop.
+                    // This instance predates the latest phase-1 response, so
+                    // its answer already exists on-chain. One at or above the
+                    // count still processes, which is how this path agrees with
+                    // the block path on post-response re-notifications.
+                    // Ordinary, not a drop.
                     continue;
                 }
             }
@@ -980,16 +883,14 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         self.emit_block(events_tx, anchor, requests).await
     }
 
-    /// Emits a processed block's requests, then its Block event, then
-    /// records progress and telemetry.
+    /// Emits a block's requests, then its Block event, then records progress
+    /// and telemetry.
     ///
-    /// Deliberately does NOT count the requests: the shared stream layer
-    /// already calls `request_indexed` for every `ChainEvent::SignRequest`
-    /// that carries no block timestamp (`node/src/stream/mod.rs`), which is
-    /// every request this chain emits, so counting here too reported each
-    /// one twice. `block_indexed` below is not the same case: the shared
-    /// layer records `block_finalized` for a `ChainEvent::Block`, a
-    /// different metric.
+    /// Does not count the requests: the shared stream layer already calls
+    /// `request_indexed` for every `SignRequest` without a block timestamp,
+    /// which is all of this chain's, so counting here reports each one twice.
+    /// `block_indexed` is not the same case, since the shared layer records
+    /// `block_finalized` for a `ChainEvent::Block`.
     async fn emit_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -1016,20 +917,18 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         Ok(())
     }
 
-    /// `run()` over an explicit [`ChainSource`]; `run()` itself only
-    /// connects the production source and delegates here, which is the
-    /// fixture seam.
+    /// `run()` over an explicit [`ChainSource`], the fixture seam. `run()`
+    /// itself only connects the production source and delegates here.
     pub(crate) async fn run_with_source<C: ChainSource>(
         &self,
         source: &C,
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        // Startup gates. Err from either is a supervised retry with light
-        // backoff, deliberately NOT a construction failure: the CLI gate
-        // constructs the indexer once and never retries new(), so a
-        // transient sidecar or node outage here must not permanently
-        // disable the chain (the B1b rationale, applied to both gates).
+        // Startup gates. Err from either is a supervised retry rather than a
+        // construction failure: the CLI gate constructs the indexer once and
+        // never retries new(), so a transient outage here must not permanently
+        // disable the chain.
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             compatible = source.assert_sidecar_compatible() => {
@@ -1067,15 +966,14 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
         let mut cache: Option<(String, Vec<MapEntry>)> = None;
         let mut last_processed = checkpoint;
-        // Pruned mode goes straight to the watermark walk: B6's degraded
-        // block walk could only drop unservable blocks, losing their
-        // requests; the watermark RECOVERS them from latest state instead.
+        // Pruned goes straight to the watermark walk: a degraded block walk
+        // could only drop unservable blocks and lose their requests, where the
+        // watermark recovers them from latest state.
         let mut need_watermark = matches!(mode, ArchiveState::Pruned { .. });
         if checkpoint == 0 {
-            // A fresh node has no gap to close: walking from genesis would
-            // reprocess the whole chain, so catchup anchors live at the
-            // finalized head and history before it is out of scope. That
-            // holds in either mode, so no watermark walk is needed.
+            // A fresh node has no gap to close, and walking from genesis would
+            // reprocess the whole chain, so catchup anchors at the finalized
+            // head in either mode.
             tracing::info!(
                 anchor = anchor.number,
                 "midnight fresh start: no checkpoint, anchoring at the finalized head"
@@ -1097,11 +995,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         self.emit_block(&events_tx, &block, requests).await?;
                         last_processed = number;
                     }
-                    // The mid-catchup pruning signature: the gap reaches
-                    // deeper than the node's retention even though the
-                    // probe said Archive. Switch to the watermark walk for
-                    // the remainder rather than restarting into the same
-                    // wall (B1b's per-block rule).
+                    // The gap reaches deeper than the node's retention even
+                    // though the probe said Archive. Switch to the watermark
+                    // walk for the remainder rather than restarting into the
+                    // same wall.
                     Err(err) if is_state_unservable(&err) => {
                         tracing::warn!(
                             height = number,
@@ -1136,10 +1033,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 _ = cancel.cancelled() => return Ok(()),
                 block = blocks_rx.recv() => match block {
                     Some(block) => block,
-                    // Binding 2: to run_supervised, Ok(()) is permanent
-                    // SHUTDOWN and Err is a restart. An ended producer must
-                    // therefore be Err, so the supervised restart re-anchors
-                    // and catches up (D10); only cancel returns Ok.
+                    // To run_supervised, Ok(()) is permanent shutdown and Err
+                    // is a restart, so an ended producer must be Err and let
+                    // the restart re-anchor. Only cancellation returns Ok.
                     None => anyhow::bail!("midnight finalized block producer terminated"),
                 },
             };
@@ -1237,10 +1133,8 @@ mod tests {
         }
     }
 
-    // ==================================================================
-    // B6: run() over an injected ChainSource (Ethereum mocks its HTTP
-    // transport; subxt WS cannot be mocked, so the seam is a trait).
-    // ==================================================================
+    // run() over an injected ChainSource. Ethereum mocks its HTTP transport;
+    // subxt's WebSocket cannot be mocked, so the seam is a trait.
 
     use crate::sidecar::{
         ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, MapEntry, StateNode,
@@ -1325,8 +1219,7 @@ mod tests {
         }
     }
 
-    /// The central singleton: six flat fields, the notification map at
-    /// ordinal 1 (D6).
+    /// The central singleton: six flat fields, notification map at ordinal 1.
     fn central_state(entries: Vec<MapEntry>) -> StateNode {
         StateNode::Array {
             children: vec![
@@ -1624,7 +1517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_catchup_precedes_completed_and_prequeued_live_blocks() {
+    async fn run_emits_catchup_before_completed_and_live_blocks() {
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let mut source = FixtureSource {
@@ -1680,7 +1573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_diff_emits_exactly_one_request_for_the_new_entry() {
+    async fn process_block_emits_one_request_per_new_entry() {
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let mut source = FixtureSource {
@@ -1749,11 +1642,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provenance_absent_still_signs() {
-        // The D5 invariant: attribution is advisory, and a diffed
-        // notification with NO matching decoded call still signs. This is
-        // the check a well-meaning implementer is most likely to make
-        // fail-closed.
+    async fn process_entry_signs_without_provenance() {
+        // Attribution is advisory: a diffed notification with no matching
+        // decoded call still signs. The check a well-meaning implementer is
+        // most likely to turn fail-closed.
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let mut source = FixtureSource {
@@ -1781,20 +1673,17 @@ mod tests {
         harness.cancel_and_join_ok().await;
     }
 
-    /// H1: a caller contract whose state the SIDECAR refuses is one caller's
-    /// data property and must be a per-entry drop.
+    /// A caller contract whose state the sidecar refuses is that caller's data
+    /// property and must be a per-entry drop.
     ///
-    /// Before the three-way `ContractState` this arrived as `Err`, which
-    /// `process_entry` propagated, `process_block` re-propagated, and `run()`
-    /// returned. The checkpoint cannot advance past a block that never
-    /// emits, so the supervisor's 1s restart re-walked the same block into
-    /// the same error forever: a permanent outage for every user of the
-    /// chain, caused by one integrator whose ledger holds a `MerkleTree`.
-    /// The assertions that would have caught it are the ones below: the
-    /// block still emits, the checkpoint still advances, and run() is still
-    /// alive to be cancelled.
+    /// As an `Err` it propagates out of `run()`, and since the checkpoint
+    /// cannot advance past a block that never emits, the supervisor re-walks
+    /// the same block into the same error forever: one integrator whose ledger
+    /// holds a `MerkleTree` takes the chain down for everyone. Hence the
+    /// assertions below that the block still emits, the checkpoint still
+    /// advances, and run() is still alive to be cancelled.
     #[tokio::test]
-    async fn a_caller_state_the_sidecar_refuses_is_a_drop_not_an_outage() {
+    async fn process_entry_drops_undecodable_caller_state() {
         let (_record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1825,21 +1714,15 @@ mod tests {
     }
 
     /// An unreadable parent notification map is not diffed against, and the
-    /// block emits NOTHING rather than everything.
+    /// block emits nothing rather than everything.
     ///
-    /// `Vec::new()` used to mean both "the parent held no entries" and "I
-    /// could not read the parent", and only the first is safe to subtract.
-    /// This pins which way the second resolves, and the direction is the
-    /// whole point: treating the parent as empty re-emits the entire
-    /// insert-only notification map, which is O(history) rather than one
-    /// duplicate and escalates into a watchdog restart loop that loses far
-    /// more than this block would. So the bad case is bounded here instead.
-    ///
-    /// The second half is what makes "bounded" a test rather than a claim:
-    /// block 10 diffs normally against block 9, so the loss stops at the one
-    /// height whose parent could not be read.
+    /// The direction is the point: treating the parent as empty re-emits the
+    /// whole insert-only map, which is O(history) rather than one duplicate and
+    /// escalates into a watchdog restart loop. The second half is what makes
+    /// "bounded" a test rather than a claim: block 10 diffs normally against
+    /// block 9, so the loss stops at the one unreadable height.
     #[tokio::test]
-    async fn an_unreadable_parent_map_emits_nothing_and_the_loss_stops_there() {
+    async fn process_block_emits_nothing_on_unreadable_parent_map() {
         let (record, rid) = caller_record_and_rid();
         let (other_record, other_rid) = named_record_and_rid("no-calldata");
         let central = central_address();
@@ -1916,13 +1799,12 @@ mod tests {
         drop(live_tx);
     }
 
-    /// The other half of H1's classification, and the reason the fix is a
-    /// three-way rather than "swallow the error": a node that CANNOT ANSWER
-    /// must still take the run down for a supervised restart. A fix that
-    /// turned every caller-state failure into a drop would pass the test
-    /// above and silently keep indexing against a broken node.
+    /// The other half of that classification, and why the fix is a three-way
+    /// rather than swallowing the error: a node that cannot answer must still
+    /// take the run down. Turning every caller-state failure into a drop would
+    /// pass the test above and keep indexing against a broken node.
     #[tokio::test]
-    async fn a_node_that_cannot_answer_still_restarts_the_run() {
+    async fn run_restarts_when_node_cannot_answer() {
         let (_record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1959,7 +1841,7 @@ mod tests {
     /// timestamp, which is every request this chain emits. The indexer used
     /// to call it as well, so each request was counted twice.
     #[tokio::test]
-    async fn the_indexer_does_not_count_requests_the_stream_layer_already_counts() {
+    async fn emit_block_does_not_double_count_requests() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -2040,7 +1922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_parked_mid_catchup_returns_ok_without_finishing_the_range() {
+    async fn run_returns_ok_on_cancel_mid_catchup() {
         // The range walk's own cancel arms. No other test reaches them: every
         // other run test cancels from the LIVE loop, and a sleep cannot get
         // here at all, because an unpopulated FixtureSource walks 500 blocks
@@ -2082,9 +1964,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_parked_in_the_watermark_walk_returns_ok() {
+    async fn run_returns_ok_on_cancel_in_watermark_walk() {
         // The watermark walk's cancellation, which no other test reaches:
-        // pruned_mode_recovers_requests_via_watermark cancels only AFTER the
+        // run_recovers_pruned_requests_via_watermark cancels only AFTER the
         // walk has finished. Parking the CALLER-state read suspends the walk
         // inside process_entry, so cancel arrives mid-entry and only the walk's
         // own cancel handling can end run().
@@ -2121,7 +2003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn producer_termination_bails_for_the_supervisor() {
+    async fn run_bails_when_block_producer_terminates() {
         // Binding 2: Ok(()) is SHUTDOWN to run_supervised, so an ended
         // producer must surface as Err; only cancel may return Ok.
         let central = central_address();
@@ -2149,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn attribution_join_finds_the_committed_caller_and_rejects_decoys() {
+    fn attribute_caller_finds_committed_caller_and_rejects_decoys() {
         // Binding 5 shapes: multi-call, the matching claim NOT first, a
         // decoy commitment matching nothing, distinguishable values.
         let central = central_address();
@@ -2236,10 +2118,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_recatches_from_checkpoint() {
-        // D10's property, distinct from B6's ordering test: a RESTART
-        // resumes from the persisted checkpoint rather than re-walking from
-        // zero or skipping the gap. Two runs over ONE MockStateManager.
+    async fn run_recatches_from_checkpoint_on_restart() {
+        // A restart resumes from the persisted checkpoint rather than re-walking
+        // from zero or skipping the gap. Two runs over one MockStateManager.
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
         let mut source = FixtureSource {
@@ -2281,14 +2162,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pruned_mode_recovers_requests_via_watermark() {
-        // B6's TODO(B7) closed: a Pruned node RECOVERS the gap's requests
-        // from latest state instead of dropping unservable blocks. The
-        // responded rid is below the on-chain per-rid watermark (D6 field
-        // 4) and is skipped; the unresponded one is recovered. BOTH rids
-        // are fully resolvable on purpose: a watermark that reads the wrong
-        // field or inverts the skip then emits the responded one and fails
-        // the exactly-one shape below, instead of hiding behind an
+    async fn run_recovers_pruned_requests_via_watermark() {
+        // A Pruned node recovers the gap's requests from latest state instead
+        // of dropping unservable blocks. The responded rid sits below the
+        // per-rid watermark in field 2 and is skipped; the unresponded one is
+        // recovered. Both rids resolve fully on purpose: a watermark that reads
+        // the wrong field or inverts the skip then emits the responded one and
+        // fails the exactly-one shape below, rather than hiding behind an
         // unresolvable decoy.
         let (record, rid) = caller_record_and_rid();
         let (responded_record, responded_rid) = named_record_and_rid("no-calldata");
@@ -2356,7 +2236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mid_catchup_pruning_switches_to_watermark() {
+    async fn run_switches_to_watermark_on_mid_catchup_pruning() {
         // Archive mode, but the gap reaches deeper than retention: block 7's
         // central read hits the pruning signature, and the walk SWITCHES to
         // the watermark for the remainder instead of restarting into the
@@ -2391,7 +2271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_node_anchors_live_without_catchup() {
+    async fn run_anchors_at_head_without_catchup_when_fresh() {
         // Checkpoint 0 in EITHER mode: no gap to close, no genesis walk, no
         // watermark walk; live starts at the anchor.
         let central = central_address();
@@ -2417,7 +2297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_caller_triggerable_conversion_failure_drops_only_its_own_entry() {
+    async fn process_block_drops_only_failing_entry() {
         // One malformed record must never stop indexing for everyone.
         // `enum-algo-set` is an ORACLE record, so it decodes cleanly and passes
         // the recompute-and-drop gate on its own filed id, and its sender is
@@ -2488,7 +2368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replayed_live_block_is_not_re_emitted() {
+    async fn run_skips_replayed_live_block() {
         // The re-delivery guard. A supervised restart or a resubscribe after a
         // transient WS drop can re-deliver a finalized block the loop already
         // processed; re-emitting it produces DUPLICATE sign requests rather
@@ -2519,7 +2399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn midnight_indexer_rejects_an_unusable_config() {
+    async fn midnight_indexer_new_rejects_unusable_config() {
         let config = MidnightConfig {
             sidecar_url: "http://127.0.0.1:8790".to_string(),
             node_ws_url: String::new(),

@@ -1122,24 +1122,10 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags. What a set variable can do differs per caller:
-    ///
-    /// - `args::midnight::tests::into_str_args_round_trips_into_config`:
-    ///   genuine false green. It reparses `into_str_args` output and asserts
-    ///   equality, so a flag dropped by `into_str_args` is silently
-    ///   backfilled from env and the equality still holds, provided the
-    ///   variable carries the same value the fixture uses. Those values
-    ///   (`"undeployed"`, the localhost endpoints) are exactly what a
-    ///   developer running a local sidecar exports, so that proviso is the
-    ///   likely case; a different value fails, just confusingly.
-    /// - `into_str_args_forwards_midnight`: prophylaxis only. All four
-    ///   flags are in argv, which beats env in clap, and the assertions
-    ///   read `into_str_args` output directly, so env cannot reach the
-    ///   outcome and a dropped flag fails either way.
-    /// - `midnight_off_by_default`: loud-failure-only. It builds its args
-    ///   programmatically, so env cannot reach the parse at all; pollution
-    ///   could only push the config toward `Some`, which fails noisily and
-    ///   can never mask a mutation.
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag
+    /// `into_str_args` dropped and turn the round-trip test green. Those
+    /// fixtures use the values a developer running a local sidecar exports,
+    /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_SIDECAR_URL",

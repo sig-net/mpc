@@ -474,14 +474,13 @@ mod tests {
         );
     }
 
-    /// BINDING (B5): for the SAME 32 sender bytes, the string index-time
-    /// epsilon derivation feeds inside `to_sign_request` must be
-    /// byte-identical to the node side's `sender_string`. A divergence here
-    /// derives a DIFFERENT KEY with no error anywhere; the node's two impls
-    /// are pinned against each other above, but the index-time side is
-    /// unpinned without this. Agreement is asserted THROUGH the derivation:
-    /// re-deriving from the node's rendering must reproduce the epsilon the
-    /// conversion produced.
+    /// For the same 32 sender bytes, the string `to_sign_request` feeds into
+    /// epsilon at index time must be byte-identical to the node's
+    /// `sender_string`. A divergence derives a different key with no error
+    /// anywhere. The two node impls are pinned against each other above; the
+    /// index-time side is unpinned without this. Asserted through the
+    /// derivation: re-deriving from the node's rendering must reproduce the
+    /// epsilon the conversion produced.
     #[test]
     fn convert_and_node_agree_on_sender_string() {
         fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {

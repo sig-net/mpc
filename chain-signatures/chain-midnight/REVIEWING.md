@@ -39,7 +39,7 @@ The defence is the recompute-and-drop gate: `resolve_verified_record` at `src/re
 
 What to check, and this is the subtle part: `decode_record` (`src/reader.rs:113`) already takes the expected request id and uses it to choose between capacity splits that all decode cleanly, **falling back to the first clean decode when none matches**. So on the matching path the gate looks tautological, and someone will eventually propose deleting it. The fallback is why it is not: when no split matched, decode returned a guess, and the gate is the only thing between that guess and a signature.
 
-Verify the gate covers the fallback rather than trusting the comment. `recompute_gate_drops_spoofed` asserts in-test that `decode_record` *accepts* the spoofed filing before asserting the resolve drops it, which is what isolates the gate's own contribution. Without that precondition the test would pass whether the gate worked or decode rejected first, and only one of those verifies anything.
+Verify the gate covers the fallback rather than trusting the comment. `resolve_verified_record_drops_spoofed_filing` asserts in-test that `decode_record` *accepts* the spoofed filing before asserting the resolve drops it, which is what isolates the gate's own contribution. Without that precondition the test would pass whether the gate worked or decode rejected first, and only one of those verifies anything.
 
 Also look at `key_matches_request_id` (`src/reader.rs:301`). Map keys arrive trailing-zero-trimmed, so a key may be shorter than 32 bytes and has to be re-padded. Convince yourself two distinct request ids cannot re-pad to the same value.
 
@@ -73,9 +73,9 @@ Each fixture declares its provenance. Read the top-level keys:
 python3 -c "import json;d=json.load(open('tests/rid_vectors.json'));print({k:d[k] for k in d if k!='vectors'})"
 ```
 
-`tests/rid_vectors.json` and `tests/tx_vectors.json` both name `@sig-net/midnight 0.11.0` and the exact TypeScript function that produced them. `chain-signatures/crypto/tests/epsilon_vectors.json` does the same for the epsilon derivation. `tests/records/{5,20}-field.json` are captured contract state, and the sidecar's own committed golden output is what `state_node_parses_the_sidecars_own_golden` (`src/sidecar.rs`) parses.
+`tests/rid_vectors.json` and `tests/tx_vectors.json` both name `@sig-net/midnight 0.11.0` and the exact TypeScript function that produced them. `chain-signatures/crypto/tests/epsilon_vectors.json` does the same for the epsilon derivation. `tests/records/{5,20}-field.json` are captured contract state, and the sidecar's own committed golden output is what `state_node_parses_sidecar_golden` (`src/sidecar.rs`) parses.
 
-What to be suspicious of: any expected value that is hand-authored, any fixture without provenance metadata, and any test that computes its expected value by calling the same function it is testing. The last one is the easy mistake. For an example of the honest form, `state_node_parses_the_sidecars_own_golden` reads a file the *other* language committed, and the payload pin in `assert_sign_request` takes its expected hash from `tx_vectors.json` rather than recomputing it, with a comment saying why.
+What to be suspicious of: any expected value that is hand-authored, any fixture without provenance metadata, and any test that computes its expected value by calling the same function it is testing. The last one is the easy mistake. For an example of the honest form, `state_node_parses_sidecar_golden` reads a file the *other* language committed, and the payload pin in `assert_sign_request` takes its expected hash from `tx_vectors.json` rather than recomputing it, with a comment saying why.
 
 `tx_vectors.json` claims its records are byte-identical to the same-named entries in `rid_vectors.json`. That claim is checked in-test per vector before any transaction bytes are compared, so a regenerated fixture that drifted fails on the join rather than producing confusing byte mismatches.
 
@@ -87,15 +87,15 @@ Restore each one before the next, and confirm with `git diff` that you did.
 
 | break this | expect |
 |---|---|
-| make the gate at `reader.rs:281` always pass | `recompute_gate_drops_spoofed` fails |
-| derive epsilon from `record.sender` **and** delete the equality check at `convert.rs:62` | `read_address_mismatch_drops` fails |
+| make the gate at `reader.rs:281` always pass | `resolve_verified_record_drops_spoofed_filing` fails |
+| derive epsilon from `record.sender` **and** delete the equality check at `convert.rs:62` | `to_sign_request_rejects_read_address_mismatch` fails |
 | drop the `keccak` around the entropy in `convert.rs` | the full-chain oracle test fails |
 | iterate the calldata words vector's length instead of `no_words` in `tx.rs` | the ethers golden fails on `unused-word-slot`, and passes on `minimal-1word` |
 | swap `max_fee_per_gas` and `max_priority_fee_per_gas` in `tx.rs` | the ethers golden fails, because the vectors carry distinct fee values on purpose |
 | propagate the `Err` from `to_sign_request` at `indexer.rs:609` instead of dropping | no test fails today, and that is the answer to a different question: see the gaps below |
 | flip the watermark comparison at `indexer.rs` from `count < respondCount` to `>` | both watermark tests fail |
-| change `RESPOND_COUNTER_FIELD` (`indexer.rs:275`) from 2 to 4 | `pruned_mode_recovers_requests_via_watermark` fails |
-| revert `StateNode` to `#[serde(untagged)]` in `sidecar.rs` | four tests fail, including the cross-language golden |
+| change `RESPOND_COUNTER_FIELD` (`indexer.rs:275`) from 2 to 4 | `run_recovers_pruned_requests_via_watermark` fails |
+| revert `StateNode` to `#[serde(untagged)]` in `sidecar.rs` | the reader's captured-state goldens fail |
 
 That last row is worth understanding rather than just running. Field 2 is `respondCounterMap`, the phase-1 signature responses, which is what this indexer emits. Field 4 is `respondBidirectionalCounterMap`, the phase-2 execution outputs, which only exist after the destination-chain transaction has run. Using field 4 would re-emit every signed-but-not-yet-executed request on each degraded catchup. The contract's own comments settle which is which.
 
@@ -107,9 +107,9 @@ An honest list of the weakest points, so review effort goes where it pays.
 
 **The insert-only assumption.** The degraded catchup sets the processed block to the anchor after a watermark walk, and that is only safe because the notification map is append-only, so the latest state still contains every notification ever filed. That holds in the current contract, which contains no removal of any kind, but it is an assumption about contract evolution that no code can enforce. Re-check it on any `@sig-net/midnight` contract bump.
 
-**Nothing bounds a response size.** `resp.json::<StateNode>()` in `sidecar.rs` reads an unbounded body, and the state it decodes originates from a caller-controlled contract. There is an atom-count cap inside `decode_record` (`reader.rs:218`) that bounds the capacity enumeration's CPU, but it fires after every atom has been hex-decoded, so it does not bound allocation. No layer above it does either.
+**Nothing bounds a response size.** `resp.json::<StateNode>()` in `sidecar.rs` reads an unbounded body, and the state it decodes originates from a caller-controlled contract. There is an atom-count cap inside `decode_record` (`reader.rs`) that bounds the capacity enumeration's CPU, but it fires after every atom has been hex-decoded, so it does not bound allocation. No layer above it does either.
 
-**No test talks to a running sidecar.** The decode contract is pinned against the sidecar's committed golden output, which is genuinely better than a mock agreeing with itself, but no test boots the service and calls it over HTTP. `/respond` additionally needs a chain.
+**`/respond` is not exercised.** `tests/sidecar_live.rs` boots the real sidecar and drives the decode and health routes over HTTP, so those are covered end to end, but `/respond` needs a chain and is run on demand from `tests/respond-live.ts` instead.
 
 **Drop counters are log labels, not metrics.** `ChainTelemetry` has no counter hook, so every per-reason drop is a structured `WARN` with a machine-countable `reason` field. Fine for a log pipeline, not a dashboard. Deliberate and recorded, not an oversight.
 
@@ -118,7 +118,7 @@ An honest list of the weakest points, so review effort goes where it pays.
 ## Running it
 
 ```
-cargo test -p mpc-chain-midnight                                    # 73 tests, 1 ignored
+cargo test -p mpc-chain-midnight                                    # 71 tests, 1 ignored
 cargo test --workspace --exclude integration-tests --no-fail-fast   # 30 suites, 444 tests
 cargo clippy --tests -- -Dclippy::all
 cargo fmt --check
@@ -143,6 +143,6 @@ Worth knowing before filing them.
 
 **Counts, never lengths.** `no_words`, `access_list_entry_count` and `storage_key_count` decide what reaches the transaction; the stored vectors are capacity and may be longer. Three golden vectors deliberately assemble to the same transaction hash from different records to pin exactly this.
 
-**Provenance is advisory and must not gate signing.** The indexer tries to attribute a notification to a calling transaction, but a direct call to the notify entry point has no cross-contract-call frame at all, so requiring provenance would drop legitimate requests. `provenance_absent_still_signs` exists because this is the invariant a well-meaning contributor is most likely to "fix" into a fail-closed check.
+**Provenance is advisory and must not gate signing.** The indexer tries to attribute a notification to a calling transaction, but a direct call to the notify entry point has no cross-contract-call frame at all, so requiring provenance would drop legitimate requests. `process_entry_signs_without_provenance` exists because this is the invariant a well-meaning contributor is most likely to "fix" into a fail-closed check.
 
 **The empty atom is meaningful.** Atoms arrive trailing-zero-trimmed, so `""` is a legitimate zero value and a composite map key's first atom can vanish entirely. This is why map keys are arrays of per-atom hex rather than one joined string, and the sidecar's own captured golden shows a one-atom key and a two-atom key that concatenate identically.

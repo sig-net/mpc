@@ -230,15 +230,12 @@ mod tests {
         );
     }
 
-    /// BINDING (B5, finding M6): the const above appears at four sites and
-    /// only the epsilon fixture's copy is oracle-derived, so a rename of the
-    /// const together with the repo test literals would keep the suite green
-    /// while the node derived a response key no integrator could verify
-    /// against. This assert links the const to the `respond-response-key`
-    /// vector's `path`, anchoring it transitively to `@sig-net/midnight`
-    /// rather than to a second copy of itself. The routing test above uses
-    /// the literal on both sides deliberately and pins ROUTING, not the
-    /// string; it does not make this redundant.
+    /// The const appears at four sites and only the epsilon fixture's copy is
+    /// oracle-derived, so renaming it alongside the repo's test literals would
+    /// keep the suite green while the node derived a response key no integrator
+    /// could verify against. Anchoring it to the `respond-response-key` vector's
+    /// `path` ties it to `@sig-net/midnight` rather than to a copy of itself.
+    /// The routing test above pins routing, not the string.
     #[test]
     fn respond_path_const_matches_the_oracle_fixture() {
         let file: serde_json::Value =

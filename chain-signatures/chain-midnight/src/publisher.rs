@@ -5,20 +5,16 @@ use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 
 /// Posts MPC responses back to the Midnight central contract.
 ///
-/// The publish path is not built yet, so every attempt returns an error.
-/// That is not a bounded failure: `execute_publish` wraps publishers in an
-/// unbounded retry (`max_times: usize::MAX`, no overall timeout, delays
-/// capped at 60s), so an enabled Midnight publish becomes an immortal task
-/// retrying roughly once a minute forever, one warning per attempt, and the
-/// request never settles as published. Still the right trade: reporting
-/// success without posting would let the request settle as published.
+/// Not implemented. `execute_publish` retries publishers unboundedly, so an
+/// enabled Midnight publish retries forever instead of settling. That is
+/// preferable to reporting success without having posted anything.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightPublisher;
 
 #[async_trait]
 impl ChainPublisher for MidnightPublisher {
     async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
-        anyhow::bail!("midnight publisher not implemented (PR-4)")
+        anyhow::bail!("midnight publisher not implemented")
     }
 }
 

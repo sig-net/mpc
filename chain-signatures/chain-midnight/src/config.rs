@@ -3,9 +3,7 @@
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
 
-/// Timeouts and retry budget for the subxt node RPC client. The sidecar has its
-/// own budget in [`SidecarConfig`]: a node call slow enough to be a proving run
-/// is a fault, not a wait.
+/// Timeouts and retry budget for the subxt node RPC client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RpcConfig {
     /// Timeout for establishing the node WebSocket connection
@@ -31,17 +29,17 @@ impl Default for RpcConfig {
     }
 }
 
-/// Timeouts and retry budget for the `midnight-publisher-ts` sidecar. Kept
-/// apart from [`RpcConfig`] because the two have incomparable budgets: a
-/// sidecar call can be queued behind the single-dust-UTXO wallet, where a node
-/// RPC call slow enough to be a proving run is a fault rather than a wait.
+/// Timeouts and retry budget for the `midnight-publisher-ts` sidecar.
+///
+/// Separate from [`RpcConfig`] because the budgets are incomparable: a sidecar
+/// call can queue behind the single-dust-UTXO wallet, where a node RPC call
+/// slow enough to be a proving run is a fault rather than a wait.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SidecarConfig {
     /// Timeout for the decode and health routes, which do no proving
     pub request_timeout: Duration,
-    /// Retry strategy for sidecar calls. Slower and shorter than the node RPC
-    /// budget: a sidecar call can be queued behind the single-dust-UTXO wallet,
-    /// where retrying hard only deepens the contention
+    /// Slower and shorter than the node budget: retrying hard only deepens
+    /// wallet contention
     pub retry: RetryConfig,
 }
 
@@ -68,16 +66,10 @@ pub struct IndexerConfig {
     /// `finalized head - archive_probe_window`
     pub archive_probe_window: u64,
     /// Refuse to start when the startup probe finds the node pruned within
-    /// `archive_probe_window`. Off by default: the probe-and-degrade policy
-    /// logs loudly and falls back to watermark catchup instead of refusing.
+    /// `archive_probe_window`. Off by default: the probe degrades to watermark
+    /// catchup instead of refusing.
     ///
-    /// NOT currently settable through the CLI: `into_config` rebuilds the
-    /// tuning sub-structs from defaults, so a CLI-configured node always
-    /// runs with `false` and the strict-refusal path is reachable only when
-    /// constructing `MidnightConfig` directly. Pinned by
-    /// `tuning_fields_do_not_survive_the_cli_round_trip` in the node's CLI
-    /// args tests; growing a real flag flips that pin into a round-trip
-    /// assert
+    /// Has no CLI flag, so a CLI-configured node always runs with `false`.
     pub require_archive_state: bool,
     /// Capacity of the live-block channel
     pub live_block_buffer: usize,
@@ -99,9 +91,9 @@ impl Default for IndexerConfig {
 
 /// Midnight chain integration configuration. Supplying it is what turns the
 /// integration on; the node leaves Midnight unspawned when it is absent.
-/// Deliberately NOT `Default`: a defaulted config has empty endpoints, so
-/// any `unwrap_or_default()` on the gate would spawn a Midnight indexer
-/// pointed at nothing. Keeping the derive off makes that a compile error.
+///
+/// No `Default` impl on purpose: a defaulted config has empty endpoints, so
+/// `unwrap_or_default()` on the gate would spawn an indexer pointed at nothing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
     /// Base URL of the `midnight-publisher-ts` sidecar
@@ -118,12 +110,9 @@ pub struct MidnightConfig {
 }
 
 impl MidnightConfig {
-    /// Rejects endpoints that cannot work, before anything dials them.
-    ///
-    /// Dropping `Default` closed the accidental path to an empty config at
-    /// compile time; this closes the explicit one. An indexer built on an
-    /// unusable config would otherwise fail forever at runtime instead of
-    /// failing once, at construction, with the offending field named.
+    /// Rejects endpoints that cannot work, before anything dials them, so an
+    /// unusable config fails once at construction with the field named rather
+    /// than forever at runtime.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.node_ws_url.is_empty(),
@@ -140,12 +129,9 @@ impl MidnightConfig {
              got {} characters",
             self.central_address.len()
         );
-        // Lowercase is the canonical form, REQUIRED rather than normalised:
-        // the address flows verbatim into chain_ctx (B5) and is compared
-        // against sidecar-returned lowercase addresses in attribution (B6),
-        // so an uppercase config value would silently never match and
-        // misreport as missing provenance. Rejecting here keeps exactly one
-        // representation everywhere with no silent transform.
+        // Required rather than normalised: the address flows verbatim into
+        // chain_ctx and is compared against the sidecar's lowercase addresses
+        // during attribution, so an uppercase value would silently never match.
         anyhow::ensure!(
             !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
             "midnight config: central_address must be lowercase hex, the canonical form \
@@ -172,14 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn archive_probing_defaults_to_degrade_not_refuse() {
+    fn default_config_does_not_require_archive_state() {
         // Probe-and-degrade is the default policy: a pruned node logs loudly
         // and falls back to watermark catchup. Strict refusal is opt-in.
         assert!(!IndexerConfig::default().require_archive_state);
     }
 
     #[test]
-    fn validate_names_the_offending_field() {
+    fn validate_names_offending_field() {
         let mut empty_ws = valid_config();
         empty_ws.node_ws_url = String::new();
         let err = empty_ws.validate().unwrap_err().to_string();

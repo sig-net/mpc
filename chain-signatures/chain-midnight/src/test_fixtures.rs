@@ -1,13 +1,10 @@
-//! Test-only serde shims for deserializing fixture records: shared by the
-//! request-id golden tests and the reader golden tests. Byte fields are hex
-//! strings and wide integers are decimal strings, because a u128 does not
-//! survive a JSON number.
+//! Test-only serde shims for fixture records. Byte fields are hex strings and
+//! wide integers are decimal strings, since a u128 does not survive a JSON
+//! number.
 //!
-//! The definitions are serde `remote` shims: field names must match the
-//! record structs exactly and serde builds those structs directly, so no
-//! field can be mapped, renamed, or reordered on the way in.
-//! `deny_unknown_fields` closes the other direction: a fixture key with no
-//! matching field is an error rather than a silent drop.
+//! These are serde `remote` shims, so field names must match the record structs
+//! exactly and no field can be mapped or reordered on the way in.
+//! `deny_unknown_fields` closes the other direction.
 
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
@@ -19,14 +16,13 @@ use crate::records::{
 };
 use crate::sidecar::StateNode;
 
-/// Wire-form atoms of a record: each field trimmed exactly as the state
-/// layer stores it (trailing zeros dropped; a false Boolean is the
-/// EMPTY atom, a true one is [1]; integers are little-endian trimmed).
-/// Used to turn A4's oracle-produced records into decode INPUTS whose
-/// expected outputs and ids come from the same oracle fixture; only
-/// this trimming transform is local, and it is the documented wire
-/// rule, not a golden. Shared by the reader gate tests and the indexer
-/// run() fixtures.
+/// Wire-form atoms of a record, each field trimmed as the state layer stores it:
+/// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
+/// integers little-endian trimmed.
+///
+/// Turns oracle-produced records into decode inputs whose expected outputs and
+/// ids come from the same fixture. Only this trimming is local, and it is the
+/// documented wire rule rather than a golden.
 pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
     fn trim(bytes: &[u8]) -> Vec<u8> {
         let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);

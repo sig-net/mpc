@@ -1,17 +1,12 @@
 //! HTTP client for the `midnight-publisher-ts` sidecar, the pure codec seam.
 //!
-//! The sidecar decodes bytes; every trust decision stays on this side. A
-//! sidecar decode bug must be able to cause a dropped request, never a wrong
-//! signature: nothing returned by these routes is signed over without the
-//! Rust-side recompute-and-drop downstream.
+//! The sidecar decodes bytes; every trust decision stays on this side. A decode
+//! bug there must be able to drop a request, never to produce a wrong
+//! signature, which is what the Rust-side recompute-and-drop downstream buys.
 //!
-//! Wire-shape assumptions this client pins: the `/decode/*` request bodies
-//! (`{"state": hex}` and `{"transactions": [hex]}`), the `kind`-tagged JSON
-//! form of `StateNode`, and camelCase keys on `/health` only. They are pinned
-//! against the RUNNING sidecar in `tests/sidecar_live.rs`, which boots the
-//! in-tree `midnight-publisher-ts` and drives these routes over HTTP. Any
-//! divergence fails loudly in deserialization or in the sidecar's zod
-//! validation, never silently.
+//! Wire shapes pinned here: the `/decode/*` request bodies, the `kind`-tagged
+//! JSON form of [`StateNode`], and camelCase keys on `/health` only.
+//! `tests/sidecar_live.rs` checks them against the running service.
 
 use std::time::Duration;
 
@@ -29,32 +24,17 @@ const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
-/// Decoded contract state (`src/state.ts`), INTERNALLY TAGGED on `kind`
-/// exactly as the sidecar emits it (`{"kind":"cell","atoms":[..]}`,
-/// `{"kind":"null"}`).
+/// Decoded contract state, internally tagged on `kind` exactly as the sidecar
+/// emits it (`{"kind":"cell","atoms":[..]}`, `{"kind":"null"}`).
 ///
-/// Tagged rather than untagged, and the difference is not stylistic. An
-/// untagged enum matched cell/array/map only by accident, because serde
-/// ignores the unknown `kind` field, while `{"kind":"null"}` matched NO
-/// variant at all: a unit variant deserializes from bare JSON `null`, not
-/// from an object. Since the chunk tree is full of unset slots, that made
-/// every real response unparseable. Reading the discriminant the sender
-/// already provides also turns a future shape change into an error naming
-/// the variant instead of "data did not match any variant".
+/// Tagged rather than untagged, and not for style: an untagged enum matched
+/// cell/array/map only by accident, since serde ignores the unknown `kind`
+/// field, while `{"kind":"null"}` matched nothing at all, because a unit
+/// variant deserializes from bare JSON `null` rather than an object. The chunk
+/// tree is full of unset slots, so that made every real response unparseable.
 ///
-/// Map keys are the entry's atoms as an ARRAY of per-atom hex, boundaries
-/// preserved: D9's chosen resolution (option 1, atom-preserving keys), which
-/// exists precisely so a composite `SignetMapKey`'s variable trim point
-/// never needs guessing.
-///
-/// Three tests hold this, and none holds all of it:
-/// `state_node_parses_the_sidecars_own_golden` pins the tagged envelope and
-/// the atom-array keys against the sidecar's own committed golden output and
-/// needs no service to do it; `tests/sidecar_live.rs` reads both back off the
-/// RUNNING sidecar, `{"kind":"null"}` included, since the caller's captured
-/// state carries null nodes; and the `Null` variant is pinned offline by
-/// `reader::tests::golden_records_decode_from_captured_state`, because no
-/// committed publisher golden contains a null node.
+/// Map keys are per-atom hex in an array with boundaries preserved, so a
+/// composite `SignetMapKey`'s variable trim point never needs guessing.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StateNode {
@@ -79,17 +59,15 @@ pub struct MapEntry {
     pub value: StateNode,
 }
 
-/// Decoded transactions (`src/block.ts`). A `DecodedCall` has NO entry
-/// point: only the CLAIMED calls (caller side) carry one, the callee's own
-/// entry carries a commitment. The provenance join matches
-/// `claimed[i].commitment` on one call against `communication_commitment`
-/// on another call in the SAME transaction.
+/// Decoded transactions. A `DecodedCall` has no entry point: only the claimed
+/// calls on the caller side carry one, the callee's own entry carries a
+/// commitment. The provenance join matches `claimed[i].commitment` on one call
+/// against `communication_commitment` on another in the same transaction.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DecodedTransactions {
     pub transactions: Vec<DecodedTransaction>,
-    /// Per-item reasons the sidecar could not decode a submitted blob. Logged
-    /// by `LiveSource::decoded_transactions`, never fatal: provenance is
-    /// advisory, so a blob the sidecar cannot read must not stop signing.
+    /// Why the sidecar could not decode a submitted blob. Logged, never fatal:
+    /// provenance is advisory, so an unreadable blob must not stop signing.
     pub skipped: Vec<String>,
 }
 
@@ -162,10 +140,9 @@ pub struct SidecarClient {
 
 impl SidecarClient {
     pub fn new(config: &MidnightConfig) -> anyhow::Result<Self> {
-        // No global reqwest timeout: every call carries its own per-attempt
-        // timeout instead. Connecting is bounded separately, because without a
-        // connect timeout an unreachable sidecar burns a full per-attempt
-        // budget per attempt just dialing.
+        // No global timeout: each call carries its own per-attempt one.
+        // Connecting is bounded separately, or an unreachable sidecar burns a
+        // full per-attempt budget just dialing.
         let http = reqwest::Client::builder()
             .connect_timeout(config.sidecar.request_timeout)
             .build()
@@ -249,54 +226,59 @@ impl SidecarClient {
         })
     }
 
-    /// Startup compatibility gate: the sidecar must decode the ledger
-    /// versions this client was written against AND sit on the network this
-    /// node is configured for. Both mismatches are silent at decode time,
-    /// so both are checked here, once, loudly.
+    /// Startup gate: the sidecar must decode the ledger versions this client
+    /// was written against and sit on the network this node is configured for.
+    /// Both mismatches are silent at decode time, so both are checked here.
     pub async fn assert_compatible(&self) -> anyhow::Result<()> {
-        let health = self.health().await?;
-        anyhow::ensure!(
-            health.status == "ok",
-            "sidecar reports status {:?}, not \"ok\": refusing to start against a sidecar \
-             that says it is not serviceable",
-            health.status
-        );
-        anyhow::ensure!(
-            health.network_id == self.expected_network_id,
-            "sidecar networkId mismatch: sidecar is on {:?}, this node is configured for {:?}",
-            health.network_id,
-            self.expected_network_id
-        );
-        let pairs = [
-            (
-                "contractState",
-                &health.ledger.contract_state,
-                EXPECTED_CONTRACT_STATE_TAG,
-            ),
-            (
-                "zswapChainState",
-                &health.ledger.zswap_chain_state,
-                EXPECTED_ZSWAP_TAG,
-            ),
-            (
-                "ledgerParameters",
-                &health.ledger.ledger_parameters,
-                EXPECTED_LEDGER_PARAMETERS_TAG,
-            ),
-            (
-                "transaction",
-                &health.ledger.transaction,
-                EXPECTED_TRANSACTION_TAG,
-            ),
-        ];
-        for (name, actual, expected) in pairs {
-            anyhow::ensure!(
-                actual == expected,
-                "sidecar ledger tag mismatch on {name}: sidecar decodes {actual:?}, this client was written against {expected:?}"
-            );
-        }
-        Ok(())
+        check_health(&self.health().await?, &self.expected_network_id)
     }
+}
+
+/// The pure half of the startup gate, split out so the rejection paths are
+/// testable without a service: a healthy sidecar only ever exercises the
+/// passing side.
+fn check_health(health: &Health, expected_network_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        health.status == "ok",
+        "sidecar reports status {:?}, not \"ok\": refusing to start against a sidecar \
+         that says it is not serviceable",
+        health.status
+    );
+    anyhow::ensure!(
+        health.network_id == expected_network_id,
+        "sidecar networkId mismatch: sidecar is on {:?}, this node is configured for {:?}",
+        health.network_id,
+        expected_network_id
+    );
+    let pairs = [
+        (
+            "contractState",
+            &health.ledger.contract_state,
+            EXPECTED_CONTRACT_STATE_TAG,
+        ),
+        (
+            "zswapChainState",
+            &health.ledger.zswap_chain_state,
+            EXPECTED_ZSWAP_TAG,
+        ),
+        (
+            "ledgerParameters",
+            &health.ledger.ledger_parameters,
+            EXPECTED_LEDGER_PARAMETERS_TAG,
+        ),
+        (
+            "transaction",
+            &health.ledger.transaction,
+            EXPECTED_TRANSACTION_TAG,
+        ),
+    ];
+    for (name, actual, expected) in pairs {
+        anyhow::ensure!(
+            actual == expected,
+            "sidecar ledger tag mismatch on {name}: sidecar decodes {actual:?}, this client was written against {expected:?}"
+        );
+    }
+    Ok(())
 }
 
 /// Surfaces a non-2xx sidecar response with its `{code, message, stage,
@@ -322,93 +304,71 @@ async fn check_response(
     anyhow::bail!("sidecar {context} failed: {status}: {text}");
 }
 
-/// Four tests, and the reason each one is not in `tests/sidecar_live.rs`.
-///
-/// The decode and health CONTRACTS are covered there, against the running
-/// service: it boots `midnight-publisher-ts` and drives these routes over
-/// HTTP, so the request keys are read by the SERVER, the trees are its own
-/// decoder's output over real captured chain blobs, and `bad_request`,
-/// `decode_failed` and `ledger_mismatch` are its own answers rather than
-/// bodies this crate wrote. Five mocks that pinned those were deleted, each
-/// only after the live test was shown to kill every mutation the mock killed.
-///
-/// What is left is what a live suite cannot reach.
-/// `state_node_parses_the_sidecars_own_golden` needs no service at all and so
-/// is the cross-language check that survives in `unit.yml`, where the
-/// sidecar's dependencies are not installed. The other three ask for answers
-/// a healthy service does not give: a 500, a ledger tag other than its own,
-/// and a status that is not `"ok"`.
-/// Simulating a fault is honest; simulating a decode answer is not, and that
-/// is the line this module now draws.
+/// The offline cross-language check plus the startup gate's rejection paths.
+/// Everything the sidecar actually answers is covered against the running
+/// service in `tests/sidecar_live.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
-    use mpc_chain_integration_core::utils::retry::RetryConfig;
-    use serde_json::json;
-    use std::time::Duration;
 
-    /// Config pointed at a mockito server, with a fast retry budget so the
-    /// retry tests run in milliseconds.
-    fn test_config(sidecar_url: &str) -> MidnightConfig {
-        MidnightConfig {
-            sidecar_url: sidecar_url.to_string(),
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
-            central_address: "ab".repeat(32),
+    fn healthy() -> Health {
+        Health {
+            status: "ok".to_string(),
             network_id: "undeployed".to_string(),
-            rpc: RpcConfig::default(),
-            sidecar: SidecarConfig {
-                request_timeout: Duration::from_secs(5),
-                retry: RetryConfig {
-                    min_delay: Duration::from_millis(1),
-                    max_delay: Duration::from_millis(2),
-                    max_times: 2,
-                    jitter: false,
-                },
+            ledger: LedgerTags {
+                contract_state: EXPECTED_CONTRACT_STATE_TAG.to_string(),
+                zswap_chain_state: EXPECTED_ZSWAP_TAG.to_string(),
+                ledger_parameters: EXPECTED_LEDGER_PARAMETERS_TAG.to_string(),
+                transaction: EXPECTED_TRANSACTION_TAG.to_string(),
             },
-            indexer: IndexerConfig::default(),
         }
     }
 
-    fn healthy_body(network_id: &str, contract_state_tag: &str) -> serde_json::Value {
-        json!({
-            "status": "ok",
-            "networkId": network_id,
-            "ledger": {
-                "contractState": contract_state_tag,
-                "zswapChainState": "midnight:zswap-ledger-state[v5]",
-                "ledgerParameters": "midnight:ledger-parameters[v8]",
-                "transaction": "midnight:transaction[v12]",
-            },
-        })
+    #[test]
+    fn check_health_accepts_a_matching_sidecar() {
+        check_health(&healthy(), "undeployed").expect("a matching sidecar passes the gate");
     }
 
-    /// The sidecar's OWN golden output, parsed by this client's types.
-    ///
-    /// Every other test here answers a mock whose body this crate wrote, so it
-    /// can only prove the client agrees with itself. This one reads the file
-    /// `midnight-publisher-ts` commits as the frozen output of its real decoder
-    /// over a real captured chain blob, which makes it the only cross-language
-    /// check in the crate. Three live mismatches got in behind mocks that
-    /// agreed with themselves: a `{"state":..}` body the server read as
-    /// `bytes`, and `kind`-tagged nodes this enum tried to read untagged.
-    ///
-    /// It needs no running sidecar, so it is an ordinary unit test rather than
-    /// an ignored integration one.
-    ///
-    /// What it does NOT cover, measured rather than assumed: this capture holds
-    /// only `array`, `map` and `cell` nodes, so reverting the enum to
-    /// `untagged` leaves this test PASSING (untagged simply ignores the unknown
-    /// `kind`). The `Null` variant is the one that made every real response
-    /// unparseable, and `reader::tests::golden_records_decode_from_captured_state`
-    /// is what catches that, on captured state that does contain nulls. The
-    /// small literal below covers it here too, transcribed from `state.ts`'s
-    /// own type rather than captured, since no committed golden supplies one.
     #[test]
-    fn state_node_parses_the_sidecars_own_golden() {
-        // `{ readonly kind: "null" }` per the sidecar's `StateNode` union. A
-        // unit variant would need bare JSON `null`, which is the mismatch that
-        // broke every response containing an unset ledger slot.
+    fn check_health_rejects_unserviceable_status() {
+        let mut health = healthy();
+        health.status = "degraded".to_string();
+        let err = check_health(&health, "undeployed")
+            .expect_err("a sidecar that says it is not serviceable must fail startup")
+            .to_string();
+        assert!(err.contains("degraded"), "status must be named: {err}");
+    }
+
+    #[test]
+    fn check_health_rejects_network_id_mismatch() {
+        let err = check_health(&healthy(), "testnet")
+            .expect_err("a sidecar on another network must fail startup")
+            .to_string();
+        assert!(err.contains("networkId"), "unexpected error: {err}");
+        assert!(err.contains("testnet"), "expected network named: {err}");
+    }
+
+    #[test]
+    fn check_health_rejects_ledger_tag_mismatch() {
+        let mut health = healthy();
+        health.ledger.contract_state = "midnight:contract-state[v9]".to_string();
+        let err = check_health(&health, "undeployed")
+            .expect_err("a contractState tag mismatch must fail startup")
+            .to_string();
+        assert!(err.contains("contractState"), "unexpected error: {err}");
+        assert!(err.contains("v9"), "the actual tag must be named: {err}");
+    }
+
+    /// Parses the golden output `midnight-publisher-ts` commits from its real
+    /// decoder over a captured chain blob, so neither side of the contract is
+    /// authored by the side it is checked against. Needs no running service,
+    /// which is what keeps it in `unit.yml`.
+    ///
+    /// The capture holds only `array`, `map` and `cell` nodes, so it does not
+    /// by itself catch a revert to `untagged`; the literal below covers the
+    /// `Null` variant that made every real response unparseable.
+    #[test]
+    fn state_node_parses_sidecar_golden() {
         assert_eq!(
             serde_json::from_str::<StateNode>(r#"{"kind":"null"}"#).expect("null node parses"),
             StateNode::Null
@@ -424,18 +384,13 @@ mod tests {
             panic!("the singleton's state root is an array of ledger fields, got {tree:?}");
         };
 
-        // Field 0 is `signBidirectionalEventNotificationCounterMap`, keyed by a
-        // single `RequestId` atom. Field 1 is
-        // `signBidirectionalEventNotificationMap`, keyed by the composite
+        // Field 0's key is a single `RequestId` atom; field 1's is the composite
         // `SignetMapKey { count, requestId }` whose `count` of 0 trims to the
-        // EMPTY atom.
-        //
-        // This capture is why D9's joined key was unusable rather than merely
-        // inconvenient: both of these keys concatenate to the same 64-character
-        // hex run, so before the atoms were kept apart a consumer could not
-        // tell a one-atom key from a two-atom key whose first atom vanished.
-        // Recovering a request id from field 1, which the indexer's diff must
-        // do, was impossible. Real captured chain data, not a constructed case.
+        // empty atom. Both concatenate to the same 64-character hex run, which
+        // is why keys must stay per-atom: joined, a consumer cannot tell a
+        // one-atom key from a two-atom key whose first atom vanished, and the
+        // indexer's diff could not recover a request id from field 1. Real
+        // captured chain data, not a constructed case.
         let key_of = |field: usize| -> Vec<String> {
             let StateNode::Map { entries } = &children[field] else {
                 panic!("ledger field {field} is a map in this capture");
@@ -466,91 +421,5 @@ mod tests {
             "the two structurally different keys concatenate identically, which \
              is exactly the ambiguity the atom array removes"
         );
-    }
-
-    #[tokio::test]
-    async fn assert_compatible_rejects_a_ledger_tag_mismatch() {
-        let mut server = mockito::Server::new_async().await;
-        let _mock = server
-            .mock("GET", "/health")
-            .with_status(200)
-            .with_body(healthy_body("undeployed", "midnight:contract-state[v9]").to_string())
-            .create_async()
-            .await;
-
-        let client = SidecarClient::new(&test_config(&server.url())).expect("client");
-        let err = client
-            .assert_compatible()
-            .await
-            .expect_err("a contractState tag mismatch must fail startup")
-            .to_string();
-        assert!(err.contains("contractState"), "unexpected error: {err}");
-        assert!(err.contains("v9"), "the actual tag must be named: {err}");
-    }
-
-    #[tokio::test]
-    async fn assert_compatible_rejects_a_sidecar_that_says_it_is_not_serviceable() {
-        // The same family as the tag mismatch: a fault a healthy service will
-        // not produce on demand, so the live suite reaches the gate only from
-        // the passing side. Without this, DELETING the status check breaks no
-        // test at all.
-        let mut server = mockito::Server::new_async().await;
-        let mut body = healthy_body("undeployed", "midnight:contract-state[v8]");
-        body["status"] = json!("degraded");
-        let _mock = server
-            .mock("GET", "/health")
-            .with_status(200)
-            .with_body(body.to_string())
-            .create_async()
-            .await;
-
-        let client = SidecarClient::new(&test_config(&server.url())).expect("client");
-        let err = client
-            .assert_compatible()
-            .await
-            .expect_err("a sidecar that says it is not serviceable must fail startup")
-            .to_string();
-        assert!(
-            err.contains("degraded"),
-            "the reported status must be named: {err}"
-        );
-    }
-
-    /// The one mock kept for what it simulates rather than for what it
-    /// answers, and the only test of recovery: a failed attempt followed by a
-    /// successful one.
-    ///
-    /// A healthy sidecar cannot be asked to produce this. `internal` has two
-    /// producers over there, a client that hangs up mid-body (where no reply
-    /// can be delivered) and `/respond`'s six-minute deadline, so 500 is a
-    /// status the live suite cannot reach at all. Classifying it terminal is
-    /// survived by every live test and fails only this one. The live suite does
-    /// cover the loop half on real answers: a real 422 spends the whole budget
-    /// against the real service.
-    #[tokio::test]
-    async fn retries_a_500_then_succeeds() {
-        let mut server = mockito::Server::new_async().await;
-        // First attempt fails, second succeeds; expect(1) on each mock is
-        // the attempt-count assertion.
-        let fail = server
-            .mock("GET", "/health")
-            .with_status(500)
-            .with_body("Internal Server Error")
-            .expect(1)
-            .create_async()
-            .await;
-        let ok = server
-            .mock("GET", "/health")
-            .with_status(200)
-            .with_body(healthy_body("undeployed", "midnight:contract-state[v8]").to_string())
-            .expect(1)
-            .create_async()
-            .await;
-
-        let client = SidecarClient::new(&test_config(&server.url())).expect("client");
-        let health = client.health().await.expect("retry must recover");
-        assert_eq!(health.network_id, "undeployed");
-        fail.assert_async().await;
-        ok.assert_async().await;
     }
 }

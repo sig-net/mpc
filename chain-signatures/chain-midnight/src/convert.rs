@@ -1,19 +1,16 @@
 //! Conversion of a verified record into the chain-agnostic
 //! [`IndexedSignRequest`] the signing pipeline consumes.
 //!
-//! The security-critical rule of this module: epsilon's requester comes from
-//! the address the record was READ FROM, never from `record.sender`. A
-//! caller controls every byte of the record and the map key in its own
-//! ledger, so the request-id gate proves internal consistency and says
-//! nothing about whether `sender` names the true caller; deriving from
+//! The security-critical rule: epsilon's requester comes from the address the
+//! record was read from, never from `record.sender`. A caller controls every
+//! byte of its own ledger, so the request-id gate proves internal consistency
+//! and says nothing about whether `sender` names the true caller. Deriving from
 //! record bytes would let a caller write another contract's address into
-//! `sender` and obtain a signature under that contract's derived key. The
-//! two are asserted equal and a mismatch drops the request.
+//! `sender` and sign under that contract's key. The two are asserted equal.
 //!
-//! The signing payload is built ONLY via [`crate::tx::serialized_transaction`],
-//! which routes through `to_unsigned_tx` and therefore inherits B5a's two
-//! record-level gates (the eip155 caip2 agreement and the `tx_param_type`
-//! check). Nothing here re-implements or bypasses them.
+//! The payload is built only via [`crate::tx::serialized_transaction`], which
+//! routes through `to_unsigned_tx` and so inherits its caip2 and
+//! `tx_param_type` gates. Nothing here reimplements or bypasses them.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_chain_integration_core::utils::hashing::hash_payload;
@@ -29,9 +26,8 @@ const ALGO_ECDSA: u8 = 0;
 /// `MPCDestination::unused`, the only real variant (1 is reserved).
 const DEST_UNUSED: u8 = 0;
 
-/// Chain context carried through the request for the respond path: the
-/// central singleton contract the response must be posted to. Mirrors
-/// `CantonChainCtx` (`chain-canton/src/signing.rs`), Borsh-encoded like it.
+/// Chain context carried through the request for the respond path: the central
+/// singleton the response must be posted to. Mirrors `CantonChainCtx`.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "borsh")]
 pub struct MidnightChainCtx {
@@ -42,13 +38,11 @@ pub struct MidnightChainCtx {
 /// Converts a verified record into the [`IndexedSignRequest`] the signing
 /// pipeline consumes (kind `SignBidirectional`).
 ///
-/// `read_address` is the caller-contract address the record was READ FROM
-/// (the notification's raw 32 bytes), and it, never `record.sender`, is
-/// what the epsilon requester is rendered from; the two are asserted equal
-/// and a mismatch drops the request. Taking bytes rather than a string
-/// keeps exactly ONE render site (`hex::encode`, lowercase unprefixed),
-/// pinned against the node side's `sender_string` by the parity test in
-/// `node/src/sign_bidirectional.rs`.
+/// `read_address` is the caller-contract address the record was read from, the
+/// notification's raw 32 bytes, and it rather than `record.sender` is what the
+/// epsilon requester is rendered from. Taking bytes rather than a string keeps
+/// exactly one render site, lowercase unprefixed hex, pinned against the node's
+/// `sender_string` by the parity test in `node/src/sign_bidirectional.rs`.
 pub fn to_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
@@ -56,8 +50,8 @@ pub fn to_sign_request(
     request_id: [u8; 32],
     indexed_ts: u64,
 ) -> anyhow::Result<IndexedSignRequest> {
-    // The security gate, first: `sender` is caller-controlled record data,
-    // so it may only CONFIRM the read address, never substitute for it.
+    // The security gate, first: `sender` is caller-controlled record data, so
+    // it may only confirm the read address, never substitute for it.
     anyhow::ensure!(
         record.sender == *read_address,
         "record sender {} does not match the address it was read from {}: dropping the request",
@@ -83,21 +77,19 @@ pub fn to_sign_request(
     let caip2_id = render_padded_ascii(&record.caip2_id, "caip2_id")?;
     let params = render_padded_ascii(&record.params, "params")?;
 
-    // The payload comes ONLY from B5a's gated path: `serialized_transaction`
-    // routes through `to_unsigned_tx`, inheriting the caip2 agreement and
-    // tx_param_type gates. Building it any other way would bypass them.
+    // Only via the gated path: `serialized_transaction` routes through
+    // `to_unsigned_tx` and inherits its gates. Any other route bypasses them.
     let serialized = serialized_transaction(record)?;
     let payload = payload_scalar(&serialized)?;
 
-    // The one render of the requester. The node side re-renders the event's
-    // sender with the same `hex::encode` in `sender_string`; the parity test
-    // pins the two against each other through the derivation.
+    // The one render of the requester. The node re-renders the event's sender
+    // with the same `hex::encode`; the parity test pins the two through the
+    // derivation.
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path);
     let entropy = hash_payload(&request_id);
-    // central_address is carried VERBATIM, and verbatim is canonical: B6's
-    // decision made validate() REJECT non-lowercase central addresses, so
-    // exactly one representation reaches every comparison site and no
+    // Verbatim is canonical: `validate()` rejects non-lowercase central
+    // addresses, so one representation reaches every comparison site and no
     // normalisation belongs here.
     let chain_ctx = Some(
         borsh::to_vec(&MidnightChainCtx {
@@ -135,19 +127,13 @@ pub fn to_sign_request(
     ))
 }
 
-/// The `pad(N, "text")` convention every string-ish record field uses:
-/// trailing NULs are padding and are trimmed; what remains must be UTF-8
-/// with no interior NULs, else the request fails loudly with the field
-/// named.
+/// The `pad(N, "text")` convention every string-ish record field uses: trailing
+/// NULs are padding and are trimmed, and what remains must be UTF-8 with no
+/// interior NULs.
 ///
-/// Decision D2, CLOSED, for `path` specifically: render it as NUL-trimmed
-/// ASCII, failing closed. Never lossy, never a hex fallback, never content
-/// sniffing: if the contract team later moves to raw identity-commitment
-/// paths, those bytes are not valid UTF-8 and the node errors visibly
-/// instead of silently deriving a different key. The chosen rendering is
-/// anchored by the only executed derivation in the ecosystem (the caller
-/// e2e stores `asciiPadded("caller-path", 32)` and derives from the literal
-/// `"caller-path"`), pinned by the A9 epsilon golden.
+/// Fails closed, never lossy and never a hex fallback. If the contract team
+/// moves to raw identity-commitment paths those bytes are not valid UTF-8, and
+/// the node must error visibly rather than silently derive a different key.
 fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
     let trimmed_len = bytes.len() - bytes.iter().rev().take_while(|byte| **byte == 0).count();
     let trimmed = &bytes[..trimmed_len];
@@ -168,10 +154,9 @@ mod tests {
     use mpc_chain_integration_core::utils::hashing::hash_payload;
     use mpc_primitives::{Chain, SignId, SignKind};
 
-    /// The A9 oracle fixture: the `e2e-caller-path` vector is the only
-    /// end-to-end proven Midnight derivation in the ecosystem, and this
-    /// record is built to its exact `(sender, path)` so the full
-    /// record-to-epsilon chain pins against the oracle scalar.
+    /// Oracle fixture. `e2e-caller-path` is the only end-to-end proven Midnight
+    /// derivation in the ecosystem, and the record below is built to its exact
+    /// `(sender, path)`, so the whole record-to-epsilon chain pins against it.
     const EPSILON_VECTORS_JSON: &str = include_str!("../../crypto/tests/epsilon_vectors.json");
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
@@ -250,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_epsilon_and_args_match_the_oracle() {
+    fn to_sign_request_matches_epsilon_oracle() {
         let record = caller_record();
         let request = to_sign_request(
             &record,
@@ -261,9 +246,9 @@ mod tests {
         )
         .expect("the caller record converts");
 
-        // The absolute anchor: this record was built to the oracle vector's
-        // exact (sender, path), so the epsilon out of the FULL chain must be
-        // the TS-generated scalar, not merely self-consistent.
+        // The record was built to the vector's exact (sender, path), so the
+        // epsilon out of the full chain must be the TS-generated scalar rather
+        // than merely self-consistent.
         let (sender, path, epsilon_be) = epsilon_vector("e2e-caller-path");
         assert_eq!(
             sender,
@@ -295,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn every_event_field_maps_per_the_table() {
+    fn to_sign_request_maps_every_event_field() {
         let record = caller_record();
         let request = to_sign_request(
             &record,
@@ -312,7 +297,7 @@ mod tests {
         assert_eq!(
             event.serialized_transaction,
             serialized_transaction(&record).expect("assembles"),
-            "the payload comes from B5a's gated path"
+            "the payload comes from the gated assembly path"
         );
         assert_eq!(event.caip2_id, "eip155:31337");
         assert_eq!(event.key_version, 1);
@@ -342,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn read_address_mismatch_drops() {
+    fn to_sign_request_rejects_read_address_mismatch() {
         // The security gate: a record whose `sender` differs from the
         // address it was read from must be dropped, because `sender` is
         // caller-controlled and the derived key space follows the requester.
@@ -364,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_enums_and_bad_key_versions_are_rejected() {
+    fn to_sign_request_rejects_reserved_enums_and_key_versions() {
         let mut record = caller_record();
         record.algo = 1;
         let err = to_sign_request(
@@ -419,11 +404,11 @@ mod tests {
     }
 
     #[test]
-    fn path_render_fails_closed() {
-        // D2's contract: NUL-trimmed ASCII, never lossy, never a hex
-        // fallback. If the contract team moves to raw identity-commitment
-        // paths those bytes are not valid UTF-8, and the node must error
-        // visibly instead of silently deriving a different key.
+    fn render_padded_ascii_rejects_non_utf8_path() {
+        // NUL-trimmed ASCII, never lossy and never a hex fallback. If the
+        // contract team moves to raw identity-commitment paths those bytes are
+        // not valid UTF-8, and the node must error visibly instead of silently
+        // deriving a different key.
         assert_eq!(
             render_padded_ascii(&ascii_padded::<32>(b"caller-path"), "path")
                 .expect("ascii renders"),
@@ -447,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_ascii_fields_fail_closed_uniformly() {
+    fn render_padded_ascii_rejects_every_malformed_field() {
         // caip2_id and params follow the same pad(N, "text") convention as
         // path (constants.ts documents it for every string-ish field), so
         // they render through the same fail-closed rule, each named in its

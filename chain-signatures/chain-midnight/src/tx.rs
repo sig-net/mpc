@@ -1,19 +1,16 @@
 //! EVM type-2 transaction assembly and the signing payload scalar.
 //!
-//! The node does not sign the record; it signs a transaction. This module
-//! is the canonical request-to-transaction transform, a port of
+//! The node signs a transaction, not the record. This is the canonical
+//! request-to-transaction transform, a port of
 //! `signBidirectionalEventToUnsignedEvmTransaction` plus `assembleCalldata`
-//! (`signet-evtype2tx-requests.ts:343-412` in `@sig-net/midnight`), the same
-//! step Canton performs in `chain-canton/src/signing.rs`.
+//! in `@sig-net/midnight`, and the step Canton performs in
+//! `chain-canton/src/signing.rs`.
 //!
-//! The one rule that matters here: the COUNT fields decide what is real,
-//! never the vector lengths. A record whose capacity is entirely unused is
-//! provably capacity-ambiguous on the wire (several splits share one
-//! request id), so `words.len()`, `access_list.len()` and
-//! `storage_keys.len()` are recovered capacity that two honest readers can
-//! legitimately disagree about; `no_words`, `access_list_entry_count` and
-//! each entry's `storage_key_count` are the only authoritative quantities,
-//! and only they reach the transaction.
+//! The rule that matters here: counts decide what is real, never vector
+//! lengths. A record with unused capacity is capacity-ambiguous on the wire, so
+//! `words.len()` and friends are recovered capacity two honest readers can
+//! disagree about. Only `no_words`, `access_list_entry_count` and each entry's
+//! `storage_key_count` are authoritative, and only they reach the transaction.
 
 use alloy::consensus::{SignableTransaction as _, TxEip1559};
 use alloy::eips::eip2930::{AccessList, AccessListItem};
@@ -31,11 +28,8 @@ const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
 impl TryFrom<&EvmType2TxParams> for TxEip1559 {
     type Error = anyhow::Error;
 
-    /// The pure params-to-transaction transform, mirroring both
-    /// `signBidirectionalEventToUnsignedEvmTransaction`
-    /// (`signet-evtype2tx-requests.ts:390-412`) and Canton's `TryFrom` in
-    /// `chain-canton/src/signing.rs`. Envelope fields pass straight
-    /// through; the contract's `to` is a fixed `Bytes<20>`, so there is no
+    /// The pure params-to-transaction transform. Envelope fields pass straight
+    /// through; `to` is a fixed `Bytes<20>` in the contract, so there is no
     /// create form and the kind is always `Call`.
     fn try_from(params: &EvmType2TxParams) -> anyhow::Result<Self> {
         Ok(Self {
@@ -54,12 +48,10 @@ impl TryFrom<&EvmType2TxParams> for TxEip1559 {
 
 /// Assembles the unsigned EIP-1559 transaction a verified record describes.
 ///
-/// Beyond the pure `TryFrom` transform this enforces two record-level
-/// consistency gates the TS transform does not need, because it dispatches
-/// through typed decode: `tx_param_type` must be the evmType2 discriminant,
-/// and `caip2_id`, the routing label, must agree with `tx_params.chain_id`
-/// whenever it names an eip155 chain. A record that routes to one chain
-/// and signs for another is refused here rather than signed.
+/// Adds two record-level gates the TS transform gets for free from its typed
+/// decode: `tx_param_type` must be the evmType2 discriminant, and `caip2_id`
+/// must agree with `tx_params.chain_id` when it names an eip155 chain. A record
+/// that routes to one chain and signs for another is refused, not signed.
 pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1559> {
     anyhow::ensure!(
         record.tx_param_type == TX_PARAM_TYPE_EVM_TYPE2,
@@ -77,9 +69,8 @@ pub fn serialized_transaction(record: &SignBidirectionalRecord) -> anyhow::Resul
     Ok(to_unsigned_tx(record)?.encoded_for_signing())
 }
 
-/// The scalar the MPC signs: `keccak256(serialized)` read as a field
-/// element, bailing when the hash falls outside the curve order, exactly
-/// as Canton does (`chain-canton/src/signing.rs:117-121`).
+/// The scalar the MPC signs: `keccak256(serialized)` as a field element,
+/// bailing when the hash falls outside the curve order, as Canton does.
 pub fn payload_scalar(serialized: &[u8]) -> anyhow::Result<Scalar> {
     let unsigned_tx_hash = hash_payload(serialized);
     let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
@@ -88,19 +79,15 @@ pub fn payload_scalar(serialized: &[u8]) -> anyhow::Result<Scalar> {
     Ok(payload)
 }
 
-/// `data = selector ‖ words[..no_words]` when present, empty otherwise.
+/// `data = selector || words[..no_words]` when present, empty otherwise.
 ///
-/// Ports `assembleCalldata` (`signet-evtype2tx-requests.ts:343-353`)
-/// including its failure mode: the reference indexes `words[i]` for
-/// `i < noWords` and THROWS when the count overruns the stored slots, so a
-/// record with `no_words > words.len()` is an error here, never a clamp
-/// and never zero-fill. `no_words` alone decides how many words are real;
-/// the vector length appears only as the overrun bound the reference also
-/// has, never as a word count.
+/// Ports `assembleCalldata` including its failure mode: the reference throws
+/// when the count overruns the stored slots, so `no_words > words.len()` is an
+/// error here, never a clamp and never zero-fill. The vector length appears
+/// only as that overrun bound, never as a word count.
 ///
-/// D8's distinction holds: an empty `Maybe` yields NO bytes at all, while
-/// a present calldata with `no_words = 0` yields the four selector bytes
-/// alone. The two are different transactions with different hashes.
+/// An empty `Maybe` yields no bytes at all; a present calldata with
+/// `no_words = 0` yields the four selector bytes. Different transactions.
 fn assemble_calldata(calldata: &CompactMaybe<EvmCalldata>) -> anyhow::Result<Bytes> {
     if !calldata.is_some {
         return Ok(Bytes::new());
@@ -120,13 +107,10 @@ fn assemble_calldata(calldata: &CompactMaybe<EvmCalldata>) -> anyhow::Result<Byt
     Ok(Bytes::from(data))
 }
 
-/// The count-trimmed access list, per `decodeAccessList`
-/// (`signet-evtype2tx-requests.ts:361-380`). The reference uses
-/// `.slice(0, count)` at both levels, which CLAMPS when a count exceeds
-/// the stored slots; `take` preserves that, deliberately asymmetric with
-/// the calldata path's overrun error, because that is what the reference
-/// does. `access_list_entry_count` and each entry's `storage_key_count`
-/// decide what is real; the vector lengths never do.
+/// The count-trimmed access list, per `decodeAccessList`. The reference slices
+/// at both levels, which clamps when a count exceeds the stored slots, and
+/// `take` preserves that. Deliberately asymmetric with the calldata path's
+/// overrun error, because the reference is.
 fn assemble_access_list(params: &EvmType2TxParams) -> AccessList {
     AccessList(
         params
@@ -149,13 +133,11 @@ fn assemble_access_list(params: &EvmType2TxParams) -> AccessList {
 /// Rejects a record whose `caip2_id` names an eip155 chain other than
 /// `tx_params.chain_id`.
 ///
-/// The label is NUL-trimmed ASCII (the contract's `pad(32, ...)`
-/// convention). A label in another namespace, or one that is not UTF-8 at
-/// all, expresses no eip155 opinion and passes: routing it is a later
-/// layer's concern. A label that CLAIMS the eip155 namespace but does not
-/// parse as `eip155:<decimal u64>` can only be corrupt and is rejected
-/// rather than ignored, keeping this gate fail-closed within the namespace
-/// it covers.
+/// The label is NUL-trimmed ASCII, the contract's `pad(32, ...)` convention. A
+/// label in another namespace, or one that is not UTF-8, expresses no eip155
+/// opinion and passes; routing it belongs to a later layer. One that claims the
+/// namespace but does not parse as `eip155:<decimal u64>` can only be corrupt,
+/// so it is rejected rather than ignored.
 fn ensure_caip2_agrees(caip2_id: &[u8; 32], chain_id: u64) -> anyhow::Result<()> {
     let trimmed_len = 32 - caip2_id.iter().rev().take_while(|byte| **byte == 0).count();
     let Ok(label) = std::str::from_utf8(&caip2_id[..trimmed_len]) else {
@@ -192,8 +174,8 @@ mod tests {
     }
 
     /// One oracle vector. The `tx_fields_ethers_sees` debugging view and the
-    /// file-level provenance keys are deliberately not modelled: the byte
-    /// expectations are the assertions.
+    /// file-level provenance keys are not modelled; the bytes are the
+    /// assertions.
     #[derive(Deserialize)]
     struct TxVector {
         name: String,
@@ -220,10 +202,10 @@ mod tests {
             .vectors
     }
 
-    /// The record a tx vector describes, joined by name: the anchor
-    /// guarantees the records are byte-identical to the same-named
-    /// `rid_vectors.json` entries, and the request-id assertion in the
-    /// golden test proves the join per vector.
+    /// The record a tx vector describes, joined by name. `tx_vectors.json`
+    /// claims its records are byte-identical to the same-named
+    /// `rid_vectors.json` entries; the golden test proves that per vector by
+    /// asserting the request id before comparing any transaction bytes.
     fn record_by_name(name: &str) -> SignBidirectionalRecord {
         serde_json::from_str::<RidVectorFile>(RID_VECTORS_JSON)
             .expect("rid_vectors.json parses")
@@ -246,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn golden_assembly_matches_the_ethers_oracle() {
+    fn to_unsigned_tx_matches_ethers_oracle() {
         let vectors = tx_vectors();
         assert_eq!(vectors.len(), 8, "the anchor names eight vectors");
 
@@ -294,15 +276,12 @@ mod tests {
     }
 
     #[test]
-    fn counts_not_capacity_is_the_assembled_truth() {
-        // The anchor's central fact: these records differ only in unused
-        // CAPACITY (word slots 1 vs 3, access-list slots 0 vs 2x2 keys at
-        // count zero) and in schema widths, and must assemble to one
-        // identical transaction, because only the counts reach the
-        // transaction and the schemas never do. al-capacity-unused is the
-        // family's zero-entry-count member: two capacity entries that a
-        // "0 means all" sentinel misread would emit as phantom zero-filled
-        // entries.
+    fn to_unsigned_tx_uses_counts_not_capacity() {
+        // These records differ only in unused capacity (1 vs 3 word slots, 0 vs
+        // 2x2 access-list slots at count zero) and schema widths, so they must
+        // assemble to one identical transaction. al-capacity-unused is the
+        // zero-entry-count member: a "0 means all" sentinel would emit its two
+        // capacity entries as phantom zero-filled ones.
         const FAMILY: [&str; 4] = [
             "minimal-1word",
             "unused-word-slot",
@@ -334,10 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_maybe_and_zero_words_are_distinct() {
-        // D8's easy conflation, separated: is_some = false yields NO bytes
-        // at all, while is_some = true with no_words = 0 yields exactly the
-        // four selector bytes.
+    fn assemble_calldata_distinguishes_empty_maybe_from_zero_words() {
+        // Easily conflated: is_some = false yields no bytes at all, while
+        // is_some = true with no_words = 0 yields the four selector bytes.
         let absent = to_unsigned_tx(&record_by_name("no-calldata")).expect("no-calldata");
         assert!(
             absent.input.is_empty(),
@@ -354,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn caip2_must_agree_with_chain_id_when_it_names_an_eip155_chain() {
+    fn to_unsigned_tx_requires_caip2_to_agree_with_chain_id() {
         // The routing label and the transaction's chain id must agree; a
         // record that routes to one chain and signs for another is refused.
         let mut record = record_by_name("minimal-1word");
@@ -383,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_param_type_must_be_evm_type2() {
+    fn to_unsigned_tx_requires_evm_type2_param_type() {
         let mut record = record_by_name("minimal-1word");
         record.tx_param_type = 1;
         let err = to_unsigned_tx(&record)
@@ -393,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn count_overrun_errors_for_calldata_and_clamps_for_the_access_list() {
+    fn assemble_calldata_errors_on_overrun_access_list_clamps() {
         // The reference is deliberately asymmetric and the port preserves
         // it: assembleCalldata INDEXES words[i] for i < noWords and throws
         // past capacity (signet-evtype2tx-requests.ts:349-351), while
@@ -427,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_storage_key_count_on_an_emitted_entry_emits_none() {
+    fn assemble_access_list_emits_no_keys_at_zero_count() {
         // The eighth vector cannot see this level: with an entry count of 0
         // no entry is emitted at all, so the key-level slice never executes
         // there, and no golden has an EMITTED entry with a zero key count.
