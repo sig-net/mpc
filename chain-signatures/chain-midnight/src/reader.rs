@@ -91,6 +91,67 @@ pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<
     })
 }
 
+/// A record cell whose wire form admits more than one capacity split that
+/// decodes cleanly, hashes to the id it was filed under, AND would assemble
+/// a different transaction from its siblings.
+///
+/// Typed rather than a message so the caller can label the drop by
+/// downcasting instead of matching on error text. `decode_record` is called
+/// directly by `resolve_verified_record` with no `retry_rpc!` in between, so
+/// unlike `rpc::STATE_UNSERVABLE_MSG` nothing flattens the error chain here
+/// and a downcast survives.
+#[derive(Debug)]
+pub struct AmbiguousRecord {
+    /// How many capacity splits hashed to the filed id.
+    pub splits: usize,
+}
+
+impl std::fmt::Display for AmbiguousRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} capacity splits decode to the filed request id and disagree on the transaction \
+             they would sign; refusing to pick one by enumeration order",
+            self.splits
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousRecord {}
+
+/// A record projected onto what can reach the SIGNED transaction: every
+/// vector truncated to the count that governs it, per the "counts, never
+/// lengths" rule, plus an absent `Maybe` contributing no calldata words at
+/// all.
+///
+/// Deliberately stated here rather than by calling `tx.rs`, which sits a
+/// layer above this one. It is CONSERVATIVE in the safe direction: equal
+/// projections guarantee the same transaction, unequal ones do not
+/// guarantee a different one (`selector` and `no_words` are compared even
+/// when `is_some` is false). Conservative here means a spurious ambiguity
+/// drops a request rather than signing the wrong bytes, and in this use the
+/// over-strict fields are fixed atoms and therefore identical across every
+/// split of one cell anyway.
+fn capacity_canonical(record: &SignBidirectionalRecord) -> SignBidirectionalRecord {
+    let mut out = record.clone();
+    let params = &mut out.tx_params;
+    let used_words = if params.calldata.is_some {
+        usize::from(params.calldata.value.no_words)
+    } else {
+        0
+    };
+    params.calldata.value.words.truncate(used_words);
+    params
+        .access_list
+        .truncate(usize::from(params.access_list_entry_count));
+    for entry in &mut params.access_list {
+        entry
+            .storage_keys
+            .truncate(usize::from(entry.storage_key_count));
+    }
+    out
+}
+
 /// Decode a stored request record by capacity enumeration.
 ///
 /// One atom count does not determine the capacities uniquely (an
@@ -107,9 +168,19 @@ pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<
 /// only thing standing between that record and a signature over something
 /// the caller filed under the wrong id. That downstream check is therefore
 /// NOT dead weight, however tautological it looks against the match path.
-/// On the match path itself, collision resistance means at most one split
-/// can hash to a given id, so a match is deterministic rather than merely
-/// first-come.
+///
+/// FAIL CLOSED ON A MATERIAL AMBIGUITY, and note why collision resistance
+/// does NOT make the match path unique: two splits of one cell can produce
+/// BYTE-IDENTICAL preimages, which hash to one id with no collision
+/// involved. The preimage width is `const + 32*V - 43*E` in the variable
+/// atom count `V` and entry count `E`, so equal-width splits share an `E`
+/// and differ only in how the same atoms are cut into words, addresses,
+/// counts and keys. When those readings agree on everything that reaches
+/// the transaction the ambiguity is immaterial and the first is returned;
+/// when they disagree, picking by enumeration order would sign bytes the
+/// record does not describe, so the whole record is refused with
+/// [`AmbiguousRecord`]. Every split is therefore enumerated even after a
+/// match: `MAX_RECORD_ATOMS` is what keeps that affordable.
 pub fn decode_record(
     cell: &StateNode,
     expected_request_id: &[u8; 32],
@@ -149,52 +220,69 @@ pub fn decode_record(
     let len_resp = atoms[atoms.len() - 1].len();
 
     let mut rejections: Vec<String> = Vec::new();
-    let mut attempt = |words: usize, entries: usize, keys: usize| match decode_at(
-        &atoms, words, entries, keys, len_out, len_resp,
-    ) {
-        Ok(record) => Some(record),
-        Err(err) => {
-            if rejections.len() < MAX_REPORTED_REJECTIONS {
-                rejections.push(format!(
-                    "({words} words, {entries} entries, {keys} keys): {err:#}"
-                ));
-            }
-            None
-        }
-    };
+    // The first matching split, its transaction-relevant projection, and
+    // whether any later match disagreed with that projection. Kept as three
+    // scalars rather than a Vec of matches on purpose: a cell at the cap can
+    // match on thousands of splits, and collecting them would trade the CPU
+    // bound below for an allocation one.
+    let mut matched: Option<SignBidirectionalRecord> = None;
+    let mut matched_projection: Option<SignBidirectionalRecord> = None;
+    let mut match_count = 0usize;
+    let mut material_ambiguity = false;
     let mut fallback: Option<SignBidirectionalRecord> = None;
-    let mut consider = |record: SignBidirectionalRecord| {
-        if compute_request_id(&record) == *expected_request_id {
-            return Some(record);
+
+    let mut consider = |words: usize, entries: usize, keys: usize| {
+        let record = match decode_at(&atoms, words, entries, keys, len_out, len_resp) {
+            Ok(record) => record,
+            Err(err) => {
+                if rejections.len() < MAX_REPORTED_REJECTIONS {
+                    rejections.push(format!(
+                        "({words} words, {entries} entries, {keys} keys): {err:#}"
+                    ));
+                }
+                return;
+            }
+        };
+        if compute_request_id(&record) != *expected_request_id {
+            if fallback.is_none() {
+                fallback = Some(record);
+            }
+            return;
         }
-        if fallback.is_none() {
-            fallback = Some(record);
+        match_count += 1;
+        let projection = capacity_canonical(&record);
+        match &matched_projection {
+            None => {
+                matched_projection = Some(projection);
+                matched = Some(record);
+            }
+            // A second reading of the same bytes that would sign differently.
+            Some(first) if *first != projection => material_ambiguity = true,
+            Some(_) => {}
         }
-        None
     };
 
     // No access list: the variable atoms are calldata words alone.
-    if let Some(record) = attempt(variable, 0, 0) {
-        if let Some(hit) = consider(record) {
-            return Ok(hit);
-        }
-    }
+    consider(variable, 0, 0);
     // With an access list: E entries of (2 + K) atoms each, the rest words.
     let mut entries = 1;
     while entries * 2 <= variable {
         let mut keys = 0;
         while entries * (2 + keys) <= variable {
-            let words = variable - entries * (2 + keys);
-            if let Some(record) = attempt(words, entries, keys) {
-                if let Some(hit) = consider(record) {
-                    return Ok(hit);
-                }
-            }
+            consider(variable - entries * (2 + keys), entries, keys);
             keys += 1;
         }
         entries += 1;
     }
 
+    if material_ambiguity {
+        return Err(anyhow::Error::new(AmbiguousRecord {
+            splits: match_count,
+        }));
+    }
+    if let Some(record) = matched {
+        return Ok(record);
+    }
     if let Some(record) = fallback {
         return Ok(record);
     }
@@ -206,16 +294,28 @@ pub fn decode_record(
     )
 }
 
-/// Ceiling on a record cell's atom count, orders of magnitude above every
-/// real tier: a legitimate record carries `22 + words + entries*(2 + keys)`
-/// atoms, and the capacities real contracts compile with sit in the tens to
-/// low hundreds. The cell being decoded comes from a CALLER's own contract
-/// state, so its length is attacker-controlled, and the capacity
-/// enumeration above is roughly O(V^2 log V) in the variable atom count
-/// with no natural ceiling (the TS reader shares the shape): without this
-/// cap an adversarial cell burns indexer CPU across the whole split space
-/// before rejecting.
-const MAX_RECORD_ATOMS: usize = 4096;
+/// Ceiling on a record cell's atom count. The cell comes from a CALLER's own
+/// contract state, so its length is attacker-controlled, and the enumeration
+/// above is roughly O(V^2 log V) in the variable atom count `V` with no
+/// natural ceiling (the TS reader shares the shape): each of the ~V*ln(V)
+/// splits that decodes cleanly pays a keccak over a ~32*V byte preimage, so
+/// the hashed volume grows as 32*V^2*ln(V). This is the ONLY thing bounding
+/// that, and fail-closed decoding removed the early exit that used to keep
+/// the match path cheap, so it now bounds every decode rather than only the
+/// no-match ones.
+///
+/// The value is set from measurement, not from headroom. A cell of one-byte
+/// atoms decodes cleanly at EVERY split, which is the worst case, and costs
+/// ~66ms at 512 atoms against ~5.6s at 4096 (release, measured). The largest
+/// real tier in the repo is 34 atoms (`tests/rid_vectors.json`, `wide-schemas`)
+/// and both captured contracts carry 23, so 512 is still an order of
+/// magnitude above anything a contract compiles today.
+/// `enumeration_cap_stays_far_above_every_real_tier` pins that relationship
+/// so raising a capacity in a fixture cannot silently outgrow the cap.
+///
+/// The cap sits inside `decode_record` before any enumeration rather than at
+/// a call site, because a later caller would bypass a call-site cap.
+const MAX_RECORD_ATOMS: usize = 512;
 
 /// The recompute-and-drop security gate: the record filed under
 /// `request_id` in the CALLER's request map, returned only if the id
@@ -245,49 +345,88 @@ const MAX_RECORD_ATOMS: usize = 4096;
 /// map, and recomputing binds the id to the record's `sender`, which B5's
 /// gate in turn binds to the address the record was read from.
 ///
-/// Every drop is logged with its own reason; `ChainTelemetry` has no
-/// counter hook yet, so the per-reason counter joins the bound telemetry
-/// follow-up. The id comparison is plain byte equality, deliberately: both
-/// operands are public on-chain values, so a timing side channel reveals
-/// nothing the chain does not already publish.
-pub fn resolve_verified_record(
-    map: &StateNode,
-    request_id: [u8; 32],
-) -> Option<SignBidirectionalRecord> {
+/// This function REPORTS NOTHING. The id comparison is plain byte equality,
+/// deliberately: both operands are public on-chain values, so a timing side
+/// channel reveals nothing the chain does not already publish.
+pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolved {
     let StateNode::Map { entries } = map else {
-        tracing::warn!(
-            request_id = %hex::encode(request_id),
-            "request-index node is not a map; dropping"
-        );
-        return None;
+        return Resolved::Dropped {
+            reason: "request-index-not-a-map",
+            detail: "the caller's requests field is not a map".to_string(),
+        };
     };
     // Map keys are unique and re-padding a trimmed atom is injective, so at
     // most one entry can match; the id being absent from the index is the
     // ordinary negative (the reference returns undefined), not a fault.
-    let entry = entries
+    let Some(entry) = entries
         .iter()
-        .find(|entry| key_matches_request_id(&entry.key, &request_id))?;
+        .find(|entry| key_matches_request_id(&entry.key, &request_id))
+    else {
+        return Resolved::Absent;
+    };
     let record = match decode_record(&entry.value, &request_id) {
         Ok(record) => record,
+        // Distinguished by DOWNCAST, not by error text: an ambiguous record
+        // is an operator-actionable signal about one integrator's contract
+        // shape, where an undecodable one is ordinary junk, and a shared
+        // label would merge the two counters.
+        Err(err) if err.downcast_ref::<AmbiguousRecord>().is_some() => {
+            return Resolved::Dropped {
+                reason: "record-ambiguous",
+                detail: format!("{err:#}"),
+            };
+        }
         Err(err) => {
-            tracing::warn!(
-                request_id = %hex::encode(request_id),
-                "request record failed to decode; dropping: {err:#}"
-            );
-            return None;
+            return Resolved::Dropped {
+                reason: "record-undecodable",
+                detail: format!("{err:#}"),
+            };
         }
     };
     let recomputed = compute_request_id(&record);
     if recomputed != request_id {
-        tracing::warn!(
-            request_id = %hex::encode(request_id),
-            recomputed = %hex::encode(recomputed),
-            "recomputed request id does not match the filed id; dropping a spoofed or \
-             wrongly filed record"
-        );
-        return None;
+        return Resolved::Dropped {
+            reason: "rid-mismatch",
+            detail: format!(
+                "recomputed {}, so this is a spoofed or wrongly filed record",
+                hex::encode(recomputed)
+            ),
+        };
     }
-    Some(record)
+    Resolved::Found(Box::new(record))
+}
+
+/// The outcome of resolving a filed request id against a caller's request
+/// index.
+///
+/// Three-way rather than `Option`, and the reason is not style. With
+/// `Option`, `None` is the only channel a resolver has for "why", so every
+/// reason has to leave through the log instead of through the return type,
+/// and the caller then logs a second line for a drop the callee already
+/// explained. Each variant here maps to exactly one caller action, so
+/// [`resolve_verified_record`] reports nothing at all and the caller, which
+/// owns the block height, does all of it: one outcome, one line, one label.
+///
+/// `Found` is boxed because the record is ~384 bytes against ~40 for the
+/// other variants, which is past clippy's `large_enum_variant` threshold.
+#[derive(Debug, PartialEq)]
+pub enum Resolved {
+    /// The record, verified: it hashes to the id it was filed under.
+    Found(Box<SignBidirectionalRecord>),
+    /// The id is not in the caller's index. The ORDINARY NEGATIVE, not a
+    /// fault: a caller that notified before its own write landed, or that
+    /// computed the id wrong, lands here. Reported at DEBUG by the caller,
+    /// deliberately neither WARN (manufacturable at will, so an adversary
+    /// would get a free alarm bell) nor silent (this is the failure an
+    /// integrator is most likely to hit and the one they cannot otherwise
+    /// diagnose).
+    Absent,
+    /// The entry exists and must not be signed. `reason` is the countable
+    /// label, `detail` the diagnosis.
+    Dropped {
+        reason: &'static str,
+        detail: String,
+    },
 }
 
 /// Exactly one trimmed `Bytes<32>` atom, re-padded and compared. The
@@ -692,8 +831,15 @@ mod tests {
                 // with identical zero content, hence one shared request
                 // id. First match wins in the TS reader and here alike,
                 // so both return the (5 words, 2 entries, 0 keys) reading.
-                // The semantic fields all survive; only the zero-filled
-                // capacity SHAPE is canonicalised.
+                // Here the ambiguity is IMMATERIAL: every matching split
+                // assembles the same transaction, which is the only reason
+                // decode_record is allowed to pick one. It is NOT a general
+                // property that the semantic fields survive a capacity
+                // ambiguity: `access_list_entry_count` demonstrably does
+                // not, which is what
+                // `a_material_capacity_ambiguity_is_refused_rather_than_resolved_by_order`
+                // pins and why the decode fails closed when the readings
+                // disagree on what would be signed.
                 assert!(decoded.tx_params.calldata.is_some);
                 assert_eq!(decoded.tx_params.calldata.value.no_words, 1);
                 assert_eq!(
@@ -952,7 +1098,10 @@ mod tests {
 
         // Genuine filing: the id it is stored under is the id it hashes to.
         let map = map_of(vec![(hex::encode(rid), cell.clone())]);
-        assert_eq!(resolve_verified_record(&map, rid), Some(record));
+        assert_eq!(
+            resolve_verified_record(&map, rid),
+            Resolved::Found(Box::new(record))
+        );
 
         // Spoofed filing: the same record bytes stored under an id they do
         // NOT hash to. decode_record ACCEPTS this cell, asserted explicitly:
@@ -966,11 +1115,20 @@ mod tests {
             "decode must accept the spoofed filing via its fallback; only the gate drops it"
         );
         let map = map_of(vec![(hex::encode(spoofed), cell)]);
-        assert_eq!(resolve_verified_record(&map, spoofed), None);
+        assert!(
+            matches!(
+                resolve_verified_record(&map, spoofed),
+                Resolved::Dropped {
+                    reason: "rid-mismatch",
+                    ..
+                }
+            ),
+            "the gate must drop the fallback under its own reason"
+        );
     }
 
     #[test]
-    fn poisoned_entry_skipped_and_absent_id_is_none() {
+    fn poisoned_entry_skipped_and_absent_id_is_absent() {
         let (record, rid) = record_and_rid("minimal-1word");
         let poisoned_rid = [0x55; 32];
         let map = map_of(vec![
@@ -982,13 +1140,31 @@ mod tests {
         ]);
 
         // The undecodable cell drops without panicking...
-        assert_eq!(resolve_verified_record(&map, poisoned_rid), None);
+        assert!(matches!(
+            resolve_verified_record(&map, poisoned_rid),
+            Resolved::Dropped {
+                reason: "record-undecodable",
+                ..
+            }
+        ));
         // ...and does not block the sibling genuine entry.
-        assert_eq!(resolve_verified_record(&map, rid), Some(record));
-        // An id absent from the index is None, as the TS returns undefined.
-        assert_eq!(resolve_verified_record(&map, [0x44; 32]), None);
-        // A non-map node is a drop, never a panic.
-        assert_eq!(resolve_verified_record(&StateNode::Null, rid), None);
+        assert_eq!(
+            resolve_verified_record(&map, rid),
+            Resolved::Found(Box::new(record))
+        );
+        // An id absent from the index is the ordinary negative, and it is a
+        // DISTINCT outcome from a drop: the caller reports it at DEBUG, so
+        // collapsing the two back into one would either silence real drops
+        // or hand an adversary a WARN it can manufacture at will.
+        assert_eq!(resolve_verified_record(&map, [0x44; 32]), Resolved::Absent);
+        // A non-map node is a drop, never a panic, and never Absent.
+        assert!(matches!(
+            resolve_verified_record(&StateNode::Null, rid),
+            Resolved::Dropped {
+                reason: "request-index-not-a-map",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1019,7 +1195,218 @@ mod tests {
             hex::encode(&trimmed),
             cell_of(&atoms_from_record(&record)),
         )]);
-        assert_eq!(resolve_verified_record(&map, rid), Some(record));
+        assert_eq!(
+            resolve_verified_record(&map, rid),
+            Resolved::Found(Box::new(record))
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Fail-closed capacity ambiguity.
+    // ------------------------------------------------------------------
+
+    /// The atom list that made the old first-match-wins decode sign a
+    /// transaction its own record does not describe.
+    ///
+    /// 25 atoms, three of them contested. Two splits decode cleanly from
+    /// them and produce BYTE-IDENTICAL preimages (`0x01` then 53 zeros in
+    /// both), so they share a request id with no keccak collision involved:
+    ///
+    ///   A = (1 word, 1 entry, 0 keys)  reads [01] as a calldata word and
+    ///       the three empty atoms as entry_count=0, address, key_count=0
+    ///   B = (0 words, 1 entry, 1 key)  reads [01] as entry_count=1 and the
+    ///       three empty atoms as address, key_count=0, storage_key
+    ///
+    /// A assembles with NO access list; B assembles with one entry. The
+    /// enumeration tries A first, so before this defence the MPC signed A's
+    /// bytes for a caller that filed B, and the rid gate passed because the
+    /// id really is the filed one.
+    fn ambiguous_cell_atoms() -> Vec<Vec<u8>> {
+        vec![
+            vec![0xab; 32],               // sender
+            vec![7],                      // request_nonce
+            vec![1],                      // key_version
+            b"caller-path".to_vec(),      // path
+            Vec::new(),                   // algo = 0
+            Vec::new(),                   // dest = 0
+            Vec::new(),                   // params = 0
+            Vec::new(),                   // tx_param_type = 0
+            vec![0x69, 0x7a],             // chain_id 31337, little-endian
+            vec![3],                      // nonce
+            vec![1],                      // max_priority_fee_per_gas
+            vec![2],                      // max_fee_per_gas
+            vec![0x08, 0x52],             // gas_limit 21000, little-endian
+            vec![0xcd; 20],               // to
+            vec![5],                      // value
+            vec![1],                      // calldata.is_some
+            vec![0xca, 0x11, 0xab, 0x1e], // calldata.selector
+            Vec::new(),                   // calldata.no_words = 0
+            vec![1],                      // contested: word[0] | entry_count
+            Vec::new(),                   // contested
+            Vec::new(),                   // contested
+            Vec::new(),                   // contested
+            b"eip155:31337".to_vec(),     // caip2_id
+            b"uint256".to_vec(),          // output schema
+            b"uint256".to_vec(),          // respond schema
+        ]
+    }
+
+    /// The two readings of [`ambiguous_cell_atoms`], as records.
+    fn ambiguous_pair() -> (SignBidirectionalRecord, SignBidirectionalRecord) {
+        use crate::records::{CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams};
+
+        let build = |words: Vec<[u8; 32]>, count: u8, access_list: Vec<EvmAccessListEntry>| {
+            let mut path = [0u8; 32];
+            path[..11].copy_from_slice(b"caller-path");
+            let mut caip2_id = [0u8; 32];
+            caip2_id[..12].copy_from_slice(b"eip155:31337");
+            SignBidirectionalRecord {
+                sender: [0xab; 32],
+                request_nonce: 7,
+                key_version: 1,
+                path,
+                algo: 0,
+                dest: 0,
+                params: [0; 64],
+                tx_param_type: 0,
+                tx_params: EvmType2TxParams {
+                    chain_id: 31337,
+                    nonce: 3,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 21000,
+                    to: [0xcd; 20],
+                    value: 5,
+                    calldata: CompactMaybe {
+                        is_some: true,
+                        value: EvmCalldata {
+                            selector: [0xca, 0x11, 0xab, 0x1e],
+                            no_words: 0,
+                            words,
+                        },
+                    },
+                    access_list_entry_count: count,
+                    access_list,
+                },
+                caip2_id,
+                output_deserialization_schema: b"uint256".to_vec(),
+                respond_serialization_schema: b"uint256".to_vec(),
+            }
+        };
+
+        let mut word = [0u8; 32];
+        word[0] = 1;
+        let split_a = build(
+            vec![word],
+            0,
+            vec![EvmAccessListEntry {
+                address: [0; 20],
+                storage_key_count: 0,
+                storage_keys: Vec::new(),
+            }],
+        );
+        let split_b = build(
+            Vec::new(),
+            1,
+            vec![EvmAccessListEntry {
+                address: [0; 20],
+                storage_key_count: 0,
+                storage_keys: vec![[0u8; 32]],
+            }],
+        );
+        (split_a, split_b)
+    }
+
+    #[test]
+    fn a_material_capacity_ambiguity_is_refused_rather_than_resolved_by_order() {
+        let (split_a, split_b) = ambiguous_pair();
+        let rid = compute_request_id(&split_b);
+
+        // The premise, asserted rather than assumed: two DISTINCT records
+        // share one request id, and they would be signed differently. Both
+        // halves matter. Without the first there is no ambiguity to refuse;
+        // without the second the ambiguity would be immaterial and refusing
+        // it would drop a legitimate record.
+        assert_eq!(
+            compute_request_id(&split_a),
+            rid,
+            "the two splits must share a request id"
+        );
+        assert_ne!(split_a, split_b, "but they must be different records");
+        assert_ne!(
+            crate::tx::serialized_transaction(&split_a).expect("a assembles"),
+            crate::tx::serialized_transaction(&split_b).expect("b assembles"),
+            "and they must assemble to different transactions, or this proves nothing"
+        );
+
+        let err = decode_record(&cell_of(&ambiguous_cell_atoms()), &rid)
+            .expect_err("a material ambiguity must be refused, not resolved by enumeration order");
+        let ambiguous = err
+            .downcast_ref::<AmbiguousRecord>()
+            .expect("the refusal must be typed so the caller can label it");
+        assert_eq!(ambiguous.splits, 2, "both splits matched the filed id");
+
+        // And it reaches the caller as its own drop reason, not merged with
+        // ordinary junk.
+        let map = map_of(vec![(hex::encode(rid), cell_of(&ambiguous_cell_atoms()))]);
+        assert!(matches!(
+            resolve_verified_record(&map, rid),
+            Resolved::Dropped {
+                reason: "record-ambiguous",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_immaterial_capacity_ambiguity_still_decodes() {
+        // The other side of fail-closed, and the reason the check compares
+        // the SIGNED projection rather than the whole record: this oracle
+        // vector is provably capacity-ambiguous too (every entries=2 split
+        // spans the same 202 preimage bytes of zeros, hence one shared id),
+        // but every matching split assembles the SAME transaction, so
+        // refusing it would drop a record the oracle itself produced.
+        let (record, rid) = record_and_rid("al-capacity-unused");
+        let decoded = decode_record(&cell_of(&atoms_from_record(&record)), &rid)
+            .expect("an immaterial ambiguity must still decode");
+        assert_eq!(
+            crate::tx::serialized_transaction(&decoded).expect("assembles"),
+            crate::tx::serialized_transaction(&record).expect("assembles"),
+            "the returned split must sign what the filed record describes"
+        );
+    }
+
+    #[test]
+    fn the_enumeration_cap_stays_in_band_against_the_real_tiers() {
+        // The cap is a CPU bound (see its doc), and it is wrong in BOTH
+        // directions, so this is a band rather than a floor. Too low and
+        // real records stop decoding; too high and the bound stops binding,
+        // which is the state it was found in: 4096 against a largest real
+        // tier of 34 let one caller-controlled cell cost 5.6s of indexer
+        // time, enough that ~56 of them in a block outlast the 315s
+        // `live_block_timeout(Midnight)` watchdog and restart-loop the
+        // chain. A wall-clock assertion would be flaky, so the band is the
+        // proxy: the cost is quadratic in the cap, so holding the cap near
+        // the tiers is what holds the cost near the measurement in its doc.
+        let file: RidVectorFile =
+            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
+        let largest = file
+            .vectors
+            .iter()
+            .map(|vector| atoms_from_record(&vector.record.0).len())
+            .max()
+            .expect("the fixture has vectors");
+        assert!(
+            largest * 8 <= MAX_RECORD_ATOMS,
+            "the largest real tier is {largest} atoms and the cap is {MAX_RECORD_ATOMS}: too \
+             close, so a legitimate capacity would stop decoding"
+        );
+        assert!(
+            MAX_RECORD_ATOMS <= largest * 32,
+            "the largest real tier is {largest} atoms and the cap is {MAX_RECORD_ATOMS}: too far \
+             above it for the cost bound in the cap's doc to still hold. Redo that arithmetic \
+             (the hashed volume grows as 32*V^2*ln(V)) before widening this band"
+        );
     }
 
     #[test]
