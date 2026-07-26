@@ -105,3 +105,71 @@ pub struct MidnightConfig {
     pub sidecar: SidecarConfig,
     pub indexer: IndexerConfig,
 }
+
+impl MidnightConfig {
+    /// Rejects endpoints that cannot work, before anything dials them.
+    ///
+    /// Dropping `Default` closed the accidental path to an empty config at
+    /// compile time; this closes the explicit one. An indexer built on an
+    /// unusable config would otherwise fail forever at runtime instead of
+    /// failing once, at construction, with the offending field named.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.node_ws_url.is_empty(),
+            "midnight config: node_ws_url is empty"
+        );
+        anyhow::ensure!(
+            self.central_address.len() == 64
+                && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
+            "midnight config: central_address must be 64 hex characters with no 0x prefix, \
+             got {} characters",
+            self.central_address.len()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> MidnightConfig {
+        MidnightConfig {
+            sidecar_url: "http://127.0.0.1:8790".to_string(),
+            node_ws_url: "ws://127.0.0.1:9944".to_string(),
+            central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            rpc: Default::default(),
+            sidecar: Default::default(),
+            indexer: Default::default(),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_usable_config() {
+        valid_config().validate().expect("valid config passes");
+    }
+
+    #[test]
+    fn validate_names_the_offending_field() {
+        let mut empty_ws = valid_config();
+        empty_ws.node_ws_url = String::new();
+        let err = empty_ws.validate().unwrap_err().to_string();
+        assert!(err.contains("node_ws_url"), "unexpected error: {err}");
+
+        let mut short_address = valid_config();
+        short_address.central_address = "ab".repeat(31);
+        let err = short_address.validate().unwrap_err().to_string();
+        assert!(err.contains("central_address"), "unexpected error: {err}");
+
+        let mut non_hex = valid_config();
+        non_hex.central_address = "zz".repeat(32);
+        let err = non_hex.validate().unwrap_err().to_string();
+        assert!(err.contains("central_address"), "unexpected error: {err}");
+
+        let mut prefixed = valid_config();
+        prefixed.central_address = format!("0x{}", "ab".repeat(31));
+        let err = prefixed.validate().unwrap_err().to_string();
+        assert!(err.contains("central_address"), "unexpected error: {err}");
+    }
+}

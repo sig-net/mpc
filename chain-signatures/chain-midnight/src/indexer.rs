@@ -44,6 +44,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         state_manager: S,
         telemetry: T,
     ) -> anyhow::Result<Self> {
+        // Fail on an unusable config here, once, rather than forever at
+        // runtime once the read path dials these endpoints.
+        config.validate()?;
         Ok(Self {
             config,
             state_manager,
@@ -146,5 +149,24 @@ mod tests {
             .expect("run() should stop promptly after cancel")
             .expect("run task panicked")
             .expect("run() should exit Ok on cancel");
+    }
+
+    #[tokio::test]
+    async fn midnight_indexer_rejects_an_unusable_config() {
+        let config = MidnightConfig {
+            sidecar_url: "http://127.0.0.1:8790".to_string(),
+            node_ws_url: String::new(),
+            central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            rpc: Default::default(),
+            sidecar: Default::default(),
+            indexer: Default::default(),
+        };
+        let Err(err) = TestIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await
+        else {
+            panic!("an empty node_ws_url must fail at construction, not forever at runtime")
+        };
+        let err = err.to_string();
+        assert!(err.contains("node_ws_url"), "unexpected error: {err}");
     }
 }

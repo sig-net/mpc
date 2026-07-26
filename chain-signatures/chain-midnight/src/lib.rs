@@ -5,6 +5,7 @@ mod indexer;
 mod publisher;
 pub mod records;
 mod request_id;
+mod rpc;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
 pub use indexer::MidnightIndexer;
@@ -14,3 +15,4 @@ pub use records::{
     SignBidirectionalRecord, SignatureRespondedEvent, SignetMapKey,
 };
 pub use request_id::compute_request_id;
+pub use rpc::{send_mn_transaction_bytes, FinalizedBlock, MidnightRpc};
