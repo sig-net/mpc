@@ -749,12 +749,22 @@ mod tests {
 
     #[test]
     fn trailing_junk_is_rejected_not_id_matched() {
-        // A cell whose first 23 atoms are a valid record plus one junk atom
-        // no split can absorb: every split must be REJECTED, including the
-        // one that decodes the valid prefix and leaves the junk over. If
-        // the leftover check were dropped, that split would decode the
-        // original record, its recomputed id would MATCH, and the junk
-        // would be silently accepted.
+        // A cell whose first 23 atoms are a valid record plus one junk
+        // atom. The protection story has three layers, and none of them is
+        // the leftover check, which is unreachable by construction: splits
+        // are derived from the total atom count, so every attempt consumes
+        // exactly all atoms and junk can never be left dangling.
+        // 1. Junk must therefore be ABSORBED into some field of some split.
+        // 2. Absorption then fails type checks on the shifted tail fields.
+        //    That layer is fixture-specific, deliberately: this junk shape
+        //    shifts a 34-byte schema atom onto the one-byte entry-count
+        //    position of the words-absorbing split; a different junk shape
+        //    could decode cleanly.
+        // 3. The id chain is the structural backstop for those shapes: a
+        //    clean absorption either fails the filed-id match and dies as a
+        //    fallback at the downstream recompute gate, or, by collision
+        //    resistance, IS the original record. Junk can only produce a
+        //    rejection, a fallback the gate drops, or the truth.
         let fixture = load_fixture(FIVE_FIELD_JSON);
         let field = signet_field_node(&fixture.state, fixture.requests_index_field).expect("field");
         let StateNode::Map { entries } = field else {
