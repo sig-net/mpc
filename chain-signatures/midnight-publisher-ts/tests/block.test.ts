@@ -204,11 +204,8 @@ function mapEntries(node: StateNode): Array<[readonly string[], readonly string[
 }
 
 /**
- * Stable identity for a `(key, atoms)` pair, for set membership.
- *
- * The key's atoms join with a separator, never bare concatenation: `["", X]`
- * and `[X]` are different keys that concatenate to the same string, and this
- * fixture contains exactly that pair.
+ * Stable identity for a `(key, atoms)` pair, for set membership. Separators,
+ * not bare concatenation: `["", X]` and `[X]` are both in this fixture.
  */
 function entryKey([key, atoms]: readonly [readonly string[], readonly string[]]): string {
   return `${key.join(",")}|${atoms.join(",")}`;
@@ -221,9 +218,9 @@ describe("offline: a state diff yields the notify", () => {
     // No transcript is decoded here at all.
     //
     // The fixtures are the singleton's real state read from the node either side
-    // of the notify block 1366. The stored map key renders as one hex string, so
-    // `SignetMapKey{count: 0, requestId}` appears as the request id alone (the
-    // zero count trims away).
+    // of the notify block 1366. `SignetMapKey{count: 0, requestId}` stores as
+    // `["", requestId]`: the zero count trims to an empty atom, which is why
+    // the counter map's one-atom key is distinguishable from it at all.
     const before = decodeContractState(fixtureBytes("singleton-pre-state-1365.mn"));
     const after = decodeContractState(fixtureBytes("singleton-post-state-1366.mn"));
 
@@ -233,10 +230,6 @@ describe("offline: a state diff yields the notify", () => {
     // Exactly two writes: the per-request notification counter, and the
     // notification itself.
     expect(written).toHaveLength(2);
-    // The two keys are structurally different and the atom form says so: the
-    // counter map is keyed by one `RequestId` atom, the notification map by a
-    // `SignetMapKey` whose `count` of 0 trims to the empty atom. Both used to
-    // render as the same bare `REQUEST_ID` string.
     expect(written).toContainEqual([[REQUEST_ID], ["01"]]);
     expect(written).toContainEqual([["", REQUEST_ID], ["01", `${CALLER}04`]]);
   });

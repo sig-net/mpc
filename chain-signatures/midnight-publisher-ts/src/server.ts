@@ -69,14 +69,7 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
   /** Liveness plus the compatibility declaration (ledger line, network id). Deliberately not readiness. */
   const healthBody = JSON.stringify({ status: "ok", networkId: config.networkId, ledger: LEDGER_TAGS });
 
-  /**
-   * The envelope is the caller's, the bytes are the ledger's.
-   *
-   * `field` names the body key per route rather than sharing one generic name:
-   * the two seams take semantically different payloads (one state blob against
-   * a list of transactions), so a shared `bytes` made the list read as a blob
-   * and put both routes one silent typo away from each other.
-   */
+  /** The envelope is the caller's, the bytes are the ledger's. */
   const decode = async (request: IncomingMessage, field: string, seam: (value: unknown) => unknown): Promise<Reply> => {
     const text = await readBody(request);
     try {
