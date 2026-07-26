@@ -7503,6 +7503,7 @@ dependencies = [
  "near-account-id",
  "near-primitives",
  "near-sdk",
+ "serde_json",
  "sha3",
 ]
 

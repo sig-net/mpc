@@ -676,6 +676,160 @@ mod tests {
         );
     }
 
+    /// Copied verbatim from the oracle generator's output (`deriveEpsilon` in
+    /// `@sig-net/midnight`'s `epsilon-derivation.ts`: keccak256 over
+    /// `"<prefix>:<chain_id>:<requester>:<path>"` reduced into the curve
+    /// order). Never hand-edit a vector: a derivation string and its scalar
+    /// only agree because the oracle produced them together.
+    const EPSILON_VECTORS_JSON: &str = include_str!("../tests/epsilon_vectors.json");
+
+    struct EpsilonVector {
+        name: String,
+        sender: String,
+        path: String,
+        epsilon_be: Vec<u8>,
+    }
+
+    fn midnight_epsilon_vectors() -> Vec<EpsilonVector> {
+        let file: serde_json::Value =
+            serde_json::from_str(EPSILON_VECTORS_JSON).expect("epsilon_vectors.json parses");
+        file["vectors"]
+            .as_array()
+            .expect("fixture has a vectors array")
+            .iter()
+            .map(|v| {
+                let field = |key: &str| {
+                    v[key]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("vector field `{key}` is a string"))
+                        .to_string()
+                };
+                EpsilonVector {
+                    name: field("name"),
+                    sender: field("sender"),
+                    path: field("path"),
+                    epsilon_be: alloy::primitives::hex::decode(field("epsilon_be_hex"))
+                        .expect("epsilon_be_hex decodes"),
+                }
+            })
+            .collect()
+    }
+
+    // Golden-pinned against the TS `deriveEpsilon`, the string the integrator
+    // side derives keys with. Every positive vector bakes `midnight:testnet`
+    // into its preimage, so this is the pin that ties
+    // `caip2_chain_id(Chain::Midnight)` to the oracle rather than to a
+    // repo-local literal; the generic parity test above passes for any
+    // chain-id string.
+    #[test]
+    fn test_derive_epsilon_midnight_matches_ts_golden_vectors() {
+        let vectors = midnight_epsilon_vectors();
+        let positives: Vec<_> = vectors
+            .iter()
+            .filter(|v| !v.name.starts_with("NEGATIVE-"))
+            .collect();
+        assert_eq!(
+            positives.len(),
+            6,
+            "the fixture carries six positive vectors"
+        );
+        for v in positives {
+            let epsilon = derive_epsilon_midnight(1, &v.sender, &v.path);
+            assert_eq!(
+                epsilon.to_bytes().as_slice(),
+                v.epsilon_be.as_slice(),
+                "vector `{}` diverged from the TS oracle",
+                v.name
+            );
+        }
+    }
+
+    // The NEGATIVE vectors are oracle outputs for inputs the MPC must never
+    // reproduce: the same request derived under `midnight:mainnet`, and under
+    // a `0x`-prefixed uppercase sender. The canonical derivation must not
+    // collide with either; the paired baseline equality keeps the
+    // inequalities from passing merely because the function is broken.
+    #[test]
+    fn test_derive_epsilon_midnight_negative_controls() {
+        let vectors = midnight_epsilon_vectors();
+        let baseline = vectors
+            .iter()
+            .find(|v| v.name == "e2e-caller-path")
+            .expect("baseline vector present");
+        let canonical = derive_epsilon_midnight(1, &baseline.sender, &baseline.path);
+        assert_eq!(
+            canonical.to_bytes().as_slice(),
+            baseline.epsilon_be.as_slice(),
+            "the canonical baseline must match before the inequalities mean anything"
+        );
+
+        let negatives: Vec<_> = vectors
+            .iter()
+            .filter(|v| v.name.starts_with("NEGATIVE-"))
+            .collect();
+        assert_eq!(
+            negatives.len(),
+            2,
+            "the fixture carries two negative controls"
+        );
+        for v in negatives {
+            assert_eq!(
+                v.path, baseline.path,
+                "negative controls vary one dimension against the baseline"
+            );
+            assert_ne!(
+                canonical.to_bytes().as_slice(),
+                v.epsilon_be.as_slice(),
+                "vector `{}`: the canonical derivation must not produce this scalar",
+                v.name
+            );
+        }
+
+        // `deriveEpsilon` is byte-literal on its requester (normalisation
+        // lives in its callers), and so is the Rust twin: handed the
+        // noncanonical sender form verbatim, it reproduces that vector's
+        // scalar exactly. If normalisation ever creeps into
+        // `derive_epsilon`, this is the assertion that fails.
+        let noncanonical = vectors
+            .iter()
+            .find(|v| v.name == "NEGATIVE-noncanonical-sender-form")
+            .expect("noncanonical vector present");
+        assert_eq!(
+            derive_epsilon_midnight(1, &noncanonical.sender, &noncanonical.path)
+                .to_bytes()
+                .as_slice(),
+            noncanonical.epsilon_be.as_slice(),
+            "both sides are byte-literal on the requester"
+        );
+    }
+
+    // TS always emits the v2 colon format; the Rust twin emits it for every
+    // nonzero key version, while version 0 selects the legacy v1 comma
+    // format. A key_version hardcoded inside the wrapper is exactly what the
+    // first assertion catches.
+    #[test]
+    fn test_derive_epsilon_midnight_key_version_routing() {
+        let vectors = midnight_epsilon_vectors();
+        let golden = vectors
+            .iter()
+            .find(|v| v.name == "e2e-caller-path")
+            .expect("baseline vector present");
+        assert_ne!(
+            derive_epsilon_midnight(0, &golden.sender, &golden.path)
+                .to_bytes()
+                .as_slice(),
+            golden.epsilon_be.as_slice(),
+            "key version 0 is the legacy v1 comma format and must not match a v2 golden"
+        );
+        assert_eq!(
+            derive_epsilon_midnight(2, &golden.sender, &golden.path)
+                .to_bytes()
+                .as_slice(),
+            golden.epsilon_be.as_slice(),
+            "every nonzero key version emits the v2 format"
+        );
+    }
+
     #[test]
     fn test_derive_epsilon_checkpoint() {
         let p = DerivationParams::SystemKey("checkpoint".to_string()).derivation_path();
