@@ -1,0 +1,36 @@
+# The midnight publisher's offline gate: typecheck plus the full vitest suite,
+# stack-free by design (pure codecs against checked-in fixtures, stubbed
+# write-path orchestration).
+#
+# The live end-to-end path (boot the dockerized stack, deploy a singleton,
+# prove/balance/submit, confirm on chain) is deliberately NOT automated here.
+# It is run on demand from `tests/respond-live.ts`, which carries the runbook.
+name: midnight-publisher-ts
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "chain-signatures/midnight-publisher-ts/**"
+  push:
+    branches: [develop]
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "chain-signatures/midnight-publisher-ts/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-publisher-ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run

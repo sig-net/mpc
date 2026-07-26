@@ -1,0 +1,36 @@
+{
+  "name": "midnight-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Localhost-bound Midnight sidecar: decode contract state, decode finalized block bodies, prove and submit responses. Mechanism only, never an authority.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/midnight-js": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.4",
+    "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.4",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@polkadot/api": "^16.5.6",
+    "@sig-net/midnight-contract": "0.11.0",
+    "@sig-net/midnight-contract-deploy": "0.11.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "effect": "3.22.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
