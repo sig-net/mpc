@@ -291,17 +291,42 @@ async fn check_response(
         return Ok(resp);
     }
     let status = resp.status();
+    let marker = failure_marker(status);
     let text = resp.text().await.unwrap_or_default();
     if let Ok(body) = serde_json::from_str::<SidecarErrorBody>(&text) {
         anyhow::bail!(
-            "sidecar {context} failed: {status}: code={} message={} stage={:?} detail={:?}",
+            "{marker}: {context} {status}: code={} message={} stage={:?} detail={:?}",
             body.code,
             body.message,
             body.stage,
             body.detail
         );
     }
-    anyhow::bail!("sidecar {context} failed: {status}: {text}");
+    anyhow::bail!("{marker}: {context} {status}: {text}");
+}
+
+/// A 4xx means the sidecar read what we sent and refused it, which is a
+/// property of the bytes. Anything else means we did not get an answer.
+fn failure_marker(status: reqwest::StatusCode) -> &'static str {
+    if status.is_client_error() {
+        REFUSED_BYTES_MSG
+    } else {
+        "sidecar could not answer"
+    }
+}
+
+/// Marks a sidecar answer that refused the BYTES, as opposed to a transport
+/// fault, a timeout or a 5xx.
+///
+/// Text-matched for the same reason as `rpc::STATE_UNSERVABLE_MSG`:
+/// `retry_rpc!` flattens the error chain into a string on budget exhaustion,
+/// which destroys anything downcastable but preserves this message.
+pub(crate) const REFUSED_BYTES_MSG: &str = "sidecar refused the submitted bytes";
+
+/// True when `err` is the sidecar refusing the bytes rather than failing to
+/// answer. Only the former may be charged to the contract that owns them.
+pub(crate) fn is_refused_bytes(err: &anyhow::Error) -> bool {
+    err.to_string().contains(REFUSED_BYTES_MSG)
 }
 
 /// The offline cross-language check plus the startup gate's rejection paths.
@@ -310,6 +335,67 @@ async fn check_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{IndexerConfig, RpcConfig, SidecarConfig};
+
+    /// The indexer charges a refusal to the contract that owns the bytes and
+    /// drops its request permanently, where anything else propagates and is
+    /// recovered by the restart. Only an answer the sidecar actually gave may
+    /// be a refusal.
+    #[test]
+    fn only_a_client_error_is_a_refusal() {
+        use reqwest::StatusCode;
+        for refused in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert_eq!(failure_marker(refused), REFUSED_BYTES_MSG, "{refused}");
+        }
+        for unanswered in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert_ne!(
+                failure_marker(unanswered),
+                REFUSED_BYTES_MSG,
+                "{unanswered}"
+            );
+        }
+    }
+
+    /// The other half: a sidecar that never answered at all.
+    #[tokio::test]
+    async fn unreachable_sidecar_is_not_a_refusal() {
+        // Port 1 on loopback refuses immediately, so this needs no server.
+        let config = MidnightConfig {
+            sidecar_url: "http://127.0.0.1:1".to_string(),
+            node_ws_url: "ws://127.0.0.1:9944".to_string(),
+            central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            rpc: RpcConfig::default(),
+            sidecar: SidecarConfig {
+                request_timeout: Duration::from_millis(200),
+                retry: RetryConfig {
+                    min_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(2),
+                    max_times: 1,
+                    jitter: false,
+                },
+            },
+            indexer: IndexerConfig::default(),
+        };
+        let err = SidecarClient::new(&config)
+            .expect("client")
+            .decode_contract_state(&[0u8; 4])
+            .await
+            .expect_err("an unreachable sidecar cannot decode");
+        assert!(
+            !is_refused_bytes(&err),
+            "a transport fault must propagate, not be charged to the contract: {err:#}"
+        );
+    }
 
     fn healthy() -> Health {
         Health {

@@ -11,7 +11,7 @@ use crate::reader::{
     unpack_notification_v1, Resolved,
 };
 use crate::rpc::{is_state_unservable, ArchiveState, BlockRef, MidnightRpc};
-use crate::sidecar::{DecodedTransactions, MapEntry, SidecarClient, StateNode};
+use crate::sidecar::{is_refused_bytes, DecodedTransactions, MapEntry, SidecarClient, StateNode};
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -147,6 +147,22 @@ pub(crate) trait ChainSource: Send + Sync {
         -> anyhow::Result<AbortOnDrop>;
 }
 
+/// Splits a sidecar decode into the per-entry class and the restart class.
+///
+/// Only a sidecar that REFUSED the bytes is charged to the contract that owns
+/// them. One that could not answer (transport fault, timeout, 5xx) belongs to
+/// the same "could not answer" class as a node fault and must propagate:
+/// dropped instead, a sidecar blip mid-block loses that request forever,
+/// because the block still emits, the checkpoint still advances, and the
+/// notification joins the parent set so no later diff sees it as new.
+fn classify_decode(decoded: anyhow::Result<StateNode>) -> anyhow::Result<ContractState> {
+    match decoded {
+        Ok(tree) => Ok(ContractState::Tree(tree)),
+        Err(err) if is_refused_bytes(&err) => Ok(ContractState::Undecodable(err)),
+        Err(err) => Err(err.context("sidecar could not decode contract state")),
+    }
+}
+
 /// The production [`ChainSource`]: subxt node reads plus sidecar codecs.
 struct LiveSource {
     rpc: MidnightRpc,
@@ -185,15 +201,16 @@ impl ChainSource for LiveSource {
         address_64hex: &str,
         at_hash: &str,
     ) -> anyhow::Result<ContractState> {
-        // The node read propagates: a transport fault or the pruning signature
-        // is the "could not answer" class. The sidecar decode does not, because
-        // the bytes it refuses are the contract owner's, not the node's.
+        // Only a sidecar that REFUSED the bytes is charged to the contract that
+        // owns them. One that could not answer (transport fault, timeout, 5xx)
+        // is the same "could not answer" class as a node fault and must
+        // propagate: dropped instead, a sidecar blip mid-block loses that
+        // request forever, because the block still emits, the checkpoint still
+        // advances, and the notification joins the parent set so no later diff
+        // sees it as new.
         match self.rpc.contract_state(address_64hex, at_hash).await? {
             None => Ok(ContractState::Absent),
-            Some(state) => match self.sidecar.decode_contract_state(&state).await {
-                Ok(tree) => Ok(ContractState::Tree(tree)),
-                Err(err) => Ok(ContractState::Undecodable(err)),
-            },
+            Some(state) => classify_decode(self.sidecar.decode_contract_state(&state).await),
         }
     }
 
@@ -1072,6 +1089,37 @@ mod tests {
     use std::time::Duration;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
+
+    /// A sidecar that could not answer must restart the run, not drop the
+    /// entry: a drop is permanent, because the block still emits and the
+    /// notification joins the parent set.
+    #[test]
+    fn classify_decode_propagates_a_sidecar_that_could_not_answer() {
+        let refused = anyhow::anyhow!(
+            "{}: /decode/contract-state 422",
+            crate::sidecar::REFUSED_BYTES_MSG
+        );
+        assert!(
+            matches!(
+                classify_decode(Err(refused)),
+                Ok(ContractState::Undecodable(_))
+            ),
+            "a refusal is the contract's own data property"
+        );
+
+        let unanswered = anyhow::anyhow!("sidecar could not answer: /decode/contract-state 502");
+        assert!(
+            classify_decode(Err(unanswered)).is_err(),
+            "an unanswered decode must propagate and restart the run"
+        );
+
+        let transport =
+            anyhow::anyhow!("sidecar /decode/contract-state request failed: connection reset");
+        assert!(
+            classify_decode(Err(transport)).is_err(),
+            "a transport fault must propagate and restart the run"
+        );
+    }
 
     #[test]
     fn select_catchup_mode_degrades_pruned_by_default() {
