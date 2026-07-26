@@ -5,19 +5,28 @@
  "requests_index_field": 4,
  "request_id_hex": "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee",
  "state": {
+  "kind": "array",
   "children": [
    {
+    "kind": "array",
     "children": [
      {
+      "kind": "cell",
       "atoms": [
        "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee"
       ]
      },
      {
+      "kind": "array",
       "children": [
-       null,
-       null,
        {
+        "kind": "null"
+       },
+       {
+        "kind": "null"
+       },
+       {
+        "kind": "cell",
         "atoms": [
          ""
         ]
@@ -25,6 +34,7 @@
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        "01"
       ]
@@ -32,11 +42,13 @@
     ]
    },
    {
+    "kind": "cell",
     "atoms": [
      "01"
     ]
    },
    {
+    "kind": "cell",
     "atoms": [
      "1babc03d35d2a6be2d30e49f5fe39189e10ff1b7bf6bc02c",
      "00884443ac3e6524",
@@ -46,17 +58,20 @@
     ]
    },
    {
+    "kind": "cell",
     "atoms": [
      "86a383d1e8cf8a3767e2b1b6d893e959cd797cb7c870d09fdaec875469b5dd57"
     ]
    },
    {
+    "kind": "map",
     "entries": [
      {
       "key": [
        "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee"
       ],
       "value": {
+       "kind": "cell",
        "atoms": [
         "8d4d43e42bd2d7462695f7da8178e57755234993d5080c751d42aecccb625632",
         "",
@@ -87,11 +102,13 @@
     ]
    },
    {
+    "kind": "cell",
     "atoms": [
      "8a1c9c30455be84497b235ab00e07622c6ec1c375c5956a82d9bc86f41dd3831"
     ]
    },
    {
+    "kind": "cell",
     "atoms": [
      "01"
     ]

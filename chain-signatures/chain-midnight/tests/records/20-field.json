@@ -5,21 +5,31 @@
  "requests_index_field": 19,
  "request_id_hex": "26f04b571a738cf763f9d97fdb64966f8945e1d0ba2f49f994b0457fdb2b6e79",
  "state": {
+  "kind": "array",
   "children": [
    {
+    "kind": "array",
     "children": [
      {
+      "kind": "array",
       "children": [
        {
+        "kind": "cell",
         "atoms": [
          "26f04b571a738cf763f9d97fdb64966f8945e1d0ba2f49f994b0457fdb2b6e79"
         ]
        },
        {
+        "kind": "array",
         "children": [
-         null,
-         null,
          {
+          "kind": "null"
+         },
+         {
+          "kind": "null"
+         },
+         {
+          "kind": "cell",
           "atoms": [
            ""
           ]
@@ -27,6 +37,7 @@
         ]
        },
        {
+        "kind": "cell",
         "atoms": [
          "01"
         ]
@@ -34,21 +45,25 @@
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        "01"
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
@@ -56,84 +71,101 @@
     ]
    },
    {
+    "kind": "array",
     "children": [
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "cell",
       "atoms": [
        ""
       ]
      },
      {
+      "kind": "map",
       "entries": [
        {
         "key": [
          "26f04b571a738cf763f9d97fdb64966f8945e1d0ba2f49f994b0457fdb2b6e79"
         ],
         "value": {
+         "kind": "cell",
          "atoms": [
           "ff73c1c09004f2de051ff1eabdb6122f70746cdf2bb6fdffa8ab1ea6823612b0",
           "",

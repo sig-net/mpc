@@ -29,21 +29,32 @@ const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
-/// Decoded contract state (`src/state.ts`). Untagged on the wire: the
-/// variants carry disjoint field names and the null node is JSON `null`, so
-/// deserialization is unambiguous and a shape divergence fails loudly.
+/// Decoded contract state (`src/state.ts`), INTERNALLY TAGGED on `kind`
+/// exactly as the sidecar emits it (`{"kind":"cell","atoms":[..]}`,
+/// `{"kind":"null"}`).
+///
+/// Tagged rather than untagged, and the difference is not stylistic. An
+/// untagged enum matched cell/array/map only by accident, because serde
+/// ignores the unknown `kind` field, while `{"kind":"null"}` matched NO
+/// variant at all: a unit variant deserializes from bare JSON `null`, not
+/// from an object. Since the chunk tree is full of unset slots, that made
+/// every real response unparseable. Reading the discriminant the sender
+/// already provides also turns a future shape change into an error naming
+/// the variant instead of "data did not match any variant".
 ///
 /// Map keys are the entry's atoms as an ARRAY of per-atom hex, boundaries
 /// preserved: D9's chosen resolution (option 1, atom-preserving keys), which
 /// exists precisely so a composite `SignetMapKey`'s variable trim point
-/// never needs guessing. This models the post-#1058 wire; until that PR
-/// lands the sidecar still joins the atoms into one string, and a live
-/// `/decode/contract-state` carrying a map will fail here with serde's
-/// "data did not match any variant of untagged enum StateNode", which names
-/// neither `key` nor `MapEntry`: if you are debugging that message, the
-/// sidecar's key encoding is the first thing to check.
+/// never needs guessing.
+///
+/// Two tests hold this, and neither holds all of it:
+/// `state_node_parses_the_sidecars_own_golden` pins the tagged envelope and
+/// the atom-array keys against the sidecar's own committed golden output, the
+/// only cross-language check here; the `Null` variant is pinned instead by
+/// `reader::tests::golden_records_decode_from_captured_state`, because no
+/// committed publisher golden contains a null node.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StateNode {
     Cell {
         /// Per-atom hex, trailing-zero-TRIMMED on the wire.
@@ -431,18 +442,23 @@ mod tests {
     async fn decodes_a_contract_state_atom_tree() {
         let mut server = mockito::Server::new_async().await;
         let state_bytes = vec![0x01, 0x02, 0x03];
-        // The request-body shape {"state": hex} is this client's documented
-        // assumption; matching on it pins the assumption visibly.
+        // Request body `{"state": hex}` and response nodes tagged on `kind`:
+        // both are the sidecar's ACTUAL contract, not this client's guess.
+        // `state_node_parses_the_sidecars_own_golden` is what keeps that claim
+        // honest; this mock only needs to agree with it.
         let mock = server
             .mock("POST", "/decode/contract-state")
             .match_body(mockito::Matcher::Json(json!({"state": "010203"})))
             .with_status(200)
             .with_body(
                 json!({
+                    "kind": "map",
                     "entries": [
-                        {"key": ["07"], "value": {"atoms": ["ab", ""]}},
-                        {"key": ["ff", "00"], "value": null},
-                        {"key": ["01"], "value": {"children": [{"atoms": ["cd"]}]}},
+                        {"key": ["07"], "value": {"kind": "cell", "atoms": ["ab", ""]}},
+                        {"key": ["ff", "00"], "value": {"kind": "null"}},
+                        {"key": ["01"], "value": {"kind": "array", "children": [
+                            {"kind": "cell", "atoms": ["cd"]}
+                        ]}},
                     ]
                 })
                 .to_string(),
@@ -483,6 +499,91 @@ mod tests {
         };
         assert_eq!(node, expected);
         mock.assert_async().await;
+    }
+
+    /// The sidecar's OWN golden output, parsed by this client's types.
+    ///
+    /// Every other test here answers a mock whose body this crate wrote, so it
+    /// can only prove the client agrees with itself. This one reads the file
+    /// `midnight-publisher-ts` commits as the frozen output of its real decoder
+    /// over a real captured chain blob, which makes it the only cross-language
+    /// check in the crate. Three live mismatches got in behind mocks that
+    /// agreed with themselves: a `{"state":..}` body the server read as
+    /// `bytes`, and `kind`-tagged nodes this enum tried to read untagged.
+    ///
+    /// It needs no running sidecar, so it is an ordinary unit test rather than
+    /// an ignored integration one.
+    ///
+    /// What it does NOT cover, measured rather than assumed: this capture holds
+    /// only `array`, `map` and `cell` nodes, so reverting the enum to
+    /// `untagged` leaves this test PASSING (untagged simply ignores the unknown
+    /// `kind`). The `Null` variant is the one that made every real response
+    /// unparseable, and `reader::tests::golden_records_decode_from_captured_state`
+    /// is what catches that, on captured state that does contain nulls. The
+    /// small literal below covers it here too, transcribed from `state.ts`'s
+    /// own type rather than captured, since no committed golden supplies one.
+    #[test]
+    fn state_node_parses_the_sidecars_own_golden() {
+        // `{ readonly kind: "null" }` per the sidecar's `StateNode` union. A
+        // unit variant would need bare JSON `null`, which is the mismatch that
+        // broke every response containing an unset ledger slot.
+        assert_eq!(
+            serde_json::from_str::<StateNode>(r#"{"kind":"null"}"#).expect("null node parses"),
+            StateNode::Null
+        );
+
+        const GOLDEN: &str = include_str!(
+            "../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1366.json"
+        );
+        let tree: StateNode = serde_json::from_str(GOLDEN)
+            .expect("the sidecar's own golden must parse into this client's StateNode");
+
+        let StateNode::Array { children } = &tree else {
+            panic!("the singleton's state root is an array of ledger fields, got {tree:?}");
+        };
+
+        // Field 0 is `signBidirectionalEventNotificationCounterMap`, keyed by a
+        // single `RequestId` atom. Field 1 is
+        // `signBidirectionalEventNotificationMap`, keyed by the composite
+        // `SignetMapKey { count, requestId }` whose `count` of 0 trims to the
+        // EMPTY atom.
+        //
+        // This capture is why D9's joined key was unusable rather than merely
+        // inconvenient: both of these keys concatenate to the same 64-character
+        // hex run, so before the atoms were kept apart a consumer could not
+        // tell a one-atom key from a two-atom key whose first atom vanished.
+        // Recovering a request id from field 1, which the indexer's diff must
+        // do, was impossible. Real captured chain data, not a constructed case.
+        let key_of = |field: usize| -> Vec<String> {
+            let StateNode::Map { entries } = &children[field] else {
+                panic!("ledger field {field} is a map in this capture");
+            };
+            assert_eq!(entries.len(), 1, "field {field} holds one entry here");
+            entries[0].key.clone()
+        };
+
+        let counter_key = key_of(0);
+        let notification_key = key_of(1);
+        assert_eq!(counter_key.len(), 1, "the counter map key is ONE atom");
+        assert_eq!(
+            notification_key.len(),
+            2,
+            "the notification map key is TWO atoms, boundary preserved"
+        );
+        assert_eq!(
+            notification_key[0], "",
+            "count 0 trims to the empty atom rather than disappearing"
+        );
+        assert_eq!(
+            notification_key[1], counter_key[0],
+            "both entries are filed under the same request id"
+        );
+        assert_eq!(
+            notification_key.concat(),
+            counter_key.concat(),
+            "the two structurally different keys concatenate identically, which \
+             is exactly the ambiguity the atom array removes"
+        );
     }
 
     #[tokio::test]
