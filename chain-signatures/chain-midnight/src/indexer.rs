@@ -362,6 +362,57 @@ fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
     err
 }
 
+/// The outcome of an operation run under [`retry_until_cancelled`].
+enum Retried<T> {
+    /// Succeeded, after however many retries.
+    Done(T),
+    /// `cancel` fired mid-flight; every caller answers this by returning `Ok(())`.
+    Cancelled,
+    /// The node cannot serve state at this height: the one failure a retry never
+    /// clears. Each caller applies its own policy, which is why it is handed back
+    /// rather than resolved here.
+    Unservable(anyhow::Error),
+}
+
+/// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
+///
+/// The per-item retry the other chains' indexers apply around their own block
+/// processing: a node or sidecar hiccup costs one retry here, not a supervised
+/// restart that re-runs backlog recovery, re-probes state retention, re-anchors and
+/// re-queues the pending backlog. Only the pruning signature escapes, as
+/// [`Retried::Unservable`]: no number of retries makes a pruned node serve state,
+/// so retrying it would spin until the watchdog fires.
+async fn retry_until_cancelled<T, F, Fut>(
+    what: &'static str,
+    height: u64,
+    cancel: &CancellationToken,
+    mut attempt: F,
+) -> Retried<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    loop {
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Retried::Cancelled,
+            result = attempt() => result,
+        };
+        match result {
+            Ok(value) => return Retried::Done(value),
+            Err(err) if is_state_unservable(&err) => return Retried::Unservable(err),
+            Err(err) => tracing::warn!(
+                reason = "retrying",
+                height,
+                "midnight {what} failed: {err:#}; retrying"
+            ),
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Retried::Cancelled,
+            _ = tokio::time::sleep(RETRY_DELAY) => {}
+        }
+    }
+}
+
 /// An observation from the advisory provenance join.
 fn advisory_note(reason: &'static str, height: u64, request_id: Option<[u8; 32]>, detail: &str) {
     tracing::warn!(
@@ -645,6 +696,37 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
+    /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
+    /// Spelled out rather than handed to that helper because it holds `&mut cache`
+    /// across attempts, which a closure returning a future cannot.
+    async fn process_block_retrying<C: ChainSource>(
+        &self,
+        source: &C,
+        cache: &mut Option<(String, Vec<MapEntry>)>,
+        block: &BlockRef,
+        cancel: &CancellationToken,
+    ) -> Retried<Vec<IndexedSignRequest>> {
+        loop {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return Retried::Cancelled,
+                result = self.process_block(source, cache, block) => result,
+            };
+            match result {
+                Ok(requests) => return Retried::Done(requests),
+                Err(err) if is_state_unservable(&err) => return Retried::Unservable(err),
+                Err(err) => tracing::warn!(
+                    reason = "retrying",
+                    height = block.number,
+                    "midnight block processing failed: {err:#}; retrying"
+                ),
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return Retried::Cancelled,
+                _ = tokio::time::sleep(RETRY_DELAY) => {}
+            }
+        }
+    }
+
     /// The degraded catchup: read the central contract's latest state once at the
     /// anchor and process every field-1 entry above the per-rid watermark.
     async fn catchup_from_latest_state<C: ChainSource>(
@@ -683,17 +765,23 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     continue;
                 }
             }
-            let request = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                request = self.process_entry(
-                    source,
-                    entry,
-                    &anchor.hash,
-                    anchor.number,
-                    &Attribution::Skipped,
-                    indexed_ts,
-                ) => request?,
-            };
+            let request =
+                match retry_until_cancelled("watermark entry", anchor.number, cancel, || {
+                    self.process_entry(
+                        source,
+                        entry,
+                        &anchor.hash,
+                        anchor.number,
+                        &Attribution::Skipped,
+                        indexed_ts,
+                    )
+                })
+                .await
+                {
+                    Retried::Done(request) => request,
+                    Retried::Cancelled => return Ok(()),
+                    Retried::Unservable(err) => return Err(err),
+                };
             if let Some(request) = request {
                 requests.push(request);
             }
@@ -701,8 +789,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         self.emit_block(events_tx, anchor, requests).await
     }
 
-    /// Emits a block's requests, then its Block event, then records progress and
-    /// telemetry.
+    /// Emits a block's requests, then its Block event, then records telemetry.
+    ///
+    /// The Block event is the whole progress report: the node advances the persisted
+    /// height in `process_block_event` after CONSUMING it, and only once caught up.
+    /// Writing the height here instead would claim blocks whose requests are still
+    /// queued, and a supervised restart allocates a fresh event channel and drops
+    /// whatever the old one still held, so those requests would be neither delivered
+    /// nor re-walked. Leaving the height to the consumer is what makes a restart
+    /// self-healing, and is what every other chain does.
     async fn emit_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -722,9 +817,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .send(ChainEvent::Block(block.number))
             .await
             .context("failed to send a midnight block event")?;
-        self.state_manager
-            .set_processed_block(Chain::Midnight, block.number)
-            .await;
         self.telemetry.block_indexed(block.number);
         Ok(())
     }
@@ -790,22 +882,27 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             need_watermark = false;
         } else if !need_watermark {
             'range: for number in (checkpoint + 1)..=anchor.number {
-                let block = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    block = source.block_at(number) => block?,
+                let block = match retry_until_cancelled("block lookup", number, &cancel, || {
+                    source.block_at(number)
+                })
+                .await
+                {
+                    Retried::Done(block) => block,
+                    Retried::Cancelled => return Ok(()),
+                    Retried::Unservable(err) => return Err(err),
                 };
-                let requests = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    requests = self.process_block(source, &mut cache, &block) => requests,
-                };
-                match requests {
-                    Ok(requests) => {
+                match self
+                    .process_block_retrying(source, &mut cache, &block, &cancel)
+                    .await
+                {
+                    Retried::Done(requests) => {
                         self.emit_block(&events_tx, &block, requests).await?;
                         last_processed = number;
                     }
+                    Retried::Cancelled => return Ok(()),
                     // The gap reaches deeper than the node's retention even though the
                     // probe said Archive.
-                    Err(err) if is_state_unservable(&err) => {
+                    Retried::Unservable(err) => {
                         tracing::warn!(
                             height = number,
                             reason = "catchup-switching-to-watermark",
@@ -814,7 +911,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         need_watermark = true;
                         break 'range;
                     }
-                    Err(err) => return Err(err),
                 }
             }
         }
@@ -851,21 +947,32 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             // Close any finality gap so a lagging subscription cannot skip
             // notifications; each height processes exactly like catchup.
             for number in (last_processed + 1)..block.number {
-                let gap = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    gap = source.block_at(number) => gap?,
+                let gap = match retry_until_cancelled("block lookup", number, &cancel, || {
+                    source.block_at(number)
+                })
+                .await
+                {
+                    Retried::Done(gap) => gap,
+                    Retried::Cancelled => return Ok(()),
+                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
                 };
-                let requests = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    requests = self.process_block(source, &mut cache, &gap) =>
-                        requests.map_err(|err| note_unservable(err, number))?,
+                let requests = match self
+                    .process_block_retrying(source, &mut cache, &gap, &cancel)
+                    .await
+                {
+                    Retried::Done(requests) => requests,
+                    Retried::Cancelled => return Ok(()),
+                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
                 };
                 self.emit_block(&events_tx, &gap, requests).await?;
             }
-            let requests = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                requests = self.process_block(source, &mut cache, &block) =>
-                    requests.map_err(|err| note_unservable(err, block.number))?,
+            let requests = match self
+                .process_block_retrying(source, &mut cache, &block, &cancel)
+                .await
+            {
+                Retried::Done(requests) => requests,
+                Retried::Cancelled => return Ok(()),
+                Retried::Unservable(err) => return Err(note_unservable(err, block.number)),
             };
             self.emit_block(&events_tx, &block, requests).await?;
             last_processed = block.number;
@@ -1086,6 +1193,10 @@ mod tests {
         /// (address, at_hash) -> error message; checked BEFORE `states`, so a read can
         /// fail with e.g.
         state_errors: HashMap<(String, String), String>,
+        /// (address, at_hash) -> (error message, failures still owed). Counts down per
+        /// read and then lets the read succeed, which is how a test distinguishes a
+        /// retry from a restart: a restarting indexer never reaches the success.
+        transient_state_errors: std::sync::Mutex<HashMap<(String, String), (String, usize)>>,
         /// (address, at_hash) -> sidecar decode rejection; the node served the bytes
         /// and the SIDECAR refused them.
         undecodable_states: HashMap<(String, String), String>,
@@ -1115,6 +1226,31 @@ mod tests {
 
         fn set_state(&mut self, address: &str, at: u64, tree: StateNode) {
             self.states.insert((address.to_string(), hash_of(at)), tree);
+        }
+
+        /// Injects a read failure that clears itself after `times` reads.
+        fn set_transient_error(&mut self, address: &str, at: u64, times: usize, message: &str) {
+            self.transient_state_errors
+                .lock()
+                .expect("fixture transient errors")
+                .insert(
+                    (address.to_string(), hash_of(at)),
+                    (message.to_string(), times),
+                );
+        }
+
+        /// Consumes one failure still owed for `key`, or `None` once the debt is paid.
+        fn take_transient_error(&self, key: &(String, String)) -> Option<String> {
+            let mut pending = self
+                .transient_state_errors
+                .lock()
+                .expect("fixture transient errors");
+            let (message, remaining) = pending.get_mut(key)?;
+            if *remaining == 0 {
+                return None;
+            }
+            *remaining -= 1;
+            Some(message.clone())
         }
 
         /// Injects the pruning signature for one (address, height) read.
@@ -1171,6 +1307,9 @@ mod tests {
                 self.park(format!("state:{address_64hex}")).await;
             }
             let key = (address_64hex.to_string(), at_hash.to_string());
+            if let Some(message) = self.take_transient_error(&key) {
+                anyhow::bail!("{message}");
+            }
             if let Some(message) = self.state_errors.get(&key) {
                 anyhow::bail!("{message}");
             }
@@ -1383,11 +1522,6 @@ mod tests {
         // The pre-queued live block adds nothing new (same entry) and emits its Block
         // only now.
         assert_block(&harness.next_event().await, 9);
-        assert_eq!(
-            harness.state.get_processed_block(Chain::Midnight).await,
-            Some(9),
-            "the checkpoint advances with emitted blocks"
-        );
         harness.cancel_and_join().await;
     }
 
@@ -1482,16 +1616,13 @@ mod tests {
         source.set_undecodable(&hex::encode(CALLER), 9);
 
         let mut harness = RunFixture::spawn(source, 8).await;
+        // The block still reports progress past the poisoned entry, or the restart
+        // re-walks it forever.
         assert_block(&harness.next_event().await, 9);
         assert!(matches!(
             harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
-        assert_eq!(
-            harness.state.get_processed_block(Chain::Midnight).await,
-            Some(9),
-            "the checkpoint must advance past the poisoned entry, or the restart re-walks it"
-        );
         harness.cancel_and_join().await;
         drop(live_tx);
     }
@@ -1558,7 +1689,7 @@ mod tests {
         );
 
         let mut harness = RunFixture::spawn(source, 8).await;
-        // Block 9 emits its Block event and NO request: the checkpoint still advances,
+        // Block 9 emits its Block event and NO request: progress is still reported,
         // which is what keeps this out of a restart loop.
         assert_block(&harness.next_event().await, 9);
         assert!(matches!(
@@ -1576,12 +1707,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_restarts_when_node_cannot_answer() {
-        let (_record, rid) = caller_record_and_rid();
+    async fn catchup_retries_a_transient_read_instead_of_degrading() {
+        // A node or sidecar hiccup costs a retry, not a switch to the watermark walk.
+        // Block 8 is where the fault lands, so it is block 8's OWN emission that proves
+        // the retry: degrading instead would abandon the range and emit only the
+        // anchor, skipping 8 entirely.
+        let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
         let mut source = FixtureSource {
             head: 9,
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        source.set_state(&central, 6, central_state(vec![]));
+        source.set_state(&central, 7, central_state(vec![]));
+        source.set_state(
+            &central,
+            8,
+            central_state(vec![notification_entry(1, &rid)]),
+        );
+        source.set_state(
+            &central,
+            9,
+            central_state(vec![notification_entry(1, &rid)]),
+        );
+        source.set_state(&hex::encode(CALLER), 8, caller_state(&record, &rid));
+        // A transport fault on the caller read, not the pruning signature: that one has
+        // its own policy (switch to the watermark walk).
+        source.set_transient_error(
+            &hex::encode(CALLER),
+            8,
+            1,
+            "sidecar /decode/contract-state request failed: connection reset by peer",
+        );
+
+        let mut harness = RunFixture::spawn(source, 6).await;
+        assert_block(&harness.next_event().await, 7);
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 8);
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn live_retries_a_transient_read_instead_of_restarting() {
+        // The live loop has no degraded fallback, so a failure there ends `run()` and
+        // costs a supervised restart: backlog recovery, a fresh retention probe, a
+        // re-anchor and a re-queue. A hiccup must cost a retry instead, and the request
+        // the failing read was carrying still arrives.
+        let (record, rid) = caller_record_and_rid();
+        let central = central_address();
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let mut source = FixtureSource {
+            head: 8,
             live: tokio::sync::Mutex::new(Some(live_rx)),
             ..Default::default()
         };
@@ -1591,20 +1775,59 @@ mod tests {
             9,
             central_state(vec![notification_entry(1, &rid)]),
         );
-        // A transport fault on the caller read, not the pruning signature: that one has
-        // its own policy (switch to the watermark walk).
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            "sidecar /decode/contract-state request failed: connection reset by peer".to_string(),
+        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
+        source.set_transient_error(
+            &hex::encode(CALLER),
+            9,
+            1,
+            "sidecar /decode/contract-state request failed: connection reset by peer",
         );
 
-        let harness = RunFixture::spawn(source, 8).await;
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(9)).await.expect("send live block");
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 9);
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_the_pruning_signature_from_the_live_loop() {
+        // The one failure the retry must NOT swallow: no number of retries makes a
+        // pruned node serve the state, so it ends `run()` and the restart re-anchors
+        // and recovers through the watermark walk.
+        let central = central_address();
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let mut source = FixtureSource {
+            head: 9,
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        source.set_state(&central, 8, central_state(vec![]));
+        source.set_state(&central, 9, central_state(vec![]));
+        source.set_unservable(&central, 10);
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(10)).await.expect("send live block");
+
         let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
             .await
             .expect("run() returns promptly")
             .expect("run task panicked")
-            .expect_err("a node that cannot answer must surface for the supervised restart");
-        assert!(err.to_string().contains("connection reset"), "err: {err}");
+            .expect_err("a pruned node must surface for the supervised restart");
+        assert!(
+            err.to_string().contains("cannot serve contract state"),
+            "err: {err}"
+        );
         drop(live_tx);
     }
 
@@ -1714,14 +1937,13 @@ mod tests {
             "cancel must arrive while the walk is parked mid-range"
         );
 
-        let state = harness.state.clone();
-        harness.cancel_and_join().await;
-        // A cancelled walk persists exactly the blocks it emitted, no more.
-        assert_eq!(
-            state.get_processed_block(Chain::Midnight).await,
-            Some(102),
-            "the checkpoint advanced only as far as the walk actually emitted"
+        // A walk parked mid-range emits exactly the blocks it completed, no more: 103 is
+        // suspended, so nothing beyond 102 can have reached the channel.
+        assert!(
+            harness.events_rx.try_recv().is_err(),
+            "the walk emitted past the last block it actually completed"
         );
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -1881,6 +2103,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_leaves_the_persisted_checkpoint_to_the_block_consumer() {
+        // The height belongs to whoever CONSUMED the block's events, not to whoever
+        // queued them: the node advances it in `process_block_event` after the block's
+        // requests have been processed, and only once caught up. An indexer that
+        // advanced it here would claim blocks whose events are still sitting in the
+        // channel, and a supervised restart drops that channel.
+        let central = central_address();
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let mut source = FixtureSource {
+            head: 9,
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        for n in 5..=10 {
+            source.set_state(&central, n, central_state(vec![]));
+        }
+        let mut harness = RunFixture::spawn(source, 5).await;
+        for n in 6..=9 {
+            assert_block(&harness.next_event().await, n);
+        }
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(10)).await.expect("send live block");
+        assert_block(&harness.next_event().await, 10);
+
+        assert_eq!(
+            harness.state.get_processed_block(Chain::Midnight).await,
+            Some(5),
+            "the indexer only READS the checkpoint at startup; emitting Block is how it \
+             reports progress"
+        );
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
     async fn run_recatches_from_checkpoint_on_restart() {
         // A restart resumes from the persisted checkpoint rather than re-walking from
         // zero or skipping the gap.
@@ -1905,7 +2165,9 @@ mod tests {
         let state = harness.state.clone();
         harness.cancel_and_join().await;
         drop(live_tx);
-        assert_eq!(state.get_processed_block(Chain::Midnight).await, Some(9));
+        // Stands in for the node's `process_block_event`, which is what advances the
+        // height once it has consumed each `Block` event asserted above.
+        state.set_processed_block(Chain::Midnight, 9).await;
 
         // The restart: same persisted state, head advanced to 12.
         let (live_tx2, live_rx2) = mpsc::channel(8);
@@ -1989,11 +2251,6 @@ mod tests {
             harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
-        assert_eq!(
-            harness.state.get_processed_block(Chain::Midnight).await,
-            Some(9),
-            "the watermark walk records progress at the anchor"
-        );
         harness.cancel_and_join().await;
         drop(live_tx);
     }
@@ -2117,12 +2374,8 @@ mod tests {
 
         live_tx.send(block_ref(9)).await.expect("send live block");
         assert_sign_request(&harness.next_event().await, good_rid, "minimal-1word");
+        // The block completes and reports progress past the bad entry.
         assert_block(&harness.next_event().await, 9);
-        assert_eq!(
-            harness.state.get_processed_block(Chain::Midnight).await,
-            Some(9),
-            "the block completes and the checkpoint advances past the bad entry"
-        );
         harness.cancel_and_join().await;
         drop(live_tx);
     }
