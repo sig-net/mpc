@@ -103,6 +103,56 @@ impl MidnightArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use mpc_chain_midnight::IndexerConfig;
+
+    #[test]
+    fn tuning_fields_do_not_survive_the_cli_round_trip() {
+        // Known limitation, pinned deliberately: only the four
+        // endpoint/identity fields have CLI flags, so from_config discards
+        // the rpc/sidecar/indexer tuning sub-structs and into_config
+        // reinstates their defaults on the other side. In particular,
+        // archive_probe_window and require_archive_state cannot traverse the
+        // recommended process-restart path. Dropping MidnightConfig's
+        // Default derive closed the accidental empty-config path; it did NOT
+        // close this one. If operators need to tune these, the fix is real
+        // flags, at which point this pin flips into a round-trip assert.
+        crate::cli::tests::assert_midnight_env_unset();
+
+        let mut cfg = MidnightConfig {
+            sidecar_url: "http://127.0.0.1:8790".into(),
+            node_ws_url: "ws://127.0.0.1:9944".into(),
+            central_address: "ab".repeat(32),
+            network_id: "undeployed".into(),
+            rpc: Default::default(),
+            sidecar: Default::default(),
+            indexer: Default::default(),
+        };
+        cfg.indexer.archive_probe_window = 77;
+        cfg.indexer.require_archive_state = true;
+        assert_ne!(
+            cfg.indexer,
+            IndexerConfig::default(),
+            "the pin is vacuous unless the tuning actually differs"
+        );
+
+        let reparsed = MidnightArgs::try_parse_from(
+            std::iter::once("test".to_string())
+                .chain(MidnightArgs::from_config(Some(cfg.clone())).into_str_args()),
+        )
+        .unwrap()
+        .into_config()
+        .expect("all four flagged fields are set");
+
+        assert_eq!(reparsed.sidecar_url, cfg.sidecar_url);
+        assert_eq!(reparsed.node_ws_url, cfg.node_ws_url);
+        assert_eq!(reparsed.central_address, cfg.central_address);
+        assert_eq!(reparsed.network_id, cfg.network_id);
+        assert_eq!(
+            reparsed.indexer,
+            IndexerConfig::default(),
+            "tuning does not traverse the CLI; if this fails, flags were added and this test should become a round-trip assert"
+        );
+    }
 
     #[test]
     fn into_str_args_round_trips_into_config() {

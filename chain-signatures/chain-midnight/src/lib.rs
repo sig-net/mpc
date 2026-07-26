@@ -12,7 +12,7 @@ mod sidecar;
 mod test_fixtures;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
-pub use indexer::MidnightIndexer;
+pub use indexer::{select_catchup_mode, MidnightIndexer};
 pub use publisher::MidnightPublisher;
 pub use reader::{
     decode_notification, decode_record, signet_field_node, unpack_notification_v1, NotificationV1,
@@ -23,7 +23,7 @@ pub use records::{
     SignBidirectionalRecord, SignatureRespondedEvent, SignetMapKey,
 };
 pub use request_id::compute_request_id;
-pub use rpc::{FinalizedBlock, MidnightRpc};
+pub use rpc::{ArchiveState, FinalizedBlock, MidnightRpc};
 pub use sidecar::{
     ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, Health, LedgerTags,
     MapEntry, RespondReceipt, RespondRequest, SidecarClient, StateNode, WirePoint, WireSignature,

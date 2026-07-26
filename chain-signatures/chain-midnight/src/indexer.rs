@@ -1,6 +1,7 @@
 //! Midnight indexer implementation.
 
 use crate::config::MidnightConfig;
+use crate::rpc::ArchiveState;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -47,11 +48,55 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // Fail on an unusable config here, once, rather than forever at
         // runtime once the read path dials these endpoints.
         config.validate()?;
+        // Deliberately network-free beyond that: the CLI gate calls new()
+        // once and logs the error without retrying, so a dial here would
+        // turn a transient outage at boot into a permanently disabled
+        // chain. The archive-state probe and catchup-mode selection run at
+        // the start of each supervised run() instead, via
+        // MidnightRpc::probe_archive_state and select_catchup_mode: B6
+        // wires that call when it writes run(), B7 implements the catchup
+        // modes the result selects.
         Ok(Self {
             config,
             state_manager,
             telemetry,
         })
+    }
+}
+
+/// Applies the startup policy to the archive probe's answer:
+/// probe-and-degrade by default, strict refusal when the operator set
+/// `require_archive_state`.
+///
+/// Degrading means catchup falls back to the WATERMARK path (resume from
+/// the last processed block using only data the node still serves) instead
+/// of exact-block contract-state reads. B6's `run()` consumes the returned
+/// mode at its start, right after `MidnightRpc::connect`, and threads it
+/// into the catchup step; B7 implements the two modes it selects; see
+/// `probe_archive_state` for why the probe does not run at construction.
+/// A `midnight_state_pruned` gauge has no `ChainTelemetry` hook yet, so
+/// the warning below is the operational signal until telemetry grows one.
+pub fn select_catchup_mode(
+    state: ArchiveState,
+    require_archive_state: bool,
+) -> anyhow::Result<ArchiveState> {
+    match state {
+        ArchiveState::Archive => Ok(state),
+        ArchiveState::Pruned { probed_height } => {
+            anyhow::ensure!(
+                !require_archive_state,
+                "midnight node cannot serve contract state at height {probed_height} and \
+                 require_archive_state is set: rerun the node with --state-pruning archive, \
+                 or unset require_archive_state to accept watermark catchup"
+            );
+            tracing::warn!(
+                probed_height,
+                "midnight node is pruned within the archive probe window; catchup will \
+                 degrade to the watermark path. Rerun the node with --state-pruning archive \
+                 to restore exact-block reads"
+            );
+            Ok(state)
+        }
     }
 }
 
@@ -149,6 +194,40 @@ mod tests {
             .expect("run() should stop promptly after cancel")
             .expect("run task panicked")
             .expect("run() should exit Ok on cancel");
+    }
+
+    #[test]
+    fn select_catchup_mode_degrades_pruned_by_default() {
+        // Probe-and-degrade: pruned is a MODE, not an error, unless the
+        // operator opted into strict refusal. Archive always passes.
+        assert_eq!(
+            select_catchup_mode(ArchiveState::Archive, false).unwrap(),
+            ArchiveState::Archive
+        );
+        assert_eq!(
+            select_catchup_mode(ArchiveState::Archive, true).unwrap(),
+            ArchiveState::Archive
+        );
+        assert_eq!(
+            select_catchup_mode(ArchiveState::Pruned { probed_height: 924 }, false).unwrap(),
+            ArchiveState::Pruned { probed_height: 924 }
+        );
+    }
+
+    #[test]
+    fn select_catchup_mode_refuses_pruned_when_archive_state_is_required() {
+        // The strict error must hand the operator everything needed to act:
+        // the option that made this fatal, the height that failed, and the
+        // node-side fix.
+        let err = select_catchup_mode(ArchiveState::Pruned { probed_height: 924 }, true)
+            .expect_err("require_archive_state turns pruned into a startup error")
+            .to_string();
+        for needle in ["require_archive_state", "924", "--state-pruning archive"] {
+            assert!(
+                err.contains(needle),
+                "strict refusal must name {needle:?}, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -67,8 +67,22 @@ impl Default for SidecarConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexerConfig {
     /// How many blocks back a contract-state read may walk when the node has
-    /// pruned the state at the block being asked for
+    /// pruned the state at the block being asked for; also the depth of the
+    /// startup archive-state probe, which asks for state at
+    /// `finalized head - archive_probe_window`
     pub archive_probe_window: u64,
+    /// Refuse to start when the startup probe finds the node pruned within
+    /// `archive_probe_window`. Off by default: the probe-and-degrade policy
+    /// logs loudly and falls back to watermark catchup instead of refusing.
+    ///
+    /// NOT currently settable through the CLI: `into_config` rebuilds the
+    /// tuning sub-structs from defaults, so a CLI-configured node always
+    /// runs with `false` and the strict-refusal path is reachable only when
+    /// constructing `MidnightConfig` directly. Pinned by
+    /// `tuning_fields_do_not_survive_the_cli_round_trip` in the node's CLI
+    /// args tests; growing a real flag flips that pin into a round-trip
+    /// assert
+    pub require_archive_state: bool,
     /// Capacity of the live-block channel
     pub live_block_buffer: usize,
     /// How long the finalized-head subscription may go silent before `run()`
@@ -80,6 +94,7 @@ impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
             archive_probe_window: 1024,
+            require_archive_state: false,
             live_block_buffer: 16384,
             stall_timeout: Duration::from_secs(60),
         }
@@ -152,6 +167,14 @@ mod tests {
     #[test]
     fn validate_accepts_a_usable_config() {
         valid_config().validate().expect("valid config passes");
+    }
+
+    #[test]
+    fn archive_probing_defaults_to_degrade_not_refuse() {
+        // Probe-and-degrade is the default policy: a pruned node logs loudly
+        // and falls back to watermark catchup. Strict refusal is opt-in.
+        assert!(!IndexerConfig::default().require_archive_state);
+        assert_eq!(IndexerConfig::default().archive_probe_window, 1024);
     }
 
     #[test]
