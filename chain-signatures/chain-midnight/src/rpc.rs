@@ -117,6 +117,16 @@ impl MidnightRpc {
     /// the supervisor's to handle, and an in-place retry loop here would
     /// duplicate the supervised restart that already re-anchors and reruns
     /// catchup, per the disconnect-window design.
+    ///
+    /// SINGLE SOCKET, load-bearing: this dials `RpcClient::from_url` exactly
+    /// once and hands clones of that one client to both the subxt
+    /// `OnlineClient` and `LegacyRpcMethods`, so every read here shares one
+    /// WebSocket. [`Self::probe_archive_state`] depends on that: its
+    /// pruned-or-unknown disambiguation is sound only because the hash
+    /// lookup and the state read cannot be routed to different backends.
+    /// Do not add a second dial (the Hydration skeleton this ported from
+    /// dials twice): every test would stay green while the probe silently
+    /// broke.
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         config.validate()?;
         let connect_timeout = config.rpc.connect_timeout;
@@ -249,6 +259,11 @@ impl MidnightRpc {
     /// hash cannot be unknown here (the node just served it), that failure
     /// IS pruning. Anything else propagates as an error, never a silent
     /// classification in either direction.
+    ///
+    /// That deduction leans on `connect()`'s single-socket property: one
+    /// `RpcClient` carries the hash lookup and the state read, so no load
+    /// balancer can hand them to backends with different pruning. See the
+    /// SINGLE SOCKET note on [`Self::connect`].
     ///
     /// Wiring note: B6's `run()` calls this at the start of each supervised
     /// run and threads the result into the catchup step; B7 implements the
@@ -633,6 +648,19 @@ mod tests {
             .await
             .expect("subscribe finalized");
         let block = blocks.next().await.expect("one finalized block");
+
+        // Probe classification against a real node: both -32602 message
+        // strings and the success shape are transcribed offline, and this
+        // is the one place that checks them live. Which variant comes back
+        // depends on the node's pruning, so EITHER is a pass; an
+        // unclassified error is the failure. Runs after the first finalized
+        // block so the walk-back target max(1, head - window) exists.
+        let archive_state = rpc
+            .probe_archive_state(config.indexer.archive_probe_window)
+            .await
+            .expect("the probe must classify a live node, whichever way");
+        println!("live archive probe: {archive_state:?}");
+
         let blobs = rpc
             .send_mn_transaction_bytes(&block)
             .await
