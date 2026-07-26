@@ -1,10 +1,4 @@
-//! Test-only serde shims for fixture records. Byte fields are hex strings and
-//! wide integers are decimal strings, since a u128 does not survive a JSON
-//! number.
-//!
-//! These are serde `remote` shims, so field names must match the record structs
-//! exactly and no field can be mapped or reordered on the way in.
-//! `deny_unknown_fields` closes the other direction.
+//! Test-only serde shims for fixture records.
 
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
@@ -19,10 +13,6 @@ use crate::sidecar::StateNode;
 /// Wire-form atoms of a record, each field trimmed as the state layer stores it:
 /// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
 /// integers little-endian trimmed.
-///
-/// Turns oracle-produced records into decode inputs whose expected outputs and
-/// ids come from the same fixture. Only this trimming is local, and it is the
-/// documented wire rule rather than a golden.
 pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
     fn trim(bytes: &[u8]) -> Vec<u8> {
         let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
@@ -65,8 +55,8 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
         }
     }
     atoms.push(trim(&record.caip2_id));
-    // Schemas are exact-length by protocol convention, never ending in a
-    // zero byte, so stored length equals declared length.
+    // Schemas are exact-length by protocol convention, never ending in a zero byte, so
+    // stored length equals declared length.
     atoms.push(record.output_deserialization_schema.clone());
     atoms.push(record.respond_serialization_schema.clone());
     atoms
@@ -78,8 +68,8 @@ pub(crate) fn cell_of(atoms: &[Vec<u8>]) -> StateNode {
     }
 }
 
-/// A standalone fixture record: `RecordFixture::deserialize` applies the
-/// remote shims to a bare record object.
+/// A standalone fixture record: `RecordFixture::deserialize` applies the remote shims
+/// to a bare record object.
 #[derive(Deserialize)]
 pub(crate) struct RecordFixture(#[serde(with = "RecordDef")] pub(crate) SignBidirectionalRecord);
 
@@ -156,9 +146,8 @@ pub(crate) struct AccessListEntryDef {
     storage_keys: Vec<[u8; 32]>,
 }
 
-/// `CompactMaybe<T>` is generic, which serde's `remote` shim cannot name,
-/// so its two fields are moved across by shorthand: a swap would not
-/// compile.
+/// `CompactMaybe<T>` is generic, which serde's `remote` shim cannot name, so its two
+/// fields are moved across by shorthand: a swap would not compile.
 fn calldata<'de, D>(deserializer: D) -> Result<CompactMaybe<EvmCalldata>, D::Error>
 where
     D: Deserializer<'de>,

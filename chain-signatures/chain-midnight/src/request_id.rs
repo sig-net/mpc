@@ -1,18 +1,5 @@
 //! The request-id twin: keccak256 over the contract's byte layout for a
 //! `SignBidirectionalRecord`.
-//!
-//! The Compact circuit mints ids as `keccak256(toBinaryRepr(record))`, a
-//! field-aligned layout rather than an ABI or EIP-712 encoding: each field
-//! re-padded to its declared width and concatenated in declaration order, no
-//! tags, framing or length prefixes. Rebuilding it here lets the node
-//! recompute an indexed request's id and drop anything that disagrees.
-//!
-//! A wrong byte fails in one direction only. Epsilon never consumes the request
-//! id, so a broken twin starves the node of requests rather than signing under
-//! an unexpected key.
-//!
-//! `tests/rid_vectors.json` comes from the contract package's
-//! `calculateRequestId` and is the only authority here. Never hand-author one.
 
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 
@@ -21,21 +8,11 @@ use crate::records::{
 };
 
 /// The request id the contract mints for `record`.
-///
-/// Capacity-sensitive: unused vector slots and an absent `calldata`'s value are
-/// part of the preimage, so `record` must arrive at its declared capacities
-/// with unused slots zero-filled and both schema buffers at their
-/// per-integrator widths. A short `Vec` declares a narrower type and yields a
-/// different id.
 pub fn compute_request_id(record: &SignBidirectionalRecord) -> [u8; 32] {
     hash_payload(&binary_repr(record))
 }
 
 /// The hash preimage: each field at its declared width, in declaration order.
-///
-/// Integers go through `to_le_bytes` on their declared Rust type, so emitted
-/// width and declared width can only change together. Byte fields are never
-/// trimmed: the wire form drops trailing zeros, the preimage pads them back.
 fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&record.sender);
@@ -48,8 +25,8 @@ fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
     buf.push(record.tx_param_type);
     push_tx_params(&mut buf, &record.tx_params);
     buf.extend_from_slice(&record.caip2_id);
-    // `Bytes<N>` at per-integrator widths, so the carried buffer is itself the
-    // declared width.
+    // `Bytes<N>` at per-integrator widths, so the carried buffer is itself the declared
+    // width.
     buf.extend_from_slice(&record.output_deserialization_schema);
     buf.extend_from_slice(&record.respond_serialization_schema);
     buf
@@ -58,8 +35,8 @@ fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
 fn push_tx_params(buf: &mut Vec<u8>, params: &EvmType2TxParams) {
     buf.extend_from_slice(&params.chain_id.to_le_bytes());
     buf.extend_from_slice(&params.nonce.to_le_bytes());
-    // Priority fee before the fee cap, `to` after the gas limit: the contract's
-    // payload order is the hash order, and it reads backwards against habit.
+    // Priority fee before the fee cap, `to` after the gas limit: the contract's payload
+    // order is the hash order, and it reads backwards against habit.
     buf.extend_from_slice(&params.max_priority_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.max_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.gas_limit.to_le_bytes());
@@ -67,17 +44,16 @@ fn push_tx_params(buf: &mut Vec<u8>, params: &EvmType2TxParams) {
     buf.extend_from_slice(&params.value.to_le_bytes());
     push_calldata(buf, &params.calldata);
     buf.push(params.access_list_entry_count);
-    // Every slot of the declared capacity: entries past the count are
-    // zero-filled and still hashed.
+    // Every slot of the declared capacity: entries past the count are zero-filled and
+    // still hashed.
     for entry in &params.access_list {
         push_access_list_entry(buf, entry);
     }
 }
 
 fn push_calldata(buf: &mut Vec<u8>, calldata: &CompactMaybe<EvmCalldata>) {
-    // `Maybe<T>` is a plain struct, not a tagged union: the flag byte is
-    // followed by a full-width `T` either way. Emitting nothing for an absent
-    // calldata changes the id of every request that carries none.
+    // `Maybe<T>` is a plain struct, not a tagged union: the flag byte is followed by a
+    // full-width `T` either way.
     buf.push(u8::from(calldata.is_some));
     buf.extend_from_slice(&calldata.value.selector);
     buf.extend_from_slice(&calldata.value.no_words.to_le_bytes());
@@ -101,19 +77,14 @@ mod tests {
     use crate::test_fixtures::RecordDef;
     use serde::Deserialize;
 
-    /// Oracle output, verbatim. A record and its digest agree only because the
-    /// oracle produced them together, so never hand-edit one.
+    /// Oracle output, verbatim.
     const VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
 
     /// Pinned so a fixture from any other generator is reviewed, not adopted.
     const ORACLE: &str =
         "calculateRequestId (packages/signet-midnight/src/signet-evtype2tx-requests.ts)";
 
-    /// Every tier the fixture covers. Several are the sole cover for their own
-    /// class of layout bug: `no-calldata` for an absent `Maybe` that emits
-    /// nothing, `access-list-partial` for unused access-list slots,
-    /// `wide-schemas` for the two schemas being swapped, and the `enum-*` trio
-    /// for one-byte enums and a non-zero `params`.
+    /// Every tier the fixture covers.
     const VECTOR_COUNT: usize = 13;
 
     #[derive(Deserialize)]
@@ -127,9 +98,9 @@ mod tests {
     struct Vector {
         name: String,
         expected_request_id_hex: String,
-        /// Asserted alongside the digest because it localises the fault: a
-        /// width mismatch names the misaligned tier, a digest mismatch only
-        /// says something is wrong.
+        /// Asserted alongside the digest because it localises the fault: a width
+        /// mismatch names the misaligned tier, a digest mismatch only says something is
+        /// wrong.
         preimage_bytes: usize,
         #[serde(with = "RecordDef")]
         record: SignBidirectionalRecord,
@@ -145,9 +116,9 @@ mod tests {
         file
     }
 
-    // Pins the emitted byte layout, not the Rust declaration order:
-    // `binary_repr` writes fields by name, so a reordered declaration is not
-    // observable here or anywhere else.
+    // Pins the emitted byte layout, not the Rust declaration order: `binary_repr`
+    // writes fields by name, so a reordered declaration is not observable here or
+    // anywhere else.
     #[test]
     fn compute_request_id_matches_ts_oracle() {
         let file = load_vectors();

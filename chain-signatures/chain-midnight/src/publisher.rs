@@ -4,10 +4,6 @@ use async_trait::async_trait;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 
 /// Posts MPC responses back to the Midnight central contract.
-///
-/// Not implemented. `execute_publish` retries publishers unboundedly, so an
-/// enabled Midnight publish retries forever instead of settling. That is
-/// preferable to reporting success without having posted anything.
 #[derive(Clone, Debug, Default)]
 pub struct MidnightPublisher;
 

@@ -1,10 +1,4 @@
-//! Midnight node RPC: the read transport everything in the read path goes
-//! through. Finalized-block subscription, `send_mn_transaction` extrinsic
-//! extraction, raw `midnight_contractState` reads, and the finalized head.
-//!
-//! Transport only. Interpreting the extracted blobs and the contract-state
-//! bytes belongs to the sidecar codec layer and the reader; nothing here decodes
-//! past the SCALE framing of an extrinsic argument.
+//! Midnight node RPC: the read transport everything in the read path goes through.
 
 use std::time::{Duration, Instant};
 
@@ -23,59 +17,36 @@ use subxt::SubstrateConfig;
 
 use crate::config::MidnightConfig;
 
-/// The pallet/call pair whose single argument carries a Midnight ledger
-/// transaction blob.
 const MIDNIGHT_PALLET: &str = "midnight";
 const SEND_MN_TRANSACTION: &str = "send_mn_transaction";
 
-/// How often the stall watchdog wakes to check block-stream liveness.
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 
 /// The pruned-or-unknown-hash failure message for `midnight_contractState`.
-///
-/// Text matching rather than a typed marker because `retry_rpc!` flattens the
-/// error chain into a string on budget exhaustion, which destroys anything
-/// downcastable but preserves the outermost context message. Two sites must
-/// therefore agree on it byte for byte: `contract_state_over` attaches it as
-/// that outermost context, `probe_archive_state_over` looks for it.
 pub(crate) const STATE_UNSERVABLE_MSG: &str =
     "midnight node cannot serve contract state at that block (pruned or unknown hash)";
 
-/// All-zero placeholder address for the archive probe: the probe asks
-/// whether the node can ANSWER a state query at an old block, not about any
-/// real contract, so "contract not present" is as much positive evidence as
-/// served state bytes. 64 hex chars with no `0x`, per the
-/// `midnight_contractState` wire shape.
+/// All-zero placeholder address for the archive probe: the probe asks whether the node
+/// can ANSWER a state query at an old block, not about any real contract, so "contract
+/// not present" is as much positive evidence as served state bytes.
 const PROBE_ADDRESS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// What the startup probe concluded about the node's state retention.
-///
-/// Request discovery diffs contract state across consecutive blocks, so catchup
-/// needs `midnight_contractState` to answer at historical hashes. Only
-/// `--state-pruning archive` nodes keep that; the default is ~256 blocks.
-/// `Pruned` is a mode, not a failure: [`crate::indexer::select_catchup_mode`]
-/// decides whether to degrade or refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveState {
     /// Contract state at `head - archive_probe_window` was reachable.
     Archive,
-    /// The node could not serve state at `probed_height`, a finalized
-    /// ancestor whose hash the node itself supplied: the pruning signature.
-    Pruned {
-        /// The height the probe asked at, carried so refusal errors and
-        /// degrade warnings can name it.
-        probed_height: u64,
-    },
+    /// The node could not serve state at `probed_height`, a finalized ancestor whose
+    /// hash the node itself supplied: the pruning signature.
+    Pruned { probed_height: u64 },
 }
 
-/// A finalized block, wrapping the subxt handle so extrinsics can be
-/// fetched lazily.
+/// A finalized block, wrapping the subxt handle so extrinsics can be fetched lazily.
 pub struct FinalizedBlock {
     block: subxt::blocks::Block<SubstrateConfig, OnlineClient<SubstrateConfig>>,
 }
 
 impl FinalizedBlock {
-    /// The plain-data form the indexer's read path consumes.
     pub fn block_ref(&self) -> BlockRef {
         BlockRef {
             number: u64::from(self.block.number()),
@@ -85,9 +56,9 @@ impl FinalizedBlock {
     }
 }
 
-/// One finalized block as plain data: the number plus the `0x`-prefixed
-/// hashes `midnight_contractState` takes, detached from any subxt handle so
-/// fixtures can mint them.
+/// One finalized block as plain data: the number plus the `0x`-prefixed hashes
+/// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRef {
     pub number: u64,
@@ -99,15 +70,13 @@ fn hex_0x(hash: H256) -> String {
     format!("0x{}", hex::encode(hash.as_bytes()))
 }
 
-/// True when `err` carries `contract_state`'s pruned-or-unknown-hash
-/// mapping (the outermost context survives `retry_rpc!`'s flattening, per
-/// the note on [`STATE_UNSERVABLE_MSG`]). The Pruned catchup path uses this
-/// to degrade a block to a counted drop instead of a restart.
+/// True when `err` carries `contract_state`'s pruned-or-unknown-hash mapping (the
+/// outermost context survives `retry_rpc!`'s flattening, per the note on
+/// [`STATE_UNSERVABLE_MSG`]).
 pub(crate) fn is_state_unservable(err: &anyhow::Error) -> bool {
     err.to_string().contains(STATE_UNSERVABLE_MSG)
 }
 
-/// Read-side client for the Midnight node.
 pub struct MidnightRpc {
     client: OnlineClient<SubstrateConfig>,
     legacy: LegacyRpcMethods<SubstrateConfig>,
@@ -115,24 +84,15 @@ pub struct MidnightRpc {
     connect_timeout: Duration,
     request_timeout: Duration,
     stall_timeout: Duration,
-    /// Retry budget for the one-shot reads. Connect and subscribe are
-    /// deliberately exempt: retrying those would duplicate the supervised
-    /// restart, which already re-anchors and catches up.
+    /// Retry budget for the one-shot reads.
     retry: RetryConfig,
-    /// Keeps subxt metadata current across runtime upgrades; aborted when
-    /// this client drops.
+    /// Keeps subxt metadata current across runtime upgrades; aborted when this client
+    /// drops.
     _runtime_updater: AbortOnDrop,
 }
 
 impl MidnightRpc {
     /// Dials the node named by `config.node_ws_url`.
-    ///
-    /// Single socket, load-bearing: one `RpcClient::from_url`, cloned into both
-    /// the subxt `OnlineClient` and `LegacyRpcMethods`, so every read shares one
-    /// WebSocket. [`Self::probe_archive_state`] depends on it, since its
-    /// pruned-or-unknown disambiguation holds only if the hash lookup and the
-    /// state read cannot reach backends with different pruning. A second dial
-    /// leaves every test green while silently breaking the probe.
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         let connect_timeout = config.rpc.connect_timeout;
         let url = config.node_ws_url.as_str();
@@ -162,11 +122,7 @@ impl MidnightRpc {
         })
     }
 
-    /// Stream of finalized blocks. Ends on stream error, stream end, or a
-    /// stall longer than the configured stall timeout; the supervised
-    /// indexer restart is what turns an ended stream into a reconnect and a
-    /// catchup, per the disconnect-window design. Like `connect` and unlike
-    /// the one-shot reads, this is deliberately not retried in place.
+    /// Stream of finalized blocks.
     pub async fn subscribe_finalized(
         &self,
     ) -> anyhow::Result<impl Stream<Item = FinalizedBlock> + Send + Unpin + 'static> {
@@ -229,14 +185,7 @@ impl MidnightRpc {
     }
 
     /// Raw contract state of `address_64hex` (64 hex chars, no `0x`) at
-    /// `at_block_hash_0x` (`0x`-prefixed), via the `midnight_contractState`
-    /// JSON-RPC. The encoding asymmetry between the two parameters is the
-    /// node's own wire shape, not a choice made here.
-    ///
-    /// `Ok(None)` means the contract is not present at that block. A node
-    /// that cannot serve state at that block (pruned or unknown hash) is an
-    /// error instead, so callers walk back within the archive probe window
-    /// rather than concluding absence.
+    /// `at_block_hash_0x` (`0x`-prefixed), via the `midnight_contractState` JSON-RPC.
     pub async fn contract_state(
         &self,
         address_64hex: &str,
@@ -252,19 +201,9 @@ impl MidnightRpc {
         .await
     }
 
-    /// Probes whether the node retains contract state `window` blocks behind
-    /// the finalized head, classifying it [`ArchiveState::Archive`] or
+    /// Probes whether the node retains contract state `window` blocks behind the
+    /// finalized head, classifying it [`ArchiveState::Archive`] or
     /// [`ArchiveState::Pruned`].
-    ///
-    /// Asks for a throwaway address at `max(1, head - window)`, at a hash the
-    /// node itself supplied. Served state and "contract not present" both prove
-    /// the state was reachable; only the pruned-or-unknown-hash failure
-    /// classifies as pruned, and the hash cannot be unknown here. Anything else
-    /// propagates rather than being silently classified.
-    ///
-    /// Sound only because of the single-socket property on [`Self::connect`].
-    /// Called per supervised run so a boot-time outage cannot disable the chain
-    /// permanently.
     pub async fn probe_archive_state(&self, window: u64) -> anyhow::Result<ArchiveState> {
         probe_archive_state_over(
             &self.legacy,
@@ -276,8 +215,8 @@ impl MidnightRpc {
         .await
     }
 
-    /// The finalized head as a [`BlockRef`]: the head hash, then its header
-    /// for the number and parent, each read on the ordinary retry budget.
+    /// The finalized head as a [`BlockRef`]: the head hash, then its header for the
+    /// number and parent, each read on the ordinary retry budget.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
         let hash = self.finalized_head().await?;
         let header = retry_rpc!(self.request_timeout, self.retry, "midnight_head_header", {
@@ -322,8 +261,8 @@ impl MidnightRpc {
         })
     }
 
-    /// Every `send_mn_transaction` blob in the block named by `hash_0x`,
-    /// for blocks reached by hash rather than through the live stream.
+    /// Every `send_mn_transaction` blob in the block named by `hash_0x`, for blocks
+    /// reached by hash rather than through the live stream.
     pub async fn send_mn_transaction_bytes_at(
         &self,
         hash_0x: &str,
@@ -348,17 +287,8 @@ impl MidnightRpc {
             .await
     }
 
-    /// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic
-    /// order: `args[0]` with its SCALE compact length prefix stripped.
-    ///
-    /// An EMPTY result is normal and must stay that way: a block with no
-    /// matching extrinsic is an ordinary idle block, and erroring on it would
-    /// turn quiet chain periods into supervisor restart storms. The
-    /// silent-zero-match trap (a misspelled pallet or call name matching
-    /// nothing forever) is pinned by [`extract_send_mn_transaction`]'s
-    /// offline tests, which require a PRESENT matching extrinsic to come
-    /// through, not by a runtime invariant. A matching extrinsic with
-    /// malformed args is still a loud error.
+    /// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic order:
+    /// `args[0]` with its SCALE compact length prefix stripped.
     pub async fn send_mn_transaction_bytes(
         &self,
         block: &FinalizedBlock,
@@ -389,9 +319,9 @@ impl MidnightRpc {
     }
 }
 
-/// [`MidnightRpc::contract_state`] over explicit transports, so the archive
-/// probe, and its offline tests, can run it without an `OnlineClient`,
-/// whose construction fetches metadata and therefore needs a whole node.
+/// [`MidnightRpc::contract_state`] over explicit transports, so the archive probe, and
+/// its offline tests, can run it without an `OnlineClient`, whose construction fetches
+/// metadata and therefore needs a whole node.
 async fn contract_state_over(
     rpc: &RpcClient,
     request_timeout: Duration,
@@ -399,11 +329,10 @@ async fn contract_state_over(
     address_64hex: &str,
     at_block_hash_0x: &str,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    // The error mapping lives INSIDE the retried operation so that the
-    // definitive answers (state bytes, contract not present) return Ok
-    // and are never retried, while transport faults and
-    // pruned-or-unknown responses surface as Err and consume the retry
-    // budget.
+    // The error mapping lives INSIDE the retried operation so that the definitive
+    // answers (state bytes, contract not present) return Ok and are never retried,
+    // while transport faults and pruned-or-unknown responses surface as Err and consume
+    // the retry budget.
     retry_rpc!(request_timeout, retry, "midnight_contractState", {
         let response: Result<String, _> = rpc
             .request(
@@ -419,9 +348,8 @@ async fn contract_state_over(
                 Ok(Some(state))
             }
             Err(err) => {
-                // Both error shapes arrive as -32602 invalid-params
-                // and are distinguishable only by message, so match
-                // the node's own strings.
+                // Both error shapes arrive as -32602 invalid-params and are
+                // distinguishable only by message, so match the node's own strings.
                 let message = err.to_string();
                 if message.contains("Contract not present") {
                     Ok(None)
@@ -435,9 +363,9 @@ async fn contract_state_over(
     })
 }
 
-/// [`MidnightRpc::probe_archive_state`] over explicit transports: the probe
-/// needs only legacy chain calls and the raw client, so tests drive it
-/// through an in-process [`subxt::backend::rpc::RpcClientT`] stub.
+/// [`MidnightRpc::probe_archive_state`] over explicit transports: the probe needs only
+/// legacy chain calls and the raw client, so tests drive it through an in-process
+/// [`subxt::backend::rpc::RpcClientT`] stub.
 async fn probe_archive_state_over(
     legacy: &LegacyRpcMethods<SubstrateConfig>,
     rpc: &RpcClient,
@@ -445,10 +373,8 @@ async fn probe_archive_state_over(
     retry: RetryConfig,
     window: u64,
 ) -> anyhow::Result<ArchiveState> {
-    // Every read here rides the ordinary retry_rpc budget ONCE; the probe
-    // adds no loop of its own. By the time a pruned answer comes back out
-    // of contract_state_over, that call's own budget is already spent, so
-    // classifying immediately is correct rather than hasty.
+    // Every read here rides the ordinary retry_rpc budget ONCE; the probe adds no loop
+    // of its own.
     let head_hash = retry_rpc!(request_timeout, retry, "midnight_probe_finalized_head", {
         legacy
             .chain_get_finalized_head()
@@ -477,8 +403,8 @@ async fn probe_archive_state_over(
 
     let at_hash = format!("0x{}", hex::encode(probed_hash.as_bytes()));
     match contract_state_over(rpc, request_timeout, retry, PROBE_ADDRESS, &at_hash).await {
-        // Served state and contract-not-present both mean the node reached
-        // the state at the probed block and searched it: positive evidence.
+        // Served state and contract-not-present both mean the node reached the state at
+        // the probed block and searched it: positive evidence.
         Ok(_) => Ok(ArchiveState::Archive),
         Err(err) if err.to_string().contains(STATE_UNSERVABLE_MSG) => {
             Ok(ArchiveState::Pruned { probed_height })
@@ -489,12 +415,9 @@ async fn probe_archive_state_over(
     }
 }
 
-/// The pure filter-and-decode step for one extrinsic: `Some(blob)` iff
-/// `(pallet, variant)` is exactly `midnight::send_mn_transaction`, where
-/// the blob is `args[0]` with the SCALE compact length prefix stripped and
-/// checked against the remainder. A matching extrinsic with malformed args
-/// is an error, never a silent skip: skipping would drop a real transaction
-/// blob.
+/// The pure filter-and-decode step for one extrinsic: `Some(blob)` iff `(pallet,
+/// variant)` is exactly `midnight::send_mn_transaction`, where the blob is `args[0]`
+/// with the SCALE compact length prefix stripped and checked against the remainder.
 fn extract_send_mn_transaction(
     pallet: &str,
     variant: &str,
@@ -562,9 +485,8 @@ mod tests {
             "args[0] must lead with the ASCII transaction tag"
         );
 
-        // The same call name under another pallet must not match, the same
-        // pallet with another call must not match, and matching is exact,
-        // never case-insensitive.
+        // The same call name under another pallet must not match, the same pallet with
+        // another call must not match, and matching is exact, never case-insensitive.
         for (pallet, variant) in [
             ("system", "send_mn_transaction"),
             ("midnight", "remark"),
@@ -582,9 +504,8 @@ mod tests {
 
     #[test]
     fn extract_send_mn_transaction_strips_compact_length_prefix() {
-        // Single-byte mode, hand-built rather than codec-built so at least
-        // one raw prefix byte is pinned non-circularly: compact(5) is one
-        // byte, 5 << 2 = 0x14.
+        // Single-byte mode, hand-built rather than codec-built so at least one raw
+        // prefix byte is pinned non-circularly: compact(5) is one byte, 5 << 2 = 0x14.
         let mut short = vec![0x14];
         short.extend_from_slice(&[1, 2, 3, 4, 5]);
         assert_eq!(
@@ -594,9 +515,9 @@ mod tests {
             [1, 2, 3, 4, 5],
         );
 
-        // Two-byte mode via the codec: a 300-byte payload needs the 0b01
-        // prefix form, so this pins that the strip is mode-aware rather than
-        // always dropping one byte.
+        // Two-byte mode via the codec: a 300-byte payload needs the 0b01 prefix form,
+        // so this pins that the strip is mode-aware rather than always dropping one
+        // byte.
         let long_blob = tagged_blob(&[0xbb; 300 - TAG.len()]);
         let field_bytes = scale_vec(&long_blob);
         assert_eq!(
@@ -614,8 +535,8 @@ mod tests {
 
     #[test]
     fn extract_send_mn_transaction_errors_on_malformed_args() {
-        // A matching extrinsic whose args do not decode must error, never be
-        // silently skipped: skipping would drop a real transaction blob.
+        // A matching extrinsic whose args do not decode must error, never be silently
+        // skipped: skipping would drop a real transaction blob.
         assert!(
             extract_send_mn_transaction("midnight", "send_mn_transaction", &[]).is_err(),
             "empty args have no compact prefix to read"
@@ -636,8 +557,6 @@ mod tests {
         );
     }
 
-    /// Requires a local Midnight node at ws://127.0.0.1:9944. Run with
-    /// `cargo test -p mpc-chain-midnight -- --ignored`.
     #[tokio::test]
     #[ignore = "requires a local midnight node"]
     async fn live_finalized_subscription_extracts_transactions() {
@@ -663,12 +582,9 @@ mod tests {
             .expect("subscribe finalized");
         let block = blocks.next().await.expect("one finalized block");
 
-        // Probe classification against a real node: both -32602 message
-        // strings and the success shape are transcribed offline, and this
-        // is the one place that checks them live. Which variant comes back
-        // depends on the node's pruning, so EITHER is a pass; an
-        // unclassified error is the failure. Runs after the first finalized
-        // block so the walk-back target max(1, head - window) exists.
+        // Probe classification against a real node: both -32602 message strings and the
+        // success shape are transcribed offline, and this is the one place that checks
+        // them live.
         let archive_state = rpc
             .probe_archive_state(config.indexer.archive_probe_window)
             .await
@@ -679,20 +595,14 @@ mod tests {
             .send_mn_transaction_bytes(&block)
             .await
             .expect("extrinsics fetch");
-        // An idle block is legal; when a ledger transaction is present it
-        // must lead with the version tag.
+        // An idle block is legal; when a ledger transaction is present it must lead
+        // with the version tag.
         if let Some(first) = blobs.first() {
             assert!(first.starts_with(TAG));
         }
     }
 
-    // Archive-state probe over an in-process JSON-RPC stub. The stub implements
-    // subxt's `RpcClientT`, so these drive the real `LegacyRpcMethods`,
-    // `retry_rpc!` budget and `contract_state` error mapping, with only the wire
-    // canned. Error replies are `Error::User(UserError { .. })`, the variant
-    // subxt's jsonrpsee transport produces, so the -32602 discrimination runs on
-    // the shape production sees. The node's literal message strings stay
-    // untested offline; the ignored live test covers those.
+    // Archive-state probe over an in-process JSON-RPC stub.
 
     /// One canned reply for a stubbed JSON-RPC method.
     #[derive(Clone)]
@@ -705,12 +615,9 @@ mod tests {
         Transport(&'static str),
     }
 
-    /// In-process JSON-RPC node: canned per-method replies consumed in
-    /// order with the last one sticky, and every call recorded so tests can
-    /// pin exactly what was asked, at which height, with which hash. Clones
-    /// share state (`RpcClient::new` consumes its client by value, and the
-    /// test keeps a handle for assertions; `Arc<StubNode>` cannot implement
-    /// the foreign `RpcClientT` because `Arc` is not fundamental).
+    /// In-process JSON-RPC node: canned per-method replies consumed in order with the
+    /// last one sticky, and every call recorded so tests can pin exactly what was
+    /// asked, at which height, with which hash.
     #[derive(Clone)]
     struct StubNode {
         state: Arc<StubState>,
@@ -822,8 +729,8 @@ mod tests {
     }
 
     /// The standard healthy-chain reply set: finalized head, its header at
-    /// `head_number_hex`, one hash for whatever height gets asked, and the
-    /// given `midnight_contractState` reply.
+    /// `head_number_hex`, one hash for whatever height gets asked, and the given
+    /// `midnight_contractState` reply.
     fn probe_replies(
         head_number_hex: &str,
         contract_state: Canned,
@@ -841,8 +748,8 @@ mod tests {
         (LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone()), rpc)
     }
 
-    /// A budget of `max_times` retries with near-zero delays, so tests pin
-    /// attempt counts without waiting out production backoff.
+    /// A budget of `max_times` retries with near-zero delays, so tests pin attempt
+    /// counts without waiting out production backoff.
     fn attempts(max_times: usize) -> RetryConfig {
         RetryConfig {
             min_delay: Duration::from_millis(1),
@@ -854,10 +761,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_archive_state_detects_archive_node() {
-        // "Contract not present at the requested address" is POSITIVE
-        // evidence: the node reached the state at head - window and looked
-        // for the throwaway probe address. That is the whole trick; only
-        // "unable to get" means the state itself was unreachable.
+        // "Contract not present at the requested address" is POSITIVE evidence: the
+        // node reached the state at head - window and looked for the throwaway probe
+        // address.
         let node = StubNode::new(probe_replies(
             "0x400", // head at 1024
             Canned::NodeError(-32602, NOT_PRESENT_MSG),
@@ -869,9 +775,9 @@ mod tests {
             .expect("a contract-not-present reply classifies cleanly");
         assert_eq!(state, ArchiveState::Archive);
 
-        // The walk-back is pinned at the wire: head 1024, window 100, so the
-        // hash request must name height 924 and the state read must use the
-        // returned hash, never the head's own.
+        // The walk-back is pinned at the wire: head 1024, window 100, so the hash
+        // request must name height 924 and the state read must use the returned hash,
+        // never the head's own.
         assert_eq!(
             node.calls_to("chain_getBlockHash"),
             vec!["[924]".to_string()]
@@ -884,8 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn probe_archive_state_detects_archive_node_serving_state() {
-        // Some contract DOES live at the probed address: served state bytes
-        // are the other face of positive evidence.
+        // Some contract DOES live at the probed address: served state bytes are the
+        // other face of positive evidence.
         let node = StubNode::new(probe_replies("0x400", json_str("0x0104")));
         let (legacy, rpc) = probe_harness(&node);
 
@@ -897,9 +803,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_archive_state_errors_on_unknown_error() {
-        // Anything that is neither shape must PROPAGATE: calling an unknown
-        // fault "pruned" would silently degrade catchup on a misconfigured
-        // endpoint, and calling it "archive" would be worse.
+        // Anything that is neither shape must PROPAGATE: calling an unknown fault
+        // "pruned" would silently degrade catchup on a misconfigured endpoint, and
+        // calling it "archive" would be worse.
         let node = StubNode::new(probe_replies(
             "0x400",
             Canned::NodeError(-32000, "Internal error: storage backend fault"),
@@ -922,9 +828,8 @@ mod tests {
 
     #[tokio::test]
     async fn probe_archive_state_clamps_window_at_block_one() {
-        // Head 0x32 = 50 with a window of 100: the subtraction saturates and
-        // block 0 is not probeable, so the probe asks at exactly
-        // T = max(1, H - window) = 1.
+        // Head 0x32 = 50 with a window of 100: the subtraction saturates and block 0 is
+        // not probeable, so the probe asks at exactly T = max(1, H - window) = 1.
         let node = StubNode::new(probe_replies(
             "0x32",
             Canned::NodeError(-32602, NOT_PRESENT_MSG),
@@ -940,9 +845,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_archive_state_uses_existing_retry_budget() {
-        // The probe adds no backoff of its own, but every read still goes
-        // through retry_rpc once, so a transient transport fault retries
-        // within the EXISTING budget and the probe still classifies.
+        // The probe adds no backoff of its own, but every read still goes through
+        // retry_rpc once, so a transient transport fault retries within the EXISTING
+        // budget and the probe still classifies.
         let mut replies = probe_replies("0x400", Canned::NodeError(-32602, NOT_PRESENT_MSG));
         replies[0]
             .1
@@ -963,16 +868,10 @@ mod tests {
 
     #[tokio::test]
     async fn contract_state_pruned_answer_spends_one_budget() {
-        // Also the pruning-signature classification pin: "Unable to get
-        // requested contract state" at a hash the node itself just served for
-        // a finalized ancestor is what identifies a pruned node, and the
-        // variant carries the height so the policy layer can name it.
-        //
-        // No stacked backoff. The pruned reply is an Err inside
-        // contract_state, so its own retry_rpc budget retries it; the probe
-        // then classifies immediately. With max_times = 2 that is exactly
-        // three state reads: any more would mean a probe-level loop was
-        // stacked on top of the per-call budget.
+        // Also the pruning-signature classification pin: "Unable to get requested
+        // contract state" at a hash the node itself just served for a finalized
+        // ancestor is what identifies a pruned node, and the variant carries the height
+        // so the policy layer can name it.
         let node = StubNode::new(probe_replies(
             "0x400",
             Canned::NodeError(-32602, UNSERVABLE_MSG),

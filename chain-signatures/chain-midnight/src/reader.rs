@@ -1,9 +1,5 @@
-//! Chunk-tree walk, capacity enumeration, and record decode over sidecar
-//! `StateNode` trees.
-//!
-//! The trust-plane half of discovery: the sidecar turns bytes into an atom
-//! tree, everything here re-derives meaning from that tree in Rust, and the
-//! request-id recompute makes a wrong reading a drop rather than a signature.
+//! Chunk-tree walk, capacity enumeration, and record decode over sidecar `StateNode`
+//! trees.
 
 use anyhow::Context as _;
 
@@ -14,37 +10,23 @@ use crate::records::{
 use crate::request_id::compute_request_id;
 use crate::sidecar::StateNode;
 
-/// compactc chunk arity: past this many ledger fields the compiler stores
-/// fields in a depth-uniform tree of arity-15 chunks, filled remainder
-/// FIRST, so every chunk on the rightmost spine is full.
+/// compactc chunk arity: past this many ledger fields the compiler stores fields in a
+/// depth-uniform tree of arity-15 chunks, filled remainder FIRST, so every chunk on the
+/// rightmost spine is full.
 const CHUNK_ARITY: usize = 15;
 
-/// Atom count of a record excluding the capacity-scaled vectors: a stored cell
-/// holds `REQUEST_FIXED_VALUE_ATOMS + words + entries * (2 + keys)` atoms.
+/// Atom count of a record excluding the capacity-scaled vectors: a stored cell holds
+/// `REQUEST_FIXED_VALUE_ATOMS + words + entries * (2 + keys)` atoms.
 ///
-/// The calldata Maybe's three fixed atoms count here even when `is_some` is
-/// false. An empty Maybe still occupies them, and treating it as absent
-/// mis-splits every plain-transfer record.
+/// The calldata `Maybe`'s three fixed atoms count even when `is_some` is false;
+/// treating it as absent mis-splits every plain-transfer record.
 pub const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
 
-/// How many rejected capacity splits the no-split error names before
-/// truncating: enough to see why, bounded so an adversarial cell cannot
-/// balloon the log line.
+/// How many rejected capacity splits the no-split error names before truncating: enough
+/// to see why, bounded so an adversarial cell cannot balloon the log line.
 const MAX_REPORTED_REJECTIONS: usize = 8;
 
 /// Resolve a flat ledger field index to its node in the raw state tree.
-///
-/// Layout as compactc emits it: up to [`CHUNK_ARITY`] fields sit at the root,
-/// and past that a depth-uniform chunk tree filled remainder first (16 fields
-/// become [1, 15], 20 become [5, 15], 226 become [1, 15x15] one level deeper).
-/// Detection walks the rightmost spine, one level to flatten per consecutive
-/// arity-15 array. No ledger ADT stores an arity-15 array at field level (a
-/// List is a three-slot cons node), so a field is never misread as a chunk.
-///
-/// `flat_index` is zero-based and is the notification's `requestsIndexField`
-/// byte passed straight in. Declaration order does not map one to one onto flat
-/// slots, since a multi-atom ADT can occupy several, so field positions must
-/// come from the producer and never be counted off the contract source.
 pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<&StateNode> {
     let StateNode::Array { children } = root else {
         if flat_index == 0 {
@@ -83,15 +65,10 @@ pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<
     })
 }
 
-/// A record cell admitting more than one capacity split that decodes cleanly,
-/// hashes to the filed id, and would assemble a different transaction.
-///
-/// Typed so the caller can label the drop by downcast rather than by matching
-/// error text. Nothing flattens the error chain between here and
-/// `resolve_verified_record`, so the downcast survives.
+/// A record cell admitting more than one capacity split that decodes cleanly, hashes to
+/// the filed id, and would assemble a different transaction.
 #[derive(Debug)]
 pub struct AmbiguousRecord {
-    /// How many capacity splits hashed to the filed id.
     pub splits: usize,
 }
 
@@ -109,14 +86,8 @@ impl std::fmt::Display for AmbiguousRecord {
 impl std::error::Error for AmbiguousRecord {}
 
 /// A record projected onto what can reach the signed transaction: every vector
-/// truncated to the count that governs it, and an absent `Maybe` contributing
-/// no calldata words.
-///
-/// Restated here rather than calling `tx.rs`, which sits a layer above. It errs
-/// strict: equal projections guarantee the same transaction, unequal ones do
-/// not guarantee a different one, since `selector` and `no_words` are compared
-/// even when `is_some` is false. That way a spurious ambiguity drops a request
-/// rather than signing the wrong bytes.
+/// truncated to the count that governs it, and an absent `Maybe` contributing no
+/// calldata words.
 fn capacity_canonical(record: &SignBidirectionalRecord) -> SignBidirectionalRecord {
     let mut out = record.clone();
     let params = &mut out.tx_params;
@@ -139,18 +110,10 @@ fn capacity_canonical(record: &SignBidirectionalRecord) -> SignBidirectionalReco
 
 /// Decode a stored request record by capacity enumeration.
 ///
-/// An atom count does not fix the capacities uniquely, so splits are enumerated
-/// and validated by the decode itself. `expected_request_id` disambiguates but
-/// does not authenticate: when no split matches, the first clean decode is
-/// returned, and the caller's recompute-and-drop is the only thing between that
-/// guess and a signature.
-///
-/// Two splits of one cell can produce byte-identical preimages, so a shared id
-/// proves nothing on its own. Where the readings agree on everything reaching
-/// the transaction the ambiguity is immaterial; where they disagree, picking by
-/// enumeration order would sign bytes the record does not describe, so the
-/// record is refused with [`AmbiguousRecord`]. Hence every split is enumerated
-/// even after a match, which `MAX_RECORD_ATOMS` bounds.
+/// `expected_request_id` disambiguates but does not authenticate: when no split
+/// matches, the first clean decode is returned, and the caller's recompute is
+/// the only thing between that guess and a signature. Splits that decode to the
+/// same id but different transactions are refused rather than ordered.
 pub fn decode_record(
     cell: &StateNode,
     expected_request_id: &[u8; 32],
@@ -171,10 +134,8 @@ pub fn decode_record(
         "request record has {} value atoms, fewer than the {REQUEST_FIXED_VALUE_ATOMS} its fixed fields need",
         atoms.len()
     );
-    // Before any enumeration, and inside this function rather than at a call
-    // site a later caller could bypass. Reported as a cap rejection, not a
-    // malformed record: an oversized cell is an adversarial or runaway
-    // producer, which wants a different operator response from codec drift.
+    // Before any enumeration, and inside this function rather than at a call site a
+    // later caller could bypass.
     anyhow::ensure!(
         atoms.len() <= MAX_RECORD_ATOMS,
         "request record has {} atoms, above the {MAX_RECORD_ATOMS}-atom enumeration cap; \
@@ -182,16 +143,15 @@ pub fn decode_record(
         atoms.len()
     );
     let variable = atoms.len() - REQUEST_FIXED_VALUE_ATOMS;
-    // Schemas are exact-length by protocol convention, never NUL-padded and
-    // never ending in a zero byte, so the last two atoms' stored lengths are
-    // their declared widths.
+    // Schemas are exact-length by protocol convention, never NUL-padded and never
+    // ending in a zero byte, so the last two atoms' stored lengths are their declared
+    // widths.
     let len_out = atoms[atoms.len() - 2].len();
     let len_resp = atoms[atoms.len() - 1].len();
 
     let mut rejections: Vec<String> = Vec::new();
-    // Scalars rather than a Vec of matches: a cell at the cap can match on
-    // thousands of splits, and collecting them would trade the CPU bound for an
-    // allocation one.
+    // Scalars rather than a Vec of matches: a cell at the cap can match on thousands of
+    // splits, and collecting them would trade the CPU bound for an allocation one.
     let mut matched: Option<SignBidirectionalRecord> = None;
     let mut matched_projection: Option<SignBidirectionalRecord> = None;
     let mut match_count = 0usize;
@@ -261,33 +221,15 @@ pub fn decode_record(
     )
 }
 
-/// Ceiling on a record cell's atom count, and the only bound on the
-/// enumeration above.
-///
-/// The cell comes from a caller's own contract state, so its length is
-/// attacker-controlled, and enumeration is roughly O(V^2 log V) in the variable
-/// atom count `V`: each of the ~V*ln(V) cleanly decoding splits pays a keccak
-/// over a ~32*V byte preimage.
-///
-/// Set from measurement, not headroom. A cell of one-byte atoms decodes cleanly
-/// at every split, the worst case, costing ~66ms at 512 atoms against ~5.6s at
-/// 4096 (release). The largest real tier in the repo is 34 atoms and both
-/// captured contracts carry 23, so 512 is an order of magnitude above anything
-/// a contract compiles today.
+/// Ceiling on a record cell's atom count, and the only bound on the enumeration above.
 const MAX_RECORD_ATOMS: usize = 512;
 
-/// The recompute-and-drop security gate: the record filed under `request_id` in
-/// the caller's request map, returned only if the id recomputed from the
-/// decoded record equals the id it was filed under.
+/// The recompute-and-drop security gate: the record filed under `request_id` in the
+/// caller's request map, returned only if the id recomputed from the decoded record
+/// equals the id it was filed under.
 ///
-/// The recompute is not redundant, though it will look deletable: on the match
-/// path it passes by construction, but on `decode_record`'s fallback path it is
-/// the only thing between a record filed under the wrong id and a signature
-/// over it. It is also stronger than a membership check, which alone admits a
-/// contract that byte-copied a victim's record into its own map.
-///
-/// Reports nothing, and compares with plain byte equality since both operands
-/// are public on-chain values.
+/// Not redundant with `decode_record`, though it looks it: on that function's
+/// fallback path this is the only check on a record filed under the wrong id.
 pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolved {
     let StateNode::Map { entries } = map else {
         return Resolved::Dropped {
@@ -295,8 +237,7 @@ pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolve
             detail: "the caller's requests field is not a map".to_string(),
         };
     };
-    // Keys are unique and re-padding is injective, so at most one entry can
-    // match. An absent id is the ordinary negative, not a fault.
+    // Keys are unique and re-padding is injective, so at most one entry can match.
     let Some(entry) = entries
         .iter()
         .find(|entry| key_matches_request_id(&entry.key, &request_id))
@@ -306,8 +247,8 @@ pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolve
     let record = match decode_record(&entry.value, &request_id) {
         Ok(record) => record,
         // Downcast rather than error text: an ambiguous record is an
-        // operator-actionable signal about one integrator's contract shape,
-        // where an undecodable one is ordinary junk.
+        // operator-actionable signal about one integrator's contract shape, where an
+        // undecodable one is ordinary junk.
         Err(err) if err.downcast_ref::<AmbiguousRecord>().is_some() => {
             return Resolved::Dropped {
                 reason: "record-ambiguous",
@@ -335,40 +276,21 @@ pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolve
 }
 
 /// The outcome of resolving a filed request id against a caller's request index.
-///
-/// Three-way rather than `Option` so the reason travels through the return type
-/// instead of the log. Each variant maps to one caller action, which lets
-/// [`resolve_verified_record`] report nothing and the caller, which owns the
-/// block height, emit one line per outcome.
-///
-/// `Found` is boxed because the record is ~384 bytes against ~40 for the others,
-/// past clippy's `large_enum_variant` threshold.
 #[derive(Debug, PartialEq)]
 pub enum Resolved {
     /// The record, verified: it hashes to the id it was filed under.
     Found(Box<SignBidirectionalRecord>),
-    /// The id is not in the caller's index. The ordinary negative rather than a
-    /// fault: a caller that notified before its write landed, or computed the id
-    /// wrong, lands here. Logged at DEBUG, neither WARN (manufacturable at will,
-    /// so an adversary gets a free alarm bell) nor silent (the failure an
-    /// integrator is most likely to hit and cannot otherwise diagnose).
+    /// The id is not in the caller's index.
     Absent,
-    /// The entry exists and must not be signed. `reason` is the countable label,
-    /// `detail` the diagnosis.
+    /// The entry exists and must not be signed.
     Dropped {
         reason: &'static str,
         detail: String,
     },
 }
 
-/// One trimmed `Bytes<32>` wire atom, re-padded to its declared width, and the
-/// only implementation of that rule.
-///
-/// Atoms arrive trailing-zero-trimmed, so a rid ending in `0x00` stores short
-/// and must be re-padded before use; an untrimmed 32-byte atom re-pads to
-/// itself, so both wire forms behave identically. Non-hex and overlong atoms
-/// yield `None` rather than a garbage id. Re-padding is injective, which is
-/// what lets callers treat a match as unique.
+/// One trimmed `Bytes<32>` wire atom, re-padded to its declared width, and the only
+/// implementation of that rule.
 pub(crate) fn repad_atom_32(atom_hex: &str) -> Option<[u8; 32]> {
     let bytes = hex::decode(atom_hex).ok()?;
     if bytes.len() > 32 {
@@ -379,10 +301,7 @@ pub(crate) fn repad_atom_32(atom_hex: &str) -> Option<[u8; 32]> {
     Some(padded)
 }
 
-/// Exactly one trimmed `Bytes<32>` atom, re-padded and compared. The caller's
-/// request map key is single-atom, so any other atom count is a typed mismatch
-/// (another map's composite key, or a future schema) rather than a string that
-/// silently fails to compare.
+/// Exactly one trimmed `Bytes<32>` atom, re-padded and compared.
 fn key_matches_request_id(key_atoms: &[String], request_id: &[u8; 32]) -> bool {
     let [atom] = key_atoms else {
         return false;
@@ -390,8 +309,7 @@ fn key_matches_request_id(key_atoms: &[String], request_id: &[u8; 32]) -> bool {
     repad_atom_32(atom) == Some(*request_id)
 }
 
-/// Decode the two-atom notification cell: version, then the 128-byte
-/// payload.
+/// Decode the two-atom notification cell: version, then the 128-byte payload.
 pub fn decode_notification(cell: &StateNode) -> anyhow::Result<SignBidirectionalEventNotification> {
     let StateNode::Cell { atoms: atom_hex } = cell else {
         anyhow::bail!("notification node is not a cell");
@@ -418,19 +336,18 @@ pub fn decode_notification(cell: &StateNode) -> anyhow::Result<SignBidirectional
     })
 }
 
-/// The V1 notification payload, unpacked per its fixed offsets:
-/// `caller_address(32) || requests_index_field(1) || zeros(95)`.
+/// The V1 notification payload, unpacked per its fixed offsets: `caller_address(32) ||
+/// requests_index_field(1) || zeros(95)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationV1 {
     pub caller_address: [u8; 32],
-    /// The ledger field position of the caller's request index: a
-    /// per-integrator value the notification carries, never assumed.
+    /// The ledger field position of the caller's request index: a per-integrator value
+    /// the notification carries, never assumed.
     pub requests_index_field: u8,
 }
 
-/// Fails closed on an unrecognised version: a future payload layout adds a
-/// branch here rather than silently misinterpreting bytes under the V1
-/// offsets.
+/// Fails closed on an unrecognised version: a future payload layout adds a branch here
+/// rather than silently misinterpreting bytes under the V1 offsets.
 pub fn unpack_notification_v1(
     notification: &SignBidirectionalEventNotification,
 ) -> anyhow::Result<NotificationV1> {
@@ -465,8 +382,8 @@ impl<'a> AtomCursor<'a> {
     }
 }
 
-/// `Bytes<N>`: the stored atom is trailing-zero-trimmed; re-pad to the
-/// declared width, rejecting an atom wider than it.
+/// `Bytes<N>`: the stored atom is trailing-zero-trimmed; re-pad to the declared width,
+/// rejecting an atom wider than it.
 fn bytes_n<const N: usize>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<[u8; N]> {
     let atom = cursor.shift(what)?;
     anyhow::ensure!(
@@ -492,9 +409,9 @@ fn bytes_dyn(cursor: &mut AtomCursor, len: usize, what: &'static str) -> anyhow:
     Ok(out)
 }
 
-/// `Uint` and enum atoms fold little-endian at whatever stored length they
-/// have; only the folded value is range-checked, mirroring the runtime
-/// descriptors (which check `res > maxValue`, not the atom length).
+/// `Uint` and enum atoms fold little-endian at whatever stored length they have; only
+/// the folded value is range-checked, mirroring the runtime descriptors (which check
+/// `res > maxValue`, not the atom length).
 fn uint(cursor: &mut AtomCursor, max: u128, what: &'static str) -> anyhow::Result<u128> {
     let atom = cursor.shift(what)?;
     let mut value: u128 = 0;
@@ -509,8 +426,7 @@ fn uint(cursor: &mut AtomCursor, max: u128, what: &'static str) -> anyhow::Resul
     Ok(value)
 }
 
-/// `Boolean`: the empty atom is false, `[1]` is true, anything else
-/// rejects.
+/// `Boolean`: the empty atom is false, `[1]` is true, anything else rejects.
 fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> {
     let atom = cursor.shift(what)?;
     anyhow::ensure!(atom.is_empty() || atom == [1], "{what}: not a Boolean atom");
@@ -518,11 +434,6 @@ fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> 
 }
 
 /// One full record decode at a fixed capacity split.
-///
-/// Every split consumes exactly `REQUEST_FIXED_VALUE_ATOMS + words + entries *
-/// (2 + keys)` atoms by construction, and the enumeration derives those counts
-/// from the cell's own atom count, so a clean decode lands on the end of the
-/// cell and needs no leftover check.
 fn decode_at(
     atoms: &[Vec<u8>],
     words: usize,
@@ -563,9 +474,8 @@ fn decode_tx_params(
     let to = bytes_n::<20>(cursor, "to")?;
     let value = uint(cursor, u128::MAX, "value")?;
 
-    // The flag does not gate the atoms: selector, no_words and every word slot
-    // are consumed either way. Skipping them for an empty Maybe would shift
-    // every later field onto the wrong atoms.
+    // The flag does not gate the atoms: selector, no_words and every word slot are
+    // consumed either way.
     let is_some = boolean(cursor, "calldata.is_some")?;
     let selector = bytes_n::<4>(cursor, "calldata.selector")?;
     let no_words = uint(cursor, u128::from(u16::MAX), "calldata.no_words")? as u16;
@@ -620,8 +530,8 @@ mod tests {
     use crate::test_fixtures::{atoms_from_record, cell_of, RecordFixture};
     use serde::Deserialize;
 
-    /// Captured by gen-b3-fixtures.ts from the two in-repo caller contracts
-    /// via the TS reader (the oracle). Never hand-edit one.
+    /// Captured by gen-b3-fixtures.ts from the two in-repo caller contracts via the TS
+    /// reader (the oracle).
     const FIVE_FIELD_JSON: &str = include_str!("../tests/records/5-field.json");
     const TWENTY_FIELD_JSON: &str = include_str!("../tests/records/20-field.json");
     const RID_VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
@@ -675,13 +585,10 @@ mod tests {
     fn decode_record_reads_captured_state() {
         for json in [FIVE_FIELD_JSON, TWENTY_FIELD_JSON] {
             let fixture = load_fixture(json);
-            // The index convention golden: the fixture's field position is
-            // the value the contract itself passes on the wire (the
-            // caller's `4 as Uint<8>` requestsIndexField, and 19 for the
-            // 20-field contract), fed to signet_field_node with no
-            // adjustment. An off-by-one in either direction fails to find
-            // the map below, so the indexer can pass the notification byte
-            // straight through.
+            // The index convention golden: the fixture's field position is the value
+            // the contract itself passes on the wire (the caller's `4 as Uint<8>`
+            // requestsIndexField, and 19 for the 20-field contract), fed to
+            // signet_field_node with no adjustment.
             let expected_field = if fixture.contract == "5-field" { 4 } else { 19 };
             assert_eq!(
                 fixture.requests_index_field, expected_field,
@@ -729,9 +636,6 @@ mod tests {
     #[test]
     fn decode_record_round_trips_rid_vectors() {
         // Every oracle record, re-trimmed into wire atoms and decoded back.
-        // Exercises the capacity enumeration across all tiers, including
-        // no-calldata, where is_some is false and the calldata block still
-        // occupies its atoms, and the access-list splits the id disambiguates.
         let file: RidVectorFile =
             serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
         assert!(file.vectors.len() >= 13, "the tier set shrank");
@@ -741,8 +645,8 @@ mod tests {
             let expected_rid = rid_bytes(&vector.expected_request_id_hex);
             let decoded = decode_record(&cell, &expected_rid)
                 .unwrap_or_else(|err| panic!("vector {}: decode failed: {err}", vector.name));
-            // The consensus property holds for every vector: the recovered
-            // record hashes to the id it was filed under.
+            // The consensus property holds for every vector: the recovered record
+            // hashes to the id it was filed under.
             assert_eq!(
                 crate::request_id::compute_request_id(&decoded),
                 expected_rid,
@@ -750,16 +654,8 @@ mod tests {
                 vector.name
             );
             if vector.name == "al-capacity-unused" {
-                // Capacity-ambiguous by construction, so exact record equality
-                // is the wrong assertion. Every entries=2 split spans the same
-                // 202 preimage bytes with identical zero content
-                // (32*(5-2k) + 2*(21+32k) = 202 for k = 0..2), hence one shared
-                // id, and first match wins in the TS reader and here alike. The
-                // ambiguity is immaterial: every matching split assembles the
-                // same transaction, which is the only reason decode_record may
-                // pick one. Semantic fields do not generally survive an
-                // ambiguity, which is what
-                // `decode_record_refuses_material_capacity_ambiguity` pins.
+                // Capacity-ambiguous by construction, so exact record equality is the
+                // wrong assertion.
                 assert!(decoded.tx_params.calldata.is_some);
                 assert_eq!(decoded.tx_params.calldata.value.no_words, 1);
                 assert_eq!(
@@ -779,13 +675,7 @@ mod tests {
 
     #[test]
     fn signet_field_node_flattens_chunk_shapes() {
-        // Navigation-only synthetic trees, no record bytes. Expected layouts
-        // come from the TS reader's documented rule rather than from this
-        // implementation: fields chunk remainder first and every chunk on the
-        // rightmost spine is full. The one-level case is anchored empirically
-        // by the 20-field capture in the golden test; these trees extend the
-        // rule to depths the checkout cannot produce.
-        // Direct layout: up to 15 fields sit at the root.
+        // Navigation-only synthetic trees, no record bytes.
         let direct = StateNode::Array {
             children: (0..7).map(leaf).collect(),
         };
@@ -811,8 +701,8 @@ mod tests {
             );
         }
 
-        // 20 fields chunk to [5, 15]: the captured 20-field golden covers
-        // this against REAL compiler output; 27 chunks to [12, 15].
+        // 20 fields chunk to [5, 15]: the captured 20-field golden covers this against
+        // REAL compiler output; 27 chunks to [12, 15].
         let twenty_seven = StateNode::Array {
             children: vec![
                 StateNode::Array {
@@ -832,8 +722,8 @@ mod tests {
         }
         assert!(signet_field_node(&twenty_seven, 27).is_err());
 
-        // Two chunk levels: a full arity-15 spine of full arity-15 chunks,
-        // the 226-field shape one level deeper. 1 + 15x15 = 226 fields.
+        // Two chunk levels: a full arity-15 spine of full arity-15 chunks, the
+        // 226-field shape one level deeper.
         let two_level = StateNode::Array {
             children: vec![
                 StateNode::Array {
@@ -867,14 +757,7 @@ mod tests {
 
     #[test]
     fn decode_record_rejects_trailing_junk() {
-        // A valid record plus one junk atom. Splits are derived from the total
-        // atom count, so junk is never left dangling; it must be absorbed into
-        // some field of some split. Here absorption fails a type check on the
-        // shifted tail, which is fixture-specific: another junk shape could
-        // decode cleanly. The id chain is the structural backstop for those,
-        // since a clean absorption either misses the filed id and dies at the
-        // downstream recompute gate or, by collision resistance, is the
-        // original record.
+        // A valid record plus one junk atom.
         let fixture = load_fixture(FIVE_FIELD_JSON);
         let field = signet_field_node(&fixture.state, fixture.requests_index_field).expect("field");
         let StateNode::Map { entries } = field else {
@@ -932,8 +815,8 @@ mod tests {
         assert_eq!(unpacked.caller_address, [0xab; 32]);
         assert_eq!(unpacked.requests_index_field, 4);
 
-        // Fail closed on an unrecognised version rather than reinterpreting
-        // the payload under V1 offsets.
+        // Fail closed on an unrecognised version rather than reinterpreting the payload
+        // under V1 offsets.
         let future = SignBidirectionalEventNotification {
             version: 2,
             payload,
@@ -959,8 +842,7 @@ mod tests {
         (vector.record.0, rid)
     }
 
-    /// A map whose keys are SINGLE atoms (the caller-map shape). Central-map
-    /// tests with composite keys build `MapEntry` directly.
+    /// A map whose keys are SINGLE atoms (the caller-map shape).
     fn map_of(entries: Vec<(String, StateNode)>) -> StateNode {
         StateNode::Map {
             entries: entries
@@ -985,12 +867,7 @@ mod tests {
             Resolved::Found(Box::new(record))
         );
 
-        // Spoofed filing: the same record bytes stored under an id they do
-        // NOT hash to. decode_record ACCEPTS this cell, asserted explicitly:
-        // no split matches the filed id, so decode falls back to
-        // first-clean-decode, and the drop below is therefore provably the
-        // GATE's independent work on the fallback path, the one place the
-        // recompute is not tautological.
+        // Spoofed filing: the same record bytes stored under an id they do NOT hash to.
         let spoofed = [0x99; 32];
         assert!(
             decode_record(&cell, &spoofed).is_ok(),
@@ -1034,10 +911,10 @@ mod tests {
             resolve_verified_record(&map, rid),
             Resolved::Found(Box::new(record))
         );
-        // An id absent from the index is the ordinary negative, and it is a
-        // DISTINCT outcome from a drop: the caller reports it at DEBUG, so
-        // collapsing the two back into one would either silence real drops
-        // or hand an adversary a WARN it can manufacture at will.
+        // An id absent from the index is the ordinary negative, and it is a DISTINCT
+        // outcome from a drop: the caller reports it at DEBUG, so collapsing the two
+        // back into one would either silence real drops or hand an adversary a WARN it
+        // can manufacture at will.
         assert_eq!(resolve_verified_record(&map, [0x44; 32]), Resolved::Absent);
         // A non-map node is a drop, never a panic, and never Absent.
         assert!(matches!(
@@ -1051,9 +928,8 @@ mod tests {
 
     #[test]
     fn repad_atom_32_repads_trimmed_key() {
-        // This nonce makes minimal-1word hash to an id ending in 0x00, so its
-        // wire key trims to fewer than 32 bytes. Found by search once and
-        // pinned; the assertion below fails loudly if it ever stops holding.
+        // This nonce makes minimal-1word hash to an id ending in 0x00, so its wire key
+        // trims to fewer than 32 bytes.
         let (mut record, _) = record_and_rid("minimal-1word");
         record.request_nonce = 272;
         let rid = compute_request_id(&record);
@@ -1074,25 +950,11 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Fail-closed capacity ambiguity.
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Fail-closed
+    // capacity ambiguity.
 
-    /// An atom list where first-match-wins would sign a transaction the record
-    /// does not describe.
-    ///
-    /// 25 atoms, three contested. Two splits decode cleanly and produce
-    /// byte-identical preimages (`0x01` then 53 zeros), so they share a request
-    /// id with no keccak collision involved:
-    ///
-    ///   A = (1 word, 1 entry, 0 keys)  reads [01] as a calldata word and
-    ///       the three empty atoms as entry_count=0, address, key_count=0
-    ///   B = (0 words, 1 entry, 1 key)  reads [01] as entry_count=1 and the
-    ///       three empty atoms as address, key_count=0, storage_key
-    ///
-    /// A assembles with no access list, B with one entry, and the enumeration
-    /// tries A first. The rid gate cannot catch this, since the id really is
-    /// the filed one.
+    /// An atom list where first-match-wins would sign a transaction the record does not
+    /// describe.
     fn ambiguous_cell_atoms() -> Vec<Vec<u8>> {
         vec![
             vec![0xab; 32],               // sender
@@ -1194,11 +1056,8 @@ mod tests {
         let (split_a, split_b) = ambiguous_pair();
         let rid = compute_request_id(&split_b);
 
-        // The premise, asserted rather than assumed: two DISTINCT records
-        // share one request id, and they would be signed differently. Both
-        // halves matter. Without the first there is no ambiguity to refuse;
-        // without the second the ambiguity would be immaterial and refusing
-        // it would drop a legitimate record.
+        // The premise, asserted rather than assumed: two DISTINCT records share one
+        // request id, and they would be signed differently.
         assert_eq!(
             compute_request_id(&split_a),
             rid,
@@ -1218,8 +1077,8 @@ mod tests {
             .expect("the refusal must be typed so the caller can label it");
         assert_eq!(ambiguous.splits, 2, "both splits matched the filed id");
 
-        // And it reaches the caller as its own drop reason, not merged with
-        // ordinary junk.
+        // And it reaches the caller as its own drop reason, not merged with ordinary
+        // junk.
         let map = map_of(vec![(hex::encode(rid), cell_of(&ambiguous_cell_atoms()))]);
         assert!(matches!(
             resolve_verified_record(&map, rid),
@@ -1232,12 +1091,12 @@ mod tests {
 
     #[test]
     fn decode_record_accepts_immaterial_capacity_ambiguity() {
-        // The other side of fail-closed, and the reason the check compares
-        // the SIGNED projection rather than the whole record: this oracle
-        // vector is provably capacity-ambiguous too (every entries=2 split
-        // spans the same 202 preimage bytes of zeros, hence one shared id),
-        // but every matching split assembles the SAME transaction, so
-        // refusing it would drop a record the oracle itself produced.
+        // The other side of fail-closed, and the reason the check compares the SIGNED
+        // projection rather than the whole record: this oracle vector is provably
+        // capacity-ambiguous too (every entries=2 split spans the same 202 preimage
+        // bytes of zeros, hence one shared id), but every matching split assembles the
+        // SAME transaction, so refusing it would drop a record the oracle itself
+        // produced.
         let (record, rid) = record_and_rid("al-capacity-unused");
         let decoded = decode_record(&cell_of(&atoms_from_record(&record)), &rid)
             .expect("an immaterial ambiguity must still decode");
@@ -1250,18 +1109,12 @@ mod tests {
 
     #[test]
     fn resolve_verified_record_rejects_composite_key() {
-        // The caller's request map is keyed by ONE Bytes<32> atom. A key with
-        // any other atom count belongs to a different map (the central
-        // singleton's composite SignetMapKey) or to a future schema, and must
-        // not resolve. Both shapes below DO resolve under a weaker reading: the
-        // first under "take key_atoms[0]", the second under any implementation
-        // that joins the atoms, since the sidecar's own golden shows a one-atom
-        // key and a two-atom key concatenating identically.
+        // The caller's request map is keyed by ONE Bytes<32> atom.
         let (record, rid) = record_and_rid("minimal-1word");
         let cell = cell_of(&atoms_from_record(&record));
 
-        // Absent rather than Dropped: an unmatched key means the id is not in
-        // this index at all, which is the ordinary negative.
+        // Absent rather than Dropped: an unmatched key means the id is not in this
+        // index at all, which is the ordinary negative.
         let leading = StateNode::Map {
             entries: vec![crate::sidecar::MapEntry {
                 key: vec![hex::encode(rid), "00".to_string()],
@@ -1289,9 +1142,9 @@ mod tests {
 
     #[test]
     fn decode_record_type_checks_wire_atoms() {
-        // Every atom here originates in a CALLER's own contract state, so a
-        // decode that coerces instead of rejecting lets the caller choose which
-        // record the MPC reconstructs.
+        // Every atom here originates in a CALLER's own contract state, so a decode that
+        // coerces instead of rejecting lets the caller choose which record the MPC
+        // reconstructs.
         let (record, rid) = record_and_rid("minimal-1word");
         let atoms = atoms_from_record(&record);
 
@@ -1304,8 +1157,8 @@ mod tests {
         assert!(err.contains("Boolean"), "err: {err}");
 
         // An atom wider than its declared Bytes<N> is a typed mismatch, never a
-        // truncation: silently dropping the tail would change the record while
-        // leaving the decode looking clean.
+        // truncation: silently dropping the tail would change the record while leaving
+        // the decode looking clean.
         let mut over_wide = atoms.clone();
         over_wide[0] = vec![0xab; 33];
         let err = decode_record(&cell_of(&over_wide), &rid)
@@ -1316,9 +1169,9 @@ mod tests {
 
     #[test]
     fn decode_notification_requires_two_atoms() {
-        // version and payload, nothing else: a cell of any other shape is a
-        // schema change and must fail closed rather than decode whatever the
-        // first two atoms happen to be.
+        // version and payload, nothing else: a cell of any other shape is a schema
+        // change and must fail closed rather than decode whatever the first two atoms
+        // happen to be.
         let mut payload = [0u8; 128];
         payload[..32].copy_from_slice(&[0xab; 32]);
         payload[32] = 4;
@@ -1336,13 +1189,10 @@ mod tests {
 
     #[test]
     fn decode_record_rejects_oversized_cell() {
-        // 33-byte atoms, deliberately: IF enumeration ever ran on these,
-        // every split would die instantly on the first fixed field (33 > 32
-        // for sender's Bytes<32>), so the mutant that removes the cap fails
-        // FAST here on the error class rather than hanging CI. The real
-        // cost the cap prevents (an adversarial cell with plausible atoms
-        // grinding the roughly O(V^2 log V) split space) is argued in the
-        // cap's doc; a wall-clock assertion would be flaky.
+        // 33-byte atoms, deliberately: IF enumeration ever ran on these, every split
+        // would die instantly on the first fixed field (33 > 32 for sender's
+        // Bytes<32>), so the mutant that removes the cap fails FAST here on the error
+        // class rather than hanging CI.
         let over = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS + 1];
         let err = decode_record(&cell_of(&over), &[0x11; 32])
             .expect_err("a cell above the cap is refused")
@@ -1356,8 +1206,8 @@ mod tests {
             "a capped cell is a cap rejection, not a malformed record, got: {err}"
         );
 
-        // At exactly the cap, enumeration RUNS and reports the ordinary
-        // no-split rejection: the boundary is exclusive-above.
+        // At exactly the cap, enumeration RUNS and reports the ordinary no-split
+        // rejection: the boundary is exclusive-above.
         let at_cap = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS];
         let err = decode_record(&cell_of(&at_cap), &[0x11; 32])
             .expect_err("no split can match 33-byte atoms")

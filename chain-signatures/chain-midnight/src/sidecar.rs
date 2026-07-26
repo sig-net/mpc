@@ -1,12 +1,4 @@
 //! HTTP client for the `midnight-publisher-ts` sidecar, the pure codec seam.
-//!
-//! The sidecar decodes bytes; every trust decision stays on this side. A decode
-//! bug there must be able to drop a request, never to produce a wrong
-//! signature, which is what the Rust-side recompute-and-drop downstream buys.
-//!
-//! Wire shapes pinned here: the `/decode/*` request bodies, the `kind`-tagged
-//! JSON form of [`StateNode`], and camelCase keys on `/health` only.
-//! `tests/sidecar_live.rs` checks them against the running service.
 
 use std::time::Duration;
 
@@ -17,64 +9,38 @@ use serde::Deserialize;
 use crate::config::MidnightConfig;
 
 /// Ledger serialization tags this client was written against
-/// (`midnight-publisher-ts/src/ledger.ts`). A sidecar reporting different
-/// tags decodes a different wire format; refuse it at startup.
+/// (`midnight-publisher-ts/src/ledger.ts`).
 const EXPECTED_CONTRACT_STATE_TAG: &str = "midnight:contract-state[v8]";
 const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
-/// Decoded contract state, internally tagged on `kind` exactly as the sidecar
-/// emits it (`{"kind":"cell","atoms":[..]}`, `{"kind":"null"}`).
-///
-/// Tagged rather than untagged, and not for style: an untagged enum matched
-/// cell/array/map only by accident, since serde ignores the unknown `kind`
-/// field, while `{"kind":"null"}` matched nothing at all, because a unit
-/// variant deserializes from bare JSON `null` rather than an object. The chunk
-/// tree is full of unset slots, so that made every real response unparseable.
-///
-/// Map keys are per-atom hex in an array with boundaries preserved, so a
-/// composite `SignetMapKey`'s variable trim point never needs guessing.
+/// Decoded contract state, internally tagged on `kind` exactly as the sidecar emits it
+/// (`{"kind":"cell","atoms":[..]}`, `{"kind":"null"}`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StateNode {
-    Cell {
-        /// Per-atom hex, trailing-zero-TRIMMED on the wire.
-        atoms: Vec<String>,
-    },
-    Array {
-        children: Vec<StateNode>,
-    },
-    Map {
-        entries: Vec<MapEntry>,
-    },
+    Cell { atoms: Vec<String> },
+    Array { children: Vec<StateNode> },
+    Map { entries: Vec<MapEntry> },
     Null,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MapEntry {
-    /// Per-atom hex of the entry's key, trailing-zero-trimmed like all wire
-    /// atoms, boundaries preserved (one element per atom).
     pub key: Vec<String>,
     pub value: StateNode,
 }
 
-/// Decoded transactions. A `DecodedCall` has no entry point: only the claimed
-/// calls on the caller side carry one, the callee's own entry carries a
-/// commitment. The provenance join matches `claimed[i].commitment` on one call
-/// against `communication_commitment` on another in the same transaction.
+/// Decoded transactions.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DecodedTransactions {
     pub transactions: Vec<DecodedTransaction>,
-    /// Why the sidecar could not decode a submitted blob. Logged, never fatal:
-    /// provenance is advisory, so an unreadable blob must not stop signing.
     pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DecodedTransaction {
-    /// Index of this transaction within the submitted batch, so a `skipped`
-    /// entry can be matched back to its input.
     pub index: usize,
     pub calls: Vec<DecodedCall>,
 }
@@ -90,15 +56,13 @@ pub struct DecodedCall {
 pub struct ClaimedCall {
     pub address: String,
     pub entry_point: String,
-    /// Little-endian Fr bytes, tag stripped.
     pub commitment: String,
 }
 
-/// `GET /health` body. This route alone uses camelCase keys.
+/// `GET /health` body.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Health {
-    /// `"ok"` when the sidecar considers itself serviceable. Checked by
-    /// [`SidecarClient::assert_compatible`].
+    /// `"ok"` when the sidecar considers itself serviceable.
     pub(crate) status: String,
     #[serde(rename = "networkId")]
     pub network_id: String,
@@ -114,8 +78,8 @@ pub struct LedgerTags {
     pub transaction: String,
 }
 
-/// The sidecar's error body shape: zod validation failures and route errors
-/// answer `{code, message, stage, detail}`; surface it verbatim.
+/// The sidecar's error body shape: zod validation failures and route errors answer
+/// `{code, message, stage, detail}`; surface it verbatim.
 #[derive(Debug, Deserialize)]
 struct SidecarErrorBody {
     code: String,
@@ -130,9 +94,9 @@ struct SidecarErrorBody {
 pub struct SidecarClient {
     http: reqwest::Client,
     base_url: String,
-    /// The network id this node expects; compared against `/health` at
-    /// startup because a sidecar on another network answers every decode
-    /// happily and posts every respond into the void.
+    /// The network id this node expects; compared against `/health` at startup because
+    /// a sidecar on another network answers every decode happily and posts every
+    /// respond into the void.
     expected_network_id: String,
     request_timeout: Duration,
     retry: RetryConfig,
@@ -141,8 +105,6 @@ pub struct SidecarClient {
 impl SidecarClient {
     pub fn new(config: &MidnightConfig) -> anyhow::Result<Self> {
         // No global timeout: each call carries its own per-attempt one.
-        // Connecting is bounded separately, or an unreachable sidecar burns a
-        // full per-attempt budget just dialing.
         let http = reqwest::Client::builder()
             .connect_timeout(config.sidecar.request_timeout)
             .build()
@@ -183,8 +145,8 @@ impl SidecarClient {
         )
     }
 
-    /// Decodes raw `send_mn_transaction` blobs into call structures for the
-    /// advisory provenance join.
+    /// Decodes raw `send_mn_transaction` blobs into call structures for the advisory
+    /// provenance join.
     pub async fn decode_transactions(
         &self,
         transactions: &[Vec<u8>],
@@ -226,17 +188,15 @@ impl SidecarClient {
         })
     }
 
-    /// Startup gate: the sidecar must decode the ledger versions this client
-    /// was written against and sit on the network this node is configured for.
-    /// Both mismatches are silent at decode time, so both are checked here.
+    /// Startup gate: the sidecar must decode the ledger versions this client was
+    /// written against and sit on the network this node is configured for.
     pub async fn assert_compatible(&self) -> anyhow::Result<()> {
         check_health(&self.health().await?, &self.expected_network_id)
     }
 }
 
-/// The pure half of the startup gate, split out so the rejection paths are
-/// testable without a service: a healthy sidecar only ever exercises the
-/// passing side.
+/// The pure half of the startup gate, split out so the rejection paths are testable
+/// without a service: a healthy sidecar only ever exercises the passing side.
 fn check_health(health: &Health, expected_network_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         health.status == "ok",
@@ -281,8 +241,8 @@ fn check_health(health: &Health, expected_network_id: &str) -> anyhow::Result<()
     Ok(())
 }
 
-/// Surfaces a non-2xx sidecar response with its `{code, message, stage,
-/// detail}` body verbatim.
+/// Surfaces a non-2xx sidecar response with its `{code, message, stage, detail}` body
+/// verbatim.
 async fn check_response(
     resp: reqwest::Response,
     context: &str,
@@ -305,8 +265,8 @@ async fn check_response(
     anyhow::bail!("{marker}: {context} {status}: {text}");
 }
 
-/// A 4xx means the sidecar read what we sent and refused it, which is a
-/// property of the bytes. Anything else means we did not get an answer.
+/// A 4xx means the sidecar read what we sent and refused it, which is a property of the
+/// bytes.
 fn failure_marker(status: reqwest::StatusCode) -> &'static str {
     if status.is_client_error() {
         REFUSED_BYTES_MSG
@@ -315,32 +275,21 @@ fn failure_marker(status: reqwest::StatusCode) -> &'static str {
     }
 }
 
-/// Marks a sidecar answer that refused the BYTES, as opposed to a transport
-/// fault, a timeout or a 5xx.
-///
-/// Text-matched for the same reason as `rpc::STATE_UNSERVABLE_MSG`:
-/// `retry_rpc!` flattens the error chain into a string on budget exhaustion,
-/// which destroys anything downcastable but preserves this message.
+/// Marks a sidecar answer that refused the BYTES, as opposed to a transport fault, a
+/// timeout or a 5xx.
 pub(crate) const REFUSED_BYTES_MSG: &str = "sidecar refused the submitted bytes";
 
-/// True when `err` is the sidecar refusing the bytes rather than failing to
-/// answer. Only the former may be charged to the contract that owns them.
+/// True when `err` is the sidecar refusing the bytes rather than failing to answer.
 pub(crate) fn is_refused_bytes(err: &anyhow::Error) -> bool {
     err.to_string().contains(REFUSED_BYTES_MSG)
 }
 
 /// The offline cross-language check plus the startup gate's rejection paths.
-/// Everything the sidecar actually answers is covered against the running
-/// service in `tests/sidecar_live.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{IndexerConfig, RpcConfig, SidecarConfig};
 
-    /// The indexer charges a refusal to the contract that owns the bytes and
-    /// drops its request permanently, where anything else propagates and is
-    /// recovered by the restart. Only an answer the sidecar actually gave may
-    /// be a refusal.
     #[test]
     fn only_a_client_error_is_a_refusal() {
         use reqwest::StatusCode;
@@ -365,7 +314,6 @@ mod tests {
         }
     }
 
-    /// The other half: a sidecar that never answered at all.
     #[tokio::test]
     async fn unreachable_sidecar_is_not_a_refusal() {
         // Port 1 on loopback refuses immediately, so this needs no server.
@@ -445,14 +393,6 @@ mod tests {
         assert!(err.contains("v9"), "the actual tag must be named: {err}");
     }
 
-    /// Parses the golden output `midnight-publisher-ts` commits from its real
-    /// decoder over a captured chain blob, so neither side of the contract is
-    /// authored by the side it is checked against. Needs no running service,
-    /// which is what keeps it in `unit.yml`.
-    ///
-    /// The capture holds only `array`, `map` and `cell` nodes, so it does not
-    /// by itself catch a revert to `untagged`; the literal below covers the
-    /// `Null` variant that made every real response unparseable.
     #[test]
     fn state_node_parses_sidecar_golden() {
         assert_eq!(
@@ -471,12 +411,8 @@ mod tests {
         };
 
         // Field 0's key is a single `RequestId` atom; field 1's is the composite
-        // `SignetMapKey { count, requestId }` whose `count` of 0 trims to the
-        // empty atom. Both concatenate to the same 64-character hex run, which
-        // is why keys must stay per-atom: joined, a consumer cannot tell a
-        // one-atom key from a two-atom key whose first atom vanished, and the
-        // indexer's diff could not recover a request id from field 1. Real
-        // captured chain data, not a constructed case.
+        // `SignetMapKey { count, requestId }` whose `count` of 0 trims to the empty
+        // atom.
         let key_of = |field: usize| -> Vec<String> {
             let StateNode::Map { entries } = &children[field] else {
                 panic!("ledger field {field} is a map in this capture");

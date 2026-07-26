@@ -6,11 +6,8 @@ use std::time::Duration;
 /// Timeouts and retry budget for the subxt node RPC client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RpcConfig {
-    /// Timeout for establishing the node WebSocket connection
     pub connect_timeout: Duration,
-    /// Timeout for a single node RPC request
     pub request_timeout: Duration,
-    /// Retry strategy for node RPC calls
     pub retry: RetryConfig,
 }
 
@@ -30,16 +27,11 @@ impl Default for RpcConfig {
 }
 
 /// Timeouts and retry budget for the `midnight-publisher-ts` sidecar.
-///
-/// Separate from [`RpcConfig`] because the budgets are incomparable: a sidecar
-/// call can queue behind the single-dust-UTXO wallet, where a node RPC call
-/// slow enough to be a proving run is a fault rather than a wait.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SidecarConfig {
-    /// Timeout for the decode and health routes, which do no proving
     pub request_timeout: Duration,
-    /// Slower and shorter than the node budget: retrying hard only deepens
-    /// wallet contention
+    /// Slower and shorter than the node budget: retrying hard only deepens wallet
+    /// contention
     pub retry: RetryConfig,
 }
 
@@ -60,21 +52,16 @@ impl Default for SidecarConfig {
 /// Tuning for the indexing pipeline (catchup and the live finalized-head loop).
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexerConfig {
-    /// How many blocks back a contract-state read may walk when the node has
-    /// pruned the state at the block being asked for; also the depth of the
-    /// startup archive-state probe, which asks for state at
-    /// `finalized head - archive_probe_window`
+    /// How many blocks back a contract-state read may walk when the node has pruned the
+    /// state at the block being asked for; also the depth of the startup archive-state
+    /// probe, which asks for state at `finalized head - archive_probe_window`
     pub archive_probe_window: u64,
     /// Refuse to start when the startup probe finds the node pruned within
-    /// `archive_probe_window`. Off by default: the probe degrades to watermark
-    /// catchup instead of refusing.
-    ///
-    /// Has no CLI flag, so a CLI-configured node always runs with `false`.
+    /// `archive_probe_window`.
     pub require_archive_state: bool,
-    /// Capacity of the live-block channel
     pub live_block_buffer: usize,
-    /// How long the finalized-head subscription may go silent before `run()`
-    /// returns and lets the supervisor restart it
+    /// How long the finalized-head subscription may go silent before `run()` returns
+    /// and lets the supervisor restart it
     pub stall_timeout: Duration,
 }
 
@@ -89,20 +76,14 @@ impl Default for IndexerConfig {
     }
 }
 
-/// Midnight chain integration configuration. Supplying it is what turns the
-/// integration on; the node leaves Midnight unspawned when it is absent.
-///
-/// No `Default` impl on purpose: a defaulted config has empty endpoints, so
-/// `unwrap_or_default()` on the gate would spawn an indexer pointed at nothing.
+/// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
-    /// Base URL of the `midnight-publisher-ts` sidecar
     pub sidecar_url: String,
-    /// Midnight node WebSocket RPC URL
     pub node_ws_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
-    /// Ledger network id. Must equal the sidecar's `MIDNIGHT_PUB_NETWORK_ID`
+    /// Ledger network id.
     pub network_id: String,
     pub rpc: RpcConfig,
     pub sidecar: SidecarConfig,
@@ -110,9 +91,9 @@ pub struct MidnightConfig {
 }
 
 impl MidnightConfig {
-    /// Rejects endpoints that cannot work, before anything dials them, so an
-    /// unusable config fails once at construction with the field named rather
-    /// than forever at runtime.
+    /// Rejects endpoints that cannot work, before anything dials them, so an unusable
+    /// config fails once at construction with the field named rather than forever at
+    /// runtime.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.node_ws_url.is_empty(),
@@ -129,9 +110,9 @@ impl MidnightConfig {
              got {} characters",
             self.central_address.len()
         );
-        // Required rather than normalised: the address flows verbatim into
-        // chain_ctx and is compared against the sidecar's lowercase addresses
-        // during attribution, so an uppercase value would silently never match.
+        // Required rather than normalised: the address flows verbatim into chain_ctx
+        // and is compared against the sidecar's lowercase addresses during attribution,
+        // so an uppercase value would silently never match.
         anyhow::ensure!(
             !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
             "midnight config: central_address must be lowercase hex, the canonical form \
@@ -159,8 +140,8 @@ mod tests {
 
     #[test]
     fn default_config_does_not_require_archive_state() {
-        // Probe-and-degrade is the default policy: a pruned node logs loudly
-        // and falls back to watermark catchup. Strict refusal is opt-in.
+        // Probe-and-degrade is the default policy: a pruned node logs loudly and falls
+        // back to watermark catchup.
         assert!(!IndexerConfig::default().require_archive_state);
     }
 
@@ -191,9 +172,9 @@ mod tests {
         let err = empty_sidecar.validate().unwrap_err().to_string();
         assert!(err.contains("sidecar_url"), "unexpected error: {err}");
 
-        // Lowercase is canonical, not a courtesy: attribution compares this
-        // address against sidecar-returned lowercase hex, so an uppercase
-        // config value would silently never match.
+        // Lowercase is canonical, not a courtesy: attribution compares this address
+        // against sidecar-returned lowercase hex, so an uppercase config value would
+        // silently never match.
         let mut uppercase = valid_config();
         uppercase.central_address = "AB".repeat(32);
         let err = uppercase.validate().unwrap_err().to_string();

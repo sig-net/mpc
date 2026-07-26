@@ -1,26 +1,4 @@
 //! The sidecar client against the running sidecar, over real HTTP.
-//!
-//! Nothing is authored on both sides: the requests are the shipped client's, the
-//! answers are `midnight-publisher-ts`'s own, and the inputs are the real chain
-//! blobs that package captured, decoded by the real ledger. The `golden-*.json`
-//! files are that decoder's frozen output for those same bytes, so a golden
-//! comparison here is cross-language rather than circular.
-//!
-//! No chain is involved: `/decode/*` and `/health` are pure codecs, served by
-//! `tests/serve-decode-only.ts` with a node client that throws on any access.
-//! `POST /respond` needs the stack and is covered by `tests/respond-live.ts`.
-//!
-//! # Running
-//!
-//! ```text
-//! (cd chain-signatures/midnight-publisher-ts && npm ci)   # once
-//! cargo test -p mpc-chain-midnight --test sidecar_live -- --ignored
-//! ```
-//!
-//! Every test is `#[ignore]`d, matching `rpc.rs`'s live node test, so CI (which
-//! installs nothing for that package) never runs them. `boot` fails with the
-//! `npm ci` line rather than letting a test pass because it could not find the
-//! service.
 
 use std::io::{BufRead as _, BufReader};
 use std::net::TcpListener;
@@ -43,8 +21,6 @@ const ENTRY: &str = "tests/serve-decode-only.ts";
 const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Real captured chain blobs and the sidecar's own frozen output for them.
-/// `include_*!` rather than a runtime read: a fixture that moves must break the
-/// build, not one test's message.
 const STATE_1366: &[u8] =
     include_bytes!("../../midnight-publisher-ts/tests/fixtures/singleton-post-state-1366.mn");
 const STATE_1365: &[u8] =
@@ -64,7 +40,6 @@ const GOLDEN_BLOCK_1366: &str =
 /// appears in the captured bytes themselves.
 const CONTRACT_STATE_TAG: &[u8] = b"midnight:contract-state[v8]";
 
-/// A running sidecar, killed when the test that booted it ends.
 struct Sidecar {
     child: Child,
     base_url: String,
@@ -72,18 +47,15 @@ struct Sidecar {
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
-        // `node --import tsx` runs the script in THIS process rather than
-        // re-spawning, so killing the child is what frees the port.
+        // `node --import tsx` runs the script in THIS process rather than re-spawning,
+        // so killing the child is what frees the port.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
 impl Sidecar {
-    /// Boots the real service on a free loopback port and waits for it to
-    /// listen. Every failure here panics with what to do about it: these tests
-    /// only run when asked for by name, so a missing prerequisite is a fault,
-    /// not a reason to pass quietly.
+    /// Boots the real service on a free loopback port and waits for it to listen.
     async fn boot() -> Self {
         let dir = Path::new(PUBLISHER_DIR);
         assert!(
@@ -102,10 +74,7 @@ impl Sidecar {
         let mut child = Command::new("node")
             .current_dir(dir)
             .args(["--import", "tsx", ENTRY])
-            // `configFromEnv` takes the full set or throws. Only the port, the
-            // bind host and the network id are live here: the rest are the
-            // sidecar's write-path endpoints, pointed at a dead port so that
-            // anything reaching for one fails loudly instead of dialling.
+            // `configFromEnv` takes the full set or throws.
             .env("MIDNIGHT_PUB_PORT", port.to_string())
             .env("MIDNIGHT_PUB_BIND_HOST", "127.0.0.1")
             .env("MIDNIGHT_PUB_NETWORK_ID", "undeployed")
@@ -122,8 +91,8 @@ impl Sidecar {
                 panic!("could not spawn `node` for the sidecar ({err}); these tests need node >= 22 on PATH")
             });
 
-        // Drained on a thread, so the pipe cannot fill and stall the service,
-        // and so a boot failure can say what the service printed.
+        // Drained on a thread, so the pipe cannot fill and stall the service, and so a
+        // boot failure can say what the service printed.
         let log = Arc::new(Mutex::new(String::new()));
         let sink = Arc::clone(&log);
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -140,8 +109,8 @@ impl Sidecar {
             base_url: format!("http://127.0.0.1:{port}"),
         };
         // Readiness is checked with a plain request rather than through
-        // `SidecarClient`, so a broken client fails its own test instead of
-        // arriving as a boot timeout.
+        // `SidecarClient`, so a broken client fails its own test instead of arriving as
+        // a boot timeout.
         let http = reqwest::Client::new();
         let deadline = Instant::now() + BOOT_TIMEOUT;
         loop {
@@ -164,9 +133,6 @@ impl Sidecar {
         }
     }
 
-    /// A client pointed at this sidecar, expecting `network_id`. The retry
-    /// budget is fast on purpose: the error-path tests below exhaust it, and
-    /// its shape is what `(exhausted after N attempts)` reports.
     fn client(&self, network_id: &str) -> SidecarClient {
         SidecarClient::new(&MidnightConfig {
             sidecar_url: self.base_url.clone(),
@@ -189,9 +155,7 @@ impl Sidecar {
     }
 }
 
-/// Every `Null` in a decoded tree. The variant that made every real response
-/// unparseable while this enum was `untagged`, and the one no committed golden
-/// contains.
+/// Every `Null` in a decoded tree.
 fn count_nulls(node: &StateNode) -> usize {
     match node {
         StateNode::Null => 1,
@@ -204,17 +168,14 @@ fn count_nulls(node: &StateNode) -> usize {
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn health_satisfies_startup_compatibility_gate() {
-    // The whole of `assert_compatible`, against the tags the sidecar really
-    // declares. Offline, all four `EXPECTED_*_TAG` constants are compared to a
-    // body this crate typed out, so the two could drift together and nothing
-    // would notice; here a ledger bump on that side fails this test.
+    // The whole of `assert_compatible`, against the tags the sidecar really declares.
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
     let health = client.health().await.expect("the real /health answers");
     assert_eq!(health.network_id, "undeployed");
-    // The camelCase spellings are the route's own, and this route's alone: a
-    // rename on either side lands in this deserialization.
+    // The camelCase spellings are the route's own, and this route's alone: a rename on
+    // either side lands in this deserialization.
     assert_eq!(health.ledger.contract_state, "midnight:contract-state[v8]");
     assert_eq!(
         health.ledger.zswap_chain_state,
@@ -231,8 +192,8 @@ async fn health_satisfies_startup_compatibility_gate() {
         .await
         .expect("this client and this sidecar decode the same ledger line");
 
-    // The same live sidecar, refused by a node configured for another network:
-    // it would answer every decode happily and post every respond into the void.
+    // The same live sidecar, refused by a node configured for another network: it would
+    // answer every decode happily and post every respond into the void.
     let err = sidecar
         .client("testnet")
         .assert_compatible()
@@ -249,12 +210,8 @@ async fn health_satisfies_startup_compatibility_gate() {
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn decode_contract_state_matches_sidecar_goldens() {
-    // Real chain blobs in, the sidecar's frozen output for those same blobs out,
-    // over HTTP. This is what a mock cannot do at any fidelity: the request body
-    // key is read by the SERVER (`{"state":..}` as `bytes` is the mismatch that
-    // shipped), the hex spelling is the client's, and the tree comes back tagged
-    // on `kind` because that is what the sidecar emits, not because this crate
-    // said so.
+    // Real chain blobs in, the sidecar's frozen output for those same blobs out, over
+    // HTTP.
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
@@ -274,12 +231,8 @@ async fn decode_contract_state_matches_sidecar_goldens() {
         );
     }
 
-    // The caller's capture has no golden, and is here for the node vocabulary
-    // no golden carries: `{"kind":"null"}`, the unset ledger slot. A unit
-    // variant deserializes from bare JSON `null`, never from an object, so
-    // while `StateNode` was `untagged` every real response containing one was
-    // unparseable. Nothing offline in this crate reads a null from the
-    // sidecar's own output; this reads three of them off the wire.
+    // The caller's capture has no golden, and is here for the node vocabulary no golden
+    // carries: `{"kind":"null"}`, the unset ledger slot.
     let caller = client
         .decode_contract_state(CALLER_STATE_1366)
         .await
@@ -316,11 +269,9 @@ async fn decode_transactions_yields_provenance_join() {
         "the live decode diverges from the sidecar's own committed golden"
     );
 
-    // The provenance join, over a real cross-contract call rather
-    // than over a body this crate wrote: one call claims another call in the
-    // SAME transaction, and the claim names that call's communication
-    // commitment. Both field names are the server's here, so a rename on either
-    // side fails the deserialization above.
+    // The provenance join, over a real cross-contract call rather than over a body this
+    // crate wrote: one call claims another call in the SAME transaction, and the claim
+    // names that call's communication commitment.
     let calls = &live.transactions[0].calls;
     let caller = calls
         .iter()
@@ -341,10 +292,9 @@ async fn decode_transactions_yields_provenance_join() {
     );
     assert!(live.skipped.is_empty(), "nothing was skipped: {live:?}");
 
-    // One bad blob costs that blob and nothing else, and never renumbers what
-    // follows it: `index` is the position in the REQUEST array, which is how a
-    // caller maps a result back to the bytes it sent. This is the only way
-    // `skipped` gets a payload, and the ledger is what decides the drop.
+    // One bad blob costs that blob and nothing else, and never renumbers what follows
+    // it: `index` is the position in the REQUEST array, which is how a caller maps a
+    // result back to the bytes it sent.
     let mixed = client
         .decode_transactions(&[vec![0xde, 0xad, 0xbe, 0xef], blob])
         .await
@@ -373,10 +323,7 @@ async fn decode_transactions_yields_provenance_join() {
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn malformed_body_is_bad_request_and_not_retried() {
-    // The real `bad_request`, provoked rather than canned. Empty bytes are what
-    // the client hex-encodes to `""`, which the sidecar's whole-bytes hex check
-    // rejects: it never reaches the ledger, so it is the caller's mistake
-    // (400, "fix your request") and not the ledger's refusal (422).
+    // The real `bad_request`, provoked rather than canned.
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
@@ -390,16 +337,15 @@ async fn malformed_body_is_bad_request_and_not_retried() {
         err.contains("`state`"),
         "the sidecar names the key the client sent, so the message proves the request shape: {err}"
     );
-    // A 4xx is terminal: `check_response` surfaces the status, `is_retryable`
-    // reads it, and the budget is never spent. One attempt, from the client's
-    // own accounting.
+    // A 4xx is terminal: `check_response` surfaces the status, `is_retryable` reads it,
+    // and the budget is never spent.
     assert!(
         err.contains("exhausted after 1 attempts"),
         "a validation reject must not be retried: {err}"
     );
 
-    // The other route's envelope, whose key and array shape are equally the
-    // server's to read: it answers by index.
+    // The other route's envelope, whose key and array shape are equally the server's to
+    // read: it answers by index.
     let err = client
         .decode_transactions(&[Vec::new()])
         .await
@@ -414,8 +360,7 @@ async fn malformed_body_is_bad_request_and_not_retried() {
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn unreadable_bytes_are_decode_failed_and_retried() {
-    // The 400/422 split, live: the envelope is fine and the LEDGER refuses the
-    // bytes. Nothing about this can be mocked honestly: the ledger decides it.
+    // The 400/422 split, live: the envelope is fine and the LEDGER refuses the bytes.
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
@@ -429,9 +374,8 @@ async fn unreadable_bytes_are_decode_failed_and_retried() {
         err.contains("ContractState"),
         "the sidecar's own diagnosis is surfaced verbatim: {err}"
     );
-    // 422 is not one of the terminal 4xx codes, so the budget IS spent here:
-    // the same request really goes out three times. The mocked pair of this
-    // assertion is `expect(3)`; this one counts a real service's real answers.
+    // 422 is not one of the terminal 4xx codes, so the budget IS spent here: the same
+    // request really goes out three times.
     assert!(
         err.contains("exhausted after 3 attempts"),
         "a retryable status must spend the whole budget: {err}"
@@ -441,13 +385,8 @@ async fn unreadable_bytes_are_decode_failed_and_retried() {
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn newer_ledger_is_named_ledger_mismatch() {
-    // The diagnosis `assert_compatible` exists to preempt, taken from the other
-    // end: a real captured state whose version tag has been advanced by one
-    // byte. The library classifies this and plain garbage identically, so what
-    // separates them is a RECEIVED version, and the sidecar answers 502
-    // `ledger_mismatch` ("this build is too old for this chain") rather than
-    // 422 `decode_failed` ("inspect your blob"). The Rust side never provokes
-    // it deliberately, which is precisely why nothing here had ever seen it.
+    // The diagnosis `assert_compatible` exists to preempt, taken from the other end: a
+    // real captured state whose version tag has been advanced by one byte.
     let sidecar = Sidecar::boot().await;
     let client = sidecar.client("undeployed");
 
