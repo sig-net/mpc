@@ -473,4 +473,80 @@ mod tests {
             mpc_crypto::kdf::derive_epsilon_midnight(1, &"ab".repeat(32), "midnight response key")
         );
     }
+
+    /// BINDING (B5): for the SAME 32 sender bytes, the string index-time
+    /// epsilon derivation feeds inside `to_sign_request` must be
+    /// byte-identical to the node side's `sender_string`. A divergence here
+    /// derives a DIFFERENT KEY with no error anywhere; the node's two impls
+    /// are pinned against each other above, but the index-time side is
+    /// unpinned without this. Agreement is asserted THROUGH the derivation:
+    /// re-deriving from the node's rendering must reproduce the epsilon the
+    /// conversion produced.
+    #[test]
+    fn convert_and_node_agree_on_sender_string() {
+        fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
+            let mut out = [0u8; N];
+            out[..text.len()].copy_from_slice(text);
+            out
+        }
+
+        let read_address = [0xab; 32];
+        let record = mpc_chain_midnight::records::SignBidirectionalRecord {
+            sender: read_address,
+            request_nonce: 7,
+            key_version: 1,
+            path: ascii_padded(b"caller-path"),
+            algo: 0,
+            dest: 0,
+            params: [0; 64],
+            tx_param_type: 0,
+            tx_params: mpc_chain_midnight::records::EvmType2TxParams {
+                chain_id: 31337,
+                nonce: 3,
+                max_priority_fee_per_gas: 1,
+                max_fee_per_gas: 2,
+                gas_limit: 21000,
+                to: [0xcd; 20],
+                value: 5,
+                calldata: mpc_chain_midnight::records::CompactMaybe {
+                    is_some: false,
+                    value: mpc_chain_midnight::records::EvmCalldata {
+                        selector: [0; 4],
+                        no_words: 0,
+                        words: vec![[0; 32]],
+                    },
+                },
+                access_list_entry_count: 0,
+                access_list: Vec::new(),
+            },
+            caip2_id: ascii_padded(b"eip155:31337"),
+            output_deserialization_schema: vec![0; 34],
+            respond_serialization_schema: vec![0; 34],
+        };
+
+        let request = mpc_chain_midnight::to_sign_request(
+            &record,
+            &read_address,
+            &"12".repeat(32),
+            [0x77; 32],
+            1,
+        )
+        .expect("the record converts");
+        let mpc_primitives::SignKind::SignBidirectional(event) = request.kind else {
+            panic!("expected SignBidirectional kind");
+        };
+
+        let node_rendering = event.sender_string().expect("node renders the sender");
+        assert_eq!(
+            node_rendering,
+            hex::encode(read_address),
+            "both sides must render lowercase unprefixed hex"
+        );
+        assert_eq!(
+            request.args.epsilon,
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &node_rendering, &event.path),
+            "re-deriving from the node's rendering must reproduce the \
+             conversion's epsilon: the two renderings are byte-identical"
+        );
+    }
 }

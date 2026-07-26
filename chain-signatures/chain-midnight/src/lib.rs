@@ -1,6 +1,7 @@
 //! Midnight chain integration for the MPC node.
 
 mod config;
+mod convert;
 mod indexer;
 mod publisher;
 mod reader;
@@ -13,6 +14,7 @@ mod test_fixtures;
 mod tx;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
+pub use convert::{path_render, to_sign_request, MidnightChainCtx};
 pub use indexer::{select_catchup_mode, MidnightIndexer};
 pub use publisher::MidnightPublisher;
 pub use reader::{
