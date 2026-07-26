@@ -7402,7 +7402,6 @@ dependencies = [
  "futures-util",
  "hex",
  "k256",
- "mockito",
  "mpc-chain-integration-core",
  "mpc-crypto",
  "mpc-primitives",
