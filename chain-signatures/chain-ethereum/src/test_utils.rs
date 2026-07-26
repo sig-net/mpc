@@ -2,10 +2,18 @@ use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
+use alloy::rpc::types::{Block, Log};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Dummy signer for tests; the read-side client never signs.
+fn test_signer() -> alloy_signer_local::PrivateKeySigner {
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        .parse()
+        .unwrap()
+}
 
 /// Default refresh interval (ms) used by `IndexerBuilder` unless overridden.
 const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
@@ -21,11 +29,11 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
     };
 
     let eth = EthConfig {
-        execution_rpc_http_url: url.to_string(),
+        execution_rpc_http_url: url.parse().unwrap(),
         light_client: false,
-        account_sk: "".to_string(),
+        account_sk: test_signer(),
         consensus_rpc_http_url: "".to_string(),
-        contract_address: "".to_string(),
+        contract_address: Address::ZERO,
         network: "".to_string(),
         helios_data_path: "".to_string(),
         refresh_finalized_interval: 0,
@@ -58,10 +66,10 @@ impl TestIndexerBuilder {
         Self {
             server_url: server_url.clone(),
             eth: EthConfig {
-                account_sk: String::new(),
+                account_sk: test_signer(),
                 consensus_rpc_http_url: server_url.clone(),
-                execution_rpc_http_url: server_url.clone(),
-                contract_address: format!("{:x}", Address::ZERO),
+                execution_rpc_http_url: server_url.parse().unwrap(),
+                contract_address: Address::ZERO,
                 network: "sepolia".to_string(),
                 helios_data_path: "/tmp/helios-test".to_string(),
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
@@ -81,16 +89,16 @@ impl TestIndexerBuilder {
     /// `EthereumClient`)
     pub fn client_url(mut self, url: impl Into<String>) -> Self {
         let url = url.into();
-        self.eth.execution_rpc_http_url = url.clone();
+        self.eth.execution_rpc_http_url = url.parse().unwrap();
         self.server_url = url;
         self
     }
 
-    /// Override both RPC URLs (e.g. empty strings) — only changes config, not
-    /// the client build URL.
+    /// Override both RPC URLs (e.g. empty consensus URL) — only changes
+    /// config, not the client build URL.
     pub fn rpc_urls(mut self, consensus: impl Into<String>, execution: impl Into<String>) -> Self {
         self.eth.consensus_rpc_http_url = consensus.into();
-        self.eth.execution_rpc_http_url = execution.into();
+        self.eth.execution_rpc_http_url = execution.into().parse().unwrap();
         self
     }
 
@@ -166,18 +174,16 @@ pub fn live_block(number: u64) -> CatchupItem {
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
-    let block: alloy::rpc::types::Block =
-        serde_json::from_value(value).expect("block fixture should deserialize");
+    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
     CatchupItem::LiveBlock(block)
 }
 
-pub fn batch_block(number: u64, logs: Vec<alloy::rpc::types::Log>) -> CatchupItem {
+pub fn batch_block(number: u64, logs: Vec<Log>) -> CatchupItem {
     let value = block_response(1, number)
         .get("result")
         .expect("block_response has a result envelope")
         .clone();
-    let block: alloy::rpc::types::Block =
-        serde_json::from_value(value).expect("block fixture should deserialize");
+    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
     CatchupItem::BatchBlock { block, logs }
 }
 

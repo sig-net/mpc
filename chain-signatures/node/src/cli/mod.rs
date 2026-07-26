@@ -21,7 +21,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::{run_stream, supervisor::run_supervised, StreamContext};
+use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
@@ -31,11 +31,11 @@ use deadpool_redis::Runtime;
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
-use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
+use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_near::NearClient;
-use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
@@ -282,7 +282,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
+            let chains = ChainConfigs::from_args(eth, sol, hydration, canton)?;
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
 
@@ -469,13 +469,18 @@ struct ChainConfigs {
 }
 
 impl ChainConfigs {
-    fn from_args(eth: EthArgs, sol: SolArgs, hydration: HydrationArgs, canton: CantonArgs) -> Self {
-        Self {
-            eth: eth.into_config(),
+    fn from_args(
+        eth: EthArgs,
+        sol: SolArgs,
+        hydration: HydrationArgs,
+        canton: CantonArgs,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            eth: eth.into_config()?,
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
-        }
+        })
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -545,7 +550,7 @@ fn log_startup(
         git_commit_hash = %crate::metrics::git_commit_hash(),
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_url = %near_client.rpc_addr(),
-        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.as_str()).unwrap_or("None"),
+        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
@@ -813,11 +818,11 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
-            Ok(sol_stream) => {
-                tracing::info!("solana indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    sol_stream,
+        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+            Ok(sol_indexer) => {
+                tracing::info!("solana indexer created successfully");
+                tokio::spawn(run_supervised(
+                    sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
                         sign_tx.clone(),
@@ -831,7 +836,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer stream");
+                tracing::error!(?err, "failed to create solana indexer");
             }
         }
     }
@@ -852,11 +857,11 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
-            Ok(canton_stream) => {
-                tracing::info!("canton indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    canton_stream,
+        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+            Ok(canton_indexer) => {
+                tracing::info!("canton indexer created successfully");
+                tokio::spawn(run_supervised(
+                    canton_indexer,
                     StreamContext::new(
                         backlog,
                         sign_tx,
@@ -870,7 +875,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer stream");
+                tracing::error!(?err, "failed to create canton indexer");
             }
         }
     }

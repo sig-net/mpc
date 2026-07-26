@@ -7339,6 +7339,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tokio-util",
  "tracing",
 ]
 
@@ -7435,6 +7436,7 @@ dependencies = [
  "solana-sdk",
  "solana-transaction-status",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber 0.3.20",
 ]
