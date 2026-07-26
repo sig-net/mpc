@@ -144,6 +144,17 @@ impl MidnightConfig {
              got {} characters",
             self.central_address.len()
         );
+        // Lowercase is the canonical form, REQUIRED rather than normalised:
+        // the address flows verbatim into chain_ctx (B5) and is compared
+        // against sidecar-returned lowercase addresses in attribution (B6),
+        // so an uppercase config value would silently never match and
+        // misreport as missing provenance. Rejecting here keeps exactly one
+        // representation everywhere with no silent transform.
+        anyhow::ensure!(
+            !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
+            "midnight config: central_address must be lowercase hex, the canonical form \
+             every comparison site assumes"
+        );
         Ok(())
     }
 }
@@ -203,5 +214,13 @@ mod tests {
         empty_sidecar.sidecar_url = String::new();
         let err = empty_sidecar.validate().unwrap_err().to_string();
         assert!(err.contains("sidecar_url"), "unexpected error: {err}");
+
+        // Lowercase is canonical, not a courtesy: attribution compares this
+        // address against sidecar-returned lowercase hex, so an uppercase
+        // config value would silently never match.
+        let mut uppercase = valid_config();
+        uppercase.central_address = "AB".repeat(32);
+        let err = uppercase.validate().unwrap_err().to_string();
+        assert!(err.contains("lowercase"), "unexpected error: {err}");
     }
 }

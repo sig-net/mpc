@@ -290,13 +290,19 @@ pub fn resolve_verified_record(
     Some(record)
 }
 
-/// One trimmed `Bytes<32>` atom, re-padded and compared. Handles the
-/// trimmed wire form (a rid ending in `0x00` stores as fewer than 32
+/// Exactly one trimmed `Bytes<32>` atom, re-padded and compared. The
+/// caller's request map key is single-atom, so a key arriving with any
+/// other atom count is a typed mismatch (another map's composite key or a
+/// future schema), never a string that silently fails to compare. Handles
+/// the trimmed wire form (a rid ending in `0x00` stores as fewer than 32
 /// bytes) and an untrimmed 32-byte form identically, since re-padding a
-/// full-width atom is the identity. Non-hex or overlong keys simply do not
-/// match; they belong to other maps or future schemas, not to this lookup.
-fn key_matches_request_id(key_hex: &str, request_id: &[u8; 32]) -> bool {
-    let Ok(bytes) = hex::decode(key_hex) else {
+/// full-width atom is the identity. Non-hex or overlong atoms simply do
+/// not match.
+fn key_matches_request_id(key_atoms: &[String], request_id: &[u8; 32]) -> bool {
+    let [atom] = key_atoms else {
+        return false;
+    };
+    let Ok(bytes) = hex::decode(atom) else {
         return false;
     };
     if bytes.len() > 32 {
@@ -543,7 +549,7 @@ mod tests {
     use super::*;
     use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
     use crate::sidecar::StateNode;
-    use crate::test_fixtures::RecordFixture;
+    use crate::test_fixtures::{atoms_from_record, cell_of, RecordFixture};
     use serde::Deserialize;
 
     /// Captured by gen-b3-fixtures.ts from the two in-repo caller contracts
@@ -584,68 +590,6 @@ mod tests {
             .expect("request id is 32 bytes")
     }
 
-    /// Wire-form atoms of a record: each field trimmed exactly as the state
-    /// layer stores it (trailing zeros dropped; a false Boolean is the
-    /// EMPTY atom, a true one is [1]; integers are little-endian trimmed).
-    /// Used to turn A4's oracle-produced records into decode INPUTS whose
-    /// expected outputs and ids come from the same oracle fixture; only
-    /// this trimming transform is local, and it is the documented wire
-    /// rule, not a golden.
-    fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
-        fn trim(bytes: &[u8]) -> Vec<u8> {
-            let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-            bytes[..end].to_vec()
-        }
-        let tx = &record.tx_params;
-        let mut atoms: Vec<Vec<u8>> = vec![
-            trim(&record.sender),
-            trim(&record.request_nonce.to_le_bytes()),
-            trim(&[record.key_version]),
-            trim(&record.path),
-            trim(&[record.algo]),
-            trim(&[record.dest]),
-            trim(&record.params),
-            trim(&[record.tx_param_type]),
-            trim(&tx.chain_id.to_le_bytes()),
-            trim(&tx.nonce.to_le_bytes()),
-            trim(&tx.max_priority_fee_per_gas.to_le_bytes()),
-            trim(&tx.max_fee_per_gas.to_le_bytes()),
-            trim(&tx.gas_limit.to_le_bytes()),
-            trim(&tx.to),
-            trim(&tx.value.to_le_bytes()),
-            if tx.calldata.is_some {
-                vec![1]
-            } else {
-                Vec::new()
-            },
-            trim(&tx.calldata.value.selector),
-            trim(&tx.calldata.value.no_words.to_le_bytes()),
-        ];
-        for word in &tx.calldata.value.words {
-            atoms.push(trim(word));
-        }
-        atoms.push(trim(&[tx.access_list_entry_count]));
-        for entry in &tx.access_list {
-            atoms.push(trim(&entry.address));
-            atoms.push(trim(&[entry.storage_key_count]));
-            for key in &entry.storage_keys {
-                atoms.push(trim(key));
-            }
-        }
-        atoms.push(trim(&record.caip2_id));
-        // Schemas are exact-length by protocol convention, never ending in a
-        // zero byte, so stored length equals declared length.
-        atoms.push(record.output_deserialization_schema.clone());
-        atoms.push(record.respond_serialization_schema.clone());
-        atoms
-    }
-
-    fn cell_of(atoms: &[Vec<u8>]) -> StateNode {
-        StateNode::Cell {
-            atoms: atoms.iter().map(hex::encode).collect(),
-        }
-    }
-
     fn leaf(marker: u8) -> StateNode {
         StateNode::Cell {
             atoms: vec![hex::encode([marker])],
@@ -683,7 +627,7 @@ mod tests {
             };
             let entry = entries
                 .iter()
-                .find(|entry| entry.key == fixture.request_id_hex)
+                .find(|entry| entry.key.len() == 1 && entry.key[0] == fixture.request_id_hex)
                 .unwrap_or_else(|| panic!("{}: request id not in the map", fixture.contract));
 
             let decoded = decode_record(&entry.value, &rid_bytes(&fixture.request_id_hex))
@@ -987,11 +931,16 @@ mod tests {
         (vector.record.0, rid)
     }
 
+    /// A map whose keys are SINGLE atoms (the caller-map shape). Central-map
+    /// tests with composite keys build `MapEntry` directly.
     fn map_of(entries: Vec<(String, StateNode)>) -> StateNode {
         StateNode::Map {
             entries: entries
                 .into_iter()
-                .map(|(key, value)| crate::sidecar::MapEntry { key, value })
+                .map(|(key, value)| crate::sidecar::MapEntry {
+                    key: vec![key],
+                    value,
+                })
                 .collect(),
         }
     }

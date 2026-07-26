@@ -130,7 +130,9 @@
      {
       "entries": [
        {
-        "key": "26f04b571a738cf763f9d97fdb64966f8945e1d0ba2f49f994b0457fdb2b6e79",
+        "key": [
+         "26f04b571a738cf763f9d97fdb64966f8945e1d0ba2f49f994b0457fdb2b6e79"
+        ],
         "value": {
          "atoms": [
           "ff73c1c09004f2de051ff1eabdb6122f70746cdf2bb6fdffa8ab1ea6823612b0",

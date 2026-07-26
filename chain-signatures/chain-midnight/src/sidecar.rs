@@ -33,9 +33,15 @@ const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 /// variants carry disjoint field names and the null node is JSON `null`, so
 /// deserialization is unambiguous and a shape divergence fails loudly.
 ///
-/// Map keys are the entry's atoms hex-CONCATENATED into one string, which is
-/// lossy for composite keys (D9): the split point is not recoverable here,
-/// and consumers must construct-and-match rather than parse.
+/// Map keys are the entry's atoms as an ARRAY of per-atom hex, boundaries
+/// preserved: D9's chosen resolution (option 1, atom-preserving keys), which
+/// exists precisely so a composite `SignetMapKey`'s variable trim point
+/// never needs guessing. This models the post-#1058 wire; until that PR
+/// lands the sidecar still joins the atoms into one string, and a live
+/// `/decode/contract-state` carrying a map will fail here with serde's
+/// "data did not match any variant of untagged enum StateNode", which names
+/// neither `key` nor `MapEntry`: if you are debugging that message, the
+/// sidecar's key encoding is the first thing to check.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum StateNode {
@@ -54,7 +60,9 @@ pub enum StateNode {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MapEntry {
-    pub key: String,
+    /// Per-atom hex of the entry's key, trailing-zero-trimmed like all wire
+    /// atoms, boundaries preserved (one element per atom).
+    pub key: Vec<String>,
     pub value: StateNode,
 }
 
@@ -432,9 +440,9 @@ mod tests {
             .with_body(
                 json!({
                     "entries": [
-                        {"key": "07", "value": {"atoms": ["ab", ""]}},
-                        {"key": "ff00", "value": null},
-                        {"key": "01", "value": {"children": [{"atoms": ["cd"]}]}},
+                        {"key": ["07"], "value": {"atoms": ["ab", ""]}},
+                        {"key": ["ff", "00"], "value": null},
+                        {"key": ["01"], "value": {"children": [{"atoms": ["cd"]}]}},
                     ]
                 })
                 .to_string(),
@@ -452,17 +460,19 @@ mod tests {
         let expected = StateNode::Map {
             entries: vec![
                 MapEntry {
-                    key: "07".to_string(),
+                    key: vec!["07".to_string()],
                     value: StateNode::Cell {
                         atoms: vec!["ab".to_string(), String::new()],
                     },
                 },
                 MapEntry {
-                    key: "ff00".to_string(),
+                    // A composite key: TWO atoms, boundary preserved. This is
+                    // the whole point of D9 option 1.
+                    key: vec!["ff".to_string(), "00".to_string()],
                     value: StateNode::Null,
                 },
                 MapEntry {
-                    key: "01".to_string(),
+                    key: vec!["01".to_string()],
                     value: StateNode::Array {
                         children: vec![StateNode::Cell {
                             atoms: vec!["cd".to_string()],

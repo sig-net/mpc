@@ -89,6 +89,41 @@ impl FinalizedBlock {
     pub fn hash(&self) -> H256 {
         self.block.hash()
     }
+
+    pub fn parent_hash(&self) -> H256 {
+        self.block.header().parent_hash
+    }
+
+    /// The plain-data form the indexer's read path consumes.
+    pub fn block_ref(&self) -> BlockRef {
+        BlockRef {
+            number: self.number(),
+            hash: hex_0x(self.hash()),
+            parent_hash: hex_0x(self.parent_hash()),
+        }
+    }
+}
+
+/// One finalized block as plain data: the number plus the `0x`-prefixed
+/// hashes `midnight_contractState` takes, detached from any subxt handle so
+/// fixtures can mint them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRef {
+    pub number: u64,
+    pub hash: String,
+    pub parent_hash: String,
+}
+
+fn hex_0x(hash: H256) -> String {
+    format!("0x{}", hex::encode(hash.as_bytes()))
+}
+
+/// True when `err` carries `contract_state`'s pruned-or-unknown-hash
+/// mapping (the outermost context survives `retry_rpc!`'s flattening, per
+/// the note on [`STATE_UNSERVABLE_MSG`]). The Pruned catchup path uses this
+/// to degrade a block to a counted drop instead of a restart.
+pub(crate) fn is_state_unservable(err: &anyhow::Error) -> bool {
+    err.to_string().contains(STATE_UNSERVABLE_MSG)
 }
 
 /// Read-side client for the Midnight node.
@@ -283,6 +318,78 @@ impl MidnightRpc {
             window,
         )
         .await
+    }
+
+    /// The finalized head as a [`BlockRef`]: the head hash, then its header
+    /// for the number and parent, each read on the ordinary retry budget.
+    pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
+        let hash = self.finalized_head().await?;
+        let header = retry_rpc!(self.request_timeout, self.retry, "midnight_head_header", {
+            self.legacy
+                .chain_get_header(Some(hash))
+                .await
+                .context("failed to fetch the finalized head header")
+        })?
+        .context("midnight node returned no header for its own finalized head")?;
+        Ok(BlockRef {
+            number: u64::from(header.number),
+            hash: hex_0x(hash),
+            parent_hash: hex_0x(header.parent_hash),
+        })
+    }
+
+    /// The block at `number` as a [`BlockRef`], for the catchup range walk.
+    pub async fn block_ref_at(&self, number: u64) -> anyhow::Result<BlockRef> {
+        let hash = retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            "midnight_block_hash_at",
+            {
+                self.legacy
+                    .chain_get_block_hash(Some(NumberOrHex::Number(number)))
+                    .await
+                    .context("failed to fetch a block hash by number")
+            }
+        )?
+        .with_context(|| format!("midnight node has no block hash for height {number}"))?;
+        let header = retry_rpc!(self.request_timeout, self.retry, "midnight_header_at", {
+            self.legacy
+                .chain_get_header(Some(hash))
+                .await
+                .context("failed to fetch a block header")
+        })?
+        .with_context(|| format!("midnight node has no header for height {number}"))?;
+        Ok(BlockRef {
+            number: u64::from(header.number),
+            hash: hex_0x(hash),
+            parent_hash: hex_0x(header.parent_hash),
+        })
+    }
+
+    /// Every `send_mn_transaction` blob in the block named by `hash_0x`,
+    /// for blocks reached by hash rather than through the live stream.
+    pub async fn send_mn_transaction_bytes_at(
+        &self,
+        hash_0x: &str,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let bytes: [u8; 32] = hex::decode(hash_0x.trim_start_matches("0x"))
+            .context("block hash is not hex")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("block hash is not 32 bytes"))?;
+        let block = retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            "midnight_block_at_hash",
+            {
+                self.client
+                    .blocks()
+                    .at(H256::from(bytes))
+                    .await
+                    .context("failed to fetch a finalized block by hash")
+            }
+        )?;
+        self.send_mn_transaction_bytes(&FinalizedBlock { block })
+            .await
     }
 
     /// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic

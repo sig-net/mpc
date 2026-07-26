@@ -17,6 +17,70 @@ use std::str::FromStr;
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
 };
+use crate::sidecar::StateNode;
+
+/// Wire-form atoms of a record: each field trimmed exactly as the state
+/// layer stores it (trailing zeros dropped; a false Boolean is the
+/// EMPTY atom, a true one is [1]; integers are little-endian trimmed).
+/// Used to turn A4's oracle-produced records into decode INPUTS whose
+/// expected outputs and ids come from the same oracle fixture; only
+/// this trimming transform is local, and it is the documented wire
+/// rule, not a golden. Shared by the reader gate tests and the indexer
+/// run() fixtures.
+pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
+    fn trim(bytes: &[u8]) -> Vec<u8> {
+        let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        bytes[..end].to_vec()
+    }
+    let tx = &record.tx_params;
+    let mut atoms: Vec<Vec<u8>> = vec![
+        trim(&record.sender),
+        trim(&record.request_nonce.to_le_bytes()),
+        trim(&[record.key_version]),
+        trim(&record.path),
+        trim(&[record.algo]),
+        trim(&[record.dest]),
+        trim(&record.params),
+        trim(&[record.tx_param_type]),
+        trim(&tx.chain_id.to_le_bytes()),
+        trim(&tx.nonce.to_le_bytes()),
+        trim(&tx.max_priority_fee_per_gas.to_le_bytes()),
+        trim(&tx.max_fee_per_gas.to_le_bytes()),
+        trim(&tx.gas_limit.to_le_bytes()),
+        trim(&tx.to),
+        trim(&tx.value.to_le_bytes()),
+        if tx.calldata.is_some {
+            vec![1]
+        } else {
+            Vec::new()
+        },
+        trim(&tx.calldata.value.selector),
+        trim(&tx.calldata.value.no_words.to_le_bytes()),
+    ];
+    for word in &tx.calldata.value.words {
+        atoms.push(trim(word));
+    }
+    atoms.push(trim(&[tx.access_list_entry_count]));
+    for entry in &tx.access_list {
+        atoms.push(trim(&entry.address));
+        atoms.push(trim(&[entry.storage_key_count]));
+        for key in &entry.storage_keys {
+            atoms.push(trim(key));
+        }
+    }
+    atoms.push(trim(&record.caip2_id));
+    // Schemas are exact-length by protocol convention, never ending in a
+    // zero byte, so stored length equals declared length.
+    atoms.push(record.output_deserialization_schema.clone());
+    atoms.push(record.respond_serialization_schema.clone());
+    atoms
+}
+
+pub(crate) fn cell_of(atoms: &[Vec<u8>]) -> StateNode {
+    StateNode::Cell {
+        atoms: atoms.iter().map(hex::encode).collect(),
+    }
+}
 
 /// A standalone fixture record: `RecordFixture::deserialize` applies the
 /// remote shims to a bare record object.
