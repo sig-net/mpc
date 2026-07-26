@@ -44,7 +44,7 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 /// on budget exhaustion (its `map_err` formats with `{e}`), which destroys
 /// anything downcastable but deterministically preserves the outermost
 /// context message, which is exactly what `{e}` prints.
-const STATE_UNSERVABLE_MSG: &str =
+pub(crate) const STATE_UNSERVABLE_MSG: &str =
     "midnight node cannot serve contract state at that block (pruned or unknown hash)";
 
 /// All-zero placeholder address for the archive probe: the probe asks
