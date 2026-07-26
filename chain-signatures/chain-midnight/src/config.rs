@@ -119,6 +119,10 @@ impl MidnightConfig {
             "midnight config: node_ws_url is empty"
         );
         anyhow::ensure!(
+            !self.sidecar_url.is_empty(),
+            "midnight config: sidecar_url is empty"
+        );
+        anyhow::ensure!(
             self.central_address.len() == 64
                 && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
             "midnight config: central_address must be 64 hex characters with no 0x prefix, \
@@ -171,5 +175,10 @@ mod tests {
         prefixed.central_address = format!("0x{}", "ab".repeat(31));
         let err = prefixed.validate().unwrap_err().to_string();
         assert!(err.contains("central_address"), "unexpected error: {err}");
+
+        let mut empty_sidecar = valid_config();
+        empty_sidecar.sidecar_url = String::new();
+        let err = empty_sidecar.validate().unwrap_err().to_string();
+        assert!(err.contains("sidecar_url"), "unexpected error: {err}");
     }
 }
