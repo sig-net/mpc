@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn golden_assembly_matches_the_ethers_oracle() {
         let vectors = tx_vectors();
-        assert_eq!(vectors.len(), 7, "the anchor names seven vectors");
+        assert_eq!(vectors.len(), 8, "the anchor names eight vectors");
 
         for vector in vectors {
             let name = vector.name.as_str();
@@ -295,13 +295,23 @@ mod tests {
 
     #[test]
     fn counts_not_capacity_is_the_assembled_truth() {
-        // The anchor's central fact: minimal-1word, unused-word-slot and
-        // wide-schemas differ only in word CAPACITY (1 vs 3) and schema
-        // widths, and must assemble to one identical transaction, because
-        // only the counts reach the transaction and the schemas never do.
-        let base = serialized_transaction(&record_by_name("minimal-1word"))
-            .expect("minimal-1word assembles");
-        for name in ["unused-word-slot", "wide-schemas"] {
+        // The anchor's central fact: these records differ only in unused
+        // CAPACITY (word slots 1 vs 3, access-list slots 0 vs 2x2 keys at
+        // count zero) and in schema widths, and must assemble to one
+        // identical transaction, because only the counts reach the
+        // transaction and the schemas never do. al-capacity-unused is the
+        // family's zero-entry-count member: two capacity entries that a
+        // "0 means all" sentinel misread would emit as phantom zero-filled
+        // entries.
+        const FAMILY: [&str; 4] = [
+            "minimal-1word",
+            "unused-word-slot",
+            "wide-schemas",
+            "al-capacity-unused",
+        ];
+        let base =
+            serialized_transaction(&record_by_name(FAMILY[0])).expect("minimal-1word assembles");
+        for name in &FAMILY[1..] {
             assert_eq!(
                 serialized_transaction(&record_by_name(name)).expect(name),
                 base,
@@ -309,16 +319,18 @@ mod tests {
             );
         }
 
-        // Non-vacuity: the three RECORDS are distinct (their ids differ),
-        // so the equality above is three records collapsing to one
-        // transaction, not one record loaded three times.
-        let ids: Vec<[u8; 32]> = ["minimal-1word", "unused-word-slot", "wide-schemas"]
+        // Non-vacuity: the four RECORDS are pairwise distinct (their ids
+        // differ), so the equality above is four records collapsing to one
+        // transaction, not one record loaded four times.
+        let ids: Vec<[u8; 32]> = FAMILY
             .into_iter()
             .map(|name| compute_request_id(&record_by_name(name)))
             .collect();
-        assert_ne!(ids[0], ids[1]);
-        assert_ne!(ids[0], ids[2]);
-        assert_ne!(ids[1], ids[2]);
+        for (i, first) in ids.iter().enumerate() {
+            for (j, second) in ids.iter().enumerate().skip(i + 1) {
+                assert_ne!(first, second, "{} and {}", FAMILY[i], FAMILY[j]);
+            }
+        }
     }
 
     #[test]

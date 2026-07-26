@@ -150,6 +150,25 @@
         "data": "0xca11ab1e1111111111111111111111111111111111111111111111111111111111111111",
         "accessList": []
       }
+    },
+    {
+      "name": "al-capacity-unused",
+      "request_id_hex": "f59a7f178a80700e91536d34610dd18c45838b8819ad1f85d74c280728d67d26",
+      "assembled_calldata_hex": "0xca11ab1e1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_unsigned_serialized_hex": "0x02f845827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05a4ca11ab1e1111111111111111111111111111111111111111111111111111111111111111c0",
+      "expected_unsigned_hash_hex": "0xf588c8fe81640dcbb4575dbc17434eb6b7e9bb525868c677db8f24bed440b212",
+      "tx_fields_ethers_sees": {
+        "type": 2,
+        "chainId": "31337",
+        "nonce": 3,
+        "gasLimit": "21000",
+        "maxFeePerGas": "2",
+        "maxPriorityFeePerGas": "1",
+        "to": "0xCdCDCdCdcdcdcdCdcDcDCdcDcDCdCdcdCdcDCDcD",
+        "value": "5",
+        "data": "0xca11ab1e1111111111111111111111111111111111111111111111111111111111111111",
+        "accessListEntries": 0
+      }
     }
   ]
 }
