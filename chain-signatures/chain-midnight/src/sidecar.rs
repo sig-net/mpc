@@ -187,9 +187,14 @@ pub struct SidecarClient {
 impl SidecarClient {
     pub fn new(config: &MidnightConfig) -> anyhow::Result<Self> {
         config.validate()?;
-        // No global reqwest timeout: /respond needs its own budget, so every
-        // call carries a per-request timeout instead.
+        // No global reqwest timeout: /respond needs its own proving budget,
+        // so every call carries a per-attempt timeout instead. Connecting is
+        // not proving, though: without a connect timeout an unreachable
+        // sidecar burns a full per-attempt budget per attempt just dialing,
+        // so the dial is bounded separately. Do not collapse these into one
+        // client-wide timeout; that silently caps the respond budget.
         let http = reqwest::Client::builder()
+            .connect_timeout(config.sidecar.request_timeout)
             .build()
             .context("failed to build the sidecar http client")?;
         Ok(Self {
@@ -467,6 +472,71 @@ mod tests {
             ],
         };
         assert_eq!(node, expected);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn decodes_transactions_with_the_provenance_join_fields() {
+        let mut server = mockito::Server::new_async().await;
+        // The request-body shape {"transactions": [hex]} is this client's
+        // documented assumption, pinned here like the contract-state one.
+        // The response exercises every decode DTO, including a populated
+        // claimed array: B4's provenance join reads address,
+        // communication_commitment, and claimed[].commitment, so their
+        // snake_case wire names must deserialize.
+        let mock = server
+            .mock("POST", "/decode/transactions")
+            .match_body(mockito::Matcher::Json(
+                json!({"transactions": ["0102", "aabb"]}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "transactions": [
+                        {
+                            "index": 0,
+                            "calls": [
+                                {
+                                    "address": "ab".repeat(32),
+                                    "communication_commitment": "cc01",
+                                    "claimed": [
+                                        {
+                                            "position": 2,
+                                            "address": "cd".repeat(32),
+                                            "entry_point": "signBidirectional",
+                                            "commitment": "cc02",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                    "skipped": ["1: unsupported segment"],
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = SidecarClient::new(&test_config(&server.url())).expect("client");
+        let decoded = client
+            .decode_transactions(&[vec![0x01, 0x02], vec![0xaa, 0xbb]])
+            .await
+            .expect("decode");
+
+        assert_eq!(decoded.skipped, vec!["1: unsupported segment".to_string()]);
+        assert_eq!(decoded.transactions.len(), 1);
+        let tx = &decoded.transactions[0];
+        assert_eq!(tx.index, 0);
+        let call = &tx.calls[0];
+        assert_eq!(call.address, "ab".repeat(32));
+        assert_eq!(call.communication_commitment, "cc01");
+        let claimed = &call.claimed[0];
+        assert_eq!(claimed.position, 2);
+        assert_eq!(claimed.address, "cd".repeat(32));
+        assert_eq!(claimed.entry_point, "signBidirectional");
+        assert_eq!(claimed.commitment, "cc02");
         mock.assert_async().await;
     }
 
