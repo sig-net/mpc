@@ -1239,7 +1239,37 @@ mod tests {
         );
     }
 
-    fn assert_sign_request(event: &ChainEvent, rid: [u8; 32]) {
+    const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");
+
+    /// The oracle payload scalar for a named tx vector: the thing that gets
+    /// SIGNED, read from tx_vectors.json's expected_unsigned_hash_hex and
+    /// never recomputed in-crate, because payload_scalar(serialized(...))
+    /// would run the very code path under test and pass for any
+    /// consistent-but-wrong implementation, including the wiring bug this
+    /// assertion exists to catch.
+    fn oracle_payload(name: &str) -> k256::Scalar {
+        use mpc_primitives::ScalarExt as _;
+        let file: serde_json::Value =
+            serde_json::from_str(TX_VECTORS_JSON).expect("tx_vectors.json parses");
+        let hash_hex = file["vectors"]
+            .as_array()
+            .expect("fixture has a vectors array")
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap_or_else(|| panic!("no tx vector named {name}"))["expected_unsigned_hash_hex"]
+            .as_str()
+            .expect("expected_unsigned_hash_hex is a string");
+        let hash: [u8; 32] = hex::decode(hash_hex.trim_start_matches("0x"))
+            .expect("oracle hash decodes")
+            .try_into()
+            .expect("oracle hash is 32 bytes");
+        k256::Scalar::from_bytes(hash).expect("oracle hash is in range")
+    }
+
+    /// Asserts the emitted request end to end: the id, the absent block
+    /// timestamp, and the PAYLOAD pinned to the named oracle vector's
+    /// unsigned hash, the plan's stream-tier acceptance criterion.
+    fn assert_sign_request(event: &ChainEvent, rid: [u8; 32], oracle_vector: &str) {
         match event {
             ChainEvent::SignRequest {
                 request,
@@ -1249,6 +1279,11 @@ mod tests {
                 assert_eq!(
                     *block_timestamp, None,
                     "midnight carries no block timestamp"
+                );
+                assert_eq!(
+                    request.args.payload,
+                    oracle_payload(oracle_vector),
+                    "the emitted payload must be the oracle's unsigned hash for {oracle_vector}"
                 );
             }
             other => panic!("expected SignRequest, got {other:?}"),
@@ -1293,7 +1328,7 @@ mod tests {
         let mut harness = Harness::spawn(source, 5).await;
 
         assert_block(&harness.next().await, 6);
-        assert_sign_request(&harness.next().await, rid);
+        assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 7);
         assert_block(&harness.next().await, 8);
         assert!(
@@ -1376,7 +1411,7 @@ mod tests {
         live_tx.send(block_ref(9)).await.expect("send live block");
         // Exactly ONE request: the pre-existing entry is not re-emitted (a
         // diff mutant that treats every entry as new emits two).
-        assert_sign_request(&harness.next().await, rid);
+        assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 9);
         harness.cancel_and_join_ok().await;
     }
@@ -1409,7 +1444,7 @@ mod tests {
         assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
 
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next().await, rid);
+        assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 9);
         harness.cancel_and_join_ok().await;
     }
@@ -1672,7 +1707,7 @@ mod tests {
         );
 
         let mut harness = Harness::spawn(source, 5).await;
-        assert_sign_request(&harness.next().await, rid);
+        assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 9);
         assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
         assert_eq!(
@@ -1712,7 +1747,7 @@ mod tests {
         assert_block(&harness.next().await, 6);
         // The switch: block 7 is never emitted block-wise; the watermark
         // walk recovers the request and lands progress at the anchor.
-        assert_sign_request(&harness.next().await, rid);
+        assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 9);
         assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
         harness.cancel_and_join_ok().await;
