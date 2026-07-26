@@ -966,7 +966,7 @@ mod tests {
     use crate::sidecar::{
         ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, MapEntry, StateNode,
     };
-    use crate::test_fixtures::{atoms_from_record, cell_of, RecordFixture};
+    use crate::test_utils::{atoms_from_record, cell_of, RecordFixture};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
     use serde::Deserialize;
@@ -1131,10 +1131,12 @@ mod tests {
         fn set_undecodable(&mut self, address: &str, at: u64) {
             self.undecodable_states.insert(
                 (address.to_string(), hash_of(at)),
-                "sidecar /decode/contract-state failed: 422 Unprocessable Entity: \
-                 code=decode_failed message=unsupported StateValue variant in signet \
-                 contract state: boundedMerkleTree"
-                    .to_string(),
+                format!(
+                    "{}: /decode/contract-state 422 Unprocessable Entity: code=decode_failed \
+                     message=unsupported StateValue variant in signet contract state: \
+                     boundedMerkleTree",
+                    crate::sidecar::REFUSED_BYTES_MSG
+                ),
             );
         }
     }
@@ -1211,14 +1213,14 @@ mod tests {
         }
     }
 
-    struct Harness {
+    struct RunFixture {
         events_rx: mpsc::Receiver<ChainEvent>,
         cancel: CancellationToken,
         handle: tokio::task::JoinHandle<anyhow::Result<()>>,
         state: MockStateManager,
     }
 
-    impl Harness {
+    impl RunFixture {
         async fn spawn(source: FixtureSource, checkpoint: u64) -> Self {
             let state = MockStateManager::new();
             if checkpoint > 0 {
@@ -1260,14 +1262,14 @@ mod tests {
             }
         }
 
-        async fn next(&mut self) -> ChainEvent {
+        async fn next_event(&mut self) -> ChainEvent {
             tokio::time::timeout(Duration::from_secs(5), self.events_rx.recv())
                 .await
                 .expect("timed out waiting for a chain event")
                 .expect("events channel closed")
         }
 
-        async fn cancel_and_join_ok(self) {
+        async fn cancel_and_join(self) {
             self.cancel.cancel();
             tokio::time::timeout(Duration::from_secs(5), self.handle)
                 .await
@@ -1368,25 +1370,25 @@ mod tests {
         );
         live_tx.send(block_ref(9)).await.expect("queue live block");
 
-        let mut harness = Harness::spawn(source, 5).await;
+        let mut harness = RunFixture::spawn(source, 5).await;
 
-        assert_block(&harness.next().await, 6);
-        assert_sign_request(&harness.next().await, rid, "minimal-1word");
-        assert_block(&harness.next().await, 7);
-        assert_block(&harness.next().await, 8);
+        assert_block(&harness.next_event().await, 6);
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 7);
+        assert_block(&harness.next_event().await, 8);
         assert!(
-            matches!(harness.next().await, ChainEvent::CatchupCompleted),
+            matches!(harness.next_event().await, ChainEvent::CatchupCompleted),
             "catchup events and only catchup events precede CatchupCompleted"
         );
         // The pre-queued live block adds nothing new (same entry) and emits its Block
         // only now.
-        assert_block(&harness.next().await, 9);
+        assert_block(&harness.next_event().await, 9);
         assert_eq!(
             harness.state.get_processed_block(Chain::Midnight).await,
             Some(9),
             "the checkpoint advances with emitted blocks"
         );
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
     }
 
     #[tokio::test]
@@ -1446,15 +1448,18 @@ mod tests {
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
 
-        let mut harness = Harness::spawn(source, 8).await;
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
 
         live_tx.send(block_ref(9)).await.expect("send live block");
         // Exactly ONE request: the pre-existing entry is not re-emitted (a diff mutant
         // that treats every entry as new emits two).
-        assert_sign_request(&harness.next().await, rid, "minimal-1word");
-        assert_block(&harness.next().await, 9);
-        harness.cancel_and_join_ok().await;
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 9);
+        harness.cancel_and_join().await;
     }
 
     #[tokio::test]
@@ -1476,15 +1481,18 @@ mod tests {
         // The caller contract IS present; the sidecar cannot walk its state.
         source.set_undecodable(&hex::encode(CALLER), 9);
 
-        let mut harness = Harness::spawn(source, 8).await;
-        assert_block(&harness.next().await, 9);
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
         assert_eq!(
             harness.state.get_processed_block(Chain::Midnight).await,
             Some(9),
             "the checkpoint must advance past the poisoned entry, or the restart re-walks it"
         );
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -1549,18 +1557,21 @@ mod tests {
             },
         );
 
-        let mut harness = Harness::spawn(source, 8).await;
+        let mut harness = RunFixture::spawn(source, 8).await;
         // Block 9 emits its Block event and NO request: the checkpoint still advances,
         // which is what keeps this out of a restart loop.
-        assert_block(&harness.next().await, 9);
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
 
         // Block 10 diffs against block 9, which WAS readable, so exactly the one
         // genuinely new entry emits.
         live_tx.send(block_ref(10)).await.expect("send live block");
-        assert_sign_request(&harness.next().await, other_rid, "no-calldata");
-        assert_block(&harness.next().await, 10);
-        harness.cancel_and_join_ok().await;
+        assert_sign_request(&harness.next_event().await, other_rid, "no-calldata");
+        assert_block(&harness.next_event().await, 10);
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -1587,7 +1598,7 @@ mod tests {
             "sidecar /decode/contract-state request failed: connection reset by peer".to_string(),
         );
 
-        let harness = Harness::spawn(source, 8).await;
+        let harness = RunFixture::spawn(source, 8).await;
         let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
             .await
             .expect("run() returns promptly")
@@ -1691,9 +1702,9 @@ mod tests {
             ..Default::default()
         };
 
-        let mut harness = Harness::spawn(source, 100).await;
-        assert_block(&harness.next().await, 101);
-        assert_block(&harness.next().await, 102);
+        let mut harness = RunFixture::spawn(source, 100).await;
+        assert_block(&harness.next_event().await, 101);
+        assert_block(&harness.next_event().await, 102);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), reached_rx.recv())
                 .await
@@ -1704,7 +1715,7 @@ mod tests {
         );
 
         let state = harness.state.clone();
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         // A cancelled walk persists exactly the blocks it emitted, no more.
         assert_eq!(
             state.get_processed_block(Chain::Midnight).await,
@@ -1738,7 +1749,7 @@ mod tests {
         );
         source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
 
-        let harness = Harness::spawn(source, 5).await;
+        let harness = RunFixture::spawn(source, 5).await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), reached_rx.recv())
                 .await
@@ -1747,7 +1758,7 @@ mod tests {
             format!("state:{}", hex::encode(CALLER)),
             "cancel must arrive while the walk is parked inside an entry"
         );
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -1764,8 +1775,11 @@ mod tests {
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
 
-        let mut harness = Harness::spawn(source, 8).await;
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
 
         drop(live_tx);
         let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
@@ -1880,13 +1894,16 @@ mod tests {
         for n in 5..=9 {
             source.set_state(&central, n, central_state(vec![]));
         }
-        let mut harness = Harness::spawn(source, 5).await;
+        let mut harness = RunFixture::spawn(source, 5).await;
         for n in 6..=9 {
-            assert_block(&harness.next().await, n);
+            assert_block(&harness.next_event().await, n);
         }
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
         let state = harness.state.clone();
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         drop(live_tx);
         assert_eq!(state.get_processed_block(Chain::Midnight).await, Some(9));
 
@@ -1900,12 +1917,15 @@ mod tests {
         for n in 9..=12 {
             source.set_state(&central, n, central_state(vec![]));
         }
-        let mut second = Harness::spawn_with_state(source, state).await;
+        let mut second = RunFixture::spawn_with_state(source, state).await;
         for n in 10..=12 {
-            assert_block(&second.next().await, n);
+            assert_block(&second.next_event().await, n);
         }
-        assert!(matches!(second.next().await, ChainEvent::CatchupCompleted));
-        second.cancel_and_join_ok().await;
+        assert!(matches!(
+            second.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        second.cancel_and_join().await;
         drop(live_tx2);
     }
 
@@ -1962,16 +1982,19 @@ mod tests {
             },
         );
 
-        let mut harness = Harness::spawn(source, 5).await;
-        assert_sign_request(&harness.next().await, rid, "minimal-1word");
-        assert_block(&harness.next().await, 9);
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 5).await;
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
         assert_eq!(
             harness.state.get_processed_block(Chain::Midnight).await,
             Some(9),
             "the watermark walk records progress at the anchor"
         );
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -1999,14 +2022,17 @@ mod tests {
         );
         source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
 
-        let mut harness = Harness::spawn(source, 5).await;
-        assert_block(&harness.next().await, 6);
+        let mut harness = RunFixture::spawn(source, 5).await;
+        assert_block(&harness.next_event().await, 6);
         // The switch: block 7 is never emitted block-wise; the watermark walk recovers
         // the request and lands progress at the anchor.
-        assert_sign_request(&harness.next().await, rid, "minimal-1word");
-        assert_block(&harness.next().await, 9);
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
-        harness.cancel_and_join_ok().await;
+        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -2025,14 +2051,14 @@ mod tests {
         source.set_state(&central, 8, central_state(vec![]));
         source.set_state(&central, 9, central_state(vec![]));
 
-        let mut harness = Harness::spawn(source, 0).await;
+        let mut harness = RunFixture::spawn(source, 0).await;
         assert!(
-            matches!(harness.next().await, ChainEvent::CatchupCompleted),
+            matches!(harness.next_event().await, ChainEvent::CatchupCompleted),
             "a fresh node emits no catchup blocks"
         );
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_block(&harness.next().await, 9);
-        harness.cancel_and_join_ok().await;
+        assert_block(&harness.next_event().await, 9);
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -2083,18 +2109,21 @@ mod tests {
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
 
-        let mut harness = Harness::spawn(source, 8).await;
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
 
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next().await, good_rid, "minimal-1word");
-        assert_block(&harness.next().await, 9);
+        assert_sign_request(&harness.next_event().await, good_rid, "minimal-1word");
+        assert_block(&harness.next_event().await, 9);
         assert_eq!(
             harness.state.get_processed_block(Chain::Midnight).await,
             Some(9),
             "the block completes and the checkpoint advances past the bad entry"
         );
-        harness.cancel_and_join_ok().await;
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 
@@ -2112,16 +2141,19 @@ mod tests {
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
 
-        let mut harness = Harness::spawn(source, 8).await;
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
 
         live_tx.send(block_ref(9)).await.expect("send 9");
-        assert_block(&harness.next().await, 9);
+        assert_block(&harness.next_event().await, 9);
 
         live_tx.send(block_ref(9)).await.expect("replay 9");
         live_tx.send(block_ref(10)).await.expect("send 10");
-        assert_block(&harness.next().await, 10);
-        harness.cancel_and_join_ok().await;
+        assert_block(&harness.next_event().await, 10);
+        harness.cancel_and_join().await;
         drop(live_tx);
     }
 

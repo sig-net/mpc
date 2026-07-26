@@ -74,7 +74,7 @@ fn push_access_list_entry(buf: &mut Vec<u8>, entry: &EvmAccessListEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::RecordDef;
+    use crate::test_utils::RecordDef;
     use serde::Deserialize;
 
     /// Oracle output, verbatim.

@@ -10,7 +10,7 @@ mod request_id;
 mod rpc;
 mod sidecar;
 #[cfg(test)]
-mod test_fixtures;
+mod test_utils;
 mod tx;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};

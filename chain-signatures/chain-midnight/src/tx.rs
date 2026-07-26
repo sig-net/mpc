@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::records::SignBidirectionalRecord;
     use crate::request_id::compute_request_id;
-    use crate::test_fixtures::RecordFixture;
+    use crate::test_utils::RecordFixture;
     use serde::Deserialize;
 
     const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");

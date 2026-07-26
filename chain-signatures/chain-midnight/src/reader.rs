@@ -527,7 +527,7 @@ mod tests {
     use super::*;
     use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
     use crate::sidecar::StateNode;
-    use crate::test_fixtures::{atoms_from_record, cell_of, RecordFixture};
+    use crate::test_utils::{atoms_from_record, cell_of, RecordFixture};
     use serde::Deserialize;
 
     /// Captured by gen-b3-fixtures.ts from the two in-repo caller contracts via the TS
