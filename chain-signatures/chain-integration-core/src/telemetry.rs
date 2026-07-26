@@ -16,6 +16,19 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
 
     /// Report that a request was indexed without a block timestamp (faster chains, e.g. for Solana, Canton, or Hydration)
     fn request_indexed(&self);
+
+    /// Reports whether this chain's catchup is running DEGRADED (state
+    /// unavailable at historical blocks, e.g. a pruned Midnight node forcing
+    /// watermark catchup) as state rather than as a log event, so an
+    /// operator sees it on a dashboard instead of in a log search. Called
+    /// with `false` when a supervised run starts healthy, `true` when it
+    /// degrades. Default no-op so existing implementations are unaffected.
+    ///
+    /// Deliberately NOT the precedent for per-reason drop counters: one
+    /// boolean per run is a gauge with no design surface, while a family of
+    /// labeled counters needs a label taxonomy and cardinality decision that
+    /// belongs to the telemetry follow-up, not to a chain task.
+    fn catchup_degraded(&self, _degraded: bool) {}
 }
 
 /// No-op implementation for tests

@@ -17,19 +17,6 @@ pub struct PublishState {
     pub is_proposer: bool,
 }
 
-impl PublishState {
-    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
-        let mut bytes = vec![tag];
-        bytes.extend_from_slice(&self.signature.to_bytes());
-        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
-        for participant in &self.participants {
-            bytes.extend_from_slice(&participant.bytes());
-        }
-        bytes.push(u8::from(self.is_proposer));
-        bytes
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
@@ -51,10 +38,10 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
-    pub fn digest_bytes(&self) -> Vec<u8> {
+    pub fn checkpoint_consensus_bytes(&self) -> Vec<u8> {
         match self {
             SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
+            SignStatus::PendingPublish { .. } => vec![1],
             SignStatus::PendingExecution { tx } => {
                 let mut bytes = vec![2];
                 bytes.extend_from_slice(tx.id.0.as_slice());
@@ -62,7 +49,7 @@ impl SignStatus {
                 bytes
             }
             SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
+            SignStatus::PendingPublishBidirectional { .. } => vec![4],
         }
     }
 
@@ -84,7 +71,7 @@ pub trait SignBidirectionalEventExt {
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
     fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
-            Chain::Canton => Ok(hex::encode(self.sender)),
+            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
             _ => crate::stream::ops::sender_string(self.sender, self.chain),
         }
     }
@@ -106,6 +93,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path,
             )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -123,7 +115,7 @@ pub trait BidirectionalTxExt {
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
-        if self.source_chain == Chain::Canton {
+        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
             return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
@@ -142,6 +134,11 @@ impl BidirectionalTxExt for BidirectionalTx {
                 path,
             )),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 path,
@@ -369,9 +366,11 @@ pub struct SignBidirectionalSignature {
 #[cfg(test)]
 mod tests {
     use super::sign_and_hash_eip1559_from_unsigned;
+    use super::{BidirectionalTxExt, SignBidirectionalEventExt};
     use alloy::consensus::{SignableTransaction, TxEip1559};
     use alloy::eips::eip2718::Encodable2718;
     use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+    use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignBidirectionalEvent};
 
     #[test]
     fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
@@ -405,5 +404,149 @@ mod tests {
 
         assert_eq!(hash, expected_hash);
         assert_eq!(nonce, 3);
+    }
+
+    /// Event fixture at key version 1, the only valid Midnight key version.
+    fn sign_bidirectional_event(chain: Chain, sender: [u8; 32]) -> SignBidirectionalEvent {
+        SignBidirectionalEvent {
+            sender,
+            serialized_transaction: Vec::new(),
+            caip2_id: "eip155:1".to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: "caller-path".to_string(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: Vec::new(),
+            respond_serialization_schema: Vec::new(),
+            chain,
+            chain_ctx: None,
+        }
+    }
+
+    fn bidirectional_tx(source_chain: Chain, sender: [u8; 32]) -> BidirectionalTx {
+        BidirectionalTx {
+            id: BidirectionalTxId([0xab; 32]),
+            sender,
+            serialized_transaction: Vec::new(),
+            source_chain,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:1".to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: "test".to_string(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: Vec::new(),
+            respond_serialization_schema: Vec::new(),
+            request_id: [0x22; 32],
+            from_address: [0u8; 20],
+            nonce: 0,
+        }
+    }
+
+    #[test]
+    fn midnight_sender_string_is_lowercase_hex64() {
+        let ev = sign_bidirectional_event(Chain::Midnight, [0xab; 32]);
+        assert_eq!(ev.sender_string().unwrap(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn midnight_epsilon_matches_kdf() {
+        let ev = sign_bidirectional_event(Chain::Midnight, [0xab; 32]);
+        assert_eq!(
+            ev.epsilon().unwrap(),
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &"ab".repeat(32), &ev.path)
+        );
+    }
+
+    /// The two extension impls are easy to conflate; pin the `BidirectionalTx`
+    /// side to the same hex sender rendering and kdf routing as the event side.
+    #[test]
+    fn midnight_bidirectional_tx_agrees_with_event_ext() {
+        let tx = bidirectional_tx(Chain::Midnight, [0xab; 32]);
+        assert_eq!(tx.sender_string().unwrap(), "ab".repeat(32));
+        assert_eq!(
+            tx.epsilon("midnight response key").unwrap(),
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &"ab".repeat(32), "midnight response key")
+        );
+    }
+
+    /// BINDING (B5): for the SAME 32 sender bytes, the string index-time
+    /// epsilon derivation feeds inside `to_sign_request` must be
+    /// byte-identical to the node side's `sender_string`. A divergence here
+    /// derives a DIFFERENT KEY with no error anywhere; the node's two impls
+    /// are pinned against each other above, but the index-time side is
+    /// unpinned without this. Agreement is asserted THROUGH the derivation:
+    /// re-deriving from the node's rendering must reproduce the epsilon the
+    /// conversion produced.
+    #[test]
+    fn convert_and_node_agree_on_sender_string() {
+        fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
+            let mut out = [0u8; N];
+            out[..text.len()].copy_from_slice(text);
+            out
+        }
+
+        let read_address = [0xab; 32];
+        let record = mpc_chain_midnight::records::SignBidirectionalRecord {
+            sender: read_address,
+            request_nonce: 7,
+            key_version: 1,
+            path: ascii_padded(b"caller-path"),
+            algo: 0,
+            dest: 0,
+            params: [0; 64],
+            tx_param_type: 0,
+            tx_params: mpc_chain_midnight::records::EvmType2TxParams {
+                chain_id: 31337,
+                nonce: 3,
+                max_priority_fee_per_gas: 1,
+                max_fee_per_gas: 2,
+                gas_limit: 21000,
+                to: [0xcd; 20],
+                value: 5,
+                calldata: mpc_chain_midnight::records::CompactMaybe {
+                    is_some: false,
+                    value: mpc_chain_midnight::records::EvmCalldata {
+                        selector: [0; 4],
+                        no_words: 0,
+                        words: vec![[0; 32]],
+                    },
+                },
+                access_list_entry_count: 0,
+                access_list: Vec::new(),
+            },
+            caip2_id: ascii_padded(b"eip155:31337"),
+            output_deserialization_schema: vec![0; 34],
+            respond_serialization_schema: vec![0; 34],
+        };
+
+        let request = mpc_chain_midnight::to_sign_request(
+            &record,
+            &read_address,
+            &"12".repeat(32),
+            [0x77; 32],
+            1,
+        )
+        .expect("the record converts");
+        let mpc_primitives::SignKind::SignBidirectional(event) = request.kind else {
+            panic!("expected SignBidirectional kind");
+        };
+
+        let node_rendering = event.sender_string().expect("node renders the sender");
+        assert_eq!(
+            node_rendering,
+            hex::encode(read_address),
+            "both sides must render lowercase unprefixed hex"
+        );
+        assert_eq!(
+            request.args.epsilon,
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &node_rendering, &event.path),
+            "re-deriving from the node's rendering must reproduce the \
+             conversion's epsilon: the two renderings are byte-identical"
+        );
     }
 }

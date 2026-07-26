@@ -389,10 +389,13 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
-/// Canton is intentionally absent: its sender is a variable-length party ID
-/// hashed irreversibly into the [u8; 32] slot, so callers with access to the
-/// original party string must short-circuit before reaching here (see
-/// `SignBidirectionalEvent::sender_string` / `BidirectionalTx::sender_string`).
+/// Canton and Midnight are intentionally absent. Canton's sender is a
+/// variable-length party ID hashed irreversibly into the [u8; 32] slot, so
+/// callers with access to the original party string must short-circuit before
+/// reaching here; Midnight's sender is a 32-byte contract address whose
+/// canonical form is already the lowercase hex of those bytes, so it
+/// short-circuits the same way (see `SignBidirectionalEvent::sender_string` /
+/// `BidirectionalTx::sender_string`).
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),

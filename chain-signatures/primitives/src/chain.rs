@@ -32,6 +32,7 @@ pub enum Chain {
     Bitcoin,
     Hydration,
     Canton,
+    Midnight,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -59,10 +60,11 @@ impl Chain {
             Chain::Bitcoin => "Bitcoin",
             Chain::Hydration => "Hydration",
             Chain::Canton => "Canton",
+            Chain::Midnight => "Midnight",
         }
     }
 
-    pub const fn iter() -> [Chain; 6] {
+    pub const fn iter() -> [Chain; 7] {
         [
             Chain::NEAR,
             Chain::Ethereum,
@@ -70,6 +72,7 @@ impl Chain {
             Chain::Bitcoin,
             Chain::Hydration,
             Chain::Canton,
+            Chain::Midnight,
         ]
     }
 
@@ -81,6 +84,7 @@ impl Chain {
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
             Chain::Canton => "canton:global",
+            Chain::Midnight => "midnight:testnet",
         }
     }
 
@@ -95,6 +99,11 @@ impl Chain {
             // ChainAgnostic/namespaces. "canton:global" follows the
             // namespace:reference format as a project-local identifier.
             Chain::Canton => "canton:global",
+            // Synthetic: Midnight has no registered CAIP-2 namespace in
+            // ChainAgnostic/namespaces. Must stay byte-identical to
+            // MIDNIGHT_TESTNET_CHAIN_ID in @sig-net/midnight's
+            // epsilon-derivation.ts, the string integrators derive keys with.
+            Chain::Midnight => "midnight:testnet",
         }
     }
 
@@ -105,6 +114,7 @@ impl Chain {
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
             Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
+            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
         };
 
         let interval = std::env::var(key)
@@ -120,6 +130,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "120"),
         ]
     }
 
@@ -131,6 +142,7 @@ impl Chain {
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
             Chain::Canton => 15,
+            Chain::Midnight => 15,
         }
     }
 
@@ -142,6 +154,7 @@ impl Chain {
     pub fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
             Chain::Canton => SerDeserFormat::Abi,
+            Chain::Midnight => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
@@ -172,7 +185,28 @@ impl FromStr for Chain {
             "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             "hydration" | "hyd" => Ok(Chain::Hydration),
             "canton" | "ctn" => Ok(Chain::Canton),
+            "midnight" => Ok(Chain::Midnight),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn midnight_enum_arms() {
+        assert_eq!(Chain::Midnight as u8, 6);
+        assert_eq!(Chain::Midnight.as_str(), "Midnight");
+        assert_eq!(Chain::Midnight.caip2_chain_id(), "midnight:testnet");
+        assert_eq!(Chain::Midnight.expected_finality_time_secs(), 15);
+        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
+        assert_eq!(
+            Chain::Midnight.respond_serialization_format(),
+            SerDeserFormat::Abi
+        );
+        assert_eq!("midnight".parse::<Chain>().unwrap(), Chain::Midnight);
+        assert!(Chain::iter().contains(&Chain::Midnight));
     }
 }

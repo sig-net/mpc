@@ -21,13 +21,6 @@ pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 /// capacity to avoid backpressure or deadlock under high concurrency.
 pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
-/// Small under test-feature so dead-letter inboxes fill quickly in clog tests.
-pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
-    4
-} else {
-    MAX_MESSAGE_SUB_CHANNEL_SIZE
-};
-
 #[derive(Debug, Clone, Copy)]
 pub enum SubscribeId {
     Generating,

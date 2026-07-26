@@ -2,7 +2,7 @@ use crate::abi::ChainSignatures;
 use crate::config::{GasConfig, PublisherConfig};
 use crate::EthConfig;
 use alloy::network::EthereumWallet;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{B256, U256};
 use alloy::providers::{
     fillers::{
         BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
@@ -10,14 +10,12 @@ use alloy::providers::{
     Provider, ProviderBuilder, RootProvider, WalletProvider,
 };
 use alloy::rpc::types::TransactionReceipt;
-use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
     utils::retry::retry_rpc, ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -65,18 +63,12 @@ pub struct EthClient {
 
 impl EthClient {
     pub fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
-        let signer: PrivateKeySigner = eth
-            .account_sk
-            .parse()
-            .expect("cannot parse Eth account sk into PrivateKeySigner");
-        let wallet = EthereumWallet::from(signer.clone());
+        let wallet = EthereumWallet::from(eth.account_sk.clone());
         let provider = ProviderBuilder::new()
             .wallet(wallet)
-            .connect_http(eth.execution_rpc_http_url.parse().unwrap());
+            .connect_http(eth.execution_rpc_http_url.clone());
 
-        // Build the contract instance
-        let address = Address::from_str(&format!("0x{}", eth.contract_address)).unwrap();
-        let contract = ChainSignatures::new(address, provider);
+        let contract = ChainSignatures::new(eth.contract_address, provider);
 
         let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
 
@@ -328,7 +320,7 @@ impl ChainPublisher for EthClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{B256, U256};
+    use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
@@ -341,9 +333,10 @@ mod tests {
     fn mock_config(url: &str) -> EthConfig {
         EthConfig {
             account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
-            execution_rpc_http_url: url.to_string(),
-            contract_address: "1234567890123456789012345678901234567890".to_string(),
+                .parse()
+                .unwrap(),
+            execution_rpc_http_url: url.parse().unwrap(),
+            contract_address: "1234567890123456789012345678901234567890".parse().unwrap(),
             consensus_rpc_http_url: "".to_string(),
             network: "sepolia".to_string(),
             helios_data_path: "".to_string(),

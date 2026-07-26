@@ -1,0 +1,152 @@
+{
+ "generated_from": "gen-b3-fixtures.ts, midnight-integration checkout",
+ "oracle": "lookupSignetRequestAt/@sig-net/midnight (TS reader over the simulator state)",
+ "contract": "5-field",
+ "requests_index_field": 4,
+ "request_id_hex": "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee",
+ "state": {
+  "kind": "array",
+  "children": [
+   {
+    "kind": "array",
+    "children": [
+     {
+      "kind": "cell",
+      "atoms": [
+       "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee"
+      ]
+     },
+     {
+      "kind": "array",
+      "children": [
+       {
+        "kind": "null"
+       },
+       {
+        "kind": "null"
+       },
+       {
+        "kind": "cell",
+        "atoms": [
+         ""
+        ]
+       }
+      ]
+     },
+     {
+      "kind": "cell",
+      "atoms": [
+       "01"
+      ]
+     }
+    ]
+   },
+   {
+    "kind": "cell",
+    "atoms": [
+     "01"
+    ]
+   },
+   {
+    "kind": "cell",
+    "atoms": [
+     "1babc03d35d2a6be2d30e49f5fe39189e10ff1b7bf6bc02c",
+     "00884443ac3e6524",
+     "12c691abf68f6d68906551cb4c881ff74284bb49e1f547fe",
+     "a92a039a00c59f11",
+     ""
+    ]
+   },
+   {
+    "kind": "cell",
+    "atoms": [
+     "86a383d1e8cf8a3767e2b1b6d893e959cd797cb7c870d09fdaec875469b5dd57"
+    ]
+   },
+   {
+    "kind": "map",
+    "entries": [
+     {
+      "key": [
+       "74c5e613fc06c2b6502ccbadde6100e34c82cd80198a4382db571c30726489ee"
+      ],
+      "value": {
+       "kind": "cell",
+       "atoms": [
+        "8d4d43e42bd2d7462695f7da8178e57755234993d5080c751d42aecccb625632",
+        "",
+        "01",
+        "63616c6c65722d70617468",
+        "",
+        "",
+        "",
+        "",
+        "697a",
+        "07",
+        "00ca9a3b",
+        "00ac23fc06",
+        "a08601",
+        "7369676e65742d63616c6c65722d6532652d746f",
+        "",
+        "01",
+        "ca11ab1e",
+        "01",
+        "7369676e65742d63616c6c65723a66697865642d776f7264",
+        "",
+        "6569703135353a3331333337",
+        "5b7b226e616d65223a2273756363657373222c2274797065223a22626f6f6c227d5d",
+        "5b7b226e616d65223a2273756363657373222c2274797065223a22626f6f6c227d5d"
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "kind": "cell",
+    "atoms": [
+     "8a1c9c30455be84497b235ab00e07622c6ec1c375c5956a82d9bc86f41dd3831"
+    ]
+   },
+   {
+    "kind": "cell",
+    "atoms": [
+     "01"
+    ]
+   }
+  ]
+ },
+ "expected_record": {
+  "sender": "8d4d43e42bd2d7462695f7da8178e57755234993d5080c751d42aecccb625632",
+  "request_nonce": "0",
+  "key_version": "1",
+  "path": "63616c6c65722d70617468000000000000000000000000000000000000000000",
+  "algo": 0,
+  "dest": 0,
+  "params": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "tx_param_type": 0,
+  "tx_params": {
+   "chain_id": "31337",
+   "nonce": "7",
+   "max_priority_fee_per_gas": "1000000000",
+   "max_fee_per_gas": "30000000000",
+   "gas_limit": "100000",
+   "to": "7369676e65742d63616c6c65722d6532652d746f",
+   "value": "0",
+   "calldata": {
+    "is_some": true,
+    "value": {
+     "selector": "ca11ab1e",
+     "no_words": "1",
+     "words": [
+      "7369676e65742d63616c6c65723a66697865642d776f72640000000000000000"
+     ]
+    }
+   },
+   "access_list_entry_count": "0",
+   "access_list": []
+  },
+  "caip2_id": "6569703135353a33313333370000000000000000000000000000000000000000",
+  "output_deserialization_schema": "5b7b226e616d65223a2273756363657373222c2274797065223a22626f6f6c227d5d",
+  "respond_serialization_schema": "5b7b226e616d65223a2273756363657373222c2274797065223a22626f6f6c227d5d"
+ }
+}

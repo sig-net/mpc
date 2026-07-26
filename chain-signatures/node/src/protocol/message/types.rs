@@ -191,6 +191,21 @@ impl Message {
         }
     }
 
+    /// The participant this message claims to come from — unverified data;
+    /// the inbox checks it against the authenticated envelope sender.
+    pub fn claimed_sender(&self) -> Option<Participant> {
+        match self {
+            Message::Posit(msg) => Some(msg.from),
+            Message::Generating(msg) => Some(msg.from),
+            Message::Resharing(msg) => Some(msg.from),
+            Message::Ready(msg) => Some(msg.from),
+            Message::Triple(msg) => Some(msg.from),
+            Message::Presignature(msg) => Some(msg.from),
+            Message::Signature(msg) => Some(msg.from),
+            Message::Unknown(_) => None,
+        }
+    }
+
     /// The size of the message in bytes.
     pub fn size(&self) -> usize {
         match self {

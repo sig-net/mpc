@@ -11,6 +11,22 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+/// Must byte-match `MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH` in `@sig-net/midnight`
+/// (`epsilon-derivation.ts`): integrator contracts pin their expected response
+/// key against that exact string, so a drift here silently derives a key
+/// nobody can verify against.
+pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
+
+/// The derivation path of a chain's bidirectional response key.
+fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
+    match chain {
+        Chain::Solana => Ok(SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Hydration => Ok(HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Canton => Ok(CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Midnight => Ok(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        _ => anyhow::bail!("Unsupported chain: {}", chain),
+    }
+}
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -88,12 +104,7 @@ impl CompletedTx {
         let Some(payload) = Scalar::from_bytes(message) else {
             anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = match chain {
-            Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            _ => anyhow::bail!("Unsupported chain: {}", chain),
-        };
+        let path = respond_bidirectional_path(chain)?;
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
@@ -209,5 +220,41 @@ mod tests {
         assert_eq!(respond.tx_id, tx.id);
         assert_eq!(respond.output, output);
         assert_eq!(respond.chain_ctx, chain_ctx);
+    }
+
+    #[test]
+    fn midnight_respond_path_is_the_response_key() {
+        assert_eq!(
+            respond_bidirectional_path(Chain::Midnight).unwrap(),
+            "midnight response key"
+        );
+    }
+
+    /// BINDING (B5, finding M6): the const above appears at four sites and
+    /// only the epsilon fixture's copy is oracle-derived, so a rename of the
+    /// const together with the repo test literals would keep the suite green
+    /// while the node derived a response key no integrator could verify
+    /// against. This assert links the const to the `respond-response-key`
+    /// vector's `path`, anchoring it transitively to `@sig-net/midnight`
+    /// rather than to a second copy of itself. The routing test above uses
+    /// the literal on both sides deliberately and pins ROUTING, not the
+    /// string; it does not make this redundant.
+    #[test]
+    fn respond_path_const_matches_the_oracle_fixture() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../crypto/tests/epsilon_vectors.json"))
+                .expect("epsilon_vectors.json parses");
+        let path = file["vectors"]
+            .as_array()
+            .expect("fixture has a vectors array")
+            .iter()
+            .find(|v| v["name"] == "respond-response-key")
+            .expect("fixture carries the respond-response-key vector")["path"]
+            .as_str()
+            .expect("the vector's path is a string");
+        assert_eq!(
+            MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH, path,
+            "the respond-path const must equal the oracle-generated vector's path"
+        );
     }
 }

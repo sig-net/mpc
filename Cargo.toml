@@ -12,6 +12,7 @@ members = [
     "chain-signatures/chain-solana",
     "chain-signatures/chain-ethereum",
     "chain-signatures/chain-near",
+    "chain-signatures/chain-midnight",
 ]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
@@ -89,6 +90,7 @@ mpc-chain-canton = { path = "./chain-signatures/chain-canton" }
 mpc-chain-ethereum = { path = "./chain-signatures/chain-ethereum" }
 mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
+mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }

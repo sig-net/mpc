@@ -155,10 +155,10 @@ impl EthereumTestEnvironment {
 
     fn config(&self, optimistic_requests: bool) -> EthConfig {
         EthConfig {
-            account_sk: self.sandbox.secret_key.clone(),
+            account_sk: self.sandbox.secret_key.parse().unwrap(),
             consensus_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            execution_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            contract_address: format!("{:x}", self.contract_address),
+            execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
+            contract_address: self.contract_address,
             network: "sepolia".to_string(),
             helios_data_path: "/tmp/helios".to_string(),
             refresh_finalized_interval: 500,
@@ -797,11 +797,17 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
 
     let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
 
-    // Send a transaction from the watched address to bump nonce and trigger the staleness check.
-    submit_sign_request(&ctx, [4u8; 32], "execution-path").await?;
+    // Send 10 transactions from the watched address to bump the nonce
+    // AND guarantee the local chain crosses a `block_number % 10 == 0` boundary
+    // to trigger the throttled staleness check.
+    for i in 0..10 {
+        let mut req_id = [0u8; 32];
+        req_id[0] = i as u8;
+        submit_sign_request(&ctx, req_id, "execution-path").await?;
+    }
 
     let mut saw_execution = false;
-    for _ in 0..8 {
+    for _ in 0..20 {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
             ChainEvent::ExecutionConfirmed { sign_id: ev_id, .. } if ev_id == sign_id => {
                 saw_execution = true;

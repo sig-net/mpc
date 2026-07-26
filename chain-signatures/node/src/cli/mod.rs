@@ -21,9 +21,12 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::{run_stream, supervisor::run_supervised, StreamContext};
+use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
-pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
+pub use args::{
+    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
+    solana::SolArgs,
+};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
@@ -31,11 +34,12 @@ use deadpool_redis::Runtime;
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
-use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
+use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
-use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
@@ -92,6 +96,9 @@ pub enum Cli {
         /// Canton Indexer options
         #[clap(flatten)]
         canton: CantonArgs,
+        /// Midnight Indexer options
+        #[clap(flatten)]
+        midnight: MidnightArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: mpc_chain_near::Options,
@@ -136,6 +143,7 @@ impl Cli {
                 sol,
                 hydration,
                 canton,
+                midnight,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -184,6 +192,7 @@ impl Cli {
                 args.extend(sol.into_str_args());
                 args.extend(hydration.into_str_args());
                 args.extend(canton.into_str_args());
+                args.extend(midnight.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -209,6 +218,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sol,
             hydration,
             canton,
+            midnight,
             indexer_options,
             my_address,
             storage_options,
@@ -282,7 +292,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
+            let chains = ChainConfigs::from_args(eth, sol, hydration, canton, midnight)?;
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
 
@@ -466,16 +476,24 @@ struct ChainConfigs {
     sol: Option<SolConfig>,
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
+    midnight: Option<MidnightConfig>,
 }
 
 impl ChainConfigs {
-    fn from_args(eth: EthArgs, sol: SolArgs, hydration: HydrationArgs, canton: CantonArgs) -> Self {
-        Self {
-            eth: eth.into_config(),
+    fn from_args(
+        eth: EthArgs,
+        sol: SolArgs,
+        hydration: HydrationArgs,
+        canton: CantonArgs,
+        midnight: MidnightArgs,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            eth: eth.into_config()?,
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
-        }
+            midnight: midnight.into_config()?,
+        })
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -513,6 +531,12 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
         }
+        // MidnightPublisher is a unit struct: there is no publish path yet, and
+        // its publish_signature bails so a request keeps retrying rather than
+        // settling as published.
+        if self.midnight.is_some() {
+            publishers.insert(Chain::Midnight, Arc::new(MidnightPublisher));
+        }
 
         publishers
     }
@@ -545,7 +569,7 @@ fn log_startup(
         git_commit_hash = %crate::metrics::git_commit_hash(),
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_url = %near_client.rpc_addr(),
-        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.as_str()).unwrap_or("None"),
+        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
@@ -553,6 +577,7 @@ fn log_startup(
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
+        midnight_node_ws_url = %chains.midnight.as_ref().map(|c| c.node_ws_url.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -776,6 +801,7 @@ async fn spawn_indexers(
         sol,
         hydration,
         canton,
+        midnight,
     } = chains;
 
     tracing::info!(
@@ -783,6 +809,7 @@ async fn spawn_indexers(
         solana = sol.is_some(),
         hydration = hydration.is_some(),
         canton = canton.is_some(),
+        midnight = midnight.is_some(),
         "spawning chain indexers"
     );
 
@@ -813,11 +840,11 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
-            Ok(sol_stream) => {
-                tracing::info!("solana indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    sol_stream,
+        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+            Ok(sol_indexer) => {
+                tracing::info!("solana indexer created successfully");
+                tokio::spawn(run_supervised(
+                    sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
                         sign_tx.clone(),
@@ -831,7 +858,7 @@ async fn spawn_indexers(
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer stream");
+                tracing::error!(?err, "failed to create solana indexer");
             }
         }
     }
@@ -852,11 +879,38 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
-            Ok(canton_stream) => {
-                tracing::info!("canton indexer stream created successfully");
-                tokio::spawn(run_stream(
-                    canton_stream,
+        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+            Ok(canton_indexer) => {
+                tracing::info!("canton indexer created successfully");
+                tokio::spawn(run_supervised(
+                    canton_indexer,
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Canton].clone(),
+                    ),
+                    canton_telemetry,
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create canton indexer");
+            }
+        }
+    }
+
+    if let Some(midnight_config) = midnight {
+        let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
+            .await
+        {
+            Ok(midnight_indexer) => {
+                tracing::info!("midnight indexer created successfully");
+                tokio::spawn(run_supervised(
+                    midnight_indexer,
                     StreamContext::new(
                         backlog,
                         sign_tx,
@@ -864,13 +918,13 @@ async fn spawn_indexers(
                         contract_watcher,
                         mesh_state,
                         node_client,
-                        checkpoints_rx[Chain::Canton].clone(),
+                        checkpoints_rx[Chain::Midnight].clone(),
                     ),
-                    canton_telemetry,
+                    midnight_telemetry,
                 ));
             }
             Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer stream");
+                tracing::error!(?err, "failed to create midnight indexer");
             }
         }
     }
@@ -1065,5 +1119,140 @@ mod tests {
         );
 
         assert_eq!(digest, -6950551088322443092);
+    }
+
+    /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
+    /// `--midnight-*` flags. What a set variable can do differs per caller:
+    ///
+    /// - `args::midnight::tests::into_str_args_round_trips_into_config`:
+    ///   genuine false green. It reparses `into_str_args` output and asserts
+    ///   equality, so a flag dropped by `into_str_args` is silently
+    ///   backfilled from env and the equality still holds, provided the
+    ///   variable carries the same value the fixture uses. Those values
+    ///   (`"undeployed"`, the localhost endpoints) are exactly what a
+    ///   developer running a local sidecar exports, so that proviso is the
+    ///   likely case; a different value fails, just confusingly.
+    /// - `into_str_args_forwards_midnight`: prophylaxis only. All four
+    ///   flags are in argv, which beats env in clap, and the assertions
+    ///   read `into_str_args` output directly, so env cannot reach the
+    ///   outcome and a dropped flag fails either way.
+    /// - `midnight_off_by_default`: loud-failure-only. It builds its args
+    ///   programmatically, so env cannot reach the parse at all; pollution
+    ///   could only push the config toward `Some`, which fails noisily and
+    ///   can never mask a mutation.
+    pub(super) fn assert_midnight_env_unset() {
+        for var in [
+            "MPC_MIDNIGHT_SIDECAR_URL",
+            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_NETWORK_ID",
+        ] {
+            assert!(
+                std::env::var_os(var).is_none(),
+                "{var} is set: these tests require an unpolluted environment"
+            );
+        }
+    }
+
+    /// Dockerized test nodes receive their whole configuration as CLI strings
+    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
+    /// `Cli::Start` but missing from that extension, its config would be
+    /// accepted on the command line and then silently dropped on
+    /// reconstruction.
+    #[test]
+    fn into_str_args_forwards_midnight() {
+        assert_midnight_env_unset();
+
+        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let central_address = "ab".repeat(32);
+        let argv = [
+            "mpc-node",
+            "start",
+            "--account-id",
+            "test.near",
+            "--account-sk",
+            &account_sk,
+            "--cipher-sk",
+            "cipher",
+            "--env",
+            "unit-tests",
+            "--gcp-project-id",
+            "project",
+            "--redis-url",
+            "redis://127.0.0.1:6379",
+            "--midnight-sidecar-url",
+            "http://127.0.0.1:8790",
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:9944",
+            "--midnight-central-address",
+            &central_address,
+            "--midnight-network-id",
+            "undeployed",
+        ];
+        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
+
+        for expected in [
+            "--midnight-sidecar-url",
+            "http://127.0.0.1:8790",
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:9944",
+            "--midnight-central-address",
+            central_address.as_str(),
+            "--midnight-network-id",
+            "undeployed",
+        ] {
+            assert!(
+                out.contains(&expected.to_string()),
+                "into_str_args dropped {expected}"
+            );
+        }
+    }
+
+    /// The Midnight config gate: with no Midnight flags supplied, the chain
+    /// must be entirely absent from the node's wiring. `spawn_indexers` reads
+    /// the same `chains.midnight` field, so `None` here also means no indexer
+    /// is spawned.
+    #[tokio::test]
+    async fn midnight_off_by_default() {
+        assert_midnight_env_unset();
+
+        let chains = ChainConfigs::from_args(
+            EthArgs::from_config(None),
+            SolArgs::from_config(None),
+            HydrationArgs::from_config(None),
+            CantonArgs::from_config(None),
+            MidnightArgs::from_config(None),
+        )
+        .unwrap();
+
+        assert!(
+            chains.midnight.is_none(),
+            "empty MidnightArgs must not produce a MidnightConfig"
+        );
+
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        );
+        // Never dialed: publishers() only stores the client in the registry.
+        let near = NearClient::new(
+            "http://127.0.0.1:1",
+            &account_id,
+            signer,
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        );
+        let publishers = chains.publishers(near).await;
+
+        assert!(
+            !publishers.contains_key(&Chain::Midnight),
+            "unconfigured Midnight must not register a publisher"
+        );
+        assert_eq!(
+            publishers.len(),
+            1,
+            "with no chain configured, only the NEAR publisher must exist"
+        );
+        assert!(publishers.contains_key(&Chain::NEAR));
     }
 }
