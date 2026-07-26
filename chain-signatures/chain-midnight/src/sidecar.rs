@@ -480,10 +480,12 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         // The request-body shape {"transactions": [hex]} is this client's
         // documented assumption, pinned here like the contract-state one.
-        // The response exercises every decode DTO, including a populated
-        // claimed array: B4's provenance join reads address,
-        // communication_commitment, and claimed[].commitment, so their
-        // snake_case wire names must deserialize.
+        // The response exercises every decode DTO, and the fixture is an
+        // executable statement of the provenance join B4 implements: the
+        // caller's claimed[0].commitment equals the callee call's
+        // communication_commitment within the SAME transaction. The
+        // caller's own communication_commitment stays distinct from both so
+        // a field swap is still caught.
         let mock = server
             .mock("POST", "/decode/transactions")
             .match_body(mockito::Matcher::Json(
@@ -507,6 +509,11 @@ mod tests {
                                             "commitment": "cc02",
                                         }
                                     ],
+                                },
+                                {
+                                    "address": "cd".repeat(32),
+                                    "communication_commitment": "cc02",
+                                    "claimed": [],
                                 }
                             ],
                         }
@@ -529,14 +536,26 @@ mod tests {
         assert_eq!(decoded.transactions.len(), 1);
         let tx = &decoded.transactions[0];
         assert_eq!(tx.index, 0);
-        let call = &tx.calls[0];
-        assert_eq!(call.address, "ab".repeat(32));
-        assert_eq!(call.communication_commitment, "cc01");
-        let claimed = &call.claimed[0];
+        assert_eq!(tx.calls.len(), 2);
+        let caller = &tx.calls[0];
+        assert_eq!(caller.address, "ab".repeat(32));
+        assert_eq!(caller.communication_commitment, "cc01");
+        let claimed = &caller.claimed[0];
         assert_eq!(claimed.position, 2);
         assert_eq!(claimed.address, "cd".repeat(32));
         assert_eq!(claimed.entry_point, "signBidirectional");
         assert_eq!(claimed.commitment, "cc02");
+        let callee = &tx.calls[1];
+        assert_eq!(callee.address, "cd".repeat(32));
+        assert!(callee.claimed.is_empty());
+        // The join itself, stated executably: the caller's claim points at
+        // the callee's communication commitment, and the caller's own
+        // commitment matches neither.
+        assert_eq!(claimed.commitment, callee.communication_commitment);
+        assert_ne!(
+            caller.communication_commitment,
+            callee.communication_commitment
+        );
         mock.assert_async().await;
     }
 
