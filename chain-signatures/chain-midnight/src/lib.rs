@@ -15,4 +15,4 @@ pub use records::{
     SignBidirectionalRecord, SignatureRespondedEvent, SignetMapKey,
 };
 pub use request_id::compute_request_id;
-pub use rpc::{send_mn_transaction_bytes, FinalizedBlock, MidnightRpc};
+pub use rpc::{FinalizedBlock, MidnightRpc};

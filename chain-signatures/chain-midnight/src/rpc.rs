@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use futures_util::{Stream, StreamExt};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_chain_integration_core::utils::task::AbortOnDrop;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;
@@ -56,6 +57,10 @@ pub struct MidnightRpc {
     connect_timeout: Duration,
     request_timeout: Duration,
     stall_timeout: Duration,
+    /// Retry budget for the one-shot reads. Connect and subscribe are
+    /// deliberately exempt: retrying those would duplicate the supervised
+    /// restart, which already re-anchors and catches up.
+    retry: RetryConfig,
     /// Keeps subxt metadata current across runtime upgrades; aborted when
     /// this client drops.
     _runtime_updater: AbortOnDrop,
@@ -65,6 +70,11 @@ impl MidnightRpc {
     /// Dials the node named by `config.node_ws_url`. Validates the config
     /// first: an unusable endpoint should fail here, once, rather than
     /// forever at runtime.
+    ///
+    /// Deliberately NOT retried, unlike the one-shot reads: a failed dial is
+    /// the supervisor's to handle, and an in-place retry loop here would
+    /// duplicate the supervised restart that already re-anchors and reruns
+    /// catchup, per the disconnect-window design.
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         config.validate()?;
         let connect_timeout = config.rpc.connect_timeout;
@@ -91,13 +101,15 @@ impl MidnightRpc {
             connect_timeout,
             request_timeout: config.rpc.request_timeout,
             stall_timeout: config.indexer.stall_timeout,
+            retry: config.rpc.retry,
         })
     }
 
     /// Stream of finalized blocks. Ends on stream error, stream end, or a
     /// stall longer than the configured stall timeout; the supervised
     /// indexer restart is what turns an ended stream into a reconnect and a
-    /// catchup, per the disconnect-window design.
+    /// catchup, per the disconnect-window design. Like `connect` and unlike
+    /// the one-shot reads, this is deliberately not retried in place.
     pub async fn subscribe_finalized(
         &self,
     ) -> anyhow::Result<impl Stream<Item = FinalizedBlock> + Send + Unpin + 'static> {
@@ -146,10 +158,17 @@ impl MidnightRpc {
 
     /// The node's current finalized head hash.
     pub async fn finalized_head(&self) -> anyhow::Result<H256> {
-        tokio::time::timeout(self.request_timeout, self.legacy.chain_get_finalized_head())
-            .await
-            .context("timed out fetching the midnight finalized head")?
-            .context("failed to fetch the midnight finalized head")
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            "midnight_finalized_head",
+            {
+                self.legacy
+                    .chain_get_finalized_head()
+                    .await
+                    .context("failed to fetch the midnight finalized head")
+            }
+        )
     }
 
     /// Raw contract state of `address_64hex` (64 hex chars, no `0x`) at
@@ -166,68 +185,88 @@ impl MidnightRpc {
         address_64hex: &str,
         at_block_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let response: Result<String, _> = tokio::time::timeout(
+        // The error mapping lives INSIDE the retried operation so that the
+        // definitive answers (state bytes, contract not present) return Ok
+        // and are never retried, while transport faults and
+        // pruned-or-unknown responses surface as Err and consume the retry
+        // budget.
+        retry_rpc!(
             self.request_timeout,
-            self.rpc.request(
-                "midnight_contractState",
-                rpc_params![address_64hex, at_block_hash_0x],
-            ),
-        )
-        .await
-        .context("timed out fetching midnight contract state")?;
+            self.retry,
+            "midnight_contractState",
+            {
+                let response: Result<String, _> = self
+                    .rpc
+                    .request(
+                        "midnight_contractState",
+                        rpc_params![address_64hex, at_block_hash_0x],
+                    )
+                    .await;
 
-        match response {
-            Ok(state_hex) => {
-                let state = hex::decode(state_hex.trim_start_matches("0x"))
-                    .context("midnight_contractState returned non-hex state")?;
-                Ok(Some(state))
-            }
-            Err(err) => {
-                // Both error shapes arrive as -32602 invalid-params and are
-                // distinguishable only by message, so match the node's own
-                // strings.
-                let message = err.to_string();
-                if message.contains("Contract not present") {
-                    Ok(None)
-                } else if message.contains("Unable to get requested contract state") {
-                    Err(anyhow::Error::new(err).context(
-                        "midnight node cannot serve contract state at that block (pruned or unknown hash)",
-                    ))
-                } else {
-                    Err(anyhow::Error::new(err).context("midnight_contractState failed"))
+                match response {
+                    Ok(state_hex) => {
+                        let state = hex::decode(state_hex.trim_start_matches("0x"))
+                            .context("midnight_contractState returned non-hex state")?;
+                        Ok(Some(state))
+                    }
+                    Err(err) => {
+                        // Both error shapes arrive as -32602 invalid-params
+                        // and are distinguishable only by message, so match
+                        // the node's own strings.
+                        let message = err.to_string();
+                        if message.contains("Contract not present") {
+                            Ok(None)
+                        } else if message.contains("Unable to get requested contract state") {
+                            Err(anyhow::Error::new(err).context(
+                                "midnight node cannot serve contract state at that block (pruned or unknown hash)",
+                            ))
+                        } else {
+                            Err(anyhow::Error::new(err).context("midnight_contractState failed"))
+                        }
+                    }
                 }
             }
-        }
+        )
     }
-}
 
-/// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic
-/// order: `args[0]` with its SCALE compact length prefix stripped.
-pub async fn send_mn_transaction_bytes(block: &FinalizedBlock) -> anyhow::Result<Vec<Vec<u8>>> {
-    let extrinsics = block
-        .block
-        .extrinsics()
-        .await
-        .context("failed to fetch extrinsics for a finalized midnight block")?;
-    let mut triples = Vec::new();
-    for extrinsic in extrinsics.iter() {
-        triples.push((
-            extrinsic
-                .pallet_name()
-                .context("extrinsic pallet name")?
-                .to_string(),
-            extrinsic
-                .variant_name()
-                .context("extrinsic variant name")?
-                .to_string(),
-            extrinsic.field_bytes().to_vec(),
-        ));
+    /// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic
+    /// order: `args[0]` with its SCALE compact length prefix stripped.
+    pub async fn send_mn_transaction_bytes(
+        &self,
+        block: &FinalizedBlock,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let extrinsics = retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            "midnight_block_extrinsics",
+            {
+                block
+                    .block
+                    .extrinsics()
+                    .await
+                    .context("failed to fetch extrinsics for a finalized midnight block")
+            }
+        )?;
+        let mut triples = Vec::new();
+        for extrinsic in extrinsics.iter() {
+            triples.push((
+                extrinsic
+                    .pallet_name()
+                    .context("extrinsic pallet name")?
+                    .to_string(),
+                extrinsic
+                    .variant_name()
+                    .context("extrinsic variant name")?
+                    .to_string(),
+                extrinsic.field_bytes().to_vec(),
+            ));
+        }
+        collect_send_mn_blobs(
+            triples.iter().map(|(pallet, variant, bytes)| {
+                (pallet.as_str(), variant.as_str(), bytes.as_slice())
+            }),
+        )
     }
-    collect_send_mn_blobs(
-        triples
-            .iter()
-            .map(|(pallet, variant, bytes)| (pallet.as_str(), variant.as_str(), bytes.as_slice())),
-    )
 }
 
 /// The pure filter-and-decode step for one extrinsic: `Some(blob)` iff
@@ -255,10 +294,14 @@ fn extract_send_mn_transaction(
     Ok(Some(rest.to_vec()))
 }
 
-/// Zero matches is an error, not an empty vector: a Midnight block always
-/// carries at least one ledger transaction, so matching none means the
-/// filter names or the chain are wrong, and returning an empty vector would
-/// index nothing forever while looking healthy.
+/// An EMPTY result is normal and must stay that way: a block with no
+/// matching extrinsic is an ordinary idle block, and erroring on it would
+/// turn quiet chain periods into supervisor restart storms once the indexer
+/// wires this in. The silent-zero-match trap (a misspelled pallet or call
+/// name matching nothing forever) is pinned by the offline tests, which
+/// require a PRESENT matching extrinsic to come through, not by a runtime
+/// invariant. A matching extrinsic with malformed args is still a loud
+/// error.
 fn collect_send_mn_blobs<'a>(
     extrinsics: impl IntoIterator<Item = (&'a str, &'a str, &'a [u8])>,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
@@ -268,10 +311,6 @@ fn collect_send_mn_blobs<'a>(
             blobs.push(blob);
         }
     }
-    anyhow::ensure!(
-        !blobs.is_empty(),
-        "no send_mn_transaction extrinsic in block: a midnight block always carries at least one"
-    );
     Ok(blobs)
 }
 
@@ -394,26 +433,33 @@ mod tests {
     }
 
     #[test]
-    fn a_block_with_zero_matches_is_an_error_not_an_empty_vec() {
-        // The silent-zero-match trap: a misspelled pallet or call name would
-        // otherwise index nothing forever and look healthy doing it.
+    fn an_idle_block_yields_ok_and_empty() {
+        // A block with no matching extrinsic is an ordinary idle block, not
+        // an error: erroring here would turn quiet chain periods into
+        // supervisor restart storms once the indexer wires this in.
         let field_bytes = scale_vec(&tagged_blob(b""));
-        let err = collect_send_mn_blobs([
+        let blobs = collect_send_mn_blobs([
             ("system", "remark", field_bytes.as_slice()),
             ("timestamp", "set", field_bytes.as_slice()),
         ])
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("no send_mn_transaction"),
-            "unexpected error: {err}"
-        );
+        .expect("an idle block is not an error");
+        assert!(blobs.is_empty());
+    }
 
+    #[test]
+    fn a_present_matching_extrinsic_is_never_silently_dropped() {
+        // The silent-zero-match trap, pinned where it belongs: a broken
+        // filter that returns empty for a block that DOES carry a matching
+        // extrinsic must fail here.
+        let blob = tagged_blob(&[0xcc; 3]);
+        let field_bytes = scale_vec(&blob);
+        let noise = scale_vec(&tagged_blob(b""));
         let blobs = collect_send_mn_blobs([
-            ("system", "remark", field_bytes.as_slice()),
+            ("system", "remark", noise.as_slice()),
             ("midnight", "send_mn_transaction", field_bytes.as_slice()),
         ])
-        .expect("one match suffices");
-        assert_eq!(blobs.len(), 1);
+        .expect("a well-formed matching extrinsic extracts");
+        assert_eq!(blobs, vec![blob], "the present blob must come through");
     }
 
     /// Requires a local Midnight node at ws://127.0.0.1:9944. Run with
@@ -442,9 +488,14 @@ mod tests {
             .await
             .expect("subscribe finalized");
         let block = blocks.next().await.expect("one finalized block");
-        let blobs = send_mn_transaction_bytes(&block)
+        let blobs = rpc
+            .send_mn_transaction_bytes(&block)
             .await
-            .expect("every Midnight block carries at least one ledger transaction");
-        assert!(blobs[0].starts_with(TAG));
+            .expect("extrinsics fetch");
+        // An idle block is legal; when a ledger transaction is present it
+        // must lead with the version tag.
+        if let Some(first) = blobs.first() {
+            assert!(first.starts_with(TAG));
+        }
     }
 }
