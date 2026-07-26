@@ -10,6 +10,7 @@ mod rpc;
 mod sidecar;
 #[cfg(test)]
 mod test_fixtures;
+mod tx;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
 pub use indexer::{select_catchup_mode, MidnightIndexer};
@@ -28,3 +29,4 @@ pub use sidecar::{
     ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, Health, LedgerTags,
     MapEntry, RespondReceipt, RespondRequest, SidecarClient, StateNode, WirePoint, WireSignature,
 };
+pub use tx::{payload_scalar, serialized_transaction, to_unsigned_tx};
