@@ -687,6 +687,7 @@ mod tests {
         name: String,
         sender: String,
         path: String,
+        epsilon_decimal: String,
         epsilon_be: Vec<u8>,
     }
 
@@ -708,6 +709,7 @@ mod tests {
                     name: field("name"),
                     sender: field("sender"),
                     path: field("path"),
+                    epsilon_decimal: field("epsilon_decimal"),
                     epsilon_be: alloy::primitives::hex::decode(field("epsilon_be_hex"))
                         .expect("epsilon_be_hex decodes"),
                 }
@@ -847,6 +849,29 @@ mod tests {
                     a.name, b.name
                 );
             }
+        }
+    }
+
+    // Fixture self-consistency: the decimal and big-endian-hex renderings of
+    // each scalar must denote the same number. This catches corrupting one
+    // field without the other, which pairwise distinctness cannot see when
+    // the corrupted value only ever feeds an assert_ne (the mainnet negative
+    // control). It still cannot catch a corruption applied consistently to
+    // both fields: that is uncatchable without the oracle, since Rust cannot
+    // derive under midnight:mainnet at all.
+    #[test]
+    fn test_midnight_epsilon_fixture_fields_agree() {
+        for v in midnight_epsilon_vectors() {
+            let from_decimal = alloy::primitives::U256::from_str_radix(&v.epsilon_decimal, 10)
+                .unwrap_or_else(|err| {
+                    panic!("vector `{}`: epsilon_decimal does not parse: {err}", v.name)
+                });
+            let from_hex = alloy::primitives::U256::from_be_slice(&v.epsilon_be);
+            assert_eq!(
+                from_decimal, from_hex,
+                "vector `{}`: epsilon_decimal and epsilon_be_hex denote different numbers",
+                v.name
+            );
         }
     }
 

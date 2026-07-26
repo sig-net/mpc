@@ -356,8 +356,8 @@ mod tests {
 
     // These goldens pin the emitted byte layout, not the Rust declaration
     // order: binary_repr reads fields by name, so a reordered declaration
-    // that keeps the emitted layout intact stays green here. Declaration
-    // order is pinned by the records module's own order tests.
+    // stays green here. Declaration order is pinned by the records module's
+    // own order tests.
     #[test]
     fn request_id_matches_the_ts_oracle() {
         let file = load_vectors();

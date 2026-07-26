@@ -1122,15 +1122,24 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a set variable reconfigures any test that
-    /// parses argv. The hazard differs per caller. For the parse-based
-    /// tests (`into_str_args_forwards_midnight` here and the round-trip in
-    /// `args::midnight`), a flag dropped by `into_str_args` would be
-    /// silently backfilled from env and the equality assertions would still
-    /// pass: a genuine false green. For `midnight_off_by_default`, which
-    /// builds its args programmatically, env cannot reach the parse at all;
-    /// the guard pins that assumption, and pollution there could only push
-    /// the config toward `Some` and fail loudly, never mask a mutation.
+    /// `--midnight-*` flags. What a set variable can do differs per caller:
+    ///
+    /// - `args::midnight::tests::into_str_args_round_trips_into_config`:
+    ///   genuine false green. It reparses `into_str_args` output and asserts
+    ///   equality, so a flag dropped by `into_str_args` is silently
+    ///   backfilled from env and the equality still holds, provided the
+    ///   variable carries the same value the fixture uses. Those values
+    ///   (`"undeployed"`, the localhost endpoints) are exactly what a
+    ///   developer running a local sidecar exports, so that proviso is the
+    ///   likely case; a different value fails, just confusingly.
+    /// - `into_str_args_forwards_midnight`: prophylaxis only. All four
+    ///   flags are in argv, which beats env in clap, and the assertions
+    ///   read `into_str_args` output directly, so env cannot reach the
+    ///   outcome and a dropped flag fails either way.
+    /// - `midnight_off_by_default`: loud-failure-only. It builds its args
+    ///   programmatically, so env cannot reach the parse at all; pollution
+    ///   could only push the config toward `Some`, which fails noisily and
+    ///   can never mask a mutation.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_SIDECAR_URL",

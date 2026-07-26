@@ -13,11 +13,23 @@ use tokio_util::sync::CancellationToken;
 /// Scaffold indexer: emits `CatchupCompleted`, then parks until cancelled.
 ///
 /// When Midnight is ENABLED, this scaffold restart-loops roughly every
-/// 5m15s: the pipeline watchdog fires on `live_block_timeout(Midnight)`,
+/// 5m15s: the stream supervisor's watchdog fires on `live_block_timeout(Midnight)`,
 /// which is `expected_finality_time_secs` (15) plus the 300-second buffer,
 /// because the scaffold never emits `ChainEvent::Block`. Harmless log noise
 /// until the read path lands; written down here so it is read rather than
 /// rediscovered in production logs.
+///
+/// The silence is also load-bearing, not only noisy.
+/// `checkpoint_interval(Midnight)` is already `Some(120)`, so the first
+/// `ChainEvent::Block` emitted after catchup starts checkpoint creation
+/// (`stream/ops.rs::process_block_event`), a threshold signing request for
+/// a chain that cannot yet publish. Emitting blocks is therefore not a
+/// self-contained change: checkpoint signing stalls unless threshold-many
+/// nodes have Midnight enabled, and a node without it still buffers peer
+/// posits for checkpoint ids it never sees locally, in `posit_queues`
+/// entries that only `retire_task` removes. Turn block emission on only
+/// with a network-wide Midnight rollout, and ideally a bound or reaper on
+/// `posit_queues`, first.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
     state_manager: S,
