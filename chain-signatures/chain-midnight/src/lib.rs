@@ -18,8 +18,8 @@ pub use convert::{path_render, to_sign_request, MidnightChainCtx};
 pub use indexer::{select_catchup_mode, MidnightIndexer};
 pub use publisher::MidnightPublisher;
 pub use reader::{
-    decode_notification, decode_record, signet_field_node, unpack_notification_v1, NotificationV1,
-    REQUEST_FIXED_VALUE_ATOMS,
+    decode_notification, decode_record, resolve_verified_record, signet_field_node,
+    unpack_notification_v1, NotificationV1, REQUEST_FIXED_VALUE_ATOMS,
 };
 pub use records::{
     CompactMaybe, EvmType2TxParams, RespondBidirectionalEvent, SignBidirectionalEventNotification,

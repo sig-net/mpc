@@ -130,6 +130,17 @@ pub fn decode_record(
         "request record has {} value atoms, fewer than the {REQUEST_FIXED_VALUE_ATOMS} its fixed fields need",
         atoms.len()
     );
+    // The cap sits HERE, inside decode_record and before any enumeration,
+    // rather than at a call site: a later caller would bypass a call-site
+    // cap. Named as a cap rejection, not a malformed record, because the
+    // two want different operator responses (an oversized cell is an
+    // adversarial or runaway producer, not a codec drift).
+    anyhow::ensure!(
+        atoms.len() <= MAX_RECORD_ATOMS,
+        "request record has {} atoms, above the {MAX_RECORD_ATOMS}-atom enumeration cap; \
+         refusing to enumerate capacity splits for an adversarially large cell",
+        atoms.len()
+    );
     let variable = atoms.len() - REQUEST_FIXED_VALUE_ATOMS;
     // Schema widths are read from the LAST TWO atoms' actual lengths:
     // schemas are exact-length by protocol convention (never NUL-padded,
@@ -193,6 +204,107 @@ pub fn decode_record(
         atoms.len(),
         rejections.join("; ")
     )
+}
+
+/// Ceiling on a record cell's atom count, orders of magnitude above every
+/// real tier: a legitimate record carries `22 + words + entries*(2 + keys)`
+/// atoms, and the capacities real contracts compile with sit in the tens to
+/// low hundreds. The cell being decoded comes from a CALLER's own contract
+/// state, so its length is attacker-controlled, and the capacity
+/// enumeration above is roughly O(V^2 log V) in the variable atom count
+/// with no natural ceiling (the TS reader shares the shape): without this
+/// cap an adversarial cell burns indexer CPU across the whole split space
+/// before rejecting.
+const MAX_RECORD_ATOMS: usize = 4096;
+
+/// The recompute-and-drop security gate: the record filed under
+/// `request_id` in the CALLER's request map, returned only if the id
+/// recomputed from the decoded record equals the id it was filed under.
+/// Mirrors `lookupSignetRequestAt`
+/// (`signature-requests-state-reader.ts:226-257`) plus the recompute the
+/// reference deliberately leaves to the MPC.
+///
+/// The caller's request map is `Map<RequestId, SignBidirectionalEvent>`,
+/// keyed by ONE `Bytes<32>` atom, so its wire key is unambiguous: the
+/// trimmed atom re-pads to exactly one 32-byte value. The central
+/// singleton's composite `SignetMapKey` maps, where the lossy joined key
+/// bites (D9), are B6's diff, never resolved here.
+///
+/// Why the recompute is NOT redundant, spelled out because it will look
+/// deletable: `decode_record` uses the id to DISAMBIGUATE capacity splits
+/// and falls back to first-clean-decode when no split matches, so on the
+/// match path this gate passes by construction. The fallback path is where
+/// it does independent work: there, this recompute is the only thing
+/// standing between a record filed under the wrong id and a signature over
+/// it. The reference states the division in as many words: "this
+/// disambiguates; it does not authenticate (the MPC recomputes against the
+/// sender-bound id before signing)"
+/// (`signature-requests-state-reader.ts:112-113`). The gate is also
+/// deliberately STRONGER than the reference's membership model: membership
+/// alone admits a contract that byte-copied a victim's record into its OWN
+/// map, and recomputing binds the id to the record's `sender`, which B5's
+/// gate in turn binds to the address the record was read from.
+///
+/// Every drop is logged with its own reason; `ChainTelemetry` has no
+/// counter hook yet, so the per-reason counter joins the bound telemetry
+/// follow-up. The id comparison is plain byte equality, deliberately: both
+/// operands are public on-chain values, so a timing side channel reveals
+/// nothing the chain does not already publish.
+pub fn resolve_verified_record(
+    map: &StateNode,
+    request_id: [u8; 32],
+) -> Option<SignBidirectionalRecord> {
+    let StateNode::Map { entries } = map else {
+        tracing::warn!(
+            request_id = %hex::encode(request_id),
+            "request-index node is not a map; dropping"
+        );
+        return None;
+    };
+    // Map keys are unique and re-padding a trimmed atom is injective, so at
+    // most one entry can match; the id being absent from the index is the
+    // ordinary negative (the reference returns undefined), not a fault.
+    let entry = entries
+        .iter()
+        .find(|entry| key_matches_request_id(&entry.key, &request_id))?;
+    let record = match decode_record(&entry.value, &request_id) {
+        Ok(record) => record,
+        Err(err) => {
+            tracing::warn!(
+                request_id = %hex::encode(request_id),
+                "request record failed to decode; dropping: {err:#}"
+            );
+            return None;
+        }
+    };
+    let recomputed = compute_request_id(&record);
+    if recomputed != request_id {
+        tracing::warn!(
+            request_id = %hex::encode(request_id),
+            recomputed = %hex::encode(recomputed),
+            "recomputed request id does not match the filed id; dropping a spoofed or \
+             wrongly filed record"
+        );
+        return None;
+    }
+    Some(record)
+}
+
+/// One trimmed `Bytes<32>` atom, re-padded and compared. Handles the
+/// trimmed wire form (a rid ending in `0x00` stores as fewer than 32
+/// bytes) and an untrimmed 32-byte form identically, since re-padding a
+/// full-width atom is the identity. Non-hex or overlong keys simply do not
+/// match; they belong to other maps or future schemas, not to this lookup.
+fn key_matches_request_id(key_hex: &str, request_id: &[u8; 32]) -> bool {
+    let Ok(bytes) = hex::decode(key_hex) else {
+        return false;
+    };
+    if bytes.len() > 32 {
+        return false;
+    }
+    let mut padded = [0u8; 32];
+    padded[..bytes.len()].copy_from_slice(&bytes);
+    padded == *request_id
 }
 
 /// Decode the two-atom notification cell: version, then the 128-byte
@@ -856,5 +968,146 @@ mod tests {
         .expect("no-calldata decodes");
         assert_eq!(decoded, vector.record.0);
         assert_eq!(decoded.tx_params.calldata.value.words.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // The recompute-and-drop gate (B4).
+    // ------------------------------------------------------------------
+
+    /// A named rid vector's record and the id the oracle filed it under.
+    fn record_and_rid(name: &str) -> (SignBidirectionalRecord, [u8; 32]) {
+        let file: RidVectorFile =
+            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
+        let vector = file
+            .vectors
+            .into_iter()
+            .find(|vector| vector.name == name)
+            .unwrap_or_else(|| panic!("no rid vector named {name}"));
+        let rid = rid_bytes(&vector.expected_request_id_hex);
+        (vector.record.0, rid)
+    }
+
+    fn map_of(entries: Vec<(String, StateNode)>) -> StateNode {
+        StateNode::Map {
+            entries: entries
+                .into_iter()
+                .map(|(key, value)| crate::sidecar::MapEntry { key, value })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn recompute_gate_drops_spoofed() {
+        let (record, rid) = record_and_rid("minimal-1word");
+        let cell = cell_of(&atoms_from_record(&record));
+
+        // Genuine filing: the id it is stored under is the id it hashes to.
+        let map = map_of(vec![(hex::encode(rid), cell.clone())]);
+        assert_eq!(resolve_verified_record(&map, rid), Some(record));
+
+        // Spoofed filing: the same record bytes stored under an id they do
+        // NOT hash to. decode_record ACCEPTS this cell, asserted explicitly:
+        // no split matches the filed id, so decode falls back to
+        // first-clean-decode, and the drop below is therefore provably the
+        // GATE's independent work on the fallback path, the one place the
+        // recompute is not tautological.
+        let spoofed = [0x99; 32];
+        assert!(
+            decode_record(&cell, &spoofed).is_ok(),
+            "decode must accept the spoofed filing via its fallback; only the gate drops it"
+        );
+        let map = map_of(vec![(hex::encode(spoofed), cell)]);
+        assert_eq!(resolve_verified_record(&map, spoofed), None);
+    }
+
+    #[test]
+    fn poisoned_entry_skipped_and_absent_id_is_none() {
+        let (record, rid) = record_and_rid("minimal-1word");
+        let poisoned_rid = [0x55; 32];
+        let map = map_of(vec![
+            (
+                hex::encode(poisoned_rid),
+                cell_of(&[vec![1], vec![2], vec![3]]),
+            ),
+            (hex::encode(rid), cell_of(&atoms_from_record(&record))),
+        ]);
+
+        // The undecodable cell drops without panicking...
+        assert_eq!(resolve_verified_record(&map, poisoned_rid), None);
+        // ...and does not block the sibling genuine entry.
+        assert_eq!(resolve_verified_record(&map, rid), Some(record));
+        // An id absent from the index is None, as the TS returns undefined.
+        assert_eq!(resolve_verified_record(&map, [0x44; 32]), None);
+        // A non-map node is a drop, never a panic.
+        assert_eq!(resolve_verified_record(&StateNode::Null, rid), None);
+    }
+
+    #[test]
+    fn trimmed_key_repadded() {
+        // Find a nonce whose record hashes to an id ending in 0x00, so the
+        // wire key (trailing-zero-trimmed, per the sidecar's own rendering)
+        // is SHORTER than 32 bytes. Bounded fixture search, not an
+        // assertion branch; expected hit within ~256 tries.
+        let (mut record, _) = record_and_rid("minimal-1word");
+        let mut found = None;
+        for nonce in 0..100_000u64 {
+            record.request_nonce = nonce;
+            let rid = compute_request_id(&record);
+            if rid[31] == 0 {
+                found = Some(rid);
+                break;
+            }
+        }
+        let rid = found.expect("a nonce with a trailing-zero id exists in range");
+
+        let mut trimmed = rid.to_vec();
+        while trimmed.last() == Some(&0) {
+            trimmed.pop();
+        }
+        assert!(trimmed.len() < 32, "the key must actually be trimmed");
+
+        let map = map_of(vec![(
+            hex::encode(&trimmed),
+            cell_of(&atoms_from_record(&record)),
+        )]);
+        assert_eq!(resolve_verified_record(&map, rid), Some(record));
+    }
+
+    #[test]
+    fn oversized_cell_is_rejected_by_the_cap_before_enumeration() {
+        // 33-byte atoms, deliberately: IF enumeration ever ran on these,
+        // every split would die instantly on the first fixed field (33 > 32
+        // for sender's Bytes<32>), so the mutant that removes the cap fails
+        // FAST here on the error class rather than hanging CI. The real
+        // cost the cap prevents (an adversarial cell with plausible atoms
+        // grinding the roughly O(V^2 log V) split space) is argued in the
+        // cap's doc; a wall-clock assertion would be flaky.
+        let over = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS + 1];
+        let err = decode_record(&cell_of(&over), &[0x11; 32])
+            .expect_err("a cell above the cap is refused")
+            .to_string();
+        assert!(
+            err.contains("enumeration cap"),
+            "the cap error must name itself, got: {err}"
+        );
+        assert!(
+            !err.contains("matches no"),
+            "a capped cell is a cap rejection, not a malformed record, got: {err}"
+        );
+
+        // At exactly the cap, enumeration RUNS and reports the ordinary
+        // no-split rejection: the boundary is exclusive-above.
+        let at_cap = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS];
+        let err = decode_record(&cell_of(&at_cap), &[0x11; 32])
+            .expect_err("no split can match 33-byte atoms")
+            .to_string();
+        assert!(
+            err.contains("matches no"),
+            "an at-cap cell goes through enumeration, got: {err}"
+        );
+        assert!(
+            !err.contains("enumeration cap"),
+            "an at-cap cell is not a cap rejection, got: {err}"
+        );
     }
 }
