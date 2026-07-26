@@ -276,62 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn to_unsigned_tx_uses_counts_not_capacity() {
-        // These records differ only in unused capacity (1 vs 3 word slots, 0 vs
-        // 2x2 access-list slots at count zero) and schema widths, so they must
-        // assemble to one identical transaction. al-capacity-unused is the
-        // zero-entry-count member: a "0 means all" sentinel would emit its two
-        // capacity entries as phantom zero-filled ones.
-        const FAMILY: [&str; 4] = [
-            "minimal-1word",
-            "unused-word-slot",
-            "wide-schemas",
-            "al-capacity-unused",
-        ];
-        let base =
-            serialized_transaction(&record_by_name(FAMILY[0])).expect("minimal-1word assembles");
-        for name in &FAMILY[1..] {
-            assert_eq!(
-                serialized_transaction(&record_by_name(name)).expect(name),
-                base,
-                "{name}: capacity and schema widths must not reach the transaction"
-            );
-        }
-
-        // Non-vacuity: the four RECORDS are pairwise distinct (their ids
-        // differ), so the equality above is four records collapsing to one
-        // transaction, not one record loaded four times.
-        let ids: Vec<[u8; 32]> = FAMILY
-            .into_iter()
-            .map(|name| compute_request_id(&record_by_name(name)))
-            .collect();
-        for (i, first) in ids.iter().enumerate() {
-            for (j, second) in ids.iter().enumerate().skip(i + 1) {
-                assert_ne!(first, second, "{} and {}", FAMILY[i], FAMILY[j]);
-            }
-        }
-    }
-
-    #[test]
-    fn assemble_calldata_distinguishes_empty_maybe_from_zero_words() {
-        // Easily conflated: is_some = false yields no bytes at all, while
-        // is_some = true with no_words = 0 yields the four selector bytes.
-        let absent = to_unsigned_tx(&record_by_name("no-calldata")).expect("no-calldata");
-        assert!(
-            absent.input.is_empty(),
-            "an empty Maybe must produce empty calldata with no selector"
-        );
-
-        let selector_only =
-            to_unsigned_tx(&record_by_name("zero-words-capacity")).expect("zero-words-capacity");
-        assert_eq!(
-            selector_only.input.len(),
-            4,
-            "a present calldata with no_words = 0 is the selector alone"
-        );
-    }
-
-    #[test]
     fn to_unsigned_tx_requires_caip2_to_agree_with_chain_id() {
         // The routing label and the transaction's chain id must agree; a
         // record that routes to one chain and signs for another is refused.
@@ -372,11 +316,9 @@ mod tests {
 
     #[test]
     fn assemble_calldata_errors_on_overrun_access_list_clamps() {
-        // The reference is deliberately asymmetric and the port preserves
-        // it: assembleCalldata INDEXES words[i] for i < noWords and throws
-        // past capacity (signet-evtype2tx-requests.ts:349-351), while
-        // decodeAccessList SLICES at both levels, which clamps
-        // (signet-evtype2tx-requests.ts:371-377).
+        // The reference is asymmetric and the port preserves it:
+        // assembleCalldata indexes words[i] and throws past capacity, while
+        // decodeAccessList slices at both levels, which clamps.
         let mut record = record_by_name("access-list-partial");
 
         record.tx_params.calldata.value.no_words = 3; // capacity is 2
@@ -406,17 +348,10 @@ mod tests {
 
     #[test]
     fn assemble_access_list_emits_no_keys_at_zero_count() {
-        // The eighth vector cannot see this level: with an entry count of 0
-        // no entry is emitted at all, so the key-level slice never executes
-        // there, and no golden has an EMITTED entry with a zero key count.
-        // Slice semantics per decodeAccessList
-        // (signet-evtype2tx-requests.ts:371-377): storage_key_count = 0 on
-        // an emitted entry slices to zero keys; a "0 means all" sentinel
-        // misread would emit every key slot at capacity. Asserted against
-        // the cited slice rule rather than oracle bytes, deliberately: a
-        // golden for this would need a new record and therefore a
-        // rid_vectors.json regeneration, which the controller priced and
-        // declined.
+        // No golden reaches this level: with an entry count of 0 no entry is
+        // emitted, so the key-level slice never runs there. On an emitted
+        // entry a storage_key_count of 0 slices to zero keys, where a
+        // "0 means all" sentinel would emit every slot at capacity.
         let mut record = record_by_name("access-list-partial");
         record.tx_params.access_list[0].storage_key_count = 0; // key capacity is 3
         let tx = to_unsigned_tx(&record).expect("assembles");

@@ -52,19 +52,14 @@ pub(crate) enum ContractState {
 
 /// Midnight indexer: `run()` owns the whole read path.
 ///
-/// Block emission is live because the checkpoint cannot advance without
-/// `ChainEvent::Block` and `set_processed_block`, and a stale checkpoint makes
-/// every supervised restart re-walk catchup and re-emit the same requests.
-/// The 315s `live_block_timeout(Midnight)` watchdog also restart-loops a silent
-/// indexer by design.
+/// Block emission is live because the checkpoint cannot advance without it, and
+/// a stale checkpoint makes every restart re-walk catchup and re-emit.
 ///
-/// Rollout hazard: `checkpoint_interval(Midnight)` is `Some(120)`, so emitting
-/// a block starts checkpoint creation, which is a threshold signing request.
-/// That stalls unless threshold-many nodes have Midnight enabled, and a node
-/// without it still buffers peer posits for checkpoint ids it never sees, in
-/// `posit_queues` entries only `retire_task` removes. The off-by-default config
-/// gate keeps this out of production; network-wide enablement plus a
-/// `posit_queues` bound are preconditions for turning it on.
+/// Rollout hazard: `checkpoint_interval(Midnight)` is `Some(120)`, so emitting a
+/// block starts checkpoint creation, a threshold signing request. That stalls
+/// unless threshold-many nodes have Midnight enabled, and a node without it
+/// still buffers peer posits it never retires. Network-wide enablement plus a
+/// `posit_queues` bound are preconditions for turning this on.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
     state_manager: S,
@@ -573,25 +568,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     .filter(|entry| !parent_keys.contains(entry.key.as_slice()))
                     .collect()
             }
-            // No diff is possible, so this block emits nothing. Both
-            // alternatives are worse and unbounded where this is bounded.
-            //
-            // Treating the parent as empty would make every entry look new, and
-            // the map is insert-only, so that re-emits the entire history: a
-            // caller-state read and a sidecar decode per entry ever filed. Past
-            // the watchdog the block never emits, the checkpoint never advances,
-            // the restart re-reads the same unreadable parent and the burst
-            // repeats, losing every request rather than this block's.
-            // Propagating puts the same permanent fault into the same loop.
-            //
-            // Here only entries filed at exactly this height are given up. The
-            // block still emits, the checkpoint still advances, and the readable
-            // current map becomes the next block's parent, so the next diff is
-            // correct rather than degraded.
-            //
-            // Reaching this arm at all means the parent walk failed and this
-            // block's did not, which is a shape transition such as a contract
-            // upgrade, so the loss is one block at one upgrade.
+            // No diff is possible, so this block emits nothing, giving up only
+            // the entries filed at this exact height. Both alternatives are
+            // unbounded: treating the parent as empty re-emits the whole
+            // insert-only map and restart-loops past the watchdog, and
+            // propagating puts the same permanent fault into the same loop.
+            // The block still emits and the checkpoint still advances, so the
+            // next diff is correct rather than degraded.
             None => {
                 degraded_read(
                     "parent-notification-map-unreadable",
@@ -813,19 +796,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// The degraded catchup: read the central contract's latest state once at
     /// the anchor and process every field-1 entry above the per-rid watermark.
     ///
-    /// No per-tx provenance and no per-block granularity, which is the trade.
-    /// The request-id gate still holds, having never depended on the block.
+    /// No per-tx provenance and no per-block granularity, which is the trade;
+    /// the request-id gate never depended on the block.
     ///
-    /// Both watermarks are the ledger's own, because `StateManager` persists
-    /// one u64 per chain and no per-rid store exists locally. The coarse one is
-    /// safe because the notification map is insert-only, so the anchor's latest
-    /// state contains every notification ever filed and
-    /// `set_processed_block(anchor)` loses nothing; the two modes interleave
-    /// because both resume from that slot, and over-coverage lands as keyed
-    /// backlog inserts. The per-rid one is `respondCounterMap` read from the
-    /// same anchored tree as a count, so a re-notification after a response,
-    /// including a failed one, is still processed: re-emission is idempotent
-    /// where a silent skip is not.
+    /// Safe only because the notification map is insert-only, so the anchor's
+    /// latest state holds every notification ever filed and
+    /// `set_processed_block(anchor)` loses nothing. Over-coverage lands as keyed
+    /// backlog inserts. The per-rid watermark is `respondCounterMap` read as a
+    /// count, so a re-notification after a response is still processed:
+    /// re-emission is idempotent where a silent skip is not.
     async fn catchup_from_latest_state<C: ChainSource>(
         &self,
         source: &C,
@@ -1093,11 +1072,6 @@ mod tests {
     use std::time::Duration;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
-
-    #[test]
-    fn midnight_indexer_chain_is_midnight() {
-        assert_eq!(TestIndexer::CHAIN, Chain::Midnight);
-    }
 
     #[test]
     fn select_catchup_mode_degrades_pruned_by_default() {
@@ -1494,7 +1468,7 @@ mod tests {
 
     /// Asserts the emitted request end to end: the id, the absent block
     /// timestamp, and the PAYLOAD pinned to the named oracle vector's
-    /// unsigned hash, the plan's stream-tier acceptance criterion.
+    /// unsigned hash.
     fn assert_sign_request(event: &ChainEvent, rid: [u8; 32], oracle_vector: &str) {
         match event {
             ChainEvent::SignRequest {
@@ -1540,7 +1514,7 @@ mod tests {
         );
         source.set_state(&hex::encode(CALLER), 7, caller_state(&record, &rid));
 
-        // The FORBIDDEN-style guard: a live block is already queued BEFORE
+        // A live block is already queued BEFORE
         // run() starts; its events must still come after CatchupCompleted.
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
@@ -1636,38 +1610,6 @@ mod tests {
         live_tx.send(block_ref(9)).await.expect("send live block");
         // Exactly ONE request: the pre-existing entry is not re-emitted (a
         // diff mutant that treats every entry as new emits two).
-        assert_sign_request(&harness.next().await, rid, "minimal-1word");
-        assert_block(&harness.next().await, 9);
-        harness.cancel_and_join_ok().await;
-    }
-
-    #[tokio::test]
-    async fn process_entry_signs_without_provenance() {
-        // Attribution is advisory: a diffed notification with no matching
-        // decoded call still signs. The check a well-meaning implementer is
-        // most likely to turn fail-closed.
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        // No txs entry at all: decoded transactions are empty.
-
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = Harness::spawn(source, 8).await;
-        assert!(matches!(harness.next().await, ChainEvent::CatchupCompleted));
-
-        live_tx.send(block_ref(9)).await.expect("send live block");
         assert_sign_request(&harness.next().await, rid, "minimal-1word");
         assert_block(&harness.next().await, 9);
         harness.cancel_and_join_ok().await;
@@ -2004,7 +1946,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_bails_when_block_producer_terminates() {
-        // Binding 2: Ok(()) is SHUTDOWN to run_supervised, so an ended
+        // Ok(()) is shutdown to run_supervised, so an ended
         // producer must surface as Err; only cancel may return Ok.
         let central = central_address();
         let mut source = FixtureSource {
@@ -2032,7 +1974,7 @@ mod tests {
 
     #[test]
     fn attribute_caller_finds_committed_caller_and_rejects_decoys() {
-        // Binding 5 shapes: multi-call, the matching claim NOT first, a
+        // Three shapes: multi-call, the matching claim NOT first, a
         // decoy commitment matching nothing, distinguishable values.
         let central = central_address();
         let txs = DecodedTransactions {

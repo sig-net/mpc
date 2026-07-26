@@ -158,6 +158,36 @@ mod tests {
     /// derivation in the ecosystem, and the record below is built to its exact
     /// `(sender, path)`, so the whole record-to-epsilon chain pins against it.
     const EPSILON_VECTORS_JSON: &str = include_str!("../../crypto/tests/epsilon_vectors.json");
+    const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");
+
+    fn tx_vector_field(name: &str, field: &str) -> String {
+        let file: serde_json::Value =
+            serde_json::from_str(TX_VECTORS_JSON).expect("tx_vectors.json parses");
+        file["vectors"]
+            .as_array()
+            .expect("fixture has a vectors array")
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap_or_else(|| panic!("no tx vector named {name}"))[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is a string"))
+            .trim_start_matches("0x")
+            .to_string()
+    }
+
+    fn oracle_serialized(name: &str) -> String {
+        tx_vector_field(name, "expected_unsigned_serialized_hex")
+    }
+
+    /// The scalar the MPC signs for a named oracle vector.
+    fn oracle_scalar(name: &str) -> k256::Scalar {
+        use mpc_primitives::ScalarExt as _;
+        let hash: [u8; 32] = hex::decode(tx_vector_field(name, "expected_unsigned_hash_hex"))
+            .expect("oracle hash decodes")
+            .try_into()
+            .expect("oracle hash is 32 bytes");
+        k256::Scalar::from_bytes(hash).expect("oracle hash is in range")
+    }
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
@@ -249,13 +279,7 @@ mod tests {
         // The record was built to the vector's exact (sender, path), so the
         // epsilon out of the full chain must be the TS-generated scalar rather
         // than merely self-consistent.
-        let (sender, path, epsilon_be) = epsilon_vector("e2e-caller-path");
-        assert_eq!(
-            sender,
-            "ab".repeat(32),
-            "fixture sanity: the vector's sender"
-        );
-        assert_eq!(path, "caller-path", "fixture sanity: the vector's path");
+        let (_, _, epsilon_be) = epsilon_vector("e2e-caller-path");
         assert_eq!(
             request.args.epsilon.to_bytes().as_slice(),
             epsilon_be.as_slice(),
@@ -265,10 +289,13 @@ mod tests {
         assert_eq!(request.args.path, "caller-path");
         assert_eq!(request.args.key_version, 1);
         assert_eq!(request.args.entropy, hash_payload(&REQUEST_ID));
+        // Against the oracle rather than by re-running the production path:
+        // caller_record() matches the minimal-1word vector in every field that
+        // reaches the transaction, differing only in `params`, which does not.
         assert_eq!(
             request.args.payload,
-            payload_scalar(&serialized_transaction(&record).expect("assembles"))
-                .expect("payload scalar"),
+            oracle_scalar("minimal-1word"),
+            "the signed payload must be the oracle's hash, not merely self-consistent"
         );
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.id, SignId::new(REQUEST_ID));
@@ -295,9 +322,9 @@ mod tests {
         };
 
         assert_eq!(
-            event.serialized_transaction,
-            serialized_transaction(&record).expect("assembles"),
-            "the payload comes from the gated assembly path"
+            hex::encode(&event.serialized_transaction),
+            oracle_serialized("minimal-1word"),
+            "the event carries the oracle's unsigned transaction bytes"
         );
         assert_eq!(event.caip2_id, "eip155:31337");
         assert_eq!(event.key_version, 1);

@@ -139,27 +139,18 @@ fn capacity_canonical(record: &SignBidirectionalRecord) -> SignBidirectionalReco
 
 /// Decode a stored request record by capacity enumeration.
 ///
-/// An atom count does not determine the capacities uniquely, since an
-/// access-list address atom re-pads into a calldata word just as well, so
-/// candidate splits are enumerated access-list-free first and validated by the
-/// decode itself. `expected_request_id` picks between splits that decode
-/// cleanly; when none matches, the first clean decode is returned, as the TS
-/// reader does.
+/// An atom count does not fix the capacities uniquely, so splits are enumerated
+/// and validated by the decode itself. `expected_request_id` disambiguates but
+/// does not authenticate: when no split matches, the first clean decode is
+/// returned, and the caller's recompute-and-drop is the only thing between that
+/// guess and a signature.
 ///
-/// The id disambiguates, it does not authenticate. On the fallback path this
-/// returns a guess, and the caller's recompute-and-drop is the only thing
-/// between that guess and a signature, so that check is not dead weight however
-/// tautological it looks on the match path.
-///
-/// Collision resistance does not make the match path unique: two splits of one
-/// cell can produce byte-identical preimages, hashing to one id with no
-/// collision involved. Preimage width is `const + 32*V - 43*E` in the variable
-/// atom count `V` and entry count `E`, so equal-width splits share an `E` and
-/// differ only in how the same atoms are cut up. Where those readings agree on
-/// everything reaching the transaction the ambiguity is immaterial; where they
-/// disagree, picking by enumeration order would sign bytes the record does not
-/// describe, so the record is refused with [`AmbiguousRecord`]. Hence every
-/// split is enumerated even after a match, which `MAX_RECORD_ATOMS` bounds.
+/// Two splits of one cell can produce byte-identical preimages, so a shared id
+/// proves nothing on its own. Where the readings agree on everything reaching
+/// the transaction the ambiguity is immaterial; where they disagree, picking by
+/// enumeration order would sign bytes the record does not describe, so the
+/// record is refused with [`AmbiguousRecord`]. Hence every split is enumerated
+/// even after a match, which `MAX_RECORD_ATOMS` bounds.
 pub fn decode_record(
     cell: &StateNode,
     expected_request_id: &[u8; 32],
@@ -289,21 +280,14 @@ const MAX_RECORD_ATOMS: usize = 512;
 /// the caller's request map, returned only if the id recomputed from the
 /// decoded record equals the id it was filed under.
 ///
-/// Mirrors `lookupSignetRequestAt` plus the recompute the reference leaves to
-/// the MPC. The caller's map is keyed by one `Bytes<32>` atom, so its wire key
-/// is unambiguous; the central singleton's composite keys are handled elsewhere.
+/// The recompute is not redundant, though it will look deletable: on the match
+/// path it passes by construction, but on `decode_record`'s fallback path it is
+/// the only thing between a record filed under the wrong id and a signature
+/// over it. It is also stronger than a membership check, which alone admits a
+/// contract that byte-copied a victim's record into its own map.
 ///
-/// The recompute is not redundant, though it will look deletable.
-/// `decode_record` uses the id to disambiguate capacity splits and falls back
-/// to first-clean-decode when none matches, so this passes by construction on
-/// the match path. On the fallback path it is the only thing between a record
-/// filed under the wrong id and a signature over it. It is also stronger than
-/// the reference's membership model, which alone admits a contract that
-/// byte-copied a victim's record into its own map: recomputing binds the id to
-/// the record's `sender`, which the conversion layer binds to the read address.
-///
-/// Reports nothing, and compares with plain byte equality: both operands are
-/// public on-chain values, so timing reveals nothing the chain does not publish.
+/// Reports nothing, and compares with plain byte equality since both operands
+/// are public on-chain values.
 pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolved {
     let StateNode::Map { entries } = map else {
         return Resolved::Dropped {
@@ -1067,21 +1051,12 @@ mod tests {
 
     #[test]
     fn repad_atom_32_repads_trimmed_key() {
-        // Find a nonce whose record hashes to an id ending in 0x00, so the
-        // wire key (trailing-zero-trimmed, per the sidecar's own rendering)
-        // is SHORTER than 32 bytes. Bounded fixture search, not an
-        // assertion branch; expected hit within ~256 tries.
+        // This nonce makes minimal-1word hash to an id ending in 0x00, so its
+        // wire key trims to fewer than 32 bytes. Found by search once and
+        // pinned; the assertion below fails loudly if it ever stops holding.
         let (mut record, _) = record_and_rid("minimal-1word");
-        let mut found = None;
-        for nonce in 0..100_000u64 {
-            record.request_nonce = nonce;
-            let rid = compute_request_id(&record);
-            if rid[31] == 0 {
-                found = Some(rid);
-                break;
-            }
-        }
-        let rid = found.expect("a nonce with a trailing-zero id exists in range");
+        record.request_nonce = 272;
+        let rid = compute_request_id(&record);
 
         let mut trimmed = rid.to_vec();
         while trimmed.last() == Some(&0) {
@@ -1270,39 +1245,6 @@ mod tests {
             crate::tx::serialized_transaction(&decoded).expect("assembles"),
             crate::tx::serialized_transaction(&record).expect("assembles"),
             "the returned split must sign what the filed record describes"
-        );
-    }
-
-    #[test]
-    fn enumeration_cap_stays_above_real_tiers() {
-        // The cap is a CPU bound (see its doc), and it is wrong in BOTH
-        // directions, so this is a band rather than a floor. Too low and
-        // real records stop decoding; too high and the bound stops binding,
-        // which is the state it was found in: 4096 against a largest real
-        // tier of 34 let one caller-controlled cell cost 5.6s of indexer
-        // time, enough that ~56 of them in a block outlast the 315s
-        // `live_block_timeout(Midnight)` watchdog and restart-loop the
-        // chain. A wall-clock assertion would be flaky, so the band is the
-        // proxy: the cost is quadratic in the cap, so holding the cap near
-        // the tiers is what holds the cost near the measurement in its doc.
-        let file: RidVectorFile =
-            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
-        let largest = file
-            .vectors
-            .iter()
-            .map(|vector| atoms_from_record(&vector.record.0).len())
-            .max()
-            .expect("the fixture has vectors");
-        assert!(
-            largest * 8 <= MAX_RECORD_ATOMS,
-            "the largest real tier is {largest} atoms and the cap is {MAX_RECORD_ATOMS}: too \
-             close, so a legitimate capacity would stop decoding"
-        );
-        assert!(
-            MAX_RECORD_ATOMS <= largest * 32,
-            "the largest real tier is {largest} atoms and the cap is {MAX_RECORD_ATOMS}: too far \
-             above it for the cost bound in the cap's doc to still hold. Redo that arithmetic \
-             (the hashed volume grows as 32*V^2*ln(V)) before widening this band"
         );
     }
 

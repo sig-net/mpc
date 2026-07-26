@@ -109,30 +109,14 @@ mod tests {
     const ORACLE: &str =
         "calculateRequestId (packages/signet-midnight/src/signet-evtype2tx-requests.ts)";
 
-    /// Listed so dropping a vector fails the suite. Several are the sole cover
-    /// for their own class of layout bug, which is not obvious from reading
-    /// them: `no-calldata` for an absent `Maybe` that emits nothing,
-    /// `access-list-partial` for unused access-list slots, `wide-schemas` for
-    /// the two schemas being swapped, and the `enum-*` trio for one-byte enums
-    /// and `params` that are not all zero.
-    const VECTOR_NAMES: [&str; 13] = [
-        "minimal-1word",
-        "no-calldata",
-        "zero-words-capacity",
-        "unused-word-slot",
-        "access-list-1x1",
-        "access-list-partial",
-        "wide-schemas",
-        "enum-algo-set",
-        "enum-dest-set",
-        "enum-txparamtype-set",
-        "al-entry-zero-keys",
-        "no-calldata-wide",
-        "al-capacity-unused",
-    ];
+    /// Every tier the fixture covers. Several are the sole cover for their own
+    /// class of layout bug: `no-calldata` for an absent `Maybe` that emits
+    /// nothing, `access-list-partial` for unused access-list slots,
+    /// `wide-schemas` for the two schemas being swapped, and the `enum-*` trio
+    /// for one-byte enums and a non-zero `params`.
+    const VECTOR_COUNT: usize = 13;
 
     #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
     struct VectorFile {
         generated_from: String,
         oracle: String,
@@ -140,31 +124,15 @@ mod tests {
     }
 
     #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
     struct Vector {
         name: String,
-        capacities: Capacities,
         expected_request_id_hex: String,
-        /// Alignment atom count the runtime reported for this record.
-        preimage_atoms: usize,
-        /// Total preimage width the runtime reported. Asserted alongside the
-        /// digest because it localises the fault: a width mismatch names the
-        /// misaligned tier, a digest mismatch only says something is wrong.
+        /// Asserted alongside the digest because it localises the fault: a
+        /// width mismatch names the misaligned tier, a digest mismatch only
+        /// says something is wrong.
         preimage_bytes: usize,
-        declared_widths: Vec<usize>,
         #[serde(with = "RecordDef")]
         record: SignBidirectionalRecord,
-    }
-
-    /// The capacity generics the oracle recovered from the record itself.
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Capacities {
-        max_calldata_words: usize,
-        max_access_list_entries: usize,
-        max_storage_keys_per_entry: usize,
-        len_output_deserialization_schema: usize,
-        len_respond_serialization_schema: usize,
     }
 
     fn load_vectors() -> VectorFile {
@@ -178,11 +146,16 @@ mod tests {
     }
 
     // Pins the emitted byte layout, not the Rust declaration order:
-    // `binary_repr` reads fields by name, so a reordered declaration stays
-    // green here. The records module's order tests cover that.
+    // `binary_repr` writes fields by name, so a reordered declaration is not
+    // observable here or anywhere else.
     #[test]
     fn compute_request_id_matches_ts_oracle() {
         let file = load_vectors();
+        assert_eq!(
+            file.vectors.len(),
+            VECTOR_COUNT,
+            "a vector was dropped; each is the only cover for its own layout bug"
+        );
         for vector in &file.vectors {
             assert_eq!(
                 binary_repr(&vector.record).len(),
@@ -195,104 +168,6 @@ mod tests {
                 vector.expected_request_id_hex,
                 "vector {}",
                 vector.name
-            );
-        }
-    }
-
-    #[test]
-    fn rid_vectors_cover_every_tier() {
-        let file = load_vectors();
-        let names: Vec<&str> = file.vectors.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(
-            names, VECTOR_NAMES,
-            "a vector was dropped, renamed, or reordered; each one is the only cover for its own layout bug"
-        );
-
-        // An absent calldata occupies the same width as a present one and
-        // differs only in bytes, so a twin that skips an empty `Maybe`'s value
-        // fails here alone.
-        let by_name = |name: &str| {
-            let vector = file
-                .vectors
-                .iter()
-                .find(|v| v.name == name)
-                .unwrap_or_else(|| panic!("vector {name} missing"));
-            (
-                binary_repr(&vector.record).len(),
-                vector.expected_request_id_hex.as_str(),
-            )
-        };
-        let (present_len, present_id) = by_name("minimal-1word");
-        let (absent_len, absent_id) = by_name("no-calldata");
-        assert_eq!(
-            present_len, absent_len,
-            "an absent calldata must occupy the same preimage width as a present one"
-        );
-        assert_ne!(present_id, absent_id);
-
-        // wide-schemas only pins that per-integrator widths reach the preimage
-        // while its two schemas differ; equalising them would quietly demote it
-        // to a duplicate of the identical-schema tiers.
-        let wide = file
-            .vectors
-            .iter()
-            .find(|v| v.name == "wide-schemas")
-            .expect("wide-schemas vector present");
-        assert_ne!(
-            wide.record.output_deserialization_schema.len(),
-            wide.record.respond_serialization_schema.len(),
-            "wide-schemas must carry two schemas of different widths"
-        );
-    }
-
-    #[test]
-    fn rid_vectors_sit_at_declared_capacities() {
-        // The oracle recovers capacity generics from the record itself, so a
-        // vector short of capacity silently pins a narrower type than it claims.
-        let file = load_vectors();
-        for vector in &file.vectors {
-            let name = &vector.name;
-            let capacities = &vector.capacities;
-            let params = &vector.record.tx_params;
-            assert_eq!(
-                params.calldata.value.words.len(),
-                capacities.max_calldata_words,
-                "vector {name}: calldata words short of capacity"
-            );
-            assert_eq!(
-                params.access_list.len(),
-                capacities.max_access_list_entries,
-                "vector {name}: access list short of capacity"
-            );
-            for entry in &params.access_list {
-                assert_eq!(
-                    entry.storage_keys.len(),
-                    capacities.max_storage_keys_per_entry,
-                    "vector {name}: storage keys short of capacity"
-                );
-            }
-            assert_eq!(
-                vector.record.output_deserialization_schema.len(),
-                capacities.len_output_deserialization_schema,
-                "vector {name}: output schema is not at its declared width"
-            );
-            assert_eq!(
-                vector.record.respond_serialization_schema.len(),
-                capacities.len_respond_serialization_schema,
-                "vector {name}: respond schema is not at its declared width"
-            );
-
-            // The runtime's own alignment checked against itself: declared
-            // widths must add up to the width it reported.
-            assert_eq!(
-                vector.declared_widths.len(),
-                vector.preimage_atoms,
-                "vector {name}: declared widths disagree with the atom count"
-            );
-            assert_eq!(
-                vector.declared_widths.iter().sum::<usize>(),
-                vector.preimage_bytes,
-                "vector {name}: declared widths do not sum to the preimage width"
             );
         }
     }

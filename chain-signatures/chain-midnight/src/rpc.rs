@@ -256,19 +256,15 @@ impl MidnightRpc {
     /// the finalized head, classifying it [`ArchiveState::Archive`] or
     /// [`ArchiveState::Pruned`].
     ///
-    /// Asks `midnight_contractState` for a throwaway address at
-    /// `max(1, head - window)`, at a hash the node itself supplied for that
-    /// finalized ancestor. Served state and "contract not present" are both
-    /// evidence the state was reachable; only the pruned-or-unknown-hash
-    /// failure classifies as pruned, and the hash cannot be unknown here, so
-    /// that failure is pruning. Anything else propagates rather than being
-    /// silently classified either way.
+    /// Asks for a throwaway address at `max(1, head - window)`, at a hash the
+    /// node itself supplied. Served state and "contract not present" both prove
+    /// the state was reachable; only the pruned-or-unknown-hash failure
+    /// classifies as pruned, and the hash cannot be unknown here. Anything else
+    /// propagates rather than being silently classified.
     ///
     /// Sound only because of the single-socket property on [`Self::connect`].
-    ///
-    /// Called per supervised run rather than from `MidnightIndexer::new`, so a
-    /// transient outage at boot cannot permanently disable the chain and a
-    /// swapped or resynced node re-decides the mode.
+    /// Called per supervised run so a boot-time outage cannot disable the chain
+    /// permanently.
     pub async fn probe_archive_state(&self, window: u64) -> anyhow::Result<ArchiveState> {
         probe_archive_state_over(
             &self.legacy,
@@ -677,7 +673,7 @@ mod tests {
             .probe_archive_state(config.indexer.archive_probe_window)
             .await
             .expect("the probe must classify a live node, whichever way");
-        println!("live archive probe: {archive_state:?}");
+        tracing::debug!(?archive_state, "live archive probe");
 
         let blobs = rpc
             .send_mn_transaction_bytes(&block)
@@ -972,7 +968,7 @@ mod tests {
         // a finalized ancestor is what identifies a pruned node, and the
         // variant carries the height so the policy layer can name it.
         //
-        // BINDING: no stacked backoff. The pruned reply is an Err inside
+        // No stacked backoff. The pruned reply is an Err inside
         // contract_state, so its own retry_rpc budget retries it; the probe
         // then classifies immediately. With max_times = 2 that is exactly
         // three state reads: any more would mean a probe-level loop was
