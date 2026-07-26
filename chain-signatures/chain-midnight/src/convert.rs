@@ -95,6 +95,11 @@ pub fn to_sign_request(
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path);
     let entropy = hash_payload(&request_id);
+    // central_address is carried VERBATIM, deliberately not case-normalised:
+    // config accepts uppercase hex, and lowercasing here while config keeps
+    // its own casing would create two representations of one address. The
+    // normalisation decision belongs to B6, which owns the comparison
+    // against sidecar-returned addresses that casing can silently break.
     let chain_ctx = Some(
         borsh::to_vec(&MidnightChainCtx {
             central_address: central_address.to_string(),

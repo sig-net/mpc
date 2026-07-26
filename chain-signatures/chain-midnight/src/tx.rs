@@ -425,4 +425,31 @@ mod tests {
             "slice semantics one level down: every present key, no invented ones"
         );
     }
+
+    #[test]
+    fn zero_storage_key_count_on_an_emitted_entry_emits_none() {
+        // The eighth vector cannot see this level: with an entry count of 0
+        // no entry is emitted at all, so the key-level slice never executes
+        // there, and no golden has an EMITTED entry with a zero key count.
+        // Slice semantics per decodeAccessList
+        // (signet-evtype2tx-requests.ts:371-377): storage_key_count = 0 on
+        // an emitted entry slices to zero keys; a "0 means all" sentinel
+        // misread would emit every key slot at capacity. Asserted against
+        // the cited slice rule rather than oracle bytes, deliberately: a
+        // golden for this would need a new record and therefore a
+        // rid_vectors.json regeneration, which the controller priced and
+        // declined.
+        let mut record = record_by_name("access-list-partial");
+        record.tx_params.access_list[0].storage_key_count = 0; // key capacity is 3
+        let tx = to_unsigned_tx(&record).expect("assembles");
+        assert_eq!(
+            tx.access_list.0.len(),
+            1,
+            "the entry itself is still emitted (entry count is 1)"
+        );
+        assert!(
+            tx.access_list.0[0].storage_keys.is_empty(),
+            "zero key count means zero keys, never all keys at capacity"
+        );
+    }
 }
