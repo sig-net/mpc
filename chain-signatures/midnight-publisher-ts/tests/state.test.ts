@@ -114,7 +114,6 @@ describe("offline: the schema the consumer parses", () => {
     // Ordinal 4 is the request map, keyed by the request id.
     const requests = tree.children[4];
     if (requests?.kind !== "map") throw new Error("ordinal 4 is the request map");
-    // One atom per key, so a `Bytes<32>`-keyed map yields a one-element array.
     expect(requests.entries.map((entry) => entry.key)).toEqual([[REQUEST_ID]]);
   });
 
