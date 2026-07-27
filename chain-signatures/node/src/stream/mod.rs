@@ -1,5 +1,4 @@
 pub mod ops;
-pub mod pipeline;
 pub(crate) mod recovery;
 pub mod supervisor;
 
@@ -14,19 +13,10 @@ use crate::stream::ops::{
 };
 use crate::types::CheckpointWatcher;
 
-pub use crate::stream::pipeline::ChainPipeline;
-
 use anyhow::Context;
-use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
+use mpc_chain_integration_core::ChainTelemetry;
 use mpc_primitives::{Chain, ChainEvent, SignCommand};
 use tokio::sync::{mpsc, watch};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainStreaming {
-    Recovery { load_local: bool },
-    Catchup { anchor_height: u64 },
-    Live,
-}
 
 /// Shared, per-chain dependencies
 pub struct StreamContext {
@@ -61,68 +51,22 @@ impl StreamContext {
             caught_up: false,
         }
     }
-}
 
-/// Shared indexer loop: recovers backlog then processes events from the stream
-pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
-    mut stream: S,
-    mut ctx: StreamContext,
-    telemetry: T,
-) {
-    let chain = S::Indexer::CHAIN;
-    tracing::info!(%chain, "starting stream");
-
-    let threshold = ctx.contract_watcher.wait_threshold().await;
-
-    let indexer = match stream.start().await {
-        Ok(indexer) => indexer,
-        Err(err) => {
-            tracing::error!(?err, %chain, "failed to start stream");
-            return;
+    /// Forward a sign command to the signing pipeline, but only when caught up.
+    /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
+    pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
+        if self.caught_up {
+            self.sign_tx
+                .send(cmd)
+                .await
+                .context("sign command channel closed")?;
         }
-    };
-
-    let (pipeline, mut state_rx) = ChainPipeline::new(
-        indexer,
-        ctx.checkpoints_rx.clone(),
-        ctx.backlog.clone(),
-        ctx.rpc.clone(),
-        ctx.mesh_state.clone(),
-        ctx.node_client.clone(),
-        threshold,
-        ctx.contract_watcher.account_id().clone(),
-    );
-    let indexer_task = tokio::spawn(pipeline.run());
-
-    let root_pk = ctx.contract_watcher.wait_public_key().await;
-
-    loop {
-        tokio::select! {
-            event = stream.next_event() => {
-                let Some(event) = event else {
-                    break;
-                };
-                if let Err(err) =
-                    handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
-                {
-                    tracing::error!(?err, %chain, "failed to process chain event");
-                }
-            }
-            _ = state_rx.changed() => {
-                let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
-                    ctx.caught_up = false;
-                }
-            }
-        }
+        Ok(())
     }
-
-    tracing::warn!(%chain, "stream shutting down");
-    indexer_task.abort();
 }
 
 /// Dispatch a single chain event to the appropriate processor.
-async fn handle_chain_event<T: ChainTelemetry>(
+pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
     event: ChainEvent,
     ctx: &mut StreamContext,
     telemetry: &T,

@@ -1,14 +1,107 @@
-// TODO: this should eventually become part of ChainPipeline, keep separate for now to avoid breaking the existing ChainStream pipeline
-use super::pipeline::{live_block_timeout, wait_detected_regression, RegressionOutcome};
+// Supervised indexer loop: node-side recovery, then spawn the chain's
+// `run()` and dispatch its events. Regression or a watchdog stall cancels
+// `run()` and restarts it, re-running light recovery first.
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
+use crate::backlog::Backlog;
+use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::ChainEvent;
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+/// Per-chain watchdog timeout. Chains whose processing synchronously waits for
+/// finality (Ethereum, ~12 min on mainnet) need a timeout that exceeds their
+/// finality cadence to avoid false restarts. We derive it from the chain's
+/// `expected_finality_time_secs` with a buffer, flooring at 300s for fast chains.
+pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
+    const FLOOR_SECS: u64 = 300;
+    const BUFFER_SECS: u64 = 300;
+    Duration::from_secs(
+        chain
+            .expected_finality_time_secs()
+            .saturating_add(BUFFER_SECS)
+            .max(FLOOR_SECS),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegressionOutcome {
+    /// Consensus digest mismatches local backlog — transition to Recovery.
+    Recovery,
+    /// Local backlog is aligned with consensus, continue current state.
+    Aligned,
+    /// Consensus checkpoint feed shut down — pipeline should stop.
+    Shutdown,
+}
+
+/// Waits for a consensus checkpoint digest change, then checks for regression.
+pub(crate) async fn wait_detected_regression(
+    checkpoints_rx: &mut CheckpointWatcher,
+    backlog: &Backlog,
+    chain: Chain,
+) -> RegressionOutcome {
+    if detect_regression(chain, backlog, checkpoints_rx).await {
+        return RegressionOutcome::Recovery;
+    }
+    if checkpoints_rx.changed().await.is_err() {
+        return RegressionOutcome::Shutdown;
+    }
+    if detect_regression(chain, backlog, checkpoints_rx).await {
+        return RegressionOutcome::Recovery;
+    }
+    RegressionOutcome::Aligned
+}
+
+/// Returns `true` if a regression is detected. When the consensus digest matches
+/// a local checkpoint (latest or historical), the checkpoint is confirmed and
+/// persisted via `on_consensus_confirmed`. Returns `false` when the backlog is
+/// aligned (no regression).
+async fn detect_regression(
+    chain: Chain,
+    backlog: &Backlog,
+    checkpoints_rx: &mut CheckpointWatcher,
+) -> bool {
+    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
+        return false;
+    };
+
+    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
+    // creating a new checkpoint as a side-effect during regression detection.
+    let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await else {
+        tracing::info!(?chain, "no local checkpoint; skipping regression check");
+        return false;
+    };
+
+    // Consensus matches our latest local checkpoint → confirm and persist.
+    if current_checkpoint.digest() == checkpoint_digest.digest {
+        backlog
+            .on_consensus_confirmed(chain, &current_checkpoint)
+            .await;
+        return false;
+    }
+
+    // Consensus matches an older checkpoint in our history → confirm and persist.
+    if let Some(matched) = backlog
+        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+        .await
+    {
+        tracing::info!(
+            ?chain,
+            local_height = current_checkpoint.block_height,
+            consensus_height = checkpoint_digest.height,
+            "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
+        );
+        backlog.on_consensus_confirmed(chain, &matched).await;
+        return false;
+    }
+
+    // No match → regression detected.
+    true
+}
 
 /// Delay before respawning a `run()` that returned an error.
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -146,14 +239,11 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::MeshState;
-    use crate::node_client::NodeClient;
-    use crate::rpc::ContractStateWatcher;
-    use crate::stream::test_utils::test_rpc_channel;
+    use crate::stream::test_utils::make_test_stream_context;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
-    use near_account_id::AccountId;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -166,26 +256,160 @@ mod tests {
         watch::Sender<Option<CheckpointDigest>>,
         watch::Sender<MeshState>,
     ) {
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            ProjectivePoint::GENERATOR.to_affine(),
-            0,
-            Default::default(),
-        );
-        let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (cp_tx, cp_rx) = watch::channel(None);
-        let (rpc, _rpc_rx) = test_rpc_channel(8);
-        let ctx = StreamContext::new(
+        // threshold 0 so `recover_backlog` doesn't block on the empty mesh.
+        make_test_stream_context(
             backlog,
             sign_tx,
-            rpc,
-            contract_watcher,
-            mesh_rx,
-            NodeClient::new(&Default::default()),
-            cp_rx,
+            false,
+            ProjectivePoint::GENERATOR.to_affine(),
+            0,
+        )
+    }
+
+    fn make_digest(
+        height: u64,
+        digest: [u8; 32],
+    ) -> (
+        watch::Sender<Option<CheckpointDigest>>,
+        watch::Receiver<Option<CheckpointDigest>>,
+    ) {
+        watch::channel(Some(CheckpointDigest { height, digest }))
+    }
+
+    #[tokio::test]
+    async fn test_empty_digest_returns_false() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let (_tx, mut rx) = watch::channel(None);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(!result, "empty digest should not trigger regression");
+    }
+
+    #[tokio::test]
+    async fn test_matching_consensus_confirms_and_returns_false() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let digest = cp.digest();
+
+        let (_tx, mut rx) = make_digest(100, digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(!result, "matching digest should not trigger regression");
+
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(
+            persisted.is_some(),
+            "matching checkpoint should be persisted"
         );
-        (ctx, cp_tx, mesh_tx)
+        assert_eq!(persisted.unwrap().block_height, 100);
+    }
+
+    #[tokio::test]
+    async fn test_ahead_with_pending_match_confirms() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp1 = backlog.checkpoint(chain).await.unwrap();
+        backlog.set_processed_block(chain, 200).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        let digest1 = cp1.digest();
+        let (_tx, mut rx) = make_digest(100, digest1);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(!result, "ahead with match should not trigger regression");
+
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(persisted.is_some());
+        assert_eq!(persisted.unwrap().block_height, 100);
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_triggers_regression() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        let different_digest = [0xabu8; 32];
+        let (_tx, mut rx) = make_digest(200, different_digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(result, "mismatched digest should trigger regression");
+    }
+
+    #[tokio::test]
+    async fn test_no_local_returns_false() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        let digest = [0x42u8; 32];
+        let (_tx, mut rx) = make_digest(100, digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(!result, "no local checkpoint should not trigger regression");
+    }
+
+    #[tokio::test]
+    async fn test_wait_detects_regression_after_consumed() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
+        let _ = rx.borrow_and_update();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_detected_regression(&mut rx, &backlog, chain),
+        )
+        .await
+        .expect("should not hang — upfront check catches mismatch");
+        assert_eq!(
+            result,
+            RegressionOutcome::Recovery,
+            "should detect regression even when receiver state was consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_detects_regression_after_change() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let matching_digest = cp.digest();
+
+        let (tx, mut rx) = make_digest(100, matching_digest);
+
+        let handle =
+            tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
+
+        tx.send(Some(CheckpointDigest {
+            height: 200,
+            digest: [0xabu8; 32],
+        }))
+        .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("timeout")
+            .expect("task should not panic");
+
+        assert_eq!(
+            result,
+            RegressionOutcome::Recovery,
+            "should detect regression after new mismatched value"
+        );
     }
 
     /// Emits CatchupCompleted + Block(100), then exits Ok.
@@ -194,12 +418,6 @@ mod tests {
     #[async_trait::async_trait]
     impl ChainIndexer for EventsThenExitIndexer {
         const CHAIN: Chain = Chain::Ethereum;
-        type Block = u64;
-        type Iter = futures_util::stream::Empty<u64>;
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::empty()
-        }
 
         async fn run(
             &self,
@@ -221,12 +439,6 @@ mod tests {
     #[async_trait::async_trait]
     impl ChainIndexer for StalledRunIndexer {
         const CHAIN: Chain = Chain::Ethereum;
-        type Block = u64;
-        type Iter = futures_util::stream::Empty<u64>;
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::empty()
-        }
 
         async fn run(
             &self,
@@ -345,12 +557,6 @@ mod tests {
         #[async_trait::async_trait]
         impl ChainIndexer for TrickleIndexer {
             const CHAIN: Chain = Chain::Ethereum;
-            type Block = u64;
-            type Iter = futures_util::stream::Empty<u64>;
-
-            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                futures_util::stream::empty()
-            }
 
             async fn run(
                 &self,

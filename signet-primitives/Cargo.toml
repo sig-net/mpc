@@ -1,20 +1,22 @@
 [package]
-name = "mpc-primitives"
+name = "signet-primitives"
 version.workspace = true
 edition = "2021"
-description = "Node-internal primitives for the MPC network (not published; see signet-primitives for the public interface)"
+description = "Interface types for the SigNet network"
 readme = "README.md"
-publish = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sig-net/mpc"
 
 [dependencies]
 borsh.workspace = true
-ciborium.workspace = true
+enum-map.workspace = true
 hex.workspace = true
 k256.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+serde_json.workspace = true
 sha3.workspace = true
-signet-primitives.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.12", features = ["custom"] }

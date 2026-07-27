@@ -8,7 +8,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{Chain, CheckpointDigest};
+use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest};
 use near_sdk::AccountId;
 use std::time::Duration;
 use test_log::test;

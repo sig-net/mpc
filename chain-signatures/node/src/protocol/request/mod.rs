@@ -19,7 +19,7 @@ use crate::util::{JoinMap, TimeoutBudget};
 use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{IndexedSignRequest, SignCommand, SignId};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;

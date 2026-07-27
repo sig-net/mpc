@@ -25,7 +25,7 @@ pub(crate) async fn recover_backlog(
     my_account_id: &AccountId,
 ) {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
-    mesh::wait_threshold_active(&mut mesh_state.clone(), threshold).await;
+    mesh::wait_threshold_active(mesh_state, threshold).await;
 
     if load_local {
         match backlog.storage.load_latest(chain).await {

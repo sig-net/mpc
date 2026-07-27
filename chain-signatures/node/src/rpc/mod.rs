@@ -15,13 +15,14 @@ pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use dashmap::DashSet;
 use k256::{AffinePoint, Secp256k1};
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, Signature};
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -433,7 +434,8 @@ impl RpcExecutor {
     ) {
         let mut cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
         let mut abort_times = HashMap::<Chain, Instant>::new();
-
+        // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
+        let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -456,10 +458,24 @@ impl RpcExecutor {
                         continue;
                     };
 
-                    let publisher = publisher.clone();
                     let sign_id = action.request.id;
+                    if !in_flight.insert(sign_id) {
+                        tracing::info!(
+                            ?sign_id,
+                            ?chain,
+                            "publish already in flight; skipping duplicate"
+                        );
+                        continue;
+                    }
+
+                    let publisher = publisher.clone();
                     let cancellation = cancellation_tokens.entry(chain).or_default().clone();
+                    let in_flight = in_flight.clone();
                     tokio::spawn(async move {
+                        let _guard = InFlightGuard {
+                            in_flight,
+                            id: sign_id,
+                        };
                         tokio::select! {
                             _ = cancellation.cancelled() => {
                                 tracing::info!(?chain, ?sign_id, "cancelled RPC publish");
@@ -575,6 +591,19 @@ async fn update_contract_data(
     }
 }
 
+/// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
+/// including during a panic unwind, so the slot is always freed for re-publish.
+struct InFlightGuard {
+    in_flight: Arc<DashSet<SignId>>,
+    id: SignId,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.remove(&self.id);
+    }
+}
+
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
     let chain = action.request.chain;
@@ -678,7 +707,7 @@ mod tests {
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_primitives::SignKind;
+    use mpc_primitives::{SignId, SignKind};
 
     /// Vote churn must be absorbed without completing; real governance changes
     /// and leaving the running state must be delivered.
@@ -861,6 +890,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -895,6 +925,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -927,12 +958,14 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::NEAR,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Solana,
             SignKind::Sign,
+            SignId::new([1u8; 32]),
         )))
         .await
         .unwrap();
@@ -977,19 +1010,21 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
 
         // Send multiple publish actions for NEAR and Solana
-        for _ in 0..NEAR_ACTION_COUNT {
+        for i in 0..NEAR_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::NEAR,
                 SignKind::Sign,
+                SignId::new([i as u8; 32]),
             )))
             .await
             .unwrap();
         }
 
-        for _ in 0..SOL_ACTION_COUNT {
+        for i in 0..SOL_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Solana,
                 SignKind::Sign,
+                SignId::new([(NEAR_ACTION_COUNT + i) as u8; 32]),
             )))
             .await
             .unwrap();
@@ -1023,6 +1058,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([2u8; 32]),
         )))
         .await
         .unwrap();
@@ -1114,7 +1150,8 @@ mod tests {
             }),
         );
 
-        let stale_action = make_publish_action(Chain::Ethereum, SignKind::Sign);
+        let stale_action =
+            make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([3u8; 32]));
         let (tx, mut rx) = mpsc::channel(16);
         tx.send(RpcAction::AbortChain(Chain::Ethereum))
             .await
@@ -1131,5 +1168,40 @@ mod tests {
 
         drop(tx);
         dispatch.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn executor_dedupes_concurrent_publishes_with_the_same_sign_id() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let sign_id = SignId::new([7u8; 32]);
+
+        // Multiple publishes for the SAME SignId
+        for _ in 0..5 {
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::Ethereum,
+                SignKind::Sign,
+                sign_id,
+            )))
+            .await
+            .unwrap();
+        }
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+
+        // Let the single in-flight publish finish.
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }

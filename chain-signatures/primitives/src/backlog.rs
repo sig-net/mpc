@@ -1,4 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use k256::{Scalar, Secp256k1};
 use serde::{Deserialize, Serialize};
 use sha3::Digest;
 use std::fmt;
@@ -115,6 +116,44 @@ impl ConsensusCheckpointDigest {
             height,
             digest,
         }
+    }
+    pub fn sign_payload_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + std::mem::size_of::<u64>() + 32);
+        bytes.extend_from_slice(&self.chain.to_bytes());
+        bytes.extend_from_slice(&self.height.to_le_bytes());
+        bytes.extend_from_slice(&self.digest);
+        bytes
+    }
+
+    pub fn sign_payload_hash(&self) -> [u8; 32] {
+        use sha3::digest::FixedOutput;
+
+        <Secp256k1 as k256::ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
+            self.sign_payload_bytes(),
+        )
+        .finalize_fixed()
+        .into()
+    }
+
+    pub fn sign_payload_scalar(&self) -> Scalar {
+        use k256::elliptic_curve::ops::Reduce;
+        let bytes: k256::elliptic_curve::FieldBytes<Secp256k1> = self.sign_payload_hash().into();
+        <Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&bytes)
+    }
+
+    pub fn sign_path(&self) -> String {
+        self.height.to_string()
+    }
+
+    pub fn sign_id(&self) -> SignId {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(b"checkpoint");
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.height.to_le_bytes());
+        hasher.update(self.sign_payload_hash());
+        hasher.update(crate::LATEST_MPC_KEY_VERSION.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
+        SignId::new(request_id)
     }
 }
 

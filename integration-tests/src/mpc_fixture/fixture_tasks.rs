@@ -3,7 +3,7 @@
 
 use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::mock_chain::MockChain;
-use crate::mpc_fixture::mock_stream::MockStream;
+use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
@@ -13,7 +13,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use mpc_node::stream::{run_stream, StreamContext};
+use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::SignCommand;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,8 +120,9 @@ pub(super) fn start_mock_stream_tasks(
     checkpoints_rx: mpc_node::types::CheckpointWatcher,
 ) {
     for stream in mock_streams {
-        tokio::spawn(run_stream(
-            stream.clone(),
+        let indexer = MockIndexer::from_stream(stream);
+        tokio::spawn(run_supervised(
+            indexer,
             StreamContext::new(
                 backlog.clone(),
                 sign_tx.clone(),

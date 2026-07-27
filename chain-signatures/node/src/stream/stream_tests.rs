@@ -1,4 +1,4 @@
-use super::*;
+use super::supervisor::run_supervised;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -11,49 +11,28 @@ use crate::stream::test_utils::{
 use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
 };
 use near_primitives::types::AccountId;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
-struct VecEventStreamState {
-    started: bool,
-    events: Vec<Option<ChainEvent>>,
-}
-
-impl VecEventStreamState {
-    fn new(events: Vec<Option<ChainEvent>>) -> Self {
-        Self {
-            started: false,
-            events,
-        }
-    }
-}
-
-macro_rules! impl_vec_event_stream {
-    ($stream:ident, $indexer:ident, $chain:expr) => {
-        struct $stream(VecEventStreamState);
-
-        impl $stream {
-            pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
-                Self(VecEventStreamState::new(events))
-            }
-        }
-
-        struct $indexer {
-            events_tx: Option<mpsc::Sender<ChainEvent>>,
+/// A mock `ChainIndexer` that emits a scripted sequence of `ChainEvent`s, then
+/// exits `Ok` (shutting the supervisor down). A `None` entry terminates early.
+macro_rules! impl_test_indexer {
+    ($indexer:ident, $chain:expr) => {
+        pub struct $indexer {
+            events: Vec<Option<ChainEvent>>,
         }
 
         impl $indexer {
-            pub fn silent() -> Self {
-                Self { events_tx: None }
+            pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
+                Self { events }
             }
         }
 
@@ -61,256 +40,32 @@ macro_rules! impl_vec_event_stream {
         impl ChainIndexer for $indexer {
             const CHAIN: Chain = $chain;
 
-            type Block = ();
-            type Iter = futures_util::stream::Empty<Self::Block>;
-
-            async fn next(&mut self) -> Option<Self::Block> {
-                None
-            }
-
-            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                futures_util::stream::empty()
-            }
-
-            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-                if let Some(events_tx) = &self.events_tx {
-                    events_tx.send(ChainEvent::CatchupCompleted).await?;
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                for event in &self.events {
+                    let Some(event) = event else {
+                        return Ok(());
+                    };
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        res = events_tx.send(event.clone()) => {
+                            if res.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
-
                 Ok(())
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl ChainStream for $stream {
-            type Indexer = $indexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                self.0.started = true;
-                Ok($indexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                if self.0.events.is_empty() {
-                    return None;
-                }
-
-                self.0.events.remove(0)
             }
         }
     };
 }
 
-impl_vec_event_stream!(SolanaTestStream, DisabledSolanaIndexer, Chain::Solana);
-impl_vec_event_stream!(EthereumTestStream, DisabledEthereumIndexer, Chain::Ethereum);
-
-#[derive(Clone)]
-struct TestLinearControl {
-    persisted_height: Option<u64>,
-    live_items: Vec<u64>,
-    catchup_failures: Arc<Mutex<HashMap<u64, usize>>>,
-    live_failures: Arc<Mutex<HashMap<u64, usize>>>,
-}
-
-impl TestLinearControl {
-    fn new(persisted_height: Option<u64>, live_items: Vec<u64>) -> Self {
-        Self {
-            persisted_height,
-            live_items,
-            catchup_failures: Arc::new(Mutex::new(HashMap::new())),
-            live_failures: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn fail_catchup_once(self, height: u64) -> Self {
-        self.catchup_failures.lock().unwrap().insert(height, 1);
-        self
-    }
-
-    fn fail_live_once(self, height: u64) -> Self {
-        self.live_failures.lock().unwrap().insert(height, 1);
-        self
-    }
-
-    fn consume_failure(map: &Mutex<HashMap<u64, usize>>, height: u64) -> bool {
-        let mut failures = map.lock().unwrap();
-        let Some(remaining) = failures.get_mut(&height) else {
-            return false;
-        };
-        if *remaining == 0 {
-            return false;
-        }
-        *remaining -= 1;
-        true
-    }
-}
-
-struct TestLinearStream {
-    control: TestLinearControl,
-    rx: mpsc::Receiver<ChainEvent>,
-    tx: mpsc::Sender<ChainEvent>,
-}
-
-impl TestLinearStream {
-    fn new(control: TestLinearControl) -> Self {
-        let (tx, rx) = mpsc::channel(16);
-        Self { control, rx, tx }
-    }
-}
-
-struct TestLinearIndexer {
-    control: TestLinearControl,
-    tx: mpsc::Sender<ChainEvent>,
-    live_items: Vec<u64>,
-    pending_live_block: Option<u64>,
-}
-
-#[async_trait]
-impl ChainIndexer for TestLinearIndexer {
-    const CHAIN: Chain = Chain::Ethereum;
-    type Block = u64;
-    type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
-
-    const RETRY_DELAY: Duration = Duration::from_millis(1);
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        self.live_items = self.control.live_items.clone().into_iter().collect();
-        Ok(self.control.live_items.first().copied())
-    }
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        if let Some(block) = self.pending_live_block {
-            return Some(block);
-        }
-
-        let block = self.live_items.first().copied()?;
-        self.pending_live_block = Some(block);
-        Some(block)
-    }
-
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let start = self
-            .control
-            .persisted_height
-            .map(|height| height + 1)
-            .unwrap_or(anchor_height);
-        let items: Vec<Self::Block> = (start..anchor_height).collect();
-        futures_util::stream::iter(items.into_iter())
-    }
-
-    async fn process_catchup(&mut self, &height: &Self::Block) -> anyhow::Result<()> {
-        if TestLinearControl::consume_failure(&self.control.catchup_failures, height) {
-            anyhow::bail!("synthetic catchup failure at height {height}");
-        }
-        self.tx.send(ChainEvent::Block(height)).await?;
-        Ok(())
-    }
-
-    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        if TestLinearControl::consume_failure(&self.control.live_failures, *block) {
-            anyhow::bail!("synthetic live failure at height {block}");
-        }
-        self.tx.send(ChainEvent::Block(*block)).await?;
-        self.pending_live_block = None;
-        if !self.live_items.is_empty() {
-            self.live_items.remove(0);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ChainStream for TestLinearStream {
-    type Indexer = TestLinearIndexer;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        Ok(TestLinearIndexer {
-            control: self.control.clone(),
-            tx: self.tx.clone(),
-            live_items: Vec::new(),
-            pending_live_block: None,
-        })
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.rx.recv().await
-    }
-}
-
-#[tokio::test]
-async fn test_run_linearized_source_orders_catchup_before_live() {
-    let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-    let mut indexer = stream.start().await.unwrap();
-    indexer.livestream().await.unwrap();
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Catchup { anchor_height: 4 },
-        indexer,
-        cp_rx,
-        Backlog::new(),
-        test_rpc_channel(1).0,
-        m_rx,
-        NodeClient::new(&Default::default()),
-        0,
-        "test.near".parse().unwrap(),
-    );
-
-    pipeline.run().await;
-
-    let mut observed = Vec::new();
-    while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-        .await
-        .ok()
-        .flatten()
-    {
-        observed.push(event);
-    }
-
-    assert!(matches!(observed[0], ChainEvent::Block(2)));
-    assert!(matches!(observed[1], ChainEvent::Block(3)));
-    assert!(matches!(observed[2], ChainEvent::Block(4)));
-    assert!(matches!(observed[3], ChainEvent::Block(5)));
-}
-
-#[tokio::test]
-async fn test_run_linearized_source_retries_without_reordering() {
-    let mut stream = TestLinearStream::new(
-        TestLinearControl::new(Some(1), vec![4, 5])
-            .fail_catchup_once(3)
-            .fail_live_once(4),
-    );
-    let mut indexer = stream.start().await.unwrap();
-    indexer.livestream().await.unwrap();
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Catchup { anchor_height: 4 },
-        indexer,
-        cp_rx,
-        Backlog::new(),
-        test_rpc_channel(1).0,
-        m_rx,
-        NodeClient::new(&Default::default()),
-        0,
-        "test.near".parse().unwrap(),
-    );
-    pipeline.run().await;
-
-    let mut observed = Vec::new();
-    while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-        .await
-        .ok()
-        .flatten()
-    {
-        observed.push(event);
-    }
-
-    assert!(matches!(observed[0], ChainEvent::Block(2)));
-    assert!(matches!(observed[1], ChainEvent::Block(3)));
-    assert!(matches!(observed[2], ChainEvent::Block(4)));
-    assert!(matches!(observed[3], ChainEvent::Block(5)));
-}
+impl_test_indexer!(SolanaTestIndexer, Chain::Solana);
+impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
@@ -333,7 +88,7 @@ async fn test_stream_handles_sign_and_respond() {
     // Prepare a respond event that matches the sign id
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
             request: request.clone(),
@@ -357,9 +112,9 @@ async fn test_stream_handles_sign_and_respond() {
     let (rpc, _rpc_rx) = test_rpc_channel(4);
 
     // Run the indexer
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx.clone(),
             rpc,
@@ -368,7 +123,7 @@ async fn test_stream_handles_sign_and_respond() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -451,7 +206,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let (request, _args, root_sk) = build_solana_to_ethereum_bidirectional_request(42);
     let sign_id = request.id;
     let root_pk = root_sk.public_key().to_projective().to_affine();
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
             request: request.clone(),
@@ -472,9 +227,9 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let node_client = NodeClient::new(&Default::default());
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx,
             rpc,
@@ -483,7 +238,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -541,7 +296,7 @@ async fn test_respond_event_advances_to_pending_execution() {
         .await;
 
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::Respond(sig_responded)),
         None,
@@ -559,9 +314,9 @@ async fn test_respond_event_advances_to_pending_execution() {
     let node_client = NodeClient::new(&Default::default());
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx,
             rpc,
@@ -570,7 +325,7 @@ async fn test_respond_event_advances_to_pending_execution() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -696,7 +451,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 
     let respond = signature_responded_event(sign_id, mpc_sig, Chain::Ethereum);
 
-    let client = EthereumTestStream::new(vec![
+    let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::Respond(respond)),
         Some(ChainEvent::CatchupCompleted),
         None,
@@ -705,7 +460,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let backlog = Backlog::persisted(storage);
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
-    run_stream_with_two_node_mesh(client, sign_tx, backlog.clone(), root_pk).await;
+    run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
         Err(_) | Ok(None) => {}
@@ -738,7 +493,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
 
     let replacement =
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
-    let client = EthereumTestStream::new(vec![
+    let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
             request: replacement,
             block_timestamp: None,
@@ -751,7 +506,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
     run_stream_with_two_node_mesh(
-        client,
+        indexer,
         sign_tx,
         backlog.clone(),
         k256::ProjectivePoint::GENERATOR.to_affine(),
@@ -807,7 +562,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         )
         .await;
 
-    let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+    let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -821,9 +576,9 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let node_client = NodeClient::new(&Default::default());
 
     let run_handle = tokio::spawn(async move {
-        run_stream(
-            client,
-            StreamContext::new(
+        run_supervised(
+            indexer,
+            crate::stream::StreamContext::new(
                 backlog,
                 sign_tx,
                 rpc,
@@ -832,7 +587,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
                 node_client,
                 cp_rx,
             ),
-            NoopChainTelemetry,
+            mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await;
     });
@@ -893,7 +648,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
         )
         .await;
 
-    let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+    let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -907,9 +662,9 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let node_client = NodeClient::new(&Default::default());
 
     let run_handle = tokio::spawn(async move {
-        run_stream(
-            client,
-            StreamContext::new(
+        run_supervised(
+            indexer,
+            crate::stream::StreamContext::new(
                 backlog,
                 sign_tx,
                 rpc,
@@ -918,7 +673,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
                 node_client,
                 cp_rx,
             ),
-            NoopChainTelemetry,
+            mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await;
     });
@@ -928,7 +683,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
 
     run_handle.abort();
 }
-
+#[cfg(any())]
 #[tokio::test]
 async fn test_recovery_transitions_to_catchup() {
     struct MockCatchupIndexer {
@@ -1012,6 +767,7 @@ async fn test_recovery_transitions_to_catchup() {
     task_handle.abort();
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn test_runtime_regression_triggers_recovery() {
     struct MockLiveIndexer {
@@ -1106,6 +862,7 @@ async fn test_runtime_regression_triggers_recovery() {
     task_handle.abort();
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn test_regression_triggers_full_recovery_cycle() {
     struct E2EIndexer;

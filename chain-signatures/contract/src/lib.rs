@@ -16,7 +16,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::ConsensusCheckpointDigest;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -29,6 +29,7 @@ use primitives::{
     CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
     PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
 };
+use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;

@@ -1,10 +1,16 @@
 pub mod common;
 use common::{candidates, create_response, init, init_env, sign_and_validate};
 
+use digest::Digest as _;
+use k256::elliptic_curve::point::DecompressPoint as _;
+use k256::elliptic_curve::subtle::Choice;
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, SignedCheckpoint, View};
+use mpc_crypto::kdf;
+use mpc_primitives::ConsensusCheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
+use signature::DigestSigner as _;
+use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
 use std::collections::HashMap;
 
