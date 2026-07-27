@@ -7509,6 +7509,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
+ "dashmap 6.1.0",
  "deadpool-redis",
  "ed25519-zebra",
  "enum-map",

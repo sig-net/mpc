@@ -39,9 +39,10 @@ pub fn make_indexed(
     epsilon: k256::Scalar,
     payload: k256::Scalar,
     kind: SignKind,
+    sign_id: SignId,
 ) -> IndexedSignRequest {
     IndexedSignRequest {
-        id: SignId::new([0u8; 32]),
+        id: sign_id,
         args: SignArgs {
             entropy: [0u8; 32],
             epsilon,
@@ -55,13 +56,13 @@ pub fn make_indexed(
     }
 }
 
-pub fn make_publish_action(chain: Chain, kind: SignKind) -> PublishAction {
+pub fn make_publish_action(chain: Chain, kind: SignKind, sign_id: SignId) -> PublishAction {
     let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk: AffinePoint = sk.public_key().into();
     let epsilon = scalar(&[1u8; 32]);
     let payload = scalar(&[42u8; 32]);
     let output = make_signature(&sk, epsilon, payload);
-    let request = make_indexed(chain, epsilon, payload, kind);
+    let request = make_indexed(chain, epsilon, payload, kind, sign_id);
     PublishAction::new(pk, request, output, vec![])
         .expect("valid signature should produce a publish action")
 }
