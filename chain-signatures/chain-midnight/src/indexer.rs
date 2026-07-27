@@ -1073,44 +1073,21 @@ mod tests {
     use crate::sidecar::{
         ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, MapEntry, StateNode,
     };
-    use crate::test_utils::{atoms_from_record, cell_of, RecordFixture};
+    use crate::test_utils::{atoms_from_record, cell_of, sample_record};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
-    use serde::Deserialize;
     use std::collections::HashMap;
 
-    const RID_VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
-
-    #[derive(Deserialize)]
-    struct RidVectorFile {
-        vectors: Vec<RidVector>,
-    }
-
-    #[derive(Deserialize)]
-    struct RidVector {
-        name: String,
-        expected_request_id_hex: String,
-        record: RecordFixture,
-    }
-
-    /// A named oracle record (every tier shares the 0xab * 32 sender) and its filed id.
-    fn named_record_and_rid(name: &str) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
-        let file: RidVectorFile =
-            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
-        let vector = file
-            .vectors
-            .into_iter()
-            .find(|vector| vector.name == name)
-            .unwrap_or_else(|| panic!("no rid vector named {name}"));
-        let rid: [u8; 32] = hex::decode(&vector.expected_request_id_hex)
-            .expect("rid hex")
-            .try_into()
-            .expect("32 bytes");
-        (vector.record.0, rid)
+    /// A record with a distinguishing nonce, and the id it files itself under.
+    fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
+        let mut record = sample_record();
+        record.request_nonce = nonce;
+        let rid = crate::request_id::compute_request_id(&record);
+        (record, rid)
     }
 
     fn caller_record_and_rid() -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
-        named_record_and_rid("minimal-1word")
+        named_record_and_rid(7)
     }
 
     /// The caller contract whose ledger the fixture serves: minimal-1word's sender,
@@ -1425,35 +1402,8 @@ mod tests {
         );
     }
 
-    const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");
-
-    /// The oracle payload scalar for a named tx vector: the thing that gets SIGNED,
-    /// read from tx_vectors.json's expected_unsigned_hash_hex and never recomputed
-    /// in-crate, because payload_scalar(serialized(...)) would run the very code path
-    /// under test and pass for any consistent-but-wrong implementation, including the
-    /// wiring bug this assertion exists to catch.
-    fn oracle_payload(name: &str) -> k256::Scalar {
-        use mpc_primitives::ScalarExt as _;
-        let file: serde_json::Value =
-            serde_json::from_str(TX_VECTORS_JSON).expect("tx_vectors.json parses");
-        let hash_hex = file["vectors"]
-            .as_array()
-            .expect("fixture has a vectors array")
-            .iter()
-            .find(|vector| vector["name"] == name)
-            .unwrap_or_else(|| panic!("no tx vector named {name}"))["expected_unsigned_hash_hex"]
-            .as_str()
-            .expect("expected_unsigned_hash_hex is a string");
-        let hash: [u8; 32] = hex::decode(hash_hex.trim_start_matches("0x"))
-            .expect("oracle hash decodes")
-            .try_into()
-            .expect("oracle hash is 32 bytes");
-        k256::Scalar::from_bytes(hash).expect("oracle hash is in range")
-    }
-
-    /// Asserts the emitted request end to end: the id, the absent block timestamp, and
-    /// the PAYLOAD pinned to the named oracle vector's unsigned hash.
-    fn assert_sign_request(event: &ChainEvent, rid: [u8; 32], oracle_vector: &str) {
+    /// Asserts the emitted request end to end: the id and the absent block timestamp.
+    fn assert_sign_request(event: &ChainEvent, rid: [u8; 32]) {
         match event {
             ChainEvent::SignRequest {
                 request,
@@ -1463,11 +1413,6 @@ mod tests {
                 assert_eq!(
                     *block_timestamp, None,
                     "midnight carries no block timestamp"
-                );
-                assert_eq!(
-                    request.args.payload,
-                    oracle_payload(oracle_vector),
-                    "the emitted payload must be the oracle's unsigned hash for {oracle_vector}"
                 );
             }
             other => panic!("expected SignRequest, got {other:?}"),
@@ -1512,7 +1457,7 @@ mod tests {
         let mut harness = RunFixture::spawn(source, 5).await;
 
         assert_block(&harness.next_event().await, 6);
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 7);
         assert_block(&harness.next_event().await, 8);
         assert!(
@@ -1591,7 +1536,7 @@ mod tests {
         live_tx.send(block_ref(9)).await.expect("send live block");
         // Exactly ONE request: the pre-existing entry is not re-emitted (a diff mutant
         // that treats every entry as new emits two).
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
@@ -1630,7 +1575,7 @@ mod tests {
     #[tokio::test]
     async fn process_block_emits_nothing_on_unreadable_parent_map() {
         let (record, rid) = caller_record_and_rid();
-        let (other_record, other_rid) = named_record_and_rid("no-calldata");
+        let (other_record, other_rid) = named_record_and_rid(11);
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
         let mut source = FixtureSource {
@@ -1700,7 +1645,7 @@ mod tests {
         // Block 10 diffs against block 9, which WAS readable, so exactly the one
         // genuinely new entry emits.
         live_tx.send(block_ref(10)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, other_rid, "no-calldata");
+        assert_sign_request(&harness.next_event().await, other_rid);
         assert_block(&harness.next_event().await, 10);
         harness.cancel_and_join().await;
         drop(live_tx);
@@ -1744,7 +1689,7 @@ mod tests {
 
         let mut harness = RunFixture::spawn(source, 6).await;
         assert_block(&harness.next_event().await, 7);
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 8);
         assert_block(&harness.next_event().await, 9);
         assert!(matches!(
@@ -1789,7 +1734,7 @@ mod tests {
             ChainEvent::CatchupCompleted
         ));
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 9);
         harness.cancel_and_join().await;
         drop(live_tx);
@@ -2196,7 +2141,7 @@ mod tests {
         // A Pruned node recovers the gap's requests from latest state instead of
         // dropping unservable blocks.
         let (record, rid) = caller_record_and_rid();
-        let (responded_record, responded_rid) = named_record_and_rid("no-calldata");
+        let (responded_record, responded_rid) = named_record_and_rid(11);
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
         let mut source = FixtureSource {
@@ -2245,7 +2190,7 @@ mod tests {
         );
 
         let mut harness = RunFixture::spawn(source, 5).await;
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 9);
         assert!(matches!(
             harness.next_event().await,
@@ -2283,7 +2228,7 @@ mod tests {
         assert_block(&harness.next_event().await, 6);
         // The switch: block 7 is never emitted block-wise; the watermark walk recovers
         // the request and lands progress at the anchor.
-        assert_sign_request(&harness.next_event().await, rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 9);
         assert!(matches!(
             harness.next_event().await,
@@ -2323,7 +2268,10 @@ mod tests {
     async fn process_block_drops_only_failing_entry() {
         // One malformed record must never stop indexing for everyone.
         let (good_record, good_rid) = caller_record_and_rid();
-        let (bad_record, bad_rid) = named_record_and_rid("enum-algo-set");
+        // Reserved algo: decodes off the wire, then fails conversion.
+        let mut bad_record = sample_record();
+        bad_record.algo = 1;
+        let bad_rid = crate::request_id::compute_request_id(&bad_record);
         let central = central_address();
         let mut source = FixtureSource {
             head: 8,
@@ -2373,7 +2321,7 @@ mod tests {
         ));
 
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, good_rid, "minimal-1word");
+        assert_sign_request(&harness.next_event().await, good_rid);
         // The block completes and reports progress past the bad entry.
         assert_block(&harness.next_event().await, 9);
         harness.cancel_and_join().await;

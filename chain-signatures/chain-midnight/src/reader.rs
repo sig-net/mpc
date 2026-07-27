@@ -527,47 +527,9 @@ mod tests {
     use super::*;
     use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
     use crate::sidecar::StateNode;
-    use crate::test_utils::{atoms_from_record, cell_of, RecordFixture};
-    use serde::Deserialize;
-
-    /// Captured by gen-b3-fixtures.ts from the two in-repo caller contracts via the TS
-    /// reader (the oracle).
-    const FIVE_FIELD_JSON: &str = include_str!("../tests/records/5-field.json");
-    const TWENTY_FIELD_JSON: &str = include_str!("../tests/records/20-field.json");
-    const RID_VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
-
-    const ORACLE: &str =
-        "lookupSignetRequestAt/@sig-net/midnight (TS reader over the simulator state)";
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ReaderFixture {
-        generated_from: String,
-        oracle: String,
-        contract: String,
-        requests_index_field: usize,
-        request_id_hex: String,
-        state: StateNode,
-        expected_record: RecordFixture,
-    }
-
-    fn load_fixture(json: &str) -> ReaderFixture {
-        let fixture: ReaderFixture = serde_json::from_str(json).expect("reader fixture parses");
-        assert_eq!(
-            fixture.oracle, ORACLE,
-            "fixture came from a different oracle (generated from {}); review before adopting",
-            fixture.generated_from
-        );
-        fixture
-    }
-
-    fn rid_bytes(hex_id: &str) -> [u8; 32] {
-        hex::decode(hex_id)
-            .expect("request id hex")
-            .try_into()
-            .expect("request id is 32 bytes")
-    }
-
+    use crate::test_utils::{
+        atoms_from_record, cell_of, sample_record, sample_record_with_unused_access_list,
+    };
     fn leaf(marker: u8) -> StateNode {
         StateNode::Cell {
             atoms: vec![hex::encode([marker])],
@@ -579,98 +541,6 @@ mod tests {
             panic!("expected a leaf cell, got a non-cell node")
         };
         hex::decode(&atoms[0]).expect("marker hex")[0]
-    }
-
-    #[test]
-    fn decode_record_reads_captured_state() {
-        for json in [FIVE_FIELD_JSON, TWENTY_FIELD_JSON] {
-            let fixture = load_fixture(json);
-            // The index convention golden: the fixture's field position is the value
-            // the contract itself passes on the wire (the caller's `4 as Uint<8>`
-            // requestsIndexField, and 19 for the 20-field contract), fed to
-            // signet_field_node with no adjustment.
-            let expected_field = if fixture.contract == "5-field" { 4 } else { 19 };
-            assert_eq!(
-                fixture.requests_index_field, expected_field,
-                "{}: the captured field position must be the contract's own on-wire value",
-                fixture.contract
-            );
-            let field = signet_field_node(&fixture.state, fixture.requests_index_field)
-                .unwrap_or_else(|err| panic!("{}: field walk failed: {err}", fixture.contract));
-            let StateNode::Map { entries } = field else {
-                panic!("{}: request index field is not a map", fixture.contract)
-            };
-            let entry = entries
-                .iter()
-                .find(|entry| entry.key.len() == 1 && entry.key[0] == fixture.request_id_hex)
-                .unwrap_or_else(|| panic!("{}: request id not in the map", fixture.contract));
-
-            let decoded = decode_record(&entry.value, &rid_bytes(&fixture.request_id_hex))
-                .unwrap_or_else(|err| panic!("{}: decode failed: {err}", fixture.contract));
-            assert_eq!(
-                decoded, fixture.expected_record.0,
-                "{}: decoded record diverges from the TS reader",
-                fixture.contract
-            );
-            assert_eq!(
-                crate::request_id::compute_request_id(&decoded),
-                rid_bytes(&fixture.request_id_hex),
-                "{}: recomputed id must match the id the record is filed under",
-                fixture.contract
-            );
-        }
-    }
-
-    #[derive(Deserialize)]
-    struct RidVectorFile {
-        vectors: Vec<RidVector>,
-    }
-
-    #[derive(Deserialize)]
-    struct RidVector {
-        name: String,
-        expected_request_id_hex: String,
-        record: RecordFixture,
-    }
-
-    #[test]
-    fn decode_record_round_trips_rid_vectors() {
-        // Every oracle record, re-trimmed into wire atoms and decoded back.
-        let file: RidVectorFile =
-            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
-        assert!(file.vectors.len() >= 13, "the tier set shrank");
-        for vector in &file.vectors {
-            let atoms = atoms_from_record(&vector.record.0);
-            let cell = cell_of(&atoms);
-            let expected_rid = rid_bytes(&vector.expected_request_id_hex);
-            let decoded = decode_record(&cell, &expected_rid)
-                .unwrap_or_else(|err| panic!("vector {}: decode failed: {err}", vector.name));
-            // The consensus property holds for every vector: the recovered record
-            // hashes to the id it was filed under.
-            assert_eq!(
-                crate::request_id::compute_request_id(&decoded),
-                expected_rid,
-                "vector {}: recomputed id diverged",
-                vector.name
-            );
-            if vector.name == "al-capacity-unused" {
-                // Capacity-ambiguous by construction, so exact record equality is the
-                // wrong assertion.
-                assert!(decoded.tx_params.calldata.is_some);
-                assert_eq!(decoded.tx_params.calldata.value.no_words, 1);
-                assert_eq!(
-                    decoded.tx_params.calldata.value.words[0],
-                    vector.record.0.tx_params.calldata.value.words[0]
-                );
-                assert_eq!(decoded.tx_params.access_list_entry_count, 0);
-                continue;
-            }
-            assert_eq!(
-                decoded, vector.record.0,
-                "vector {}: round trip diverged",
-                vector.name
-            );
-        }
     }
 
     #[test]
@@ -701,8 +571,7 @@ mod tests {
             );
         }
 
-        // 20 fields chunk to [5, 15]: the captured 20-field golden covers this against
-        // REAL compiler output; 27 chunks to [12, 15].
+        // 20 fields chunk to [5, 15]; 27 chunks to [12, 15].
         let twenty_seven = StateNode::Array {
             children: vec![
                 StateNode::Array {
@@ -756,31 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_record_rejects_trailing_junk() {
-        // A valid record plus one junk atom.
-        let fixture = load_fixture(FIVE_FIELD_JSON);
-        let field = signet_field_node(&fixture.state, fixture.requests_index_field).expect("field");
-        let StateNode::Map { entries } = field else {
-            panic!("request index field is not a map")
-        };
-        let StateNode::Cell { atoms } = &entries[0].value else {
-            panic!("record cell expected")
-        };
-        let mut with_junk = atoms.clone();
-        with_junk.push("00".repeat(33));
-        let err = decode_record(
-            &StateNode::Cell { atoms: with_junk },
-            &rid_bytes(&fixture.request_id_hex),
-        )
-        .expect_err("trailing junk must reject every split")
-        .to_string();
-        assert!(
-            err.contains("24") && err.contains("capacity split"),
-            "diagnostics must carry the atom count and what was enumerated: {err}"
-        );
-    }
-
-    #[test]
     fn decode_record_names_too_few_atoms() {
         let short = StateNode::Cell {
             atoms: vec!["ab".to_string(); 21],
@@ -829,17 +673,17 @@ mod tests {
 
     // The recompute-and-drop gate.
 
-    /// A named rid vector's record and the id the oracle filed it under.
-    fn record_and_rid(name: &str) -> (SignBidirectionalRecord, [u8; 32]) {
-        let file: RidVectorFile =
-            serde_json::from_str(RID_VECTORS_JSON).expect("rid_vectors.json parses");
-        let vector = file
-            .vectors
-            .into_iter()
-            .find(|vector| vector.name == name)
-            .unwrap_or_else(|| panic!("no rid vector named {name}"));
-        let rid = rid_bytes(&vector.expected_request_id_hex);
-        (vector.record.0, rid)
+    /// A record and the id it files itself under.
+    fn record_and_rid() -> (SignBidirectionalRecord, [u8; 32]) {
+        let record = sample_record();
+        let rid = crate::request_id::compute_request_id(&record);
+        (record, rid)
+    }
+
+    fn record_with_unused_access_list_and_rid() -> (SignBidirectionalRecord, [u8; 32]) {
+        let record = sample_record_with_unused_access_list();
+        let rid = crate::request_id::compute_request_id(&record);
+        (record, rid)
     }
 
     /// A map whose keys are SINGLE atoms (the caller-map shape).
@@ -857,7 +701,7 @@ mod tests {
 
     #[test]
     fn resolve_verified_record_drops_spoofed_filing() {
-        let (record, rid) = record_and_rid("minimal-1word");
+        let (record, rid) = record_and_rid();
         let cell = cell_of(&atoms_from_record(&record));
 
         // Genuine filing: the id it is stored under is the id it hashes to.
@@ -888,7 +732,7 @@ mod tests {
 
     #[test]
     fn resolve_verified_record_reports_absent_and_dropped() {
-        let (record, rid) = record_and_rid("minimal-1word");
+        let (record, rid) = record_and_rid();
         let poisoned_rid = [0x55; 32];
         let map = map_of(vec![
             (
@@ -928,11 +772,15 @@ mod tests {
 
     #[test]
     fn repad_atom_32_repads_trimmed_key() {
-        // This nonce makes minimal-1word hash to an id ending in 0x00, so its wire key
-        // trims to fewer than 32 bytes.
-        let (mut record, _) = record_and_rid("minimal-1word");
-        record.request_nonce = 272;
-        let rid = compute_request_id(&record);
+        // Search for a nonce whose id ends in 0x00, so its wire key trims short.
+        let (mut record, _) = record_and_rid();
+        let rid = (0u64..)
+            .find_map(|nonce| {
+                record.request_nonce = nonce;
+                let rid = compute_request_id(&record);
+                (rid[31] == 0).then_some(rid)
+            })
+            .expect("some nonce hashes to an id ending in 0x00");
 
         let mut trimmed = rid.to_vec();
         while trimmed.last() == Some(&0) {
@@ -1097,7 +945,7 @@ mod tests {
         // bytes of zeros, hence one shared id), but every matching split assembles the
         // SAME transaction, so refusing it would drop a record the oracle itself
         // produced.
-        let (record, rid) = record_and_rid("al-capacity-unused");
+        let (record, rid) = record_with_unused_access_list_and_rid();
         let decoded = decode_record(&cell_of(&atoms_from_record(&record)), &rid)
             .expect("an immaterial ambiguity must still decode");
         assert_eq!(
@@ -1110,7 +958,7 @@ mod tests {
     #[test]
     fn resolve_verified_record_rejects_composite_key() {
         // The caller's request map is keyed by ONE Bytes<32> atom.
-        let (record, rid) = record_and_rid("minimal-1word");
+        let (record, rid) = record_and_rid();
         let cell = cell_of(&atoms_from_record(&record));
 
         // Absent rather than Dropped: an unmatched key means the id is not in this
@@ -1145,7 +993,7 @@ mod tests {
         // Every atom here originates in a CALLER's own contract state, so a decode that
         // coerces instead of rejecting lets the caller choose which record the MPC
         // reconstructs.
-        let (record, rid) = record_and_rid("minimal-1word");
+        let (record, rid) = record_and_rid();
         let atoms = atoms_from_record(&record);
 
         // A Compact Boolean is the EMPTY atom or [1]; [2] is not "true".

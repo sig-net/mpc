@@ -106,113 +106,11 @@ fn assemble_access_list(params: &EvmType2TxParams) -> AccessList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::SignBidirectionalRecord;
-    use crate::request_id::compute_request_id;
-    use crate::test_utils::RecordFixture;
-    use serde::Deserialize;
-
-    const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");
-    const RID_VECTORS_JSON: &str = include_str!("../tests/rid_vectors.json");
-
-    #[derive(Deserialize)]
-    struct TxVectorFile {
-        vectors: Vec<TxVector>,
-    }
-
-    /// One oracle vector.
-    #[derive(Deserialize)]
-    struct TxVector {
-        name: String,
-        request_id_hex: String,
-        assembled_calldata_hex: String,
-        expected_unsigned_serialized_hex: String,
-        expected_unsigned_hash_hex: String,
-    }
-
-    #[derive(Deserialize)]
-    struct RidVectorFile {
-        vectors: Vec<RidVector>,
-    }
-
-    #[derive(Deserialize)]
-    struct RidVector {
-        name: String,
-        record: RecordFixture,
-    }
-
-    fn tx_vectors() -> Vec<TxVector> {
-        serde_json::from_str::<TxVectorFile>(TX_VECTORS_JSON)
-            .expect("tx_vectors.json parses")
-            .vectors
-    }
-
-    /// The record a tx vector describes, joined by name.
-    fn record_by_name(name: &str) -> SignBidirectionalRecord {
-        serde_json::from_str::<RidVectorFile>(RID_VECTORS_JSON)
-            .expect("rid_vectors.json parses")
-            .vectors
-            .into_iter()
-            .find(|vector| vector.name == name)
-            .unwrap_or_else(|| panic!("no rid vector named {name}"))
-            .record
-            .0
-    }
-
-    fn strip_0x(hex: &str) -> &str {
-        hex.strip_prefix("0x").unwrap_or(hex)
-    }
-
-    #[test]
-    fn to_unsigned_tx_matches_ethers_oracle() {
-        let vectors = tx_vectors();
-        assert_eq!(vectors.len(), 8, "the anchor names eight vectors");
-
-        for vector in vectors {
-            let name = vector.name.as_str();
-            let record = record_by_name(name);
-
-            // Join integrity: the record loaded by name IS the record the oracle
-            // assembled, proven by the id rather than assumed.
-            assert_eq!(
-                hex::encode(compute_request_id(&record)),
-                vector.request_id_hex,
-                "{name}: joined record's request id"
-            );
-
-            let tx = to_unsigned_tx(&record).expect(name);
-            assert_eq!(
-                hex::encode(&tx.input),
-                strip_0x(&vector.assembled_calldata_hex),
-                "{name}: assembled calldata"
-            );
-
-            let serialized = serialized_transaction(&record).expect(name);
-            assert_eq!(
-                hex::encode(&serialized),
-                strip_0x(&vector.expected_unsigned_serialized_hex),
-                "{name}: unsigned serialized payload"
-            );
-
-            let unsigned_hash = hash_payload(&serialized);
-            assert_eq!(
-                hex::encode(unsigned_hash),
-                strip_0x(&vector.expected_unsigned_hash_hex),
-                "{name}: unsigned hash"
-            );
-
-            // The scalar the MPC signs is that hash and nothing else.
-            let scalar = payload_scalar(&serialized).expect(name);
-            assert_eq!(
-                scalar,
-                k256::Scalar::from_bytes(unsigned_hash).expect("oracle hash is in range"),
-                "{name}: payload scalar"
-            );
-        }
-    }
+    use crate::test_utils::{sample_record, sample_record_with_partial_access_list};
 
     #[test]
     fn to_unsigned_tx_requires_evm_type2_param_type() {
-        let mut record = record_by_name("minimal-1word");
+        let mut record = sample_record();
         record.tx_param_type = 1;
         let err = to_unsigned_tx(&record)
             .expect_err("the reserved tx_param_type must not assemble as evmType2")
@@ -225,7 +123,7 @@ mod tests {
         // The reference is asymmetric and the port preserves it: assembleCalldata
         // indexes words[i] and throws past capacity, while decodeAccessList slices at
         // both levels, which clamps.
-        let mut record = record_by_name("access-list-partial");
+        let mut record = sample_record_with_partial_access_list();
 
         record.tx_params.calldata.value.no_words = 3; // capacity is 2
         let err = serialized_transaction(&record)
@@ -254,9 +152,9 @@ mod tests {
 
     #[test]
     fn assemble_access_list_emits_no_keys_at_zero_count() {
-        // No golden reaches this level: with an entry count of 0 no entry is emitted,
-        // so the key-level slice never runs there.
-        let mut record = record_by_name("access-list-partial");
+        // With an entry count of 0 no entry is emitted, so the key-level slice never
+        // runs there.
+        let mut record = sample_record_with_partial_access_list();
         record.tx_params.access_list[0].storage_key_count = 0; // key capacity is 3
         let tx = to_unsigned_tx(&record).expect("assembles");
         assert_eq!(

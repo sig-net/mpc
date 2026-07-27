@@ -1,9 +1,4 @@
-//! Test-only serde shims for fixture records.
-
-use serde::de::{self, Deserializer};
-use serde::Deserialize;
-use std::fmt::Display;
-use std::str::FromStr;
+//! Test-only record builders shared by the unit tests.
 
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
@@ -67,157 +62,91 @@ pub(crate) fn cell_of(atoms: &[Vec<u8>]) -> StateNode {
         atoms: atoms.iter().map(hex::encode).collect(),
     }
 }
-
-/// A standalone fixture record: `RecordFixture::deserialize` applies the remote shims
-/// to a bare record object.
-#[derive(Deserialize)]
-pub(crate) struct RecordFixture(#[serde(with = "RecordDef")] pub(crate) SignBidirectionalRecord);
-
-#[derive(Deserialize)]
-#[serde(remote = "SignBidirectionalRecord", deny_unknown_fields)]
-pub(crate) struct RecordDef {
-    #[serde(deserialize_with = "hex_array")]
-    sender: [u8; 32],
-    #[serde(deserialize_with = "decimal")]
-    request_nonce: u64,
-    #[serde(deserialize_with = "decimal")]
-    key_version: u8,
-    #[serde(deserialize_with = "hex_array")]
-    path: [u8; 32],
-    algo: u8,
-    dest: u8,
-    #[serde(deserialize_with = "hex_array")]
-    params: [u8; 64],
-    tx_param_type: u8,
-    #[serde(with = "TxParamsDef")]
-    tx_params: EvmType2TxParams,
-    #[serde(deserialize_with = "hex_array")]
-    caip2_id: [u8; 32],
-    #[serde(deserialize_with = "hex_bytes")]
-    output_deserialization_schema: Vec<u8>,
-    #[serde(deserialize_with = "hex_bytes")]
-    respond_serialization_schema: Vec<u8>,
+fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    out[..text.len()].copy_from_slice(text);
+    out
 }
 
-#[derive(Deserialize)]
-#[serde(remote = "EvmType2TxParams", deny_unknown_fields)]
-pub(crate) struct TxParamsDef {
-    #[serde(deserialize_with = "decimal")]
-    chain_id: u64,
-    #[serde(deserialize_with = "decimal")]
-    nonce: u64,
-    #[serde(deserialize_with = "decimal")]
-    max_priority_fee_per_gas: u128,
-    #[serde(deserialize_with = "decimal")]
-    max_fee_per_gas: u128,
-    #[serde(deserialize_with = "decimal")]
-    gas_limit: u64,
-    #[serde(deserialize_with = "hex_array")]
-    to: [u8; 20],
-    #[serde(deserialize_with = "decimal")]
-    value: u128,
-    #[serde(deserialize_with = "calldata")]
-    calldata: CompactMaybe<EvmCalldata>,
-    #[serde(deserialize_with = "decimal")]
-    access_list_entry_count: u8,
-    #[serde(deserialize_with = "access_list")]
-    access_list: Vec<EvmAccessListEntry>,
+fn ascii_padded_vec(text: &[u8], width: usize) -> Vec<u8> {
+    let mut out = vec![0u8; width];
+    out[..text.len()].copy_from_slice(text);
+    out
 }
 
-#[derive(Deserialize)]
-#[serde(remote = "EvmCalldata", deny_unknown_fields)]
-pub(crate) struct CalldataDef {
-    #[serde(deserialize_with = "hex_array")]
-    selector: [u8; 4],
-    #[serde(deserialize_with = "decimal")]
-    no_words: u16,
-    #[serde(deserialize_with = "hex_words")]
-    words: Vec<[u8; 32]>,
-}
-
-#[derive(Deserialize)]
-#[serde(remote = "EvmAccessListEntry", deny_unknown_fields)]
-pub(crate) struct AccessListEntryDef {
-    #[serde(deserialize_with = "hex_array")]
-    address: [u8; 20],
-    #[serde(deserialize_with = "decimal")]
-    storage_key_count: u8,
-    #[serde(deserialize_with = "hex_words")]
-    storage_keys: Vec<[u8; 32]>,
-}
-
-/// `CompactMaybe<T>` is generic, which serde's `remote` shim cannot name, so its two
-/// fields are moved across by shorthand: a swap would not compile.
-fn calldata<'de, D>(deserializer: D) -> Result<CompactMaybe<EvmCalldata>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct MaybeCalldata {
-        is_some: bool,
-        #[serde(with = "CalldataDef")]
-        value: EvmCalldata,
+/// The canonical record the unit tests build on: sender `0xab * 32`, path
+/// `"caller-path"`, one used calldata word, no access list. The smallest shape that
+/// still exercises every capacity-scaled vector.
+pub(crate) fn sample_record() -> SignBidirectionalRecord {
+    SignBidirectionalRecord {
+        sender: [0xab; 32],
+        request_nonce: 7,
+        key_version: 1,
+        path: ascii_padded(b"caller-path"),
+        algo: 0,
+        dest: 0,
+        params: ascii_padded(b"integrator-params"),
+        tx_param_type: 0,
+        tx_params: EvmType2TxParams {
+            chain_id: 31337,
+            nonce: 3,
+            max_priority_fee_per_gas: 1,
+            max_fee_per_gas: 2,
+            gas_limit: 21000,
+            to: [0xcd; 20],
+            value: 5,
+            calldata: CompactMaybe {
+                is_some: true,
+                value: EvmCalldata {
+                    selector: [0xca, 0x11, 0xab, 0x1e],
+                    no_words: 1,
+                    words: vec![[0x11; 32]],
+                },
+            },
+            access_list_entry_count: 0,
+            access_list: Vec::new(),
+        },
+        caip2_id: ascii_padded(b"eip155:31337"),
+        output_deserialization_schema: ascii_padded_vec(b"uint256", 34),
+        respond_serialization_schema: ascii_padded_vec(b"uint256", 34),
     }
-
-    let MaybeCalldata { is_some, value } = MaybeCalldata::deserialize(deserializer)?;
-    Ok(CompactMaybe { is_some, value })
 }
 
-fn access_list<'de, D>(deserializer: D) -> Result<Vec<EvmAccessListEntry>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    struct Entry(#[serde(with = "AccessListEntryDef")] EvmAccessListEntry);
-
-    Ok(Vec::<Entry>::deserialize(deserializer)?
-        .into_iter()
-        .map(|Entry(entry)| entry)
-        .collect())
+/// `sample_record` carrying an access list at capacity with every slot unused.
+/// Every `entries = 2` split spans the same run of zero bytes, so the record is
+/// capacity-ambiguous while every matching split assembles the same transaction.
+pub(crate) fn sample_record_with_unused_access_list() -> SignBidirectionalRecord {
+    let mut record = sample_record();
+    record.tx_params.access_list_entry_count = 0;
+    record.tx_params.access_list = vec![
+        EvmAccessListEntry {
+            address: [0u8; 20],
+            storage_key_count: 0,
+            storage_keys: vec![[0u8; 32]; 2],
+        };
+        2
+    ];
+    record
 }
 
-fn hex_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    hex::decode(String::deserialize(deserializer)?).map_err(de::Error::custom)
-}
-
-fn hex_array<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes = hex_bytes(deserializer)?;
-    let len = bytes.len();
-    bytes
-        .try_into()
-        .map_err(|_: Vec<u8>| de::Error::custom(format!("expected {N} hex bytes, got {len}")))
-}
-
-fn hex_words<'de, D>(deserializer: D) -> Result<Vec<[u8; 32]>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Vec::<String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|word| {
-            let bytes = hex::decode(word).map_err(de::Error::custom)?;
-            let len = bytes.len();
-            bytes.try_into().map_err(|_: Vec<u8>| {
-                de::Error::custom(format!("expected 32 hex bytes, got {len}"))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn decimal<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: FromStr,
-    T::Err: Display,
-{
-    String::deserialize(deserializer)?
-        .parse()
-        .map_err(de::Error::custom)
+/// A record at capacity on every scaled vector, with one access-list entry in use:
+/// 2 calldata words, 2 access-list entries, 3 storage keys each.
+pub(crate) fn sample_record_with_partial_access_list() -> SignBidirectionalRecord {
+    let mut record = sample_record();
+    record.tx_params.calldata.value.no_words = 2;
+    record.tx_params.calldata.value.words = vec![[0x11; 32], [0x22; 32]];
+    record.tx_params.access_list_entry_count = 1;
+    record.tx_params.access_list = vec![
+        EvmAccessListEntry {
+            address: [0xef; 20],
+            storage_key_count: 3,
+            storage_keys: vec![[0x01; 32], [0x02; 32], [0x03; 32]],
+        },
+        EvmAccessListEntry {
+            address: [0u8; 20],
+            storage_key_count: 0,
+            storage_keys: vec![[0u8; 32]; 3],
+        },
+    ];
+    record
 }

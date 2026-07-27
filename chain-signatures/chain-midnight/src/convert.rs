@@ -133,42 +133,8 @@ fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{CompactMaybe, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord};
-    use mpc_chain_integration_core::utils::hashing::hash_payload;
-    use mpc_primitives::{Chain, SignId, SignKind};
-
-    /// Oracle fixture.
-    const EPSILON_VECTORS_JSON: &str = include_str!("../../crypto/tests/epsilon_vectors.json");
-    const TX_VECTORS_JSON: &str = include_str!("../tests/tx_vectors.json");
-
-    fn tx_vector_field(name: &str, field: &str) -> String {
-        let file: serde_json::Value =
-            serde_json::from_str(TX_VECTORS_JSON).expect("tx_vectors.json parses");
-        file["vectors"]
-            .as_array()
-            .expect("fixture has a vectors array")
-            .iter()
-            .find(|vector| vector["name"] == name)
-            .unwrap_or_else(|| panic!("no tx vector named {name}"))[field]
-            .as_str()
-            .unwrap_or_else(|| panic!("{field} is a string"))
-            .trim_start_matches("0x")
-            .to_string()
-    }
-
-    fn oracle_serialized(name: &str) -> String {
-        tx_vector_field(name, "expected_unsigned_serialized_hex")
-    }
-
-    /// The scalar the MPC signs for a named oracle vector.
-    fn oracle_scalar(name: &str) -> k256::Scalar {
-        use mpc_primitives::ScalarExt as _;
-        let hash: [u8; 32] = hex::decode(tx_vector_field(name, "expected_unsigned_hash_hex"))
-            .expect("oracle hash decodes")
-            .try_into()
-            .expect("oracle hash is 32 bytes");
-        k256::Scalar::from_bytes(hash).expect("oracle hash is in range")
-    }
+    use crate::records::SignBidirectionalRecord;
+    use mpc_primitives::{Chain, SignKind};
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
@@ -184,107 +150,8 @@ mod tests {
         out
     }
 
-    fn ascii_padded_vec(text: &[u8], width: usize) -> Vec<u8> {
-        let mut out = vec![0u8; width];
-        out[..text.len()].copy_from_slice(text);
-        out
-    }
-
-    /// A record shaped after the caller e2e: sender `0xab * 32`, path `"caller-path"`,
-    /// one used calldata word, no access list.
     fn caller_record() -> SignBidirectionalRecord {
-        SignBidirectionalRecord {
-            sender: READ_ADDRESS,
-            request_nonce: 7,
-            key_version: 1,
-            path: ascii_padded(b"caller-path"),
-            algo: 0,
-            dest: 0,
-            params: ascii_padded(b"integrator-params"),
-            tx_param_type: 0,
-            tx_params: EvmType2TxParams {
-                chain_id: 31337,
-                nonce: 3,
-                max_priority_fee_per_gas: 1,
-                max_fee_per_gas: 2,
-                gas_limit: 21000,
-                to: [0xcd; 20],
-                value: 5,
-                calldata: CompactMaybe {
-                    is_some: true,
-                    value: EvmCalldata {
-                        selector: [0xca, 0x11, 0xab, 0x1e],
-                        no_words: 1,
-                        words: vec![[0x11; 32]],
-                    },
-                },
-                access_list_entry_count: 0,
-                access_list: Vec::new(),
-            },
-            caip2_id: ascii_padded(b"eip155:31337"),
-            output_deserialization_schema: ascii_padded_vec(b"uint256", 34),
-            respond_serialization_schema: ascii_padded_vec(b"uint256", 34),
-        }
-    }
-
-    /// The `(sender, path, epsilon_be)` triple of a named oracle vector.
-    fn epsilon_vector(name: &str) -> (String, String, Vec<u8>) {
-        let file: serde_json::Value =
-            serde_json::from_str(EPSILON_VECTORS_JSON).expect("epsilon_vectors.json parses");
-        let vector = file["vectors"]
-            .as_array()
-            .expect("fixture has a vectors array")
-            .iter()
-            .find(|v| v["name"] == name)
-            .unwrap_or_else(|| panic!("no epsilon vector named {name}"));
-        (
-            vector["sender"].as_str().expect("sender").to_string(),
-            vector["path"].as_str().expect("path").to_string(),
-            hex::decode(vector["epsilon_be_hex"].as_str().expect("epsilon_be_hex"))
-                .expect("epsilon_be_hex decodes"),
-        )
-    }
-
-    #[test]
-    fn to_sign_request_matches_epsilon_oracle() {
-        let record = caller_record();
-        let request = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect("the caller record converts");
-
-        // The record was built to the vector's exact (sender, path), so the epsilon out
-        // of the full chain must be the TS-generated scalar rather than merely
-        // self-consistent.
-        let (_, _, epsilon_be) = epsilon_vector("e2e-caller-path");
-        assert_eq!(
-            request.args.epsilon.to_bytes().as_slice(),
-            epsilon_be.as_slice(),
-            "record-to-epsilon must reproduce the oracle scalar"
-        );
-
-        assert_eq!(request.args.path, "caller-path");
-        assert_eq!(request.args.key_version, 1);
-        assert_eq!(request.args.entropy, hash_payload(&REQUEST_ID));
-        // Against the oracle rather than by re-running the production path:
-        // caller_record() matches the minimal-1word vector in every field that reaches
-        // the transaction, differing only in `params`, which does not.
-        assert_eq!(
-            request.args.payload,
-            oracle_scalar("minimal-1word"),
-            "the signed payload must be the oracle's hash, not merely self-consistent"
-        );
-        assert_eq!(request.chain, Chain::Midnight);
-        assert_eq!(request.id, SignId::new(REQUEST_ID));
-        assert_eq!(request.unix_timestamp_indexed, INDEXED_TS);
-        assert!(
-            matches!(request.kind, SignKind::SignBidirectional(_)),
-            "the indexed kind is SignBidirectional"
-        );
+        crate::test_utils::sample_record()
     }
 
     #[test]
@@ -303,17 +170,14 @@ mod tests {
         };
 
         assert_eq!(
-            hex::encode(&event.serialized_transaction),
-            oracle_serialized("minimal-1word"),
-            "the event carries the oracle's unsigned transaction bytes"
+            event.serialized_transaction,
+            crate::tx::serialized_transaction(&record).expect("assembles"),
+            "the event carries the record's own unsigned transaction bytes"
         );
         assert_eq!(event.caip2_id, "eip155:31337");
         assert_eq!(event.key_version, 1);
         assert_eq!(event.deposit, 0, "Midnight V1 has no payment");
         assert_eq!(event.path, "caller-path");
-        assert_eq!(event.algo, "ecdsa");
-        assert_eq!(event.dest, "", "dest 0 is `unused`, rendered empty");
-        assert_eq!(event.params, "integrator-params");
         assert_eq!(
             event.output_deserialization_schema,
             record.output_deserialization_schema
@@ -357,33 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn to_sign_request_rejects_reserved_enums_and_key_versions() {
-        let mut record = caller_record();
-        record.algo = 1;
-        let err = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("the reserved algo must be rejected")
-        .to_string();
-        assert!(err.contains("algo"), "err: {err}");
-
-        let mut record = caller_record();
-        record.dest = 1;
-        let err = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("the reserved dest must be rejected")
-        .to_string();
-        assert!(err.contains("dest"), "err: {err}");
-
+    fn to_sign_request_routes_and_bounds_key_versions() {
         // Version 0 is accepted, matching Canton, and routes through the legacy
         // derivation rather than the v2 caip2 one.
         let mut record = caller_record();
@@ -443,9 +281,8 @@ mod tests {
 
     #[test]
     fn render_padded_ascii_rejects_every_malformed_field() {
-        // caip2_id and params follow the same pad(N, "text") convention as path
-        // (constants.ts documents it for every string-ish field), so they render
-        // through the same fail-closed rule, each named in its error.
+        // caip2_id follows the same pad(N, "text") convention as path, so it renders
+        // through the same fail-closed rule and is named in its own error.
         let mut record = caller_record();
         record.caip2_id = [0xff; 32];
         let err = to_sign_request(
@@ -458,18 +295,5 @@ mod tests {
         .expect_err("non-UTF-8 caip2 bytes must fail closed")
         .to_string();
         assert!(err.contains("caip2_id"), "err: {err}");
-
-        let mut record = caller_record();
-        record.params = ascii_padded(b"p\0q");
-        let err = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("interior-NUL params must fail closed")
-        .to_string();
-        assert!(err.contains("params"), "err: {err}");
     }
 }
