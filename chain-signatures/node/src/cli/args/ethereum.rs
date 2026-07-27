@@ -1,4 +1,5 @@
-use crate::indexer_eth::EthConfig;
+use anyhow::Context as _;
+use mpc_chain_ethereum::EthConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 // Configures Ethereum indexer.
@@ -13,7 +14,7 @@ pub struct EthArgs {
         requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
     pub eth_account_sk: Option<SecretString>,
-    /// The contract address to watch without the `0x` prefix
+    /// The contract address to watch, with or without the `0x` prefix
     #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
 
@@ -42,13 +43,15 @@ pub struct EthArgs {
         requires = "eth_account_sk"
     )]
     pub eth_consensus_rpc_http_url: Option<String>,
-    /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
+    /// The network that the eth indexer is running on: "sepolia"/"mainnet",
+    /// or "anvil" for local dev chains (anvil never reports finalized blocks,
+    /// so requests are emitted without waiting for finality).
     #[clap(
         long,
         env("MPC_ETH_NETWORK"),
         requires = "eth_account_sk",
         default_value = "sepolia",
-        value_parser = ["sepolia", "mainnet"],
+        value_parser = ["sepolia", "mainnet", "anvil"],
     )]
     pub eth_network: Option<String>,
     /// Helios light client data path
@@ -67,9 +70,9 @@ pub struct EthArgs {
         env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
         default_value = "10000"
     )]
-    pub eth_refresh_finalized_interval: Option<u64>,
-    /// Enable the indexer to just send requests optimistically instead waiting for final.
-    /// Useful for testing where we do not want to reach finality due to how long it takes.
+    pub eth_refresh_finalized_interval: u64,
+    /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
+    /// on live networks a reorg can orphan already-emitted sign requests.
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
     pub eth_optimistic_requests: bool,
 }
@@ -104,12 +107,10 @@ impl EthArgs {
         if let Some(eth_helios_data_path) = self.eth_helios_data_path {
             args.extend(["--eth-helios-data-path".to_string(), eth_helios_data_path]);
         }
-        if let Some(eth_refresh_finalized_interval) = self.eth_refresh_finalized_interval {
-            args.extend([
-                "--eth-refresh-finalized-interval".to_string(),
-                eth_refresh_finalized_interval.to_string(),
-            ]);
-        }
+        args.extend([
+            "--eth-refresh-finalized-interval".to_string(),
+            self.eth_refresh_finalized_interval.to_string(),
+        ]);
         if self.eth_optimistic_requests {
             args.push("--eth-optimistic-requests".to_string());
         }
@@ -119,7 +120,7 @@ impl EthArgs {
         args
     }
 
-    pub fn into_config(self) -> Option<EthConfig> {
+    pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
         #[cfg(not(feature = "helios"))]
         if self.eth_light_client {
             tracing::warn!(
@@ -127,32 +128,64 @@ impl EthArgs {
             );
         }
 
-        Some(EthConfig {
-            account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
+        let network = self.eth_network.unwrap_or_default();
+        if self.eth_optimistic_requests && network == "mainnet" {
+            tracing::warn!(
+                "eth optimistic requests enabled on mainnet: emitted requests are NOT \
+                 reorg-safe; this flag is intended for dev/demo use only"
+            );
+        }
+
+        let Some(account_sk) = self.eth_account_sk else {
+            return Ok(None);
+        };
+        let account_sk = account_sk
+            .expose_secret()
+            .parse()
+            .context("invalid eth account sk")?;
+        let execution_rpc_http_url = self
+            .eth_execution_rpc_http_url
+            .context("eth execution rpc http url is required")?
+            .parse()
+            .context("invalid eth execution rpc http url")?;
+        let contract_address = self
+            .eth_contract_address
+            .context("eth contract address is required")?
+            .parse()
+            .context("invalid eth contract address")?;
+
+        Ok(Some(EthConfig {
+            account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
-            execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
-            contract_address: self.eth_contract_address.unwrap(),
-            network: self.eth_network.unwrap_or_default(),
+            execution_rpc_http_url,
+            contract_address,
+            optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
+            network,
             helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
-            refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
-            optimistic_requests: self.eth_optimistic_requests,
+            refresh_finalized_interval: self.eth_refresh_finalized_interval,
             #[cfg(feature = "helios")]
             light_client: self.eth_light_client,
             #[cfg(not(feature = "helios"))]
             light_client: false,
-        })
+            // TODO: currently we only have Ethereum and Sepolia, so defaults
+            // are fine. Make these configurable when we add more chains.
+            rpc: Default::default(),
+            gas: Default::default(),
+            publisher: Default::default(),
+            indexer: Default::default(),
+        }))
     }
 
     pub fn from_config(config: Option<EthConfig>) -> Self {
         match config {
-            Some(config) if !config.account_sk.is_empty() => Self {
-                eth_account_sk: Some(config.account_sk.into()),
+            Some(config) => Self {
+                eth_account_sk: Some(hex::encode(config.account_sk.credential().to_bytes()).into()),
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
-                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
-                eth_contract_address: Some(config.contract_address),
+                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
+                eth_contract_address: Some(config.contract_address.to_string()),
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
-                eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
+                eth_refresh_finalized_interval: config.refresh_finalized_interval,
                 eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
             },
@@ -163,7 +196,7 @@ impl EthArgs {
                 eth_contract_address: None,
                 eth_network: None,
                 eth_helios_data_path: None,
-                eth_refresh_finalized_interval: None,
+                eth_refresh_finalized_interval: 0,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
             },

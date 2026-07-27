@@ -3,6 +3,7 @@ pub mod errors;
 pub mod primitives;
 pub mod state;
 pub mod update;
+pub mod utils;
 
 use errors::{
     CheckpointError, ConversionError, InitError, InvalidParameters, InvalidState, JoinError,
@@ -14,7 +15,7 @@ use mpc_crypto::{
     derive_epsilon_checkpoint, derive_epsilon_near, derive_key, kdf::check_ec_signature,
     near_public_key_to_affine_point, ScalarExt as _,
 };
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::ConsensusCheckpointDigest;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -27,11 +28,13 @@ use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes, Read,
     SignPoll, SignRequest, SignedCheckpoint, StorageKey, View, Votes, YieldIndex,
 };
+use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
+use crate::utils::compute_threshold;
 
 pub use state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -391,8 +394,9 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        new_participants,
                         threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
+                        new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -438,8 +442,9 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        new_participants,
                         threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
+                        new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -505,6 +510,7 @@ impl VersionedMpcContract {
                 old_epoch,
                 new_participants,
                 threshold,
+                new_threshold,
                 public_key,
                 finished_votes,
                 ..
@@ -513,11 +519,13 @@ impl VersionedMpcContract {
                     return Err(InvalidState::EpochMismatch.into());
                 }
                 finished_votes.insert(voter);
+                // Completion is attested by the old participants, so it is gated by
+                // the old threshold. The reshared key adopts the new threshold.
                 if finished_votes.len() >= *threshold {
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch + 1,
                         participants: new_participants.clone(),
-                        threshold: *threshold,
+                        threshold: *new_threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
@@ -676,19 +684,28 @@ impl VersionedMpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
+        checkpoints: Option<BTreeMap<Chain, SignedCheckpoint>>,
     ) -> Result<Self, Error> {
         log!(
-            "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}",
+            "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
             env::signer_account_id(),
             epoch,
             serde_json::to_string(&participants).unwrap(),
             threshold,
             public_key,
             config,
+            checkpoints,
         );
 
         if threshold > participants.len() {
             return Err(InitError::ThresholdTooHigh.into());
+        }
+
+        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpoints);
+        if let Some(checkpoints) = checkpoints {
+            for (chain, checkpoint) in checkpoints {
+                latest_checkpoints.insert(chain, checkpoint);
+            }
         }
 
         Ok(Self::V0(MpcContract {
@@ -704,7 +721,7 @@ impl VersionedMpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            latest_checkpoints,
         }))
     }
 
@@ -790,8 +807,8 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<SignedCheckpoint> {
-        self.checkpoints().get(&chain).cloned()
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&SignedCheckpoint> {
+        self.checkpoints().get(&chain)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -802,9 +819,11 @@ impl VersionedMpcContract {
                 Read::State => View::State(self.state().clone()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
-                    self.checkpoints()
-                        .iter()
-                        .map(|(chain, checkpoint)| (*chain, checkpoint.clone()))
+                    Chain::iter()
+                        .into_iter()
+                        .filter_map(|chain| {
+                            self.checkpoints().get(&chain).map(|cp| (chain, cp.clone()))
+                        })
                         .collect(),
                 ),
             };
@@ -852,13 +871,13 @@ impl VersionedMpcContract {
             }
         }
 
-        self.mutable_checkpoints().insert(
+        self.update_checkpoint(vec![(
             checkpoint.chain,
             SignedCheckpoint {
                 checkpoint,
                 signature,
             },
-        );
+        )]);
         Ok(())
     }
 
@@ -1091,11 +1110,26 @@ impl VersionedMpcContract {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
         }
     }
+
+    #[private]
+    pub fn update_checkpoint(&mut self, checkpoints: Vec<(Chain, SignedCheckpoint)>) {
+        for (chain, signed_checkpoint) in checkpoints {
+            self.mutable_checkpoints().insert(chain, signed_checkpoint);
+        }
+    }
+
+    #[private]
+    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
+        for chain in chains {
+            self.mutable_checkpoints().remove(&chain);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use near_sdk::borsh::BorshSerialize;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
 
@@ -1110,6 +1144,40 @@ mod tests {
     #[derive(BorshSerialize)]
     enum VersionedOldMpcContractTest {
         V0(OldMpcContractTest),
+    }
+
+    #[derive(BorshSerialize)]
+    struct IterableMapValueAndIndexForTest<V> {
+        value: V,
+        key_index: u32,
+    }
+
+    // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
+    // `LatestCheckpoints` is split into a vector of iterable keys under
+    // `<prefix>v` and a lookup map under `<prefix>m`.
+    fn latest_checkpoints_map_prefix() -> Vec<u8> {
+        let mut prefix = Vec::new();
+        StorageKey::LatestCheckpoints
+            .serialize(&mut prefix)
+            .unwrap();
+        [prefix.as_slice(), b"m"].concat()
+    }
+
+    // Seed only the lookup-map entry and intentionally do not seed the vector
+    // key entry. This reproduces the observed devnet state where
+    // `latest_checkpoint(chain)` works because it uses `.get()`, while
+    // `IterableMap::iter()` returns no checkpoints.
+    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: SignedCheckpoint) {
+        let mut key_bytes = latest_checkpoints_map_prefix();
+        chain.serialize(&mut key_bytes).unwrap();
+        let storage_key = env::sha256_array(&key_bytes);
+
+        let value = IterableMapValueAndIndexForTest {
+            value: checkpoint,
+            key_index: 0,
+        };
+        let value_bytes = borsh::to_vec(&value).unwrap();
+        env::storage_write(&storage_key, &value_bytes);
     }
 
     #[test]
@@ -1165,5 +1233,63 @@ mod tests {
                 assert!(contract.latest_checkpoints.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn test_checkpoint_read_handles_missing_iterable_keys() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+        let signed_checkpoint = SignedCheckpoint {
+            checkpoint,
+            signature: Signature {
+                big_r: k256::AffinePoint::GENERATOR,
+                s: Scalar::ONE,
+                recovery_id: 0,
+            },
+        };
+
+        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, signed_checkpoint.clone());
+
+        // Construct a contract whose `latest_checkpoints` map points at the
+        // seeded storage. The map itself has an empty iterable key vector.
+        let contract = VersionedMpcContract::V0(MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+        });
+
+        // Prove the test setup matches production: direct lookup sees the
+        // checkpoint, but iteration over the same map does not.
+        assert!(
+            contract.latest_checkpoint(Chain::Solana).is_some(),
+            "direct checkpoint lookup should reproduce production .get() behavior"
+        );
+        assert!(
+            contract.checkpoints().iter().next().is_none(),
+            "test setup should reproduce the broken iterable index"
+        );
+
+        // `read(Checkpoints)` is the path nodes use to learn confirmed
+        // checkpoints. It must not rely on `IterableMap::iter()` here.
+        let checkpoints = contract
+            .read(vec![Read::Checkpoints])
+            .into_iter()
+            .find_map(|view| match view {
+                View::Checkpoints(checkpoints) => Some(checkpoints),
+                _ => None,
+            })
+            .expect("read should return checkpoints view");
+
+        let stored = checkpoints
+            .get(&Chain::Solana)
+            .expect("read(Checkpoints) should not rely on IterableMap::iter()");
+        assert_eq!(stored.checkpoint.height, checkpoint.height);
+        assert_eq!(stored.checkpoint.digest, checkpoint.digest);
     }
 }

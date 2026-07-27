@@ -1,4 +1,6 @@
 use cait_sith::protocol::Participant;
+use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use mpc_chain_solana::SolConfig;
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
@@ -58,6 +60,9 @@ fn thread_network_name(docker: &DockerClient) -> String {
 
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
+/// First sandbox release on protocol 84, which accepts the bulk-memory opcodes rustc
+/// emits past 1.81. The near-workspaces default is older and rejects the contract.
+const SANDBOX_VERSION: &str = "2.12.0";
 
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
@@ -301,7 +306,7 @@ impl ClusterSpawner {
     pub fn solana(mut self) -> Self {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
-            self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+            self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),      // Will be filled in later
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
@@ -339,10 +344,10 @@ impl ClusterSpawner {
 
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
-            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+            self.cfg.canton = Some(CantonConfig {
                 json_api_url: String::new(),
                 json_api_ws_url: String::new(),
-                auth: mpc_node::indexer_canton::CantonAuthConfig {
+                auth: CantonAuthConfig {
                     token_url: String::new(),
                     client_id: String::new(),
                     client_secret: String::new(),
@@ -521,7 +526,7 @@ impl IntoFuture for ClusterSpawner {
 async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
     let mut last_err = None;
     for attempt in 1..=5 {
-        match near_workspaces::sandbox().await {
+        match near_workspaces::sandbox_with_version(SANDBOX_VERSION).await {
             Ok(worker) => return Ok(worker),
             Err(e) => {
                 tracing::warn!(

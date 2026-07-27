@@ -21,20 +21,14 @@ pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 /// capacity to avoid backpressure or deadlock under high concurrency.
 pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
-/// Small under test-feature so dead-letter inboxes fill quickly in clog tests.
-pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
-    4
-} else {
-    MAX_MESSAGE_SUB_CHANNEL_SIZE
-};
-
+#[derive(Debug, Clone, Copy)]
 pub enum SubscribeId {
     Generating,
     Resharing,
     Ready,
-    Triples,
-    Presignatures,
-    Signatures,
+    TriplePosit,
+    PresignaturePosit,
+    SignaturePosit,
     Triple(TripleId),
     Presignature(PresignatureId),
     Signature(SignId, PresignatureId),
@@ -50,6 +44,36 @@ pub enum SubscribeResponse {
     PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
     Signature(mpsc::Receiver<SignatureMessage>),
     SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+}
+
+/// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
+pub trait SubscriptionMessage: Sized {
+    fn receiver(resp: SubscribeResponse) -> Option<mpsc::Receiver<Self>>;
+}
+
+macro_rules! impl_subscription_message {
+    ($($ty:ty => $variant:ident,)*) => {$(
+        impl SubscriptionMessage for $ty {
+            fn receiver(resp: SubscribeResponse) -> Option<mpsc::Receiver<Self>> {
+                match resp {
+                    SubscribeResponse::$variant(rx) => Some(rx),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+
+impl_subscription_message! {
+    GeneratingMessage => Generating,
+    ResharingMessage => Resharing,
+    ReadyMessage => Ready,
+    TripleMessage => Triple,
+    (TripleId, Participant, PositAction) => TriplePosit,
+    PresignatureMessage => Presignature,
+    (FullPresignatureId, Participant, PositAction) => PresignaturePosit,
+    SignatureMessage => Signature,
+    (SignId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
 }
 
 pub enum SubscribeRequestAction {

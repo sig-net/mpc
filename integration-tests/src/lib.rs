@@ -19,12 +19,13 @@ use crate::containers::DockerClient;
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
+use mpc_chain_canton::CantonConfig;
+use mpc_chain_ethereum::EthConfig;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
-use mpc_node::indexer_eth::EthConfig;
 use mpc_node::indexer_hydration::HydrationConfig;
-use mpc_node::indexer_sol::SolConfig;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
@@ -63,7 +64,7 @@ pub struct NodeConfig {
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
-    pub canton: Option<mpc_node::indexer_canton::CantonConfig>,
+    pub canton: Option<CantonConfig>,
 }
 
 impl Default for NodeConfig {
@@ -384,15 +385,26 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
         let contract_address_hex = hex::encode(contract_address);
         spawner.cfg.eth = Some(EthConfig {
-            account_sk: sandbox.secret_key.clone(),
+            account_sk: sandbox
+                .secret_key
+                .parse()
+                .context("invalid ethereum sandbox secret key")?,
             consensus_rpc_http_url: rpc_endpoint.clone(),
-            execution_rpc_http_url: rpc_endpoint,
-            contract_address: contract_address_hex.clone(),
-            network: "sepolia".to_string(),
-            helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
+            execution_rpc_http_url: rpc_endpoint
+                .parse()
+                .context("invalid ethereum sandbox rpc endpoint")?,
+            contract_address: contract_address_hex
+                .parse()
+                .context("invalid deployed contract address")?,
+            network: "anvil".to_string(),
+            helios_data_path: format!("/tmp/helios-{contract_address_hex}"),
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             light_client: false,
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         });
 
         ethereum = Some(EthereumContext {

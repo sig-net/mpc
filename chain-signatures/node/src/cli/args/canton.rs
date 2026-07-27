@@ -1,4 +1,4 @@
-use crate::indexer_canton::{CantonAuthConfig, CantonConfig};
+use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
 
 /// CLI arguments for the Canton indexer.
 #[derive(Debug, Clone, clap::Parser)]

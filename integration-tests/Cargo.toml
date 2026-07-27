@@ -29,6 +29,7 @@ serde_json.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
@@ -67,7 +68,11 @@ near-workspaces.workspace = true
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
-mpc-indexer-core.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
+mpc-chain-solana.workspace = true
+mpc-chain-ethereum.workspace = true
+mpc-chain-near.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",
@@ -99,4 +104,4 @@ harness = false
 [features]
 default = []
 docker-test = []
-helios = ["mpc-node/helios"]
+helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]

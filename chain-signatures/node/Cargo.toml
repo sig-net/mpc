@@ -12,8 +12,10 @@ async-trait.workspace = true
 axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
+dashmap = "6.1"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
+highway = "1.1.0"
 hkdf = "0.12.4"
 http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }
@@ -35,9 +37,7 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
     "rt-tokio",
 ] }
 opentelemetry-appender-tracing = "0.29.1"
-alloy-signer-local = "1.0.38"
-alloy-sol-types = "1.4.1"
-helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19", optional = true }
+ed25519-zebra = { version = "4.1", default-features = false, features = ["alloc"] }
 subxt = { version = "0.44", default-features = false, features = ["jsonrpsee","native","unstable-light-client"] }
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
@@ -45,9 +45,9 @@ sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
 sp-state-machine = { version = "0.48", default-features = false, features = ["std"] }
 # workspace dependencies
 alloy.workspace = true
+alloy-sol-types.workspace = true
 anyhow.workspace = true
 enum-map.workspace = true
-backon.workspace = true
 borsh.workspace = true
 cait-sith.workspace = true
 ciborium.workspace = true
@@ -60,37 +60,33 @@ rand.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
-serde-aux = { version = "4", default-features = false }
 serde_bytes.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-anchor-client.workspace = true
-anchor-lang.workspace = true
-solana-sdk.workspace = true
-solana-transaction-status.workspace = true
-solana-client.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
-tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
-oauth2.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
-mpc-indexer-core.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
+mpc-chain-ethereum.workspace = true
+mpc-chain-solana.workspace = true
+mpc-chain-near.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
-signet-program.workspace = true
 
 alloy-dyn-abi.workspace = true
 alloy-json-abi.workspace = true
@@ -110,10 +106,11 @@ ignored = ["alloy-json-abi", "serde_bytes"]
 
 [features]
 default = []
-helios = ["dep:helios"]
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
 test-feature = []
 # Show a debug page
 debug-page = ["maud"]
+# Enable Helios light client for Ethereum
+helios = ["mpc-chain-ethereum/helios"]

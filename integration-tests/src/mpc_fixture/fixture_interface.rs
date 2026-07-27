@@ -12,9 +12,9 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
-use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState, Sign};
+use mpc_node::protocol::{MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,10 +36,12 @@ pub struct MpcFixtureNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: mpsc::Sender<Sign>,
+    pub sign_tx: mpsc::Sender<SignCommand>,
     pub msg_channel: MessageChannel,
     pub mock_streams: HashMap<Chain, MockStream>,
 
+    /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
+    pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
@@ -72,6 +74,7 @@ impl MpcFixture {
             old_participants: running.participants.clone(),
             new_participants: running.participants.clone(),
             threshold: running.threshold,
+            new_threshold: running.threshold,
             public_key: running.public_key,
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
@@ -313,12 +316,12 @@ impl MpcFixtureNode {
             .expect("remove_holder_and_prune presignatures failed");
     }
 
-    pub async fn start_web_interface(&mut self, account_id: AccountId) {
+    pub async fn start_web_interface(&mut self, account_id: AccountId) -> Option<u16> {
         let web_port = match crate::utils::pick_unused_port().await {
             Ok(port) => port,
             Err(err) => {
                 tracing::error!(?err, "failed to allocate fixture web port");
-                return;
+                return None;
             }
         };
 
@@ -328,12 +331,12 @@ impl MpcFixtureNode {
             self.state.clone(),
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
-            // unused but needed to call the web interface
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
+        Some(web_port)
     }
 }
 

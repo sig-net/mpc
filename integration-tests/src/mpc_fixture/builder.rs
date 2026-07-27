@@ -33,7 +33,7 @@ use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
-use mpc_primitives::{Chain, CheckpointDigest};
+use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -326,7 +326,7 @@ impl MpcFixtureBuilder {
                 .unwrap();
             routing_table.insert(
                 Participant::from(*participant),
-                node.messaging.channel.inbox.clone(),
+                node.messaging.channel.inbox_sender(),
             );
         }
         routing_table
@@ -586,7 +586,7 @@ impl MpcFixtureNodeBuilder {
         let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
-        let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+        let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),
@@ -633,11 +633,13 @@ impl MpcFixtureNodeBuilder {
             triple_storage,
             presignature_storage,
             backlog,
+            checkpoint_tx,
             sync_channel,
             web_handle: None,
         };
 
-        node.start_web_interface(self.participant_info.account_id)
+        let _ = node
+            .start_web_interface(self.participant_info.account_id)
             .await;
 
         node

@@ -23,6 +23,8 @@ use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use mpc_chain_near::Options as NearIndexerOptions;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
@@ -157,7 +159,7 @@ impl Node {
     }
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
@@ -902,8 +904,8 @@ impl Solana {
         anyhow::bail!("solana-test-validator did not become ready in time")
     }
 
-    pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
-        mpc_node::indexer_sol::SolConfig {
+    pub fn get_config(&self, program_address: String) -> SolConfig {
+        SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
             rpc_ws_url: self.ws_address.clone(),

@@ -5,11 +5,12 @@ use digest::Digest as _;
 use k256::elliptic_curve::point::DecompressPoint as _;
 use k256::elliptic_curve::subtle::Choice;
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, SignRequest};
+use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, SignedCheckpoint, View};
 use mpc_crypto::kdf;
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::ConsensusCheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
 use signature::DigestSigner as _;
+use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
 use std::collections::HashMap;
 
@@ -452,6 +453,94 @@ async fn test_contract_checkpoint_verification() -> anyhow::Result<()> {
         respond_root_key.is_failure(),
         "respond_checkpoint with root key signature should have failed"
     );
+
+    Ok(())
+}
+
+/// Verifies that checkpoints written via `respond_checkpoint` are readable
+/// through the external `read` view endpoint. The lower-level regression test
+/// in `src/lib.rs` covers the broken storage shape where `.get()` works but
+/// iterable keys are missing.
+#[tokio::test]
+async fn test_checkpoint_read_after_respond() -> anyhow::Result<()> {
+    let (_, contract, _, sk) = init_env().await;
+
+    let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+
+    let epsilon = kdf::derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
+    let derived_sk = kdf::derive_secret_key(&sk, epsilon);
+    let derived_pk = mpc_crypto::derive_key(sk.public_key().into(), epsilon);
+
+    let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
+    let digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
+        checkpoint.sign_payload_bytes(),
+    );
+    let (signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
+        signing_key.try_sign_digest(digest).unwrap();
+    let s = signature.s();
+    let (r_bytes, _) = signature.split_bytes();
+    let big_r = k256::AffinePoint::decompress(&r_bytes, Choice::from(0)).unwrap();
+    let s: k256::Scalar = *s.as_ref();
+    let recovery_id =
+        if kdf::check_ec_signature(&derived_pk, &big_r, &s, checkpoint.sign_payload_scalar(), 0)
+            .is_ok()
+        {
+            0
+        } else {
+            1
+        };
+
+    let valid_signature = Signature {
+        big_r,
+        s,
+        recovery_id,
+    };
+
+    // Write checkpoint in one transaction.
+    let respond = contract
+        .call("respond_checkpoint")
+        .args_json(serde_json::json!({
+            "checkpoint": checkpoint,
+            "signature": valid_signature,
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        respond.is_success(),
+        "respond_checkpoint failed: {respond:?}"
+    );
+
+    // Read checkpoints back via the `read` view in a separate transaction.
+    // This is the same path that `update_contract_data` uses in the node.
+    let views: Vec<View> = contract
+        .view("read")
+        .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
+        .await?
+        .json()?;
+
+    let checkpoints: HashMap<Chain, SignedCheckpoint> = views
+        .into_iter()
+        .find_map(|v| match v {
+            View::Checkpoints(cp) => Some(cp),
+            _ => None,
+        })
+        .expect("read should return a Checkpoints view");
+
+    let stored = checkpoints
+        .get(&Chain::Solana)
+        .expect("Solana checkpoint must be present after respond_checkpoint");
+    assert_eq!(stored.checkpoint.height, 120);
+    assert_eq!(stored.checkpoint.digest, checkpoint.digest);
+
+    // Also verify the per-chain view path.
+    let latest: Option<SignedCheckpoint> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    let latest = latest.expect("latest_checkpoint should return the checkpoint");
+    assert_eq!(latest.checkpoint.height, 120);
 
     Ok(())
 }

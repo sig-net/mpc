@@ -67,6 +67,9 @@ pub enum PositRejectReason {
     /// The posit message is invalid, usually because of bad timing leading to
     /// round / proposer mismatches.
     InvalidRequest = 3,
+    /// The sender's round is behind the rejector's current round. The reject
+    /// carries the rejector's round so the sender can catch up in one bump.
+    StaleRound = 4,
 }
 
 impl PositAction {
@@ -465,7 +468,7 @@ impl SinglePositCounter {
         self.accepts.len() + self.rejects.len() == self.participants.len()
     }
 
-    pub fn num_peers_with_ongoing_generation(&self) -> usize {
+    pub fn num_peers_already_generating(&self) -> usize {
         self.rejects
             .values()
             .filter(|reason| matches!(reason, PositRejectReason::AlreadyGenerating))
@@ -690,35 +693,35 @@ mod tests {
         ];
         let mut counter = SinglePositCounter::new(me, &participants);
 
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 0);
+        assert_eq!(counter.num_peers_already_generating(), 0);
 
         counter.process_action(
             Participant::from(1),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 1);
+        assert_eq!(counter.num_peers_already_generating(), 1);
 
         counter.process_action(
             Participant::from(3),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+        assert_eq!(counter.num_peers_already_generating(), 2);
 
         // Other reject reasons are not counted.
         counter.process_action(
             Participant::from(2),
             &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
         );
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+        assert_eq!(counter.num_peers_already_generating(), 2);
 
         counter.process_action(Participant::from(3), &PositAction::Accept);
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+        assert_eq!(counter.num_peers_already_generating(), 2);
 
         // Reject from the same peer is not counted again.
         counter.process_action(
             Participant::from(1),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+        assert_eq!(counter.num_peers_already_generating(), 2);
     }
 }

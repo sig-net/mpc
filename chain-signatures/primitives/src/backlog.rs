@@ -51,6 +51,15 @@ pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<PendingTx>,
+    /// Commitment to each pending request's checkpoint-consensus status.
+    ///
+    /// This is computed by hashing each request's checkpoint-consensus status
+    /// in the same sorted order as `pending_requests`. It lets the checkpoint
+    /// digest commit to cross-node request progress without hashing
+    /// `transaction`, which is the full recovery payload and may include
+    /// node-local fields.
+    #[serde(default, with = "serde_bytes")]
+    pub cumulative_digest: [u8; 32],
 }
 
 impl Checkpoint {
@@ -59,7 +68,12 @@ impl Checkpoint {
             chain,
             block_height: 0,
             pending_requests: Vec::new(),
+            cumulative_digest: Self::empty_cumulative_digest(),
         }
+    }
+
+    pub fn empty_cumulative_digest() -> [u8; 32] {
+        sha3::Sha3_256::new().finalize().into()
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -68,8 +82,8 @@ impl Checkpoint {
         hasher.update(self.block_height.to_le_bytes());
         for pending in &self.pending_requests {
             hasher.update(pending.sign_id.request_id);
-            hasher.update(&pending.transaction);
         }
+        hasher.update(self.cumulative_digest);
         hasher.finalize().into()
     }
 }
@@ -133,7 +147,14 @@ impl ConsensusCheckpointDigest {
     }
 
     pub fn sign_id(&self) -> SignId {
-        SignId::from_checkpoint(self.chain, self.height, &self.sign_payload_hash())
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(b"checkpoint");
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.height.to_le_bytes());
+        hasher.update(self.sign_payload_hash());
+        hasher.update(crate::LATEST_MPC_KEY_VERSION.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
+        SignId::new(request_id)
     }
 }
 

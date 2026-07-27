@@ -8,7 +8,7 @@ default:
 # Build WASM contract + local mpc-node binary
 # Pass helios=1 to enable Helios: just setup helios=1
 setup helios="":
-    {{ if helios != "" { "MPC_ENABLE_HELIOS=1 ../setup.sh" } else { "../setup.sh" } }}
+    {{ if helios != "" { "MPC_ENABLE_HELIOS=1 ./setup.sh" } else { "./setup.sh" } }}
 alias s := setup
 
 # Run all integration tests

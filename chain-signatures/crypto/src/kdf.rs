@@ -1,93 +1,34 @@
-use crate::types::{Address, KeyVersion, Path, Purpose};
-use crate::{PublicKey, ScalarExt};
+use crate::types::KeyVersion;
+use crate::PublicKey;
 use anyhow::Context;
 use k256::{
-    ecdsa::{RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
+    ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
+    elliptic_curve::{
+        point::{AffineCoordinates, DecompressPoint},
+        sec1::ToEncodedPoint,
+        CurveArithmetic,
+    },
     Scalar, Secp256k1, SecretKey,
 };
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
-use sha3::{Digest, Keccak256, Sha3_256};
 
-// Constant prefix that ensures epsilon derivation values are used specifically for
-// Sig.Network with key derivation protocol vX.Y.Z.
-const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
-const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
+// `ScalarExt` and `Sha3_256` are used only by `derive_delta`, which is
+// excluded from the wasm contract build; gate the imports to match so the
+// wasm build has no unused imports (CI compiles with `-D warnings`).
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ScalarExt;
+#[cfg(not(target_arch = "wasm32"))]
+use sha3::Sha3_256;
 
-const CHECKPOINT_SENDER: &str = "checkpoint|sender";
-
-pub enum DerivationParams {
-    /// Account owned by a user on a specific chain.
-    UserAccount(KeyVersion, Chain, Address, Path),
-    /// Account owned by MPC system on a specific chain.
-    SystemAccount(KeyVersion, Chain, Path),
-    /// Key used for system purposes.
-    SystemKey(Purpose),
-    /// Checkpoint for consensus of a given chain and block height.
-    ConsensusCheckpoint(Chain, u64),
-}
-
-impl DerivationParams {
-    pub fn derivation_path(&self) -> String {
-        match self {
-            DerivationParams::UserAccount(key_version, chain, owner, path) => match key_version {
-                0 => deprecated_derivation_path(*chain, owner, path),
-                _ => caip2_derivation_path(*chain, owner, path),
-            },
-            DerivationParams::SystemAccount(key_version, chain, path) => {
-                let sender = "%admin#";
-                match key_version {
-                    0 => deprecated_derivation_path(*chain, sender, path),
-                    _ => caip2_derivation_path(*chain, sender, path),
-                }
-            }
-            DerivationParams::SystemKey(purpose) => {
-                // key version and other parameters are not relevant for system keys
-                format!("{EPSILON_DERIVATION_PREFIX_V2}:system_key:{purpose}")
-            }
-            DerivationParams::ConsensusCheckpoint(chain, height) => {
-                caip2_derivation_path(*chain, CHECKPOINT_SENDER, &height.to_string())
-            }
-        }
-    }
-}
-
-/// Creates a derivation path string using the legacy format
-fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
-    let chain_id = chain.deprecated_chain_id();
-    format!("{EPSILON_DERIVATION_PREFIX_V1},{chain_id},{sender},{path}")
-}
-
-/// Creates a derivation path string using the extended with prefix CAIP-2 format
-fn caip2_derivation_path(chain: Chain, sender: &str, derivation_path: &str) -> String {
-    let chain_id = chain.caip2_chain_id();
-    format!("{EPSILON_DERIVATION_PREFIX_V2}:{chain_id}:{sender}:{derivation_path}")
-}
-
-fn sha3(derivation_path: impl AsRef<[u8]>) -> Scalar {
-    let mut hasher = Sha3_256::new();
-    hasher.update(derivation_path);
-    let hash: [u8; 32] = hasher.finalize().into();
-    Scalar::from_non_biased(hash)
-}
-
-fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
-    let mut hasher = Keccak256::new();
-    hasher.update(derivation_path);
-    let hash: [u8; 32] = hasher.finalize().into();
-    Scalar::from_non_biased(hash)
-}
-
-pub fn derive_epsilon(params: &DerivationParams) -> Scalar {
-    let derivation_path = params.derivation_path();
-    match params {
-        DerivationParams::UserAccount(_, Chain::NEAR, _, _)
-        | DerivationParams::SystemAccount(_, Chain::NEAR, _)
-        | DerivationParams::ConsensusCheckpoint(_, _) => sha3(derivation_path),
-        _ => keccak(derivation_path),
-    }
-}
+// Epsilon derivation and derived-key computation now live in the publishable
+// `signet-crypto` kernel; re-exported here so node paths (`mpc_crypto::kdf::…`,
+// `mpc_crypto::…`) keep resolving unchanged.
+pub use signet_crypto::{
+    derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
+    derive_epsilon_hydration, derive_epsilon_sol, derive_key, DerivationParams,
+    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+};
 
 pub fn derive_epsilon_checkpoint(chain: Chain, height: u64) -> Scalar {
     derive_epsilon(&DerivationParams::ConsensusCheckpoint(chain, height))
@@ -100,55 +41,6 @@ pub fn derive_epsilon_near(key_version: KeyVersion, account_id: &AccountId, path
         account_id.to_string(),
         path.to_string(),
     ))
-}
-
-pub fn derive_epsilon_eth(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Ethereum,
-        address.to_string(),
-        path.to_string(),
-    ))
-}
-
-pub fn derive_epsilon_sol(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Solana,
-        address.to_string(),
-        path.to_string(),
-    ))
-}
-
-pub fn derive_epsilon_canton(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Canton,
-        address.to_string(),
-        path.to_string(),
-    ))
-}
-
-pub fn derive_epsilon_hydration(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Hydration,
-        address.to_string(),
-        path.to_string(),
-    ))
-}
-
-pub fn derive_epsilon_bitcoin(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
-    derive_epsilon(&DerivationParams::UserAccount(
-        key_version,
-        Chain::Bitcoin,
-        address.to_string(),
-        path.to_string(),
-    ))
-}
-
-pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
-    (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
 
 pub fn derive_secret_key(secret_key: &SecretKey, epsilon: Scalar) -> SecretKey {
@@ -232,209 +124,105 @@ pub fn recover(
     .context("Failed to parse returned key")
 }
 
+/// Reconstructs a signature from its components and verifies that it matches the expected public key.
+pub fn reconstruct_signature(
+    public_key: &k256::AffinePoint,
+    big_r: &k256::AffinePoint,
+    s: &k256::Scalar,
+    msg_hash: Scalar,
+) -> anyhow::Result<MpcSignature> {
+    let public_key = public_key.to_encoded_point(false);
+    let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
+        .context("cannot create signature from cait_sith signature")?;
+    let pk0 = recover(
+        &msg_hash.to_bytes()[..],
+        &signature,
+        RecoveryId::try_from(0).context("cannot create recovery_id=0")?,
+    )
+    .context("unable to use 0 as recovery_id to recover public key")?
+    .to_encoded_point(false);
+    if public_key == pk0 {
+        return Ok(MpcSignature::new(*big_r, *s, 0));
+    }
+
+    let pk1 = recover(
+        &msg_hash.to_bytes()[..],
+        &signature,
+        RecoveryId::try_from(1).context("cannot create recovery_id=1")?,
+    )
+    .context("unable to use 1 as recovery_id to recover public key")?
+    .to_encoded_point(false);
+    if public_key == pk1 {
+        return Ok(MpcSignature::new(*big_r, *s, 1));
+    }
+
+    anyhow::bail!("cannot use either recovery id (0 or 1) to recover pubic key")
+}
+
+/// Generates a signature for the given payload using the provided root secret key and sign arguments.
+pub fn generate_signature(
+    root_sk: &k256::SecretKey,
+    args: &mpc_primitives::SignArgs,
+) -> MpcSignature {
+    let derived_secret_key = derive_secret_key(root_sk, args.epsilon);
+    let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
+    let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
+        .sign_prehash(&args.payload.to_bytes())
+        .expect("signing should succeed");
+    let (r_bytes, _) = ecdsa_sig.split_bytes();
+    let big_r =
+        k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+            .unwrap();
+    let s = *ecdsa_sig.s().as_ref();
+    let expected_public_key = derive_key(root_sk.public_key().into(), args.epsilon);
+
+    reconstruct_signature(&expected_public_key, &big_r, &s, args.payload)
+        .expect("signature should validate")
+}
+
+/// Derives the delta tweak used to randomize a presignature for a specific request.
+///
+/// Only used off-chain by the node, so it (and its `hkdf`/`near-primitives`
+/// dependencies) is excluded from the wasm contract build.
+///
+/// In case there are multiple requests in the same block (hence same entropy), we need to ensure
+/// that we generate different random scalars as delta tweaks.
+/// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn derive_delta(
+    request_id: [u8; 32],
+    entropy: [u8; 32],
+    presignature_big_r: k256::AffinePoint,
+) -> Scalar {
+    use hkdf::Hkdf;
+    use near_primitives::hash::CryptoHash;
+
+    // Constant prefix that ensures delta derivation values are used specifically for
+    // near-mpc-recovery with key derivation protocol vX.Y.Z.
+    const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
+
+    let hk = Hkdf::<Sha3_256>::new(None, &entropy);
+    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
+    let mut okm = [0u8; 32];
+    // Both the request identifier (`info`) and the presignature's `big_r` must feed the
+    // derivation. A single `expand` per input would overwrite the buffer each time, so we
+    // pass them together via `expand_multi_info`, which concatenates them into one HKDF call.
+    hk.expand_multi_info(
+        &[
+            info.as_bytes(),
+            presignature_big_r.to_encoded_point(true).as_bytes(),
+        ],
+        &mut okm,
+    )
+    .unwrap();
+    Scalar::from_non_biased(okm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
     use std::str::FromStr;
-
-    #[test]
-    fn test_derivation_path_stays_the_same() {
-        assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v1.0.0 epsilon derivation,0x1,sender,path"
-        );
-        assert_eq!(
-            DerivationParams::UserAccount(
-                1,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:eip155:1:sender:path"
-        );
-
-        assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v1.0.0 epsilon derivation,0x800001f5,sender,path"
-        );
-        assert_eq!(
-            DerivationParams::UserAccount(1, Chain::Solana, "sender".to_string(), "path".to_string())
-                .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:sender:path"
-        );
-
-        assert_eq!(
-            DerivationParams::UserAccount(0, Chain::NEAR, "sender".to_string(), "path".to_string())
-                .derivation_path(),
-            "sig.network v1.0.0 epsilon derivation,0x18d,sender,path"
-        );
-
-        assert_eq!(
-            DerivationParams::UserAccount(1, Chain::NEAR, "sender".to_string(), "path".to_string())
-                .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:near:mainnet:sender:path"
-        );
-
-        assert_eq!(
-            DerivationParams::UserAccount(0, Chain::Bitcoin, "sender".to_string(), "path".to_string())
-                .derivation_path(),
-            "sig.network v1.0.0 epsilon derivation,bip122:000000000019d6689c085ae165831e93,sender,path"
-        );
-        assert_eq!(
-            DerivationParams::UserAccount(1, Chain::Bitcoin, "sender".to_string(), "path".to_string())
-                .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:bip122:000000000019d6689c085ae165831e93:sender:path"
-        );
-
-        assert_eq!(
-            DerivationParams::UserAccount(
-                0,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v1.0.0 epsilon derivation,canton:global,sender,path"
-        );
-        assert_eq!(
-            DerivationParams::UserAccount(
-                1,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:canton:global:sender:path"
-        );
-
-        assert_eq!(
-            DerivationParams::SystemAccount(1, Chain::Ethereum, "path".to_string())
-                .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:eip155:1:%admin#:path"
-        );
-    }
-
-    #[test]
-    fn test_derive_epsilon_stays_the_same() {
-        use crate::ScalarExt;
-
-        // Expected scalar values for Ethereum epsilon derivation
-        let expected_eth_v0 = Scalar::from_bytes([
-            0x8F, 0x2A, 0x2D, 0xCC, 0x32, 0xB3, 0x35, 0xE1, 0x21, 0x40, 0x4D, 0xE8, 0x43, 0x6E,
-            0xD8, 0x95, 0x83, 0xD5, 0xA6, 0x39, 0x70, 0xA6, 0x1A, 0x23, 0xD9, 0x78, 0xAC, 0x12,
-            0x5B, 0xF2, 0x00, 0x69,
-        ])
-        .unwrap();
-
-        let expected_eth_v1 = Scalar::from_bytes([
-            0x51, 0x8D, 0x99, 0xF3, 0x4A, 0x18, 0x27, 0xA5, 0x9E, 0xD2, 0xA8, 0xC6, 0xB7, 0x00,
-            0x3C, 0xF4, 0x24, 0x6C, 0x6E, 0xCA, 0x82, 0xE8, 0x4B, 0xFB, 0x40, 0xC4, 0x7D, 0xD8,
-            0xD1, 0xA1, 0xD4, 0x2F,
-        ])
-        .unwrap();
-
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                0,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_eth_v0
-        );
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                1,
-                Chain::Ethereum,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_eth_v1
-        );
-
-        // Expected scalar values for Solana epsilon derivation
-        let expected_sol_v0 = Scalar::from_bytes([
-            0x61, 0xDD, 0xCA, 0xFF, 0x12, 0xF1, 0x29, 0xBB, 0x47, 0x3C, 0xFB, 0x26, 0x8A, 0x01,
-            0x9C, 0x7D, 0x2F, 0xDD, 0xF2, 0x65, 0xF1, 0xD9, 0x5A, 0xC5, 0xAD, 0x65, 0x4E, 0x27,
-            0x9B, 0xA3, 0x39, 0x92,
-        ])
-        .unwrap();
-
-        let expected_sol_v1 = Scalar::from_bytes([
-            0xF1, 0x83, 0x50, 0x69, 0xD5, 0x52, 0x22, 0xD0, 0x08, 0xB3, 0x07, 0x39, 0x81, 0x98,
-            0x85, 0x00, 0xAB, 0x7C, 0xE2, 0x96, 0x88, 0x43, 0xE7, 0x1A, 0xD9, 0x38, 0x8B, 0xF8,
-            0xFA, 0x93, 0xFF, 0x9E,
-        ])
-        .unwrap();
-
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                0,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_sol_v0
-        );
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                1,
-                Chain::Solana,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_sol_v1
-        );
-
-        // Expected scalar values for NEAR epsilon derivation
-        let expected_near_v0 = Scalar::from_bytes([
-            0x0E, 0x32, 0x6D, 0x79, 0x76, 0x3A, 0xEE, 0xC1, 0x9F, 0x16, 0x6A, 0xE1, 0xC4, 0x6B,
-            0x08, 0x65, 0x29, 0xC9, 0x40, 0x21, 0xC3, 0x6E, 0xD6, 0xFF, 0x4C, 0xF2, 0x2C, 0xD7,
-            0xF4, 0xE6, 0x5A, 0x97,
-        ])
-        .unwrap();
-
-        let expected_near_v1 = Scalar::from_bytes([
-            0xFD, 0xFD, 0xB2, 0x01, 0x7F, 0x43, 0xB6, 0x8B, 0x2C, 0xC9, 0x8F, 0x6B, 0x4F, 0x87,
-            0x55, 0x4C, 0xE3, 0x2C, 0xC7, 0x13, 0xE5, 0xC3, 0xFF, 0x33, 0x70, 0x34, 0x93, 0x94,
-            0xD9, 0xF7, 0x1E, 0x4B,
-        ])
-        .unwrap();
-
-        // Test NEAR epsilon derivation
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                0,
-                Chain::NEAR,
-                "sender.near".to_string(),
-                "path".to_string()
-            )),
-            expected_near_v0
-        );
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                1,
-                Chain::NEAR,
-                "sender.near".to_string(),
-                "path".to_string()
-            )),
-            expected_near_v1
-        );
-    }
 
     #[test]
     fn test_derive_key_stays_the_same() {
@@ -489,51 +277,6 @@ mod tests {
         assert_eq!(derived_secret_key.to_bytes().as_slice(), &expected_bytes);
     }
 
-    #[test]
-    fn test_derive_epsilon_canton_stays_the_same() {
-        let expected_canton_v0 = Scalar::from_bytes([
-            0xA4, 0xCF, 0xD1, 0x98, 0x07, 0xD1, 0x96, 0x8D, 0xAA, 0xDA, 0x88, 0xB5, 0xB8, 0x12,
-            0xAD, 0x61, 0xC6, 0x24, 0x08, 0xB4, 0x84, 0xB5, 0x51, 0xFC, 0x37, 0x30, 0x34, 0x51,
-            0x03, 0x14, 0x61, 0x4C,
-        ])
-        .unwrap();
-
-        let expected_canton_v1 = Scalar::from_bytes([
-            0x49, 0x05, 0x93, 0xA1, 0x00, 0xEA, 0xE1, 0x26, 0x98, 0x8F, 0x3B, 0xA4, 0xEC, 0x3A,
-            0xBD, 0x75, 0x4C, 0xD2, 0x4C, 0xD9, 0xA6, 0x6B, 0x14, 0x71, 0x27, 0x6A, 0x1B, 0xC3,
-            0xE3, 0x10, 0xCA, 0xBD,
-        ])
-        .unwrap();
-
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                0,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_canton_v0
-        );
-        assert_eq!(
-            derive_epsilon(&DerivationParams::UserAccount(
-                1,
-                Chain::Canton,
-                "sender".to_string(),
-                "path".to_string()
-            )),
-            expected_canton_v1
-        );
-    }
-
-    #[test]
-    fn test_derive_epsilon_checkpoint() {
-        let p = DerivationParams::SystemKey("checkpoint".to_string()).derivation_path();
-        assert_eq!(
-            p,
-            "sig.network v2.0.0 epsilon derivation:system_key:checkpoint"
-        );
-    }
-
     // This logic is used to determine MPC PK (address) that is set as admin in Ethereum contract
     #[test]
     fn derive_ethereum_admin_key() {
@@ -565,5 +308,230 @@ mod tests {
                 .unwrap();
 
         assert_eq!(address, expected_address);
+    }
+
+    #[test]
+    fn test_reconstruct_signature_success() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // Generate a valid signature
+        let (ecdsa_sig, expected_rec_id): (k256::ecdsa::Signature, _) =
+            k256::ecdsa::SigningKey::from(&sk)
+                .sign_prehash(&msg_hash.to_bytes())
+                .unwrap();
+
+        // Extract components
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        let mpc_sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+        assert_eq!(mpc_sig.big_r, big_r);
+        assert_eq!(mpc_sig.s, s);
+        assert_eq!(mpc_sig.recovery_id, expected_rec_id.to_byte());
+    }
+
+    #[test]
+    fn test_reconstruct_signature_wrong_public_key() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        // Generate a different secret key to simulate a wrong public key
+        let wrong_sk = SecretKey::from_bytes((&[0x99; 32]).into()).unwrap();
+        let wrong_public_key: k256::AffinePoint = wrong_sk.public_key().into();
+
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // Generate a valid signature with the original secret key
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
+
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        // Attempt to create an MPC signature with the wrong public key
+        let err = reconstruct_signature(&wrong_public_key, &big_r, &s, msg_hash).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot use either recovery id (0 or 1) to recover pubic key"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_signature_wrong_payload() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+        // Use a different message hash to simulate a wrong payload
+        let wrong_msg_hash = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
+
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        // Attempt to create an MPC signature with the wrong message hash
+        let err = reconstruct_signature(&public_key, &big_r, &s, wrong_msg_hash).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot use either recovery id (0 or 1) to recover pubic key"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_signature_invalid_s_scalar() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // use the public key as a dummy point for big_r
+        let dummy_big_r = public_key;
+        let invalid_s = Scalar::ZERO; // 0 is always an invalid 's' in ECDSA
+
+        // Attempt to create an MPC signature with an invalid 's' scalar
+        let err =
+            reconstruct_signature(&public_key, &dummy_big_r, &invalid_s, msg_hash).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot create signature from cait_sith signature"));
+    }
+
+    #[test]
+    fn test_generate_signature_produces_verifiable_signature() {
+        let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let root_public_key: PublicKey = root_sk.public_key().into();
+
+        let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
+        let payload = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let args = mpc_primitives::SignArgs {
+            entropy: [0x44; 32],
+            epsilon,
+            payload,
+            path: "test/path".to_string(),
+            key_version: 0,
+        };
+
+        let mpc_sig = generate_signature(&root_sk, &args);
+
+        // Verify the produced signature is mathematically correct against the derived public key
+        let is_valid = verify_signature(root_public_key, epsilon, payload, &mpc_sig);
+        assert!(
+            is_valid.is_ok(),
+            "generate_signature should produce a mathematically valid signature"
+        );
+    }
+
+    // Within a single block every request shares the same entropy, so `derive_delta`
+    // must rely on the unique per-request `request_id` to produce distinct deltas.
+    // Otherwise all presignatures in that block would be tweaked identically.
+    #[test]
+    fn test_derive_delta_differs_by_request_id_within_same_block() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        // Same block => same entropy and same presignature `big_r`.
+        let entropy = [0x44; 32];
+
+        let delta_a = derive_delta([0x01; 32], entropy, big_r);
+        let delta_b = derive_delta([0x02; 32], entropy, big_r);
+
+        assert_ne!(
+            delta_a, delta_b,
+            "distinct request_ids must yield distinct deltas even with identical entropy and big_r"
+        );
+
+        // Sanity: derivation is deterministic for identical inputs.
+        assert_eq!(delta_a, derive_delta([0x01; 32], entropy, big_r));
+    }
+
+    #[test]
+    fn test_derive_delta_stays_the_same() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let delta = derive_delta([0x01; 32], [0x44; 32], big_r);
+
+        let expected = [
+            201, 189, 221, 160, 229, 175, 219, 17, 168, 142, 248, 183, 27, 177, 126, 76, 212, 79,
+            213, 149, 121, 44, 193, 110, 192, 228, 97, 9, 64, 180, 196, 28,
+        ];
+        assert_eq!(delta.to_bytes().as_slice(), &expected);
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_big_r() {
+        let big_r_a: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+        let big_r_b: k256::AffinePoint = SecretKey::from_bytes((&[0x22; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+        let entropy = [0x44; 32];
+
+        assert_ne!(
+            derive_delta(request_id, entropy, big_r_a),
+            derive_delta(request_id, entropy, big_r_b),
+            "distinct presignature big_r must yield distinct deltas"
+        );
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_entropy() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+
+        assert_ne!(
+            derive_delta(request_id, [0x44; 32], big_r),
+            derive_delta(request_id, [0x55; 32], big_r),
+            "distinct entropy must yield distinct deltas"
+        );
+    }
+
+    #[test]
+    fn test_generate_signature_is_deterministic() {
+        let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
+        let payload = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let args = mpc_primitives::SignArgs {
+            entropy: [0x44; 32],
+            epsilon,
+            payload,
+            path: "test/path".to_string(),
+            key_version: 0,
+        };
+
+        // ECDSA signatures with the same key and payload should be completely deterministic.
+        let sig1 = generate_signature(&root_sk, &args);
+        let sig2 = generate_signature(&root_sk, &args);
+
+        assert_eq!(sig1.big_r, sig2.big_r);
+        assert_eq!(sig1.s, sig2.s);
+        assert_eq!(sig1.recovery_id, sig2.recovery_id);
     }
 }

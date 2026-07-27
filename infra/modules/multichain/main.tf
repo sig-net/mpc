@@ -124,7 +124,7 @@ resource "google_cloud_run_v2_service" "node" {
       }
       env {
         name  = "RUST_LOG"
-        value = "mpc_node=debug"
+        value = "mpc=debug"
       }
 
       ports {

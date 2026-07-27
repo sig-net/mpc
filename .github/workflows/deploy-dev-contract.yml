@@ -5,6 +5,8 @@ on:
     types: [closed]
     branches:
       - develop
+    paths:
+      - 'chain-signatures/contract/**'
 
 jobs:
   deploy-contract:

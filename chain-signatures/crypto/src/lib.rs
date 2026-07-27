@@ -6,7 +6,7 @@ use k256::EncodedPoint;
 pub use kdf::{
     check_ec_signature, derive_epsilon_canton, derive_epsilon_checkpoint, derive_epsilon_eth,
     derive_epsilon_hydration, derive_epsilon_near, derive_epsilon_sol, derive_key,
-    verify_signature, x_coordinate,
+    generate_signature, reconstruct_signature, verify_signature, x_coordinate,
 };
 pub use mpc_primitives::{PublicKey, ScalarExt};
 
