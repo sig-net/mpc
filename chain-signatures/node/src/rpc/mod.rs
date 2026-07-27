@@ -425,8 +425,11 @@ impl RpcExecutor {
             let publisher = publisher.clone();
             let in_flight = in_flight.clone();
             tokio::spawn(async move {
+                let _guard = InFlightGuard {
+                    in_flight,
+                    id: sign_id,
+                };
                 execute_publish(publisher, action).await;
-                in_flight.remove(&sign_id);
             });
         }
     }
@@ -497,6 +500,19 @@ async fn update_contract_data(
                 true
             });
         }
+    }
+}
+
+/// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
+/// including during a panic unwind, so the slot is always freed for re-publish.
+struct InFlightGuard {
+    in_flight: Arc<DashSet<SignId>>,
+    id: SignId,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.remove(&self.id);
     }
 }
 
