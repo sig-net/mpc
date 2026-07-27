@@ -391,9 +391,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
-        Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
-            sender,
-        )),
+        Chain::Hydration => Ok(mpc_chain_hydration::ss58_address_from_account32(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }

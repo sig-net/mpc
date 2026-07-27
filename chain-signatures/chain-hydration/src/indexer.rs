@@ -1,26 +1,17 @@
-mod config;
-
-use crate::backlog::Backlog;
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
-use crate::rpc::ContractStateWatcher;
-use crate::stream::StreamContext;
-use crate::types::CheckpointWatcher;
-
-pub use config::HydrationConfig;
+use super::HydrationConfig;
 
 use alloy_sol_types::SolValue;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::{
     utils::hashing::{compute_request_id, hash_payload},
-    ChainTelemetry,
+    ChainIndexer, ChainTelemetry,
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent,
-    SignCommand, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
+    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
@@ -36,7 +27,7 @@ use subxt::events::EventDetails;
 use subxt::ext::scale_value::{Composite, Value, ValueDef};
 use subxt::{client::OnlineClient, SubstrateConfig};
 use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HydrationSignatureRequestedEvent {
@@ -109,12 +100,8 @@ impl HydrationSignatureRequestedEvent {
                 key_version: self.key_version,
             },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
         ))
-    }
-
-    pub fn source_chain(&self) -> Chain {
-        Chain::Hydration
     }
 
     pub fn sender_string(&self) -> String {
@@ -235,7 +222,7 @@ impl HydrationSignBidirectionalRequestedEvent {
                 key_version: self.key_version,
             },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
             SignBidirectionalEvent {
                 sender: self.sender,
                 serialized_transaction: self.serialized_transaction.clone(),
@@ -252,10 +239,6 @@ impl HydrationSignBidirectionalRequestedEvent {
                 chain_ctx: None,
             },
         ))
-    }
-
-    pub fn source_chain(&self) -> Chain {
-        Chain::Hydration
     }
 
     pub fn sender_string(&self) -> String {
@@ -307,373 +290,345 @@ async fn fetch_proven_system_events_bytes(
     Ok(events_bytes)
 }
 
-pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
+pub fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     let acc = SpAccountId32::from(sender);
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run<T: ChainTelemetry>(
-    hydration: HydrationConfig,
-    sign_tx: mpsc::Sender<SignCommand>,
-    backlog: Backlog,
-    telemetry: T,
-    mut contract_watcher: ContractStateWatcher,
-    mut mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
-    mut checkpoints_rx: CheckpointWatcher,
-) {
-    let threshold = contract_watcher.wait_threshold().await;
-    crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
-
-    // Load local checkpoint from storage first
-    match backlog.storage.load_latest(Chain::Hydration).await {
-        Ok(Some(checkpoint)) => {
-            tracing::info!(
-                chain = ?Chain::Hydration,
-                height = checkpoint.block_height,
-                "loaded local checkpoint"
-            );
-            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                tracing::warn!(chain = ?Chain::Hydration, %err, "failed to recover from local checkpoint");
-            }
-        }
-        Ok(None) => {
-            tracing::info!(chain = ?Chain::Hydration, "no local checkpoint found");
-        }
-        Err(err) => {
-            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load local checkpoint");
-        }
-    }
-
-    // Align with consensus
-    crate::backlog::consensus::align_backlog_with_consensus(
-        Chain::Hydration,
-        &backlog,
-        &mut checkpoints_rx,
-        &mut mesh_state,
-        &node_client,
-        contract_watcher.account_id(),
-    )
-    .await;
-
-    let root_pk = contract_watcher.wait_public_key().await;
-
-    // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)
-    let ctx = {
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let rpc = crate::rpc::RpcChannel { tx: rpc_tx };
-        let mut ctx = StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc,
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx.clone(),
-        );
-        ctx.caught_up = true;
-        ctx
-    };
-
-    let ws_url: &str = hydration.rpc_ws_url.as_str();
-    const RECONNECT_DELAY: Duration = Duration::from_secs(5);
-    const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-    const STALL_TIMEOUT: Duration = Duration::from_secs(60);
-    let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
-
-    loop {
-        if let Some(handle) = runtime_updater_handle.take() {
-            handle.abort();
-        }
-
-        tracing::info!("connecting to hydration rpc at {ws_url}");
-
-        let hydration_api = match tokio::time::timeout(
-            CONNECTION_TIMEOUT,
-            OnlineClient::<SubstrateConfig>::from_url(ws_url),
-        )
-        .await
-        {
-            Ok(Ok(api)) => api,
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "failed to connect to hydration rpc: {e}; retrying in {RECONNECT_DELAY:?}"
-                );
-                tokio::time::sleep(RECONNECT_DELAY).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::error!(
-                    "timed out connecting to hydration rpc after {CONNECTION_TIMEOUT:?}; retrying"
-                );
-                continue;
-            }
-        };
-
-        let rpc_client = match tokio::time::timeout(CONNECTION_TIMEOUT, RpcClient::from_url(ws_url))
-            .await
-        {
-            Ok(Ok(client)) => client,
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "failed to connect to hydration rpc client: {e}; retrying in {RECONNECT_DELAY:?}"
-                );
-                tokio::time::sleep(RECONNECT_DELAY).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::error!(
-                    "timed out connecting to hydration rpc client after {CONNECTION_TIMEOUT:?}; retrying"
-                );
-                continue;
-            }
-        };
-        let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
-
-        let mut blocks = match tokio::time::timeout(
-            CONNECTION_TIMEOUT,
-            hydration_api.blocks().subscribe_finalized(),
-        )
-        .await
-        {
-            Ok(Ok(blocks)) => blocks,
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "failed to subscribe to finalized blocks: {e}; retrying in {RECONNECT_DELAY:?}"
-                );
-                tokio::time::sleep(RECONNECT_DELAY).await;
-                continue;
-            }
-            Err(_) => {
-                tracing::error!(
-                    "timed out subscribing to finalized blocks after {CONNECTION_TIMEOUT:?}; retrying"
-                );
-                continue;
-            }
-        };
-
-        runtime_updater_handle = Some(spawn_runtime_updater(hydration_api.clone()));
-
-        let mut last_block_time = std::time::Instant::now();
-        let mut watchdog = tokio::time::interval(Duration::from_secs(5));
-
-        loop {
-            let block_res = tokio::select! {
-                maybe = blocks.next() => {
-                    match maybe {
-                        Some(block_res) => block_res,
-                        None => {
-                            tracing::warn!("hydration block stream ended; reconnecting");
-                            break;
-                        }
-                    }
-                }
-                _ = watchdog.tick() => {
-                    if last_block_time.elapsed() > STALL_TIMEOUT {
-                        tracing::warn!(
-                            "hydration block subscription stalled: no block for {STALL_TIMEOUT:?}; reconnecting"
-                        );
-                        break;
-                    }
-                    continue;
-                }
-            };
-            let block = match block_res {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::warn!("failed to get block: {e}; reconnecting");
-                    break;
-                }
-            };
-            last_block_time = std::time::Instant::now();
-            let number = block.number();
-            let hash = block.hash();
-            let header = block.header().clone();
-            tracing::info!(
-                "received block from hydration rpc: block number {number}, hash {hash:?}"
-            );
-
-            let state_root: H256 = header.state_root;
-
-            let events = match block.events().await {
-                Ok(events) => events,
-                Err(e) => {
-                    tracing::error!("failed to get events: {e}");
-                    continue;
-                }
-            };
-            let events_bytes_unproven = events.bytes().to_vec();
-
-            let events_bytes_proven =
-                match fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await {
-                    Ok(events_bytes_proven) => events_bytes_proven,
-                    Err(e) => {
-                        tracing::error!("failed to fetch proven system events bytes: {e}");
-                        continue;
-                    }
-                };
-
-            if events_bytes_unproven != events_bytes_proven {
-                tracing::error!(
-                    "Mismatch between RPC events and Merkle‑proven System::Events \
-                     in block #{number} ({hash:?})"
-                );
-                continue;
-            }
-
-            let root_pk = contract_watcher.public_key().await.unwrap_or(root_pk);
-
-            for ev in events.iter() {
-                let ev = match ev {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        tracing::error!("failed to get event: {e}");
-                        continue;
-                    }
-                };
-
-                // SignatureRequested
-                if ev.pallet_name() == PALLET_SIGNET
-                    && ev.variant_name() == EVENT_SIGNATURE_REQUESTED
-                {
-                    let event = match decode_signature_requested(&ev) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::error!("failed to decode signature requested event: {e}");
-                            continue;
-                        }
-                    };
-                    tracing::info!(
-                        "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
-                        event
-                    );
-
-                    let entropy = sp_core::hashing::blake2_256(ev.bytes());
-
-                    let Some(sign_request) = event.generate_sign_request(entropy) else {
-                        continue;
-                    };
-
-                    if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
-                    {
-                        tracing::error!("failed to process sign event: {e}");
-                    }
-                }
-                // SignatureResponded
-                if ev.pallet_name() == PALLET_SIGNET
-                    && ev.variant_name() == EVENT_SIGNATURE_RESPONDED
-                {
-                    let event = match decode_signature_responded(&ev) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::error!("failed to decode signature responded event: {e}");
-                            continue;
-                        }
-                    };
-                    tracing::info!(
-                        "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
-                    );
-                    if let Err(e) =
-                        crate::stream::ops::process_respond_event(event, &ctx, root_pk).await
-                    {
-                        tracing::error!("failed to process respond event: {e}");
-                    }
-                }
-
-                // Bidirectional request
-                if ev.pallet_name() == PALLET_SIGNET
-                    && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
-                {
-                    let event = match decode_sign_bidirectional_requested(&ev) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to decode sign bidirectional requested event: {e}"
-                            );
-                            continue;
-                        }
-                    };
-                    tracing::info!(
-                        "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                        event
-                    );
-
-                    let entropy = sp_core::hashing::blake2_256(ev.bytes());
-
-                    let Some(sign_request) = event.generate_sign_request(entropy) else {
-                        continue;
-                    };
-
-                    if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
-                    {
-                        tracing::error!("failed to process sign event: {e}");
-                    }
-                }
-
-                // Bidirectional response
-                if ev.pallet_name() == PALLET_SIGNET
-                    && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
-                {
-                    let fields = match ev.field_values() {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::error!("failed to get fields for respond bidirectional: {e}");
-                            continue;
-                        }
-                    };
-                    let request_id = match get_named_bytes32(&fields, "request_id") {
-                        Ok(id) => id,
-                        Err(e) => {
-                            tracing::error!("failed to get request_id: {e}");
-                            continue;
-                        }
-                    };
-                    let signature = match get_named(&fields, "signature").and_then(parse_signature)
-                    {
-                        Ok(sig) => sig,
-                        Err(e) => {
-                            tracing::error!(?e, "failed to parse signature");
-                            continue;
-                        }
-                    };
-                    tracing::info!(
-                        "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
-                    );
-                    if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                        RespondBidirectionalEvent {
-                            request_id,
-                            signature,
-                            chain: Chain::Hydration,
-                        },
-                        &ctx,
-                        root_pk,
-                    )
-                    .await
-                    {
-                        tracing::error!("failed to process respond bidirectional event: {e}");
-                    }
-                }
-            }
-
-            telemetry.block_indexed(number.into());
-        }
-
-        // TODO: backfill blocks missed during the disconnect window before resuming live streaming.
-        tracing::info!("reconnecting to hydration rpc in {RECONNECT_DELAY:?}");
-        tokio::time::sleep(RECONNECT_DELAY).await;
-    }
+fn current_unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs()
 }
 
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const PALLET_SIGNET: &str = "Signet";
 const EVENT_SIGNATURE_REQUESTED: &str = "SignatureRequested";
 const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
 const EVENT_SIGN_BIDIRECTIONAL_REQUESTED: &str = "SignBidirectionalRequested";
 const EVENT_RESPOND_BIDIRECTIONAL: &str = "RespondBidirectionalEvent";
 
-pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) -> tokio::task::JoinHandle<()> {
+pub struct HydrationIndexer<T: ChainTelemetry> {
+    config: HydrationConfig,
+    telemetry: T,
+}
+
+impl<T: ChainTelemetry> HydrationIndexer<T> {
+    pub fn new(config: HydrationConfig, telemetry: T) -> Self {
+        Self { config, telemetry }
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
+    const CHAIN: Chain = Chain::Hydration;
+
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        // Hydration is live-only: it streams finalized blocks and performs no
+        // catchup/backfill (any gap during a disconnect is a known TODO). Declare
+        // catchup complete immediately so all observed events are forwarded.
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("failed to send hydration catchup completed event")?;
+
+        let ws_url: &str = self.config.rpc_ws_url.as_str();
+        let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            if let Some(handle) = runtime_updater_handle.take() {
+                handle.abort();
+            }
+
+            tracing::info!("connecting to hydration rpc at {ws_url}");
+
+            let hydration_api = match tokio::time::timeout(
+                CONNECTION_TIMEOUT,
+                OnlineClient::<SubstrateConfig>::from_url(ws_url),
+            )
+            .await
+            {
+                Ok(Ok(api)) => api,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        "failed to connect to hydration rpc: {e}; retrying in {RECONNECT_DELAY:?}"
+                    );
+                    tokio::time::sleep(RECONNECT_DELAY).await;
+                    continue;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "timed out connecting to hydration rpc after {CONNECTION_TIMEOUT:?}; retrying"
+                    );
+                    continue;
+                }
+            };
+
+            let rpc_client = match tokio::time::timeout(
+                CONNECTION_TIMEOUT,
+                RpcClient::from_url(ws_url),
+            )
+            .await
+            {
+                Ok(Ok(client)) => client,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        "failed to connect to hydration rpc client: {e}; retrying in {RECONNECT_DELAY:?}"
+                    );
+                    tokio::time::sleep(RECONNECT_DELAY).await;
+                    continue;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "timed out connecting to hydration rpc client after {CONNECTION_TIMEOUT:?}; retrying"
+                    );
+                    continue;
+                }
+            };
+            let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
+
+            let mut blocks = match tokio::time::timeout(
+                CONNECTION_TIMEOUT,
+                hydration_api.blocks().subscribe_finalized(),
+            )
+            .await
+            {
+                Ok(Ok(blocks)) => blocks,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        "failed to subscribe to finalized blocks: {e}; retrying in {RECONNECT_DELAY:?}"
+                    );
+                    tokio::time::sleep(RECONNECT_DELAY).await;
+                    continue;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "timed out subscribing to finalized blocks after {CONNECTION_TIMEOUT:?}; retrying"
+                    );
+                    continue;
+                }
+            };
+
+            runtime_updater_handle = Some(spawn_runtime_updater(hydration_api.clone()));
+
+            let mut last_block_time = std::time::Instant::now();
+            let mut watchdog = tokio::time::interval(Duration::from_secs(5));
+
+            loop {
+                let block_res = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    maybe = blocks.next() => {
+                        match maybe {
+                            Some(block_res) => block_res,
+                            None => {
+                                tracing::warn!("hydration block stream ended; reconnecting");
+                                break;
+                            }
+                        }
+                    }
+                    _ = watchdog.tick() => {
+                        if last_block_time.elapsed() > STALL_TIMEOUT {
+                            tracing::warn!(
+                                "hydration block subscription stalled: no block for {STALL_TIMEOUT:?}; reconnecting"
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let block = match block_res {
+                    Ok(block) => block,
+                    Err(e) => {
+                        tracing::warn!("failed to get block: {e}; reconnecting");
+                        break;
+                    }
+                };
+                last_block_time = std::time::Instant::now();
+                let number = block.number();
+                let hash = block.hash();
+                let header = block.header().clone();
+                tracing::info!(
+                    "received block from hydration rpc: block number {number}, hash {hash:?}"
+                );
+
+                let state_root: H256 = header.state_root;
+
+                let events = match block.events().await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        tracing::error!("failed to get events: {e}");
+                        continue;
+                    }
+                };
+                let events_bytes_unproven = events.bytes().to_vec();
+
+                let events_bytes_proven =
+                    match fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await {
+                        Ok(events_bytes_proven) => events_bytes_proven,
+                        Err(e) => {
+                            tracing::error!("failed to fetch proven system events bytes: {e}");
+                            continue;
+                        }
+                    };
+
+                if events_bytes_unproven != events_bytes_proven {
+                    tracing::error!(
+                        "Mismatch between RPC events and Merkle‑proven System::Events \
+                         in block #{number} ({hash:?})"
+                    );
+                    continue;
+                }
+
+                for ev in events.iter() {
+                    let ev = match ev {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            tracing::error!("failed to get event: {e}");
+                            continue;
+                        }
+                    };
+
+                    // SignatureRequested
+                    if ev.pallet_name() == PALLET_SIGNET
+                        && ev.variant_name() == EVENT_SIGNATURE_REQUESTED
+                    {
+                        let event = match decode_signature_requested(&ev) {
+                            Ok(event) => event,
+                            Err(e) => {
+                                tracing::error!("failed to decode signature requested event: {e}");
+                                continue;
+                            }
+                        };
+                        tracing::info!(
+                            "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
+                            event
+                        );
+
+                        let entropy = sp_core::hashing::blake2_256(ev.bytes());
+
+                        if let Some(sign_request) = event.generate_sign_request(entropy) {
+                            events_tx
+                                .send(ChainEvent::SignRequest {
+                                    request: sign_request,
+                                    block_timestamp: None,
+                                })
+                                .await?;
+                        }
+                    }
+
+                    // SignatureResponded
+                    if ev.pallet_name() == PALLET_SIGNET
+                        && ev.variant_name() == EVENT_SIGNATURE_RESPONDED
+                    {
+                        let event = match decode_signature_responded(&ev) {
+                            Ok(event) => event,
+                            Err(e) => {
+                                tracing::error!("failed to decode signature responded event: {e}");
+                                continue;
+                            }
+                        };
+                        tracing::info!(
+                            "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
+                        );
+                        events_tx.send(ChainEvent::Respond(event)).await?;
+                    }
+
+                    // Bidirectional request
+                    if ev.pallet_name() == PALLET_SIGNET
+                        && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
+                    {
+                        let event = match decode_sign_bidirectional_requested(&ev) {
+                            Ok(event) => event,
+                            Err(e) => {
+                                tracing::error!(
+                                    "failed to decode sign bidirectional requested event: {e}"
+                                );
+                                continue;
+                            }
+                        };
+                        tracing::info!(
+                            "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
+                            event
+                        );
+
+                        let entropy = sp_core::hashing::blake2_256(ev.bytes());
+
+                        if let Some(sign_request) = event.generate_sign_request(entropy) {
+                            events_tx
+                                .send(ChainEvent::SignRequest {
+                                    request: sign_request,
+                                    block_timestamp: None,
+                                })
+                                .await?;
+                        }
+                    }
+
+                    // Bidirectional response
+                    if ev.pallet_name() == PALLET_SIGNET
+                        && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
+                    {
+                        let fields = match ev.field_values() {
+                            Ok(f) => f,
+                            Err(e) => {
+                                tracing::error!(
+                                    "failed to get fields for respond bidirectional: {e}"
+                                );
+                                continue;
+                            }
+                        };
+                        let request_id = match get_named_bytes32(&fields, "request_id") {
+                            Ok(id) => id,
+                            Err(e) => {
+                                tracing::error!("failed to get request_id: {e}");
+                                continue;
+                            }
+                        };
+                        let signature =
+                            match get_named(&fields, "signature").and_then(parse_signature) {
+                                Ok(sig) => sig,
+                                Err(e) => {
+                                    tracing::error!(?e, "failed to parse signature");
+                                    continue;
+                                }
+                            };
+                        tracing::info!(
+                            "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
+                        );
+                        events_tx
+                            .send(ChainEvent::RespondBidirectional(
+                                RespondBidirectionalEvent {
+                                    request_id,
+                                    signature,
+                                    chain: Chain::Hydration,
+                                },
+                            ))
+                            .await?;
+                    }
+                }
+
+                self.telemetry.block_indexed(u64::from(number));
+                events_tx.send(ChainEvent::Block(u64::from(number))).await?;
+            }
+
+            // TODO: backfill blocks missed during the disconnect window before resuming live streaming.
+            tracing::info!("reconnecting to hydration rpc in {RECONNECT_DELAY:?}");
+            tokio::time::sleep(RECONNECT_DELAY).await;
+        }
+    }
+}
+
+fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) -> tokio::task::JoinHandle<()> {
     let updater = api.updater();
     tokio::spawn(async move {
         if let Err(e) = updater.perform_runtime_updates().await {
