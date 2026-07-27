@@ -16,7 +16,7 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 ```bash
 rustup target add wasm32-unknown-unknown
 # Or, if forced by a rust-toolchain file:
-rustup target add wasm32-unknown-unknown --toolchain 1.81.0
+rustup target add wasm32-unknown-unknown --toolchain 1.93.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):
