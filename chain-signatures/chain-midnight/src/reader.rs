@@ -871,6 +871,69 @@ mod tests {
     }
 
     #[test]
+    fn decode_record_reads_the_minimal_record() {
+        // Every scaled vector empty: exactly REQUEST_FIXED_VALUE_ATOMS atoms, so the
+        // word scan and the access-list region are both empty and adjacent. This is the
+        // lower boundary of the capacity walk, and it is the plain-transfer shape, which
+        // is the one a decoder is most likely to mis-split.
+        let mut record = sample_record();
+        record.tx_params.calldata = crate::records::CompactMaybe {
+            is_some: false,
+            value: crate::records::EvmCalldata {
+                selector: [0; 4],
+                no_words: 0,
+                words: Vec::new(),
+            },
+        };
+        record.tx_params.access_list_entry_count = 0;
+        record.tx_params.access_list = Vec::new();
+
+        let cell = cell_from_record(&record);
+        let StateNode::Cell { atoms, .. } = &cell else {
+            panic!("cell_from_record must build a cell")
+        };
+        assert_eq!(
+            atoms.len(),
+            REQUEST_FIXED_VALUE_ATOMS,
+            "the minimal record must sit exactly on the fixed-atom count"
+        );
+        assert_eq!(
+            decode_record(&cell).expect("the minimal record decodes"),
+            record
+        );
+    }
+
+    #[test]
+    fn decode_record_rejects_a_malformed_access_list_region() {
+        // The entry capacity is counted from the Bytes<20> addresses, so a region that
+        // counts cleanly but is laid out wrongly must still die in the per-atom pass
+        // rather than decode into some other record.
+        let record = sample_record_with_partial_access_list();
+        let atoms = atoms_from_record(&record);
+        let mut widths = widths_from_record(&record);
+        // Swap an entry's address and its key count: the region still holds the same
+        // number of Bytes<20> atoms, so the capacity arithmetic is unchanged.
+        //
+        // The SECOND Bytes<20>, deliberately: the first is `to`, which sits in the fixed
+        // head, and perturbing that would prove nothing about the access-list region.
+        let first_entry = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width == 20)
+            .map(|(index, _)| index)
+            .nth(1)
+            .expect("the partial-access-list record has an entry address after `to`");
+        widths.swap(first_entry, first_entry + 1);
+        let err = decode_record(&cell_of(&atoms, &widths))
+            .expect_err("a permuted access-list entry must not decode")
+            .to_string();
+        assert!(
+            err.contains("access list address"),
+            "the refusal must name the field it failed on: {err}"
+        );
+    }
+
+    #[test]
     fn decode_record_rejects_a_width_the_layout_does_not_declare() {
         // The declared width IS the type check. A sender stored in 20 bytes fits a
         // Bytes<20> perfectly well, so nothing about the stored bytes catches this; only
