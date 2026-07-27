@@ -56,18 +56,15 @@ jobs:
       # package's own installed dependencies, and last because everything above
       # is cheaper to fail on.
 
-      # Copied from `unit.yml`, including the version. Note that this installs
-      # 1.81.0 without making it the default (`actions-rs/toolchain` defaults
+      # Copied from `unit.yml`, including the version. Note that this installs the
+      # toolchain without making it the default (`actions-rs/toolchain` defaults
       # `default` and `override` to false), so cargo below runs the runner's own
-      # stable, exactly as every other Rust job in this repo does. Do not
-      # "correct" that to `default: true` without checking the whole workspace
-      # still resolves: `alloy-consensus` pulls `alloy-trie 0.9.1`, which needs
-      # edition2024 and cannot be parsed by cargo 1.81.
-      - name: Install Rust (1.81.0)
+      # stable, exactly as every other Rust job in this repo does.
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
 
       # reqwest reaches OpenSSL through native-tls on Linux; use the system one
       # rather than building it from source
