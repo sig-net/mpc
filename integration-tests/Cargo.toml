@@ -61,7 +61,7 @@ near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.21.1"
+near-jsonrpc-client.workspace = true
 near-primitives.workspace = true
 near-workspaces.workspace = true
 
