@@ -1,16 +1,11 @@
-/**
- * The node client, used by `POST /respond` alone.
- *
- * Two surfaces matter and only one appears in `rpc_methods`: the `midnight_*`
- * JSON-RPC namespace, and `MidnightRuntimeApi`, reached through `state_call`.
- * The zswap chain state and the live ledger parameters exist only on the second.
- */
+// Two surfaces matter and only one appears in `rpc_methods`: the `midnight_*`
+// namespace, and `MidnightRuntimeApi` through `state_call`, which is the only
+// one carrying the zswap chain state and the live ledger parameters.
 
 import { ApiPromise, WsProvider } from "@polkadot/api";
 
 export type NodeClient = ApiPromise;
 
-/** `0x`-prefixed 64-hex, the form every block-hash argument takes. */
 export type BlockHashHex = `0x${string}`;
 
 // Stays `async` so a synchronous `new WsProvider(badUrl)` throw becomes a rejection.
@@ -20,13 +15,8 @@ export async function connect(nodeUrl: string): Promise<NodeClient> {
 
 type RuntimeApiNamespace = Record<string, (...args: readonly unknown[]) => Promise<unknown>>;
 
-/**
- * Undefined when the runtime answered with an error.
- *
- * Addresses MUST be `0x`-prefixed hex. `@polkadot/api` treats a `Uint8Array` as
- * already SCALE-encoded and compact-decodes its head as a length, failing with a
- * message about a length rather than an encoding.
- */
+// Addresses MUST be `0x`-prefixed hex: `@polkadot/api` treats a `Uint8Array` as
+// already SCALE-encoded and fails about a length rather than an encoding.
 export async function runtimeApiBytes(
   client: NodeClient,
   blockHash: BlockHashHex,
@@ -40,7 +30,8 @@ export async function runtimeApiBytes(
   return result.isOk ? result.asOk.toU8a(true) : undefined;
 }
 
-/** Truncates silently; wire input is checked in `server.ts` first. */
+// Truncates silently on anything but bare lowercase hex, which every caller has
+// already rejected: `server.ts` for the decode seams, the schema for respond.
 export function fromHex(hex: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(hex.replace(/^0x/, ""), "hex"));
+  return Uint8Array.from(Buffer.from(hex, "hex"));
 }

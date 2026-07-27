@@ -1,18 +1,10 @@
-/**
- * `POST /respond` orchestration tests, offline.
- *
- * The write path past `bad_request` is covered here without a stack: a stub
- * node client whose runtime API serves captured fixture blobs, and a publisher
- * primed through the test seam from the real compiled-contract assets, real
- * derived keys, and stub proof and wallet edges. The circuit itself really runs
- * (`createUnprovenCallTxFromInitialStates` executes the compact-generated
- * JavaScript against the fixture state), so what these tests prove is the flow:
- * the deadline, the busy gate, error classification, and the success wire
- * shape.
- *
- * Deliberately NOT covered here, and covered by `tests/respond-live.ts`
- * instead: the real wallet facade, real proving, and real submission.
- */
+// `POST /respond` orchestration tests, offline: a stub node client serving
+// captured fixture blobs and a publisher primed through the test seam from the
+// real contract assets and real derived keys. The circuit itself really runs, so
+// what these prove is the flow: deadline, busy gate, classification, wire shape.
+//
+// NOT covered here, and covered by `tests/respond-live.ts` instead: the real
+// wallet facade, real proving, and real submission.
 
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
@@ -47,10 +39,8 @@ import { FIXTURES, listening } from "./support.js";
 
 const MANAGED = fileURLToPath(new URL("../node_modules/@sig-net/midnight-contract/dist/managed/", import.meta.url));
 
-/** The deployed singleton the state fixture was captured from. */
 const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 
-/** The finalized head every stub client pins, bare and `0x`-prefixed. */
 const HEAD_BARE = "ab".repeat(32);
 
 const TEST_CONFIG: Config = {
@@ -64,7 +54,7 @@ const TEST_CONFIG: Config = {
   networkId: "undeployed",
 };
 
-/** A valid `respond` body; the circuit is a blind append, so any 32-byte values do. */
+// The circuit is a blind append, so any 32-byte values do.
 function respondBody(rid: string): string {
   return JSON.stringify({
     contract_address: SINGLETON,
@@ -82,8 +72,6 @@ function parseBody(reply: Reply): Record<string, unknown> {
   return JSON.parse(reply.body) as Record<string, unknown>;
 }
 
-// ---- the stub node client ----------------------------------------------------
-
 type RuntimeResult = { isOk: boolean; asOk: { toU8a: (bare?: boolean) => Uint8Array } };
 
 const ok = (bytes: Uint8Array): RuntimeResult => ({ isOk: true, asOk: { toU8a: () => bytes } });
@@ -96,11 +84,7 @@ interface StubReads {
   readonly params?: () => Promise<RuntimeResult>;
 }
 
-/**
- * The shape `readCallStates` actually touches, backed by the captured contract
- * state and freshly serialized (hence correctly tagged) zswap and parameter
- * blobs. Everything else on the client is unreachable by construction.
- */
+// Only the shape `readCallStates` touches; everything else is unreachable by construction.
 function stubClient(overrides: StubReads = {}): NodeClient {
   const reads: Required<StubReads> = {
     head: async () => ({ toHex: () => `0x${HEAD_BARE}` }),
@@ -123,8 +107,6 @@ function stubClient(overrides: StubReads = {}): NodeClient {
   } as unknown as NodeClient;
 }
 
-// ---- the primed publisher ------------------------------------------------------
-
 interface StubEdges {
   readonly proveTx?: (tx: unknown) => Promise<unknown>;
   readonly balanceTx?: (tx: unknown) => Promise<unknown>;
@@ -139,8 +121,7 @@ let compiledContract: ReturnType<
 >;
 
 beforeAll(async () => {
-  // The transaction under construction bakes the network id into address
-  // encoding; `buildPublisher` normally does this and the seam bypasses it.
+  // Baked into address encoding; `buildPublisher` normally does this and the seam bypasses it.
   setNetworkId(TEST_CONFIG.networkId);
   zkConfigProvider = new NodeZkConfigProvider<SignetContractCircuitId>(MANAGED);
   compiledContract = makeVacantCompiledContract<SignetContract<SignetContractPrivateState>, SignetContractPrivateState>(
@@ -153,7 +134,6 @@ beforeAll(async () => {
   );
 });
 
-/** Real assets and keys, stubbed proof and wallet edges; installed via the test seam. */
 function primeStub(edges: StubEdges = {}): void {
   const keys = deriveFundingKeys(GENESIS_MINT_WALLET_SEED, TEST_CONFIG.networkId);
   const wallet = {
@@ -182,8 +162,6 @@ afterEach(async () => {
   RESPOND_TIMEOUT.ms = PRODUCTION_TIMEOUT;
 });
 
-// ---- withDeadline --------------------------------------------------------------
-
 describe("withDeadline", () => {
   it("passes a timely result through", async () => {
     await expect(withDeadline(Promise.resolve(7), 1_000, () => new Error("never"))).resolves.toBe(7);
@@ -196,9 +174,8 @@ describe("withDeadline", () => {
   });
 
   it("leaves the abandoned attempt's late failure handled", async () => {
-    // Node's default is to throw on an unhandled rejection, so the losing side
-    // of the race rejecting after the caller already has its answer would kill a
-    // process holding a hot wallet. `Promise.race` is what makes it not.
+    // An unhandled rejection from the losing side would kill a process holding a
+    // hot wallet; `Promise.race` is what makes it not one.
     const unhandled: unknown[] = [];
     const record = (reason: unknown): void => void unhandled.push(reason);
     process.on("unhandledRejection", record);
@@ -213,7 +190,6 @@ describe("withDeadline", () => {
   });
 });
 
-/** The fixture with its leading version stamp bumped one past what this build links. */
 function skewedContractState(): Uint8Array {
   const real = Buffer.from(readFileSync(`${FIXTURES}respond-singleton-state-37571.mn`));
   const offset = real.indexOf("midnight:contract-state[v") + "midnight:contract-state[v".length;
@@ -222,7 +198,7 @@ function skewedContractState(): Uint8Array {
   return skewed;
 }
 
-/** What a call threw, as a value: the library's own error, never a hand-built stand-in. */
+// The library's own error, never a hand-built stand-in.
 function thrownBy(run: () => unknown): unknown {
   try {
     run();
@@ -231,8 +207,6 @@ function thrownBy(run: () => unknown): unknown {
   }
   throw new Error("expected a throw");
 }
-
-// ---- the respond flow, step by step -------------------------------------------
 
 describe("POST /respond: the flow against stubbed edges", () => {
   it("names the read failure when the node read fails", async () => {
@@ -253,9 +227,8 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("answers contract_mismatch when the deployed keys are not this build's", async () => {
-    // An EMPTY key list passes vacuously (nothing claimed, nothing checked), so
-    // the wrongness has to be real: pair each of two circuits with the other's
-    // key. This is exactly what a stale `managedDir` looks like.
+    // An EMPTY key list passes vacuously, so the wrongness has to be real: pair
+    // each circuit with the other's key, which is what a stale `managedDir` looks like.
     const [first, second, ...rest] = realVerifierKeys;
     if (first === undefined || second === undefined) throw new Error("the contract ships at least two circuits");
     primeStub({ verifierKeys: [[first[0], second[1]], [second[0], first[1]], ...rest] });
@@ -266,8 +239,8 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("carries the proof provider's output through balance and into submit", async () => {
-    // The wallet stubs are identity functions, so a sentinel is the only thing
-    // that notices the proven transaction being dropped for the unproven one.
+    // The wallet stubs are identity functions, so only a sentinel notices the
+    // proven transaction being dropped for the unproven one.
     const proven = { proven: true };
     let balanced: unknown;
     let submitted: unknown;
@@ -288,8 +261,7 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("names prove_failed when the proof server refuses", async () => {
-    // Reaching this stage at all means the circuit really ran: the unproven
-    // transaction was built from the fixture state before the stub refused it.
+    // Reaching this stage at all means the circuit really ran against the fixture state.
     primeStub({ proveTx: async () => Promise.reject(new Error("proof server refused")) });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
     expect(reply.status).toBe(502);
@@ -297,8 +269,7 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("rejects an untagged read before the deserializer sees it", async () => {
-    // What a wrong runtime-API argument encoding looks like, and the reason the
-    // tag check carries the hint: the deserializer would only say "malformed".
+    // Why the tag check carries a hint: the deserializer would only say "malformed".
     primeStub();
     const reply = await handleRespond(
       TEST_CONFIG,
@@ -310,9 +281,8 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("names a dependency's ledger skew rather than the step it surfaced in", async () => {
-    // The reads are tag-checked before any deserializer runs, so a skew that
-    // gets past them came out of a dependency's own blob. `prove_failed` would
-    // send the operator to the proof server's logic instead of its version.
+    // A skew past the tag checks came out of a dependency's own blob, and
+    // `prove_failed` would send the operator to the proof server's logic instead.
     const skew = thrownBy(() => deserializeCompactContractState(skewedContractState(), { caller: "test" }));
     primeStub({ proveTx: async () => Promise.reject(skew) });
     const reply = await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32)));
@@ -320,9 +290,8 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("keeps a merely malformed blob at the step that produced it", async () => {
-    // The negative half, and why the guard is on the received version rather
-    // than the classification: the library calls this `version-mismatch` too,
-    // and it means nothing more than "these bytes are not a contract state".
+    // Why the guard is on the received version: the library calls this
+    // `version-mismatch` too, meaning only "these bytes are not a contract state".
     const corrupt = Uint8Array.from(skewedContractState());
     corrupt[0] = 0;
     const malformed = thrownBy(() => deserializeCompactContractState(corrupt, { caller: "test" }));
@@ -332,8 +301,6 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("keeps balance_failed and submit_rejected apart", async () => {
-    // The only thing naming where an unrefined wallet failure happened, now
-    // that nothing else on the wire does.
     primeStub({ balanceTx: async () => Promise.reject(new Error("dust actions rejected")) });
     expect(parseBody(await handleRespond(TEST_CONFIG, stubClient(), respondBody("cd".repeat(32))))).toMatchObject({
       code: "balance_failed",
@@ -362,10 +329,9 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 
   it("logs the rendered cause chain when Effect flattens the message", async () => {
-    // The submission service wraps every node error in a constant-message
-    // SubmissionError whose cause Effect stores on a Symbol, out of
-    // `describeFailure`'s reach. The classification alone could be wrong, so the
-    // chain that proves it has to survive somewhere: the log, not the wire.
+    // Every node error is wrapped in a constant-message SubmissionError whose
+    // cause Effect stores on a Symbol, out of `describeFailure`'s reach, so the
+    // chain that proves the classification has to survive in the log.
     const logged: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => void logged.push(line));
     class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
@@ -397,8 +363,6 @@ describe("POST /respond: the flow against stubbed edges", () => {
   });
 });
 
-// ---- one at a time ---------------------------------------------------------------
-
 describe("POST /respond: the busy gate", () => {
   it("does not let a rejected request leave the gate claimed", async () => {
     primeStub();
@@ -408,9 +372,8 @@ describe("POST /respond: the busy gate", () => {
   });
 
   it("keeps the gate claimed while an abandoned post is still running", async () => {
-    // The answer is not the end of the work. Releasing here would admit a second
-    // post onto the one dust UTXO the first has not finished with, which is the
-    // whole reason the gate exists; the process stops instead.
+    // Releasing on the answer would admit a second post onto the one dust UTXO
+    // the first has not finished with. The process stops instead.
     primeStub();
     RESPOND_TIMEOUT.ms = 50;
     const hung = stubClient({ head: () => new Promise(() => undefined) });
@@ -424,8 +387,7 @@ describe("POST /respond: the busy gate", () => {
   });
 
   it("never lets two posts balance at once, even across a blown deadline", async () => {
-    // The invariant the gate is FOR, measured rather than argued: the wallet has
-    // one dust UTXO, so a second `balanceTx` is a lost race at best.
+    // The invariant the gate is FOR, measured rather than argued.
     let live = 0;
     let peak = 0;
     const slowBalance = async (tx: unknown): Promise<unknown> => {
@@ -452,14 +414,7 @@ describe("POST /respond: the busy gate", () => {
   });
 });
 
-// ---- over the real HTTP server ---------------------------------------------
-
-/**
- * Everything above calls `handleRespond` directly, which leaves the route
- * itself untested: the `POST /respond` case in `server.ts`, the status the code
- * maps to, and the content type. This is the one route that spends money, so it
- * is the last one that should be reached only in process.
- */
+// This is the one route that spends money, so it is the last that should be reached only in process.
 describe("POST /respond: over the real HTTP server", () => {
   it("routes, answers 200, and carries the wire body as JSON", async () => {
     primeStub({ submitTx: async () => "cafe".repeat(16) });
@@ -475,9 +430,8 @@ describe("POST /respond: over the real HTTP server", () => {
   });
 
   it("answers a blown deadline first, and only then stops the process", async () => {
-    // The order is the whole point: stopping before the reply is flushed would
-    // leave the caller with a dropped connection and no way to learn that its
-    // post may still land.
+    // Stopping before the reply is flushed would leave the caller with a dropped
+    // connection and no way to learn its post may still land.
     primeStub();
     RESPOND_TIMEOUT.ms = 50;
     let stop!: () => void;
@@ -491,8 +445,6 @@ describe("POST /respond: over the real HTTP server", () => {
       const answer = await server.send("/respond", { method: "POST", body: respondBody(rid) });
       expect(answer.status).toBe(500);
       expect(parseBody(answer)).toMatchObject({ code: "internal" });
-      // A timeout past submit may still land, so the answer names the rid and
-      // warns rather than implying the post failed.
       expect(parseBody(answer)["message"]).toMatch(/deadline/);
       expect(parseBody(answer)["message"]).toContain(rid);
       expect(parseBody(answer)["message"]).toMatch(/may still land/);
@@ -529,8 +481,7 @@ describe("POST /respond: over the real HTTP server", () => {
   });
 
   it("refuses a second concurrent post with 503 wallet_busy, on one server", async () => {
-    // The gate over HTTP, not over two in-process calls: a real second
-    // connection must be answered while the first still holds the wallet.
+    // A real second connection must be answered while the first still holds the wallet.
     primeStub();
     let releaseHead: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
@@ -555,8 +506,8 @@ describe("POST /respond: over the real HTTP server", () => {
       releaseHead?.();
       expect((await first).status).toBe(200);
 
-      // Released by COMPLETION, not by failure: a gate that only opens on the
-      // error path strands the wallet after the first successful post.
+      // Released by COMPLETION: a gate that only opens on the error path strands
+      // the wallet after the first successful post.
       const third = await server.send("/respond", { method: "POST", body: respondBody("cc".repeat(32)) });
       expect(third.status).toBe(200);
     } finally {

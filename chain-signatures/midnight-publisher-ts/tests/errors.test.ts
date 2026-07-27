@@ -1,18 +1,12 @@
-/**
- * The two failures worth acting on differently are identified by matching a
- * substring of a dependency's error text, which is the most fragile thing here.
- *
- * These build the failures through a REAL `Effect.runPromise` rejection, not a
- * hand-set `.name`. The first version of this file fabricated them with
- * `new Error()` plus a `.name`, passed, and proved nothing: it missed that
- * `submissionService` flattens every node error into a constant-message
- * `SubmissionError` whose cause Effect stores on a Symbol rather than `.cause`.
- * That is the same self-consistent-test trap `block.ts` warns about for the `Fr`
- * tag byte, and it hid an unreachable error code.
- *
- * Still NOT proven here: that the node client surfaces the ledger's own
- * `ReadMismatch` text at all. That needs a live same-id race.
- */
+// The two failures worth acting on differently are identified by matching a
+// substring of a dependency's error text, which is the most fragile thing here.
+// These build them through a REAL `Effect.runPromise` rejection: a hand-set
+// `.name` passes while missing that `submissionService` flattens every node
+// error into a constant-message `SubmissionError` whose cause Effect stores on
+// a Symbol rather than `.cause`.
+//
+// Still NOT proven here: that the node client surfaces the ledger's own
+// `ReadMismatch` text at all. That needs a live same-id race.
 
 import { Data, Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
@@ -31,7 +25,7 @@ class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError"
   readonly message: string;
 }> {}
 
-/** Reject through Effect so the value is a genuine `FiberFailure`. */
+// Reject through Effect so the value is a genuine `FiberFailure`.
 async function fiberFailure(error: unknown): Promise<unknown> {
   try {
     await Effect.runPromise(Effect.fail(error));
@@ -41,15 +35,9 @@ async function fiberFailure(error: unknown): Promise<unknown> {
   }
 }
 
-/**
- * What `step` matches against: the message ALONE is not enough, which is why it
- * searches the rendered cause chain too. The code each text maps to is pinned
- * end to end in `respond-path.test.ts`, through the real handler.
- */
+// The message ALONE is not enough, which is why `step` searches the rendered cause chain too.
 describe("what the wallet and the submission wrapper actually render", () => {
   it("keeps the dust shortfall's tag and message intact", async () => {
-    // `DustWallet` runs its Effect with no outer wrapper, so `Data.TaggedError`'s
-    // tag lands in `name` and the message is the balancer's own template.
     const error = await fiberFailure(
       new InsufficientFundsError({ message: "Insufficient Funds: could not balance dust" }),
     );
@@ -59,9 +47,8 @@ describe("what the wallet and the submission wrapper actually render", () => {
   });
 
   it("flattens every submit failure to one constant message", async () => {
-    // The defect this file exists to catch: every submit failure renders
-    // identically, whatever went wrong underneath, so `ReadMismatch` survives
-    // only in `String(error)` and never in the message.
+    // Every submit failure renders identically, so `ReadMismatch` survives only
+    // in `String(error)` and never in the message.
     const error = await fiberFailure(
       new SubmissionError({
         message: "Transaction submission error",
@@ -89,11 +76,10 @@ describe("the status map", () => {
 
 });
 
-/** Scrubs nothing, deliberately: secrecy is held upstream in `wallet.ts`. These pin the reply shape. */
+// Scrubs nothing, deliberately: secrecy is held upstream in `wallet.ts`.
 describe("the reply funnel", () => {
   it("keeps the evidence in the log and out of the body", () => {
-    // The split that lets the wire stay `{code, message}`: an operator gets the
-    // whole rendered chain, a caller that branches on `code` gets none of it.
+    // An operator gets the whole rendered chain; a caller branching on `code` gets none of it.
     const logged: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => void logged.push(line));
     try {

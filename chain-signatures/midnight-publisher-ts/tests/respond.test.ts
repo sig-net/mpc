@@ -1,12 +1,6 @@
-/**
- * `POST /respond` request contract. Everything here runs offline: no node, no
- * indexer, no proof server, no wallet. The live prove-and-submit is a script,
- * `tests/respond-live.ts`.
- *
- * These tests are the seam's specification: every acceptance, every rejection
- * with its exact body, and the JSON-shape negatives (absent, `null`, wrong
- * types, unknown fields, check ordering), all of it decided by one schema.
- */
+// `POST /respond` request contract, offline. These tests are the seam's
+// specification: every acceptance, every rejection with its exact body, and the
+// JSON-shape negatives, all decided by one schema.
 
 import { describe, expect, it } from "vitest";
 
@@ -27,20 +21,17 @@ import { forbiddenClient, TEST_CONFIG } from "./support.js";
 const ADDRESS = "ab".repeat(32);
 const REQUEST_ID = "11".repeat(32);
 
-/** Loose on purpose: half the cases below are values the wire type does not admit. */
+// Loose on purpose: half the cases below are values the wire type does not admit.
 type Body = Record<string, unknown>;
 
-/** The shared signature both circuits carry; typed, so the schema's own shape pins it. */
 const SIGNATURE: WireSignature = {
   big_r: { x: "22".repeat(32), y: "33".repeat(32) },
   s: "44".repeat(32),
   recovery_id: 1,
 };
 
-/** SIGNATURE with one component replaced, for the rejection rows. */
 const withSignature = (delta: Body): Body => ({ ...SIGNATURE, ...delta });
 
-/** A valid `respond` request, with fields optionally replaced. */
 function signatureResponse(overrides: Body = {}): Body {
   return {
     contract_address: ADDRESS,
@@ -51,7 +42,6 @@ function signatureResponse(overrides: Body = {}): Body {
   };
 }
 
-/** A valid `respondBidirectional` request, with fields optionally replaced. */
 function bidirectional(overrides: Body = {}): Body {
   return {
     contract_address: ADDRESS,
@@ -64,27 +54,24 @@ function bidirectional(overrides: Body = {}): Body {
   };
 }
 
-/** `JSON.stringify` drops a key set to `undefined`, so the rows below spell an omission `{ field: undefined }`. */
+// `JSON.stringify` drops a key set to `undefined`, so the rows below spell an omission `{ field: undefined }`.
 const parse = (body: Body) => parseRespondRequest(JSON.stringify(body));
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 
-/** Parse, then take the event argument of a `respond` call. */
 function signatureEvent(body: Body): SignatureRespondedEvent {
   const call = respondCall(parse(body));
   expect(call.circuitId).toBe("respond");
-  // Safe after the assertion above; the union cannot be narrowed by `expect`.
   return (call as Extract<RespondCall, { circuitId: "respond" }>).args[1];
 }
 
-/** Parse, then take the event argument of a `respondBidirectional` call. */
 function bidirectionalEvent(body: Body): RespondBidirectionalEvent {
   const call = respondCall(parse(body));
   expect(call.circuitId).toBe("respondBidirectional");
   return (call as Extract<RespondCall, { circuitId: "respondBidirectional" }>).args[1];
 }
 
-/** The values the round-trip cases below do not reach: both ends of every bounded field. */
+// Both ends of every bounded field, which the round-trip cases below do not reach.
 describe("parseRespondRequest: accepts", () => {
   it("output_len at both ends of its range", () => {
     expect(() => parse(bidirectional({ output_len: 0 }))).not.toThrow();
@@ -97,11 +84,7 @@ describe("parseRespondRequest: accepts", () => {
   });
 });
 
-/**
- * Every rejection, with the exact 400 body. One message per field, so the value
- * rows and the shape rows below say the same sentence and neither needs to
- * re-cross the other's cases.
- */
+// Every rejection, with the exact 400 body. One message per field.
 const REJECTIONS: [string, Body, string][] = [
   // ---- the address and the request id ----
   ["address too short", signatureResponse({ contract_address: "ab".repeat(31) }), "invalid request: `contract_address` must be 64 lowercase hex"],
@@ -171,7 +154,6 @@ describe.each(REJECTIONS)("parseRespondRequest rejects %s", (_label, body, messa
 
 describe("parseRespondRequest: checks fire in their pinned wire order", () => {
   it("answers the circuit before ANY other field, because it is the discriminator", () => {
-    // No branch matched, so no branch's fields were ever looked at.
     expect(() => parse(signatureResponse({ circuit: "nope", contract_address: "nope" }))).toThrowError(
       "invalid request: `circuit` must be respond or respondBidirectional",
     );
@@ -196,7 +178,6 @@ describe("parseRespondRequest: checks fire in their pinned wire order", () => {
   });
 
   it("reports the signature before the circuit's own fields", () => {
-    // The signature is shared, so it is declared before the fields that split.
     expect(() =>
       parse(bidirectional({ signature: withSignature({ s: "" }), serialized_output: "55" })),
     ).toThrowError("invalid request: `signature.s` must be 64 lowercase hex");
@@ -219,8 +200,8 @@ const MALFORMED_BODIES: [string, string][] = [
 ];
 
 describe("parseRespondRequest", () => {
-  // `toEqual`, not `toStrictEqual`: an absent optional key and one set to
-  // `undefined` are the same request, and the schema omits what it did not see.
+  // `toEqual`, not `toStrictEqual`: an absent key and one set to `undefined` are
+  // the same request.
   it("round-trips the respond body", () => {
     expect(parse(signatureResponse())).toEqual(signatureResponse());
   });
@@ -229,9 +210,8 @@ describe("parseRespondRequest", () => {
     expect(parse(bidirectional())).toEqual(bidirectional());
   });
 
-  // The branch declares neither field, so `RespondRequest` does not carry them
-  // there at all — a compile error, not a runtime one, if `respondCall` reached
-  // for either. On the wire they are simply unknown keys, like any other.
+  // The branch declares neither field, so reaching for either is a compile error.
+  // On the wire they are simply unknown keys.
   it("strips a bidirectional field sent to respond rather than rejecting it", () => {
     expect(parse(signatureResponse({ serialized_output: "55".repeat(128), output_len: 64 }))).toEqual(signatureResponse());
   });
@@ -241,18 +221,12 @@ describe("parseRespondRequest", () => {
   });
 
   it.each(MALFORMED_BODIES)("rejects %s with an invalid-JSON message", (_label, body) => {
-    // Never reaches the schema, so it keeps the `invalid JSON:` preamble.
     expect(() => parseRespondRequest(body)).toThrowError(/^invalid JSON:/);
   });
 });
 
-/**
- * Both circuits take exactly two arguments: the request id, then the whole
- * event struct. The struct's field names are the Compact declaration's, its
- * numeric members are `bigint` (`Uint<N>` generates as `bigint`), and the
- * signature is the nested `Signature { bigR: { x, y }, s, recoveryId }`
- * struct — the wire's big-endian bytes land in it verbatim.
- */
+// Field names are the Compact declaration's, numeric members are `bigint`, and
+// the wire's big-endian bytes land in the nested `Signature` struct verbatim.
 describe("respondCall", () => {
   it("builds requestId plus one SignatureRespondedEvent", () => {
     const call = respondCall(parse(signatureResponse()));
@@ -300,7 +274,7 @@ describe("respondCall", () => {
   });
 });
 
-/** The exact wire bodies this seam accepts, byte for byte. If the field set drifts, one of these fails. */
+// The exact wire bodies this seam accepts. If the field set drifts, one of these fails.
 describe("wire fixtures", () => {
   it("accepts the pinned respond body", () => {
     const body =
@@ -321,7 +295,6 @@ describe("wire fixtures", () => {
 
 const forbidden = forbiddenClient("no I/O may happen for an invalid request");
 
-/** A managed dir that cannot resolve, so reaching boot at all is a visible failure. */
 const offlineConfig: Config = { ...TEST_CONFIG, managedDir: "/nonexistent" };
 
 const BAD_REQUESTS: [string, string, string | RegExp][] = [
@@ -336,8 +309,7 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
 
 describe("the JSON preamble", () => {
   it("is byte-identical on this seam, not merely prefix-matched", () => {
-    // Shared with `/decode/contract-state`; pinned on both sides so unifying
-    // them cannot silently move one.
+    // Pinned on both sides so unifying them with `/decode/contract-state` cannot move one.
     expect(() => parseRespondRequest("[]")).toThrow("invalid JSON: expected a JSON object");
   });
 });
@@ -346,23 +318,14 @@ describe("handleRespond: the bad_request path never touches the chain", () => {
   it.each(BAD_REQUESTS)("returns bad_request for %s", async (_label, body, expected) => {
     const reply = await handleRespond(offlineConfig, forbidden, body);
     expect(reply.status).toBe(400);
-    // The code is the stable half and the message is the free half; a caller
-    // branches on the first and shows the second.
     const { code, message } = JSON.parse(reply.body) as { code: string; message: string };
     expect(code).toBe("bad_request");
     expect(message).toMatch(expected);
   });
 });
 
-/**
- * Nothing is retried in process, so the 502 body is the whole answer a caller
- * gets and must name the failure. The shapes below are the ones the write path
- * actually throws: an Effect `FiberFailure`, whose `name` carries the failing
- * class and whose `message` carries only the bare text (a live same-id race
- * returned `(FiberFailure) Wallet.InsufficientFunds: Insufficient Funds: could
- * not balance dust`); a wrapper with a `cause`; and a tagged value that is not
- * an `Error` at all.
- */
+// Nothing is retried in process, so the 502 body is the whole answer. The shapes
+// below are the ones the write path actually throws.
 describe("describeFailure", () => {
   it("appends a cause instead of dropping it", () => {
     const wrapped = new Error("balancing failed", { cause: { _tag: "TransactionInvalidError", message: "rejected" } });
@@ -385,9 +348,7 @@ describe("describeFailure", () => {
   });
 
   it("never throws itself, whatever it is handed", () => {
-    // Renders inside the 502 path, where a second failure would replace the
-    // real one. Neither an object that cannot be serialized nor one that
-    // serializes to nothing may escape.
+    // Renders inside the 502 path, where a second failure would replace the real one.
     const circular: { self?: unknown } = {};
     circular.self = circular;
     expect(describeFailure(circular)).toBe("[object Object]");
@@ -402,11 +363,7 @@ describe("describeFailure", () => {
 
 });
 
-/**
- * A real, checksum-valid 12-word BIP-39 mnemonic. Distinct from the malformed
- * phrase below on purpose: this is the one the library derivation underneath
- * `deriveFundingKeys` DOES accept, so it is the only case that pins the guard.
- */
+// Checksum-valid, so it is the one the library derivation DOES accept and the only case that pins the guard.
 const VALID_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 const BAD_SEEDS: [string, string][] = [
@@ -441,13 +398,10 @@ describe("parseFundingSeed", () => {
   });
 });
 
-/**
- * `deriveFundingKeys` delegates to a library derivation whose own seed parser
- * ALSO accepts a BIP-39 mnemonic, PBKDF2-ing it into a different, unfunded
- * wallet. The `parseFundingSeed` pre-check is the only thing stopping that, and
- * dropping it fails here rather than six months later as an unexplained
- * `Wallet.InsufficientFunds: could not balance dust`.
- */
+// The library derivation underneath ALSO accepts a BIP-39 mnemonic, PBKDF2-ing
+// it into a different, unfunded wallet. The `parseFundingSeed` pre-check is the
+// only thing stopping that, and dropping it fails here rather than later as an
+// unexplained `could not balance dust`.
 describe("deriveFundingKeys", () => {
   it("rejects a valid BIP-39 mnemonic, which the library derivation would accept", () => {
     expect(() => deriveFundingKeys(VALID_MNEMONIC, "undeployed")).toThrowError(/MIDNIGHT_PUB_FUNDING_SEED/);
