@@ -1,43 +1,35 @@
-/**
- * Live acceptance run for `POST /respond`. Run ON DEMAND, never from CI: it
- * needs the whole stack up (node, proof server, indexer) and a funded wallet,
- * it costs a real fee, and it writes to the chain. It is also not a
- * `*.test.ts`, so `vitest run` never picks it up.
- *
- * The whole runbook, from nothing. The stack is the midnight-integration repo's
- * `docker compose up -d` (node :9944, proof server :6300, indexer :8088), whose
- * image tags are the matched ledger-9 set this package's `@midnightntwrk/ledger-v9`
- * pin belongs to.
- *
- *   npx tsx tests/bootstrap-live.ts          # prints the fresh singleton address last
- *
- *   MIDNIGHT_PUB_PORT=0 \
- *   MIDNIGHT_PUB_BIND_HOST=127.0.0.1 \
- *   MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
- *   MIDNIGHT_PUB_PROOF_SERVER_URL=http://127.0.0.1:6300 \
- *   MIDNIGHT_PUB_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
- *   MIDNIGHT_PUB_INDEXER_WS_URL=ws://127.0.0.1:8088/api/v3/graphql/ws \
- *   MIDNIGHT_PUB_MANAGED_DIR=$PWD/node_modules/@sig-net/midnight-contract/dist/managed \
- *   MIDNIGHT_PUB_FUNDING_SEED=0000000000000000000000000000000000000000000000000000000000000001 \
- *   MIDNIGHT_PUB_NETWORK_ID=undeployed \
- *   npx tsx tests/respond-live.ts <64-hex contract address> [respond|respondBidirectional] [64-hex request id]
- *
- * The seed is the public genesis dev wallet of a fresh `undeployed` chain, not a
- * secret. Port and bind host are inert here but still required: `configFromEnv`
- * takes the full set or throws.
- *
- * It drives the real `handleRespond`, so what it exercises is the shipped code
- * path and not a parallel re-implementation. It then establishes three things
- * independently:
- *
- *  - the append landed, by decoding the circuit's own map over the node's
- *    runtime API before and after;
- *  - which block it landed in, by walking finalized blocks from the pre-post
- *    head until the map grows;
- *  - the ledger's own apply status, from the indexer, which is the only source
- *    that carries it. `SucceedEntirely` there and the append here are two
- *    independent confirmations of the same fact.
- */
+// Live acceptance run for `POST /respond`. Run ON DEMAND, never from CI: it
+// needs the whole stack up, costs a real fee, and writes to the chain. Not a
+// `*.test.ts`, so `vitest run` never picks it up.
+//
+// The stack is the midnight-integration repo's `docker compose up -d`
+// (node :9944, proof server :6300, indexer :8088), whose image tags are the
+// matched ledger-9 set this package's `@midnightntwrk/ledger-v9` pin belongs to.
+//
+// npx tsx tests/bootstrap-live.ts          # prints the fresh singleton address last
+//
+// MIDNIGHT_PUB_PORT=0 \
+// MIDNIGHT_PUB_BIND_HOST=127.0.0.1 \
+// MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
+// MIDNIGHT_PUB_PROOF_SERVER_URL=http://127.0.0.1:6300 \
+// MIDNIGHT_PUB_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
+// MIDNIGHT_PUB_INDEXER_WS_URL=ws://127.0.0.1:8088/api/v3/graphql/ws \
+// MIDNIGHT_PUB_MANAGED_DIR=$PWD/node_modules/@sig-net/midnight-contract/dist/managed \
+// MIDNIGHT_PUB_FUNDING_SEED=0000000000000000000000000000000000000000000000000000000000000001 \
+// MIDNIGHT_PUB_NETWORK_ID=undeployed \
+// npx tsx tests/respond-live.ts <64-hex contract address> [respond|respondBidirectional] [64-hex request id]
+//
+// The seed is the public genesis dev wallet of a fresh `undeployed` chain, not
+// a secret. It drives the real `handleRespond`, then establishes three things
+// independently:
+//
+// - the append landed, by decoding the circuit's own map over the node's
+// runtime API before and after;
+// - which block it landed in, by walking finalized blocks from the pre-post
+// head until the map grows;
+// - the ledger's own apply status, from the indexer, which is the only source
+// that carries it. `SucceedEntirely` there and the append here are two
+// independent confirmations of the same fact.
 
 import { randomBytes } from "node:crypto";
 
@@ -49,7 +41,6 @@ import { configFromEnv } from "../src/config.js";
 import { connect, runtimeApiBytes, type BlockHashHex, type NodeClient } from "../src/node.js";
 import { closePublisher, handleRespond } from "../src/respond.js";
 
-/** The schema's own rule; the library's `isHex` would also take uppercase and `0x`. */
 const isHex = (value: string, bytes: number): boolean => value.length === bytes * 2 && /^[0-9a-f]+$/.test(value);
 
 const config = configFromEnv();
@@ -61,14 +52,12 @@ if (!isHex(address, 32) || (circuit !== "respond" && circuit !== "respondBidirec
     `usage: tsx tests/respond-live.ts <64-hex contract address> [respond|respondBidirectional] [64-hex request id]`,
   );
 }
-// A fresh throwaway request id by default, so a re-run never contends with an
-// earlier one on the ledger-level optimistic-concurrency check.
+// Fresh by default, so a re-run never contends with an earlier one.
 const requestId = process.argv[4] ?? toHex(randomBytes(32));
 if (!isHex(requestId, 32)) throw new Error(`request id must be 64 lowercase hex, got ${requestId}`);
 
 const client = await connect(config.nodeUrl);
 
-/** The singleton's state for the posted circuit at one block, read over the runtime API only. */
 async function readRespondState(
   at: BlockHashHex,
 ): Promise<{ size: bigint; counter: bigint | undefined; landed: string[] }> {
@@ -80,7 +69,6 @@ async function readRespondState(
   const signed = (value: { bigR: { x: Uint8Array }; s: Uint8Array; recoveryId: bigint }): string =>
     `bigR.x=${toHex(value.bigR.x).slice(0, 12)}… s=${toHex(value.s).slice(0, 12)}… recoveryId=${value.recoveryId}`;
 
-  // Two maps, two value shapes: the branch is the circuit's, not a test path's.
   if (circuit === "respond") {
     const landed: string[] = [];
     for (const [entry, value] of decoded.respondMap) {
@@ -111,22 +99,13 @@ async function head(node: NodeClient): Promise<{ hash: BlockHashHex; height: num
   return { hash, height: (await node.rpc.chain.getHeader(hash)).number.toNumber() };
 }
 
-/**
- * The ledger's own apply status. No node RPC carries it, so this is the one
- * place the indexer is read for evidence rather than for fee payment.
- *
- * Asked by block height and matched on the transaction's identifiers, because
- * the root `transactions(offset: {identifier})` query returns nothing for a
- * freshly finalized transaction. `SUCCESS` with no `segments` is the indexer's
- * rendering of the ledger's `SucceedEntirely`; a partial apply reports
- * `PARTIAL_SUCCESS` and populates `segments`.
- *
- * Polled, because the indexer trails the node's finalized head by a few seconds
- * and answers `block: null` until it catches up.
- *
- * Best effort: the append decoded from the runtime API is the primary evidence,
- * and this is an independent second opinion.
- */
+// The ledger's own apply status. No node RPC carries it, so this is the one
+// place the indexer is read for evidence rather than for fee payment.
+//
+// Asked by block height and matched on identifiers, because the root
+// `transactions(offset: {identifier})` query returns nothing for a freshly
+// finalized transaction. Polled, because the indexer trails the node's finalized
+// head. Best effort: the runtime-API append is the primary evidence.
 async function indexerStatus(height: number, transactionId: string): Promise<string> {
   const query =
     `query BlockStatus($height: Int!) { block(offset: {height: $height}) { transactions { hash __typename ` +
@@ -153,9 +132,7 @@ async function indexerStatus(height: number, transactionId: string): Promise<str
       };
       const mine = payload.data?.block?.transactions?.find((tx) => tx.identifiers?.includes(transactionId));
       if (mine !== undefined) {
-        // SUCCESS with no per-segment breakdown is the indexer's rendering of
-        // the ledger's SucceedEntirely; a partial apply reports
-        // PARTIAL_SUCCESS and populates segments.
+        // SUCCESS with no segments is the indexer's rendering of SucceedEntirely.
         return (
           `${mine.transactionResult?.status ?? "(no result)"} ` +
           `(segments: ${JSON.stringify(mine.transactionResult?.segments ?? null)})  tx hash ${mine.hash}`
@@ -177,8 +154,7 @@ console.log(`circuit         ${circuit}`);
 console.log(`request id      ${requestId}   (fresh, throwaway)`);
 console.log(`before          height=${before.height} map.size=${beforeState.size} counter=${beforeState.counter ?? "(absent)"}`);
 
-// A recognisable payload: the request id's first four bytes, then zero padding
-// to the full Bytes<128> the event stores.
+// The request id's first four bytes, zero-padded to the Bytes<128> the event stores.
 const signature = {
   big_r: { x: `${"00".repeat(31)}01`, y: `${"00".repeat(31)}02` },
   s: `${"00".repeat(31)}03`,
@@ -197,8 +173,7 @@ const body = JSON.stringify(
       },
 );
 
-// The handler logs the submitted transaction id; tap it rather than duplicating
-// the submit path here, so this script exercises the shipped code and nothing else.
+// Tapped rather than duplicating the submit path, so this exercises shipped code only.
 const lines: string[] = [];
 const realLog = console.log.bind(console);
 console.log = (...args: unknown[]): void => {
@@ -218,9 +193,8 @@ if (reply.status !== 200) {
   throw new Error(`respond did not succeed: ${reply.status} ${reply.body}`);
 }
 
-// The success body is wire contract: the submitted transaction id, and the
-// finalized block the three reads were pinned to (bare hex). The log line is
-// kept only as a cross-check that body and log tell one story.
+// The success body is wire contract; the log line is kept as a cross-check that
+// body and log tell one story.
 const success = JSON.parse(reply.body) as { status?: string; tx_id?: string; block_hash?: string };
 if (success.status !== "ok" || typeof success.tx_id !== "string" || success.tx_id.length === 0) {
   throw new Error(`the success body must carry a non-empty tx_id: ${reply.body}`);
@@ -233,8 +207,7 @@ const logged = lines.find((line) => line.includes("submitted tx"))?.split("submi
 console.log(`transaction id  ${submitted}${logged === submitted ? "" : `   (LOG DISAGREES: ${logged ?? "(not logged)"})`}`);
 console.log(`pinned reads at ${success.block_hash}`);
 
-// Walk finalized blocks forward from the pre-post head until the map grows;
-// that block is where the append landed.
+// Walk finalized blocks forward until the map grows: that is where the append landed.
 let landingHeight: number | undefined;
 let landingHash: BlockHashHex | undefined;
 for (let height = before.height + 1; landingHeight === undefined; height += 1) {

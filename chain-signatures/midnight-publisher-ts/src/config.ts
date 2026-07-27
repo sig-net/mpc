@@ -1,4 +1,4 @@
-/** `MIDNIGHT_PUB_*` configuration. The variable names are the deployment contract; never rename casually. */
+// `MIDNIGHT_PUB_*` configuration. The variable names are the deployment contract; never rename casually.
 
 import { z } from "zod";
 
@@ -6,14 +6,14 @@ import { NETWORK_IDS } from "@sig-net/midnight-contract-deploy";
 
 export interface Config {
   readonly port: number;
-  /** The loopback boundary IS the access control: no auth, and it holds a funding wallet. */
+  // The loopback boundary IS the access control: no auth, and it holds a funding wallet.
   readonly bindHost: string;
   readonly nodeUrl: string;
-  /** Mandatory: these contracts are zkir-v3 and cannot be proven locally. */
+  // Mandatory: these contracts are zkir-v3 and cannot be proven locally.
   readonly proofServerUrl: string;
   readonly indexerUrl: string;
   readonly indexerWsUrl: string;
-  /** Root of the compiled-contract assets (`contract/`, `compiler/`, `keys/`, `zkir/`). */
+  // Root of the compiled-contract assets (`contract/`, `compiler/`, `keys/`, `zkir/`).
   readonly managedDir: string;
   readonly networkId: string;
 }
@@ -22,7 +22,7 @@ function isLoopback(host: string): boolean {
   return ["localhost", "::1", "[::1]"].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
-/** Every value is required and taken as given: the operator supplies the full set, nothing is defaulted or derived. */
+// Every value is required: the operator supplies the full set, nothing is defaulted.
 const EnvSchema = z.object({
   MIDNIGHT_PUB_PORT: z.coerce.number(),
   MIDNIGHT_PUB_BIND_HOST: z.string().min(1),
@@ -68,7 +68,7 @@ export function configFromEnv(): Config {
 
 const FUNDING_SEED_VAR = "MIDNIGHT_PUB_FUNDING_SEED" satisfies keyof z.infer<typeof EnvSchema>;
 
-/** The hot gas-wallet seed. Read at the point of use; `EnvSchema` requires it, so a missing one fails at boot. */
+// Read at the point of use; `EnvSchema` requires it, so a missing one fails at boot.
 export function fundingSeed(): string {
   const seed = process.env[FUNDING_SEED_VAR];
   if (seed === undefined || seed.length === 0) throw new Error(`${FUNDING_SEED_VAR} is required`);

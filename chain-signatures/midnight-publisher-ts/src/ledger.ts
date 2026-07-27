@@ -1,8 +1,5 @@
-/**
- * Which ledger this build speaks, published at `GET /health` so the caller can
- * assert compatibility at startup. These are the ledger's own tags, stamped into
- * everything it serializes, so they move when the encoding moves.
- */
+// Which ledger this build speaks, published at `GET /health`. These are the
+// ledger's own tags, so they move when the encoding moves.
 
 import { PublisherError } from "./errors.js";
 
@@ -13,7 +10,7 @@ export const LEDGER_TAGS = {
   transaction: "midnight:transaction[v12]",
 } as const;
 
-/** Scans the leading 96 bytes, wider than the longest real tag. Fires before the deserializer, where an untagged blob usually means a bad runtime-API argument. */
+// Fires before the deserializer, where an untagged blob usually means a bad runtime-API argument.
 export function assertLedgerTag(bytes: Uint8Array, tag: string, what: string): void {
   const head = Buffer.from(bytes.subarray(0, 96)).toString("latin1");
   if (head.includes(tag)) return;

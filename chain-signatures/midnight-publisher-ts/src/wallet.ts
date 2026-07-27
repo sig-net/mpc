@@ -1,11 +1,6 @@
-/**
- * The funding (gas) wallet.
- *
- * THE SERVICE'S ONLY INDEXER DEPENDENCY, and unavoidable: the sub-wallets
- * discover their UTXOs exclusively through the indexer, and no node RPC returns
- * UTXO or dust state for an address. It feeds fee payment only, so it sits
- * downstream of every security decision. Nothing here touches disk.
- */
+// The funding (gas) wallet, and THE SERVICE'S ONLY INDEXER DEPENDENCY: no node
+// RPC returns UTXO or dust state for an address. It feeds fee payment only, so
+// it sits downstream of every security decision.
 
 import type { MidnightProvider, WalletProvider } from "@midnight-ntwrk/midnight-js-types";
 import {
@@ -19,22 +14,14 @@ import {
 
 import { fundingSeed, type Config } from "./config.js";
 
-/**
- * `balanceTx` adds the dust and unshielded inputs that pay the fee, signs them
- * and finalizes. `submitTx` waits for the node to report finality.
- */
 export interface FundingWallet extends WalletProvider, MidnightProvider {
   close(): Promise<void>;
 }
 
-/**
- * Doubles as the dust-spending intent's TTL, so it is how long a post that
- * dies between finalize and submit strands the fee coin, and why `respond.ts`
- * bounds nothing past balance. ~15x the measured ~20 s round.
- */
+// Also the dust intent's TTL: how long a post dying between finalize and submit strands the coin.
 const RECIPE_TTL_MS = 5 * 60 * 1000;
 
-/** Hex only, via the library's own seed parser. The message names the env var and never quotes the value. */
+// Hex only. The message names the env var and never quotes the value.
 export function parseFundingSeed(seed: string): Uint8Array {
   try {
     const parsed = parseSeed(seed);
@@ -52,7 +39,6 @@ export function deriveFundingKeys(seed: string, networkId: string): AccountKeys 
   return deriveAccountKeys(seed, networkId);
 }
 
-/** The five fields the facade declares, not the whole `Config`. */
 export function nodeConfig(config: Config): MidnightNodeConfig {
   return {
     indexerUrl: config.indexerUrl,
@@ -86,7 +72,6 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
   };
 }
 
-/** Opens and blocks until synced: an unsynced wallet fails every balance. */
 export async function openFundingWallet(config: Config): Promise<FundingWallet> {
   return openFacade(deriveFundingKeys(fundingSeed(), config.networkId), nodeConfig(config));
 }

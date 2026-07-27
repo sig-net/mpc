@@ -1,19 +1,16 @@
-/**
- * The localhost HTTP seam.
- *
- *   GET  /health                  -> {status, networkId, ledger}
- *   POST /decode/contract-state   {state: hex}          -> the state tree
- *   POST /decode/transactions     {transactions: [hex]} -> {transactions, skipped}
- *   POST /respond                 -> {status, tx_id, block_hash}
- *
- * The decode seams are pure codecs and open no connection. They are POST only
- * because a serialized transaction runs ~14 KB and does not fit a query string.
- * Every failure is `{code, message}`; see `errors.ts`.
- */
+// The localhost HTTP seam.
+//
+// GET  /health                  -> {status, networkId, ledger}
+// POST /decode/contract-state   {state: hex}          -> the state tree
+// POST /decode/transactions     {transactions: [hex]} -> {transactions, skipped}
+// POST /respond                 -> {status, tx_id, block_hash}
+//
+// The decode seams are POST only because a serialized transaction runs ~14 KB
+// and does not fit a query string.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import { isDeserializationError, isHex as isWholeBytesHex } from "@midnight-ntwrk/midnight-js-utils";
+import { isDeserializationError } from "@midnight-ntwrk/midnight-js-utils";
 
 import { type Config } from "./config.js";
 import { fail, jsonObject, PublisherError, replyTo, type ErrorCode, type Reply } from "./errors.js";
@@ -23,53 +20,42 @@ import { decodeTransactions } from "./block.js";
 import { handleRespond } from "./respond.js";
 import { decodeContractState } from "./state.js";
 
-/**
- * Read unbounded: the only caller is the trusted in-node publisher over
- * loopback, so there is no body-size cap to enforce here.
- */
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of request as AsyncIterable<Buffer>) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/**
- * Checked with the library's whole-bytes `isHex` (optional `0x`, any case,
- * non-empty), not coerced: `Buffer.from(_, "hex")` truncates silently at the
- * first bad character, which would hand the ledger a short blob and blame the
- * caller's bytes (`decode_failed`) for an envelope mistake (`bad_request`).
- */
+// ONE spelling, matching `respond.ts` and what the Rust caller sends: bare, even
+// length, lowercase. Accepting `0x` and upper case too would mean two renderings
+// of one blob, and `Buffer.from(_, "hex")` truncates silently at the first bad
+// character, so a rejected spelling is the only way a caller learns it guessed.
+const BARE_LOWERCASE_HEX = /^(?:[0-9a-f]{2})+$/;
+
 function hexBytes(value: unknown, what: string): Uint8Array {
   if (typeof value !== "string") throw new PublisherError("bad_request", `${what} must be a hex string`);
-  if (!isWholeBytesHex(value)) throw new PublisherError("bad_request", `${what} must be a whole number of bytes of hex, optionally \`0x\`-prefixed`);
+  if (!BARE_LOWERCASE_HEX.test(value)) {
+    throw new PublisherError("bad_request", `${what} must be non-empty bare lowercase hex, no \`0x\` prefix`);
+  }
   return fromHex(value);
 }
 
-/** The envelope fails the whole request; only bytes the LEDGER refuses survive per item. */
 function hexList(value: unknown, what: string): Uint8Array[] {
   if (!Array.isArray(value)) throw new PublisherError("bad_request", `\`${what}\` must be an array of hex strings`);
   return value.map((item: unknown, index) => hexBytes(item, `\`${what}[${index}]\``));
 }
 
-/**
- * Classification alone cannot separate a version skew from garbage: the library
- * reports `version-mismatch` for any unexpected header tag, `deadbeef` included.
- * A RECEIVED version is the evidence the chain moved.
- */
+// The library reports `version-mismatch` for any bad tag, so a RECEIVED version is the real evidence.
 function decodeFailureCode(error: unknown): ErrorCode {
   const skewed = isDeserializationError(error) && error.context.extracted?.receivedVersion !== undefined;
   return skewed && error.context.classification === "version-mismatch" ? "ledger_mismatch" : "decode_failed";
 }
 
-/**
- * `onFatal` runs after a {@link Reply} marked `fatal` has been flushed, which is
- * the only safe point to stop: the caller must learn its post may still land.
- */
+// `onFatal` runs only after a `fatal` reply is flushed: the caller must learn its post may still land.
 export function buildServer(config: Config, client: NodeClient, onFatal?: () => void): Server {
-  /** Liveness plus the compatibility declaration (ledger line, network id). Deliberately not readiness. */
+  // Deliberately liveness, not readiness.
   const healthBody = JSON.stringify({ status: "ok", networkId: config.networkId, ledger: LEDGER_TAGS });
 
-  /** The envelope is the caller's, the bytes are the ledger's. */
   const decode = async (request: IncomingMessage, field: string, seam: (value: unknown) => unknown): Promise<Reply> => {
     const text = await readBody(request);
     try {
@@ -96,7 +82,6 @@ export function buildServer(config: Config, client: NodeClient, onFatal?: () => 
     }
   };
 
-  /** One request, one reply: `handle` decides it, this writes it. */
   const answer = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     // Reached in normal operation: `readBody` rejects with `aborted` when a
     // client hangs up mid-body, so this catch includes disconnects.

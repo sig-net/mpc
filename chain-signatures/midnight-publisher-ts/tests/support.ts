@@ -1,7 +1,4 @@
-/**
- * Shared test scaffolding: the arrange step only. What each suite asserts, and
- * the fixtures it names, stay in the suite.
- */
+// Shared test scaffolding: the arrange step only.
 
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -22,7 +19,7 @@ export function goldenText(name: string): string {
   return readFileSync(`${FIXTURES}${name}`, "utf8");
 }
 
-/** Endpoints that would fail loudly if anything tried to use them. Spread it to vary a field. */
+// Endpoints that fail loudly if anything tries to use them. Spread it to vary a field.
 export const TEST_CONFIG: Config = {
   port: 0,
   bindHost: "127.0.0.1",
@@ -34,11 +31,7 @@ export const TEST_CONFIG: Config = {
   networkId: "undeployed",
 };
 
-/**
- * A node client that must never be reached: ANY property access throws `what`.
- * This is what proves a path opens no connection, rather than merely not
- * needing one.
- */
+// ANY property access throws, which is what proves a path opens no connection.
 export function forbiddenClient(what: string): NodeClient {
   return new Proxy({} as NodeClient, {
     get(_target, property) {
@@ -47,18 +40,12 @@ export function forbiddenClient(what: string): NodeClient {
   });
 }
 
-/** A reply plus the header no `Reply` carries, so a suite can pin the content type. */
+// A reply plus the header no `Reply` carries.
 export interface Answer extends Reply {
   readonly contentType: string | null;
 }
 
-/**
- * The REAL server on an ephemeral port, held open so a suite can send more than
- * one request to ONE instance. `close` when done.
- *
- * The decode seams get {@link request}, which builds its own; a suite that needs
- * a live node client (the respond route) builds it here.
- */
+// The REAL server, held open so a suite can send more than one request to ONE instance.
 export async function listening(config: Config, client: NodeClient, onFatal?: () => void) {
   const server = buildServer(config, client, onFatal);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -75,13 +62,7 @@ export async function listening(config: Config, client: NodeClient, onFatal?: ()
   };
 }
 
-/**
- * Round-trip a body through the REAL HTTP server, on an ephemeral port.
- *
- * Not a direct handler call: the envelope (method, path, JSON, hex) is as much
- * of the contract as the decoded tree is, and the caller on the other side is a
- * separate process.
- */
+// Not a direct handler call: the envelope is as much of the contract as the decoded tree.
 export async function request(path: string, init?: RequestInit): Promise<Reply> {
   const server = await listening(TEST_CONFIG, forbiddenClient("a decode seam touched the node client"));
   try {
@@ -92,12 +73,10 @@ export async function request(path: string, init?: RequestInit): Promise<Reply> 
   }
 }
 
-/** {@link request}, as a `POST` carrying a body. */
 export function post(path: string, body: string): Promise<Reply> {
   return request(path, { method: "POST", body });
 }
 
-/** {@link request}, as a bare `GET`. */
 export function get(path: string): Promise<Reply> {
   return request(path);
 }
