@@ -15,51 +15,6 @@ const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
-/// The ledger's `AlignmentAtom`. Only `Bytes` carries a width, which is why the wire
-/// form cannot be a flat width list.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "lowercase")]
-pub enum AlignmentAtom {
-    Compress,
-    Field,
-    Bytes { length: u32 },
-}
-
-/// The ledger's `AlignmentSegment`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "lowercase")]
-pub enum AlignmentSegment {
-    Atom { value: AlignmentAtom },
-    Option { value: Vec<Vec<AlignmentSegment>> },
-}
-
-/// Decoded contract state, internally tagged on `kind` exactly as the sidecar emits it
-/// (`{"kind":"cell","atoms":[..],"alignment":[..]}`, `{"kind":"null"}`).
-///
-/// A cell's `alignment` runs one segment per atom. Stored atoms are trailing-zero
-/// trimmed, so a field's declared width is recoverable only from there.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum StateNode {
-    Cell {
-        atoms: Vec<String>,
-        alignment: Vec<AlignmentSegment>,
-    },
-    Array {
-        children: Vec<StateNode>,
-    },
-    Map {
-        entries: Vec<MapEntry>,
-    },
-    Null,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct MapEntry {
-    pub key: Vec<String>,
-    pub value: StateNode,
-}
-
 /// Decoded transactions.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DecodedTransactions {
@@ -148,29 +103,6 @@ impl SidecarClient {
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
-    }
-
-    /// Decodes raw contract state bytes into the sidecar's atom tree.
-    pub async fn decode_contract_state(&self, state: &[u8]) -> anyhow::Result<StateNode> {
-        let body = serde_json::json!({ "state": hex::encode(state) });
-        retry_rpc!(
-            self.request_timeout,
-            self.retry,
-            "sidecar_decode_contract_state",
-            {
-                let resp = self
-                    .http
-                    .post(self.endpoint("/decode/contract-state"))
-                    .json(&body)
-                    .send()
-                    .await
-                    .context("sidecar /decode/contract-state request failed")?;
-                let resp = check_response(resp, "/decode/contract-state").await?;
-                resp.json::<StateNode>()
-                    .await
-                    .context("sidecar /decode/contract-state returned an unparseable body")
-            }
-        )
     }
 
     /// Decodes raw `send_mn_transaction` blobs into call structures for the advisory
@@ -307,16 +239,10 @@ fn failure_marker(status: reqwest::StatusCode) -> &'static str {
 /// timeout or a 5xx.
 pub(crate) const REFUSED_BYTES_MSG: &str = "sidecar refused the submitted bytes";
 
-/// True when `err` is the sidecar refusing the bytes rather than failing to answer.
-pub(crate) fn is_refused_bytes(err: &anyhow::Error) -> bool {
-    err.to_string().contains(REFUSED_BYTES_MSG)
-}
-
 /// The offline cross-language check plus the startup gate's rejection paths.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IndexerConfig, RpcConfig, SidecarConfig};
 
     #[test]
     fn only_a_client_error_is_a_refusal() {
@@ -340,37 +266,6 @@ mod tests {
                 "{unanswered}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn unreachable_sidecar_is_not_a_refusal() {
-        // Port 1 on loopback refuses immediately, so this needs no server.
-        let config = MidnightConfig {
-            sidecar_url: "http://127.0.0.1:1".to_string(),
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
-            central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
-            rpc: RpcConfig::default(),
-            sidecar: SidecarConfig {
-                request_timeout: Duration::from_millis(200),
-                retry: RetryConfig {
-                    min_delay: Duration::from_millis(1),
-                    max_delay: Duration::from_millis(2),
-                    max_times: 1,
-                    jitter: false,
-                },
-            },
-            indexer: IndexerConfig::default(),
-        };
-        let err = SidecarClient::new(&config)
-            .expect("client")
-            .decode_contract_state(&[0u8; 4])
-            .await
-            .expect_err("an unreachable sidecar cannot decode");
-        assert!(
-            !is_refused_bytes(&err),
-            "a transport fault must propagate, not be charged to the contract: {err:#}"
-        );
     }
 
     fn healthy() -> Health {
@@ -419,57 +314,5 @@ mod tests {
             .to_string();
         assert!(err.contains("contractState"), "unexpected error: {err}");
         assert!(err.contains("v9"), "the actual tag must be named: {err}");
-    }
-
-    #[test]
-    fn state_node_parses_sidecar_golden() {
-        assert_eq!(
-            serde_json::from_str::<StateNode>(r#"{"kind":"null"}"#).expect("null node parses"),
-            StateNode::Null
-        );
-
-        const GOLDEN: &str = include_str!(
-            "../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1366.json"
-        );
-        let tree: StateNode = serde_json::from_str(GOLDEN)
-            .expect("the sidecar's own golden must parse into this client's StateNode");
-
-        let StateNode::Array { children } = &tree else {
-            panic!("the singleton's state root is an array of ledger fields, got {tree:?}");
-        };
-
-        // Field 0's key is a single `RequestId` atom; field 1's is the composite
-        // `SignetMapKey { count, requestId }` whose `count` of 0 trims to the empty
-        // atom.
-        let key_of = |field: usize| -> Vec<String> {
-            let StateNode::Map { entries } = &children[field] else {
-                panic!("ledger field {field} is a map in this capture");
-            };
-            assert_eq!(entries.len(), 1, "field {field} holds one entry here");
-            entries[0].key.clone()
-        };
-
-        let counter_key = key_of(0);
-        let notification_key = key_of(1);
-        assert_eq!(counter_key.len(), 1, "the counter map key is ONE atom");
-        assert_eq!(
-            notification_key.len(),
-            2,
-            "the notification map key is TWO atoms, boundary preserved"
-        );
-        assert_eq!(
-            notification_key[0], "",
-            "count 0 trims to the empty atom rather than disappearing"
-        );
-        assert_eq!(
-            notification_key[1], counter_key[0],
-            "both entries are filed under the same request id"
-        );
-        assert_eq!(
-            notification_key.concat(),
-            counter_key.concat(),
-            "the two structurally different keys concatenate identically, which \
-             is exactly the ambiguity the atom array removes"
-        );
     }
 }

@@ -3,11 +3,15 @@
 use crate::config::MidnightConfig;
 use crate::convert::to_sign_request;
 use crate::reader::{
-    decode_notification, repad_atom_32, resolve_verified_record, signet_field_node,
-    unpack_notification_v1, Resolved,
+    decode_notification, resolve_verified_record, signet_field_node, unpack_notification_v1, Node,
+    Resolved,
 };
 use crate::rpc::{is_state_unservable, ArchiveState, BlockRef, MidnightRpc};
-use crate::sidecar::{is_refused_bytes, DecodedTransactions, MapEntry, SidecarClient, StateNode};
+use crate::sidecar::{DecodedTransactions, SidecarClient};
+use crate::state::decode_contract_state;
+
+use midnight_base_crypto::fab::AlignedValue;
+use midnight_onchain_state::state::StateValue;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,10 +33,10 @@ const NOTIFICATION_MAP_FIELD: u8 = 1;
 
 /// What a contract-state read found.
 pub(crate) enum ContractState {
-    Tree(StateNode),
+    Tree(Node),
     /// Not present at that block.
     Absent,
-    /// The node served the bytes and the sidecar refused to decode them.
+    /// The node served bytes that did not deserialize.
     Undecodable(anyhow::Error),
 }
 
@@ -108,17 +112,12 @@ pub(crate) trait ChainSource: Send + Sync {
         -> anyhow::Result<AbortOnDrop>;
 }
 
-/// Splits a sidecar decode into the per-entry class and the restart class.
-///
-/// Only a sidecar that refused the bytes is charged to the contract that owns
-/// them. One that could not answer must propagate: dropped instead, the block
-/// still emits and the notification joins the parent set, so the request is
-/// lost for good.
-fn classify_decode(decoded: anyhow::Result<StateNode>) -> anyhow::Result<ContractState> {
+/// Bytes that do not deserialize are charged to the contract that owns them, never to
+/// the read: the decode is in-process, so there is no transport that could have failed.
+fn classify_decode(decoded: anyhow::Result<Node>) -> anyhow::Result<ContractState> {
     match decoded {
         Ok(tree) => Ok(ContractState::Tree(tree)),
-        Err(err) if is_refused_bytes(&err) => Ok(ContractState::Undecodable(err)),
-        Err(err) => Err(err.context("sidecar could not decode contract state")),
+        Err(err) => Ok(ContractState::Undecodable(err)),
     }
 }
 
@@ -159,11 +158,11 @@ impl ChainSource for LiveSource {
         address_64hex: &str,
         at_hash: &str,
     ) -> anyhow::Result<ContractState> {
-        // Only a sidecar that REFUSED the bytes is charged to the contract that owns
-        // them.
         match self.rpc.contract_state(address_64hex, at_hash).await? {
             None => Ok(ContractState::Absent),
-            Some(state) => classify_decode(self.sidecar.decode_contract_state(&state).await),
+            // Decoded in-process by the ledger's own deserializer: the state path makes
+            // no network call beyond the node read above.
+            Some(state) => classify_decode(decode_contract_state(&state)),
         }
     }
 
@@ -233,11 +232,14 @@ fn attribute_caller(txs: &DecodedTransactions, central_address: &str) -> Option<
 /// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }` recovered
 /// from its atom-preserving wire key: two trimmed atoms, the count folded little-endian
 /// and the rid re-padded.
-fn signet_map_key_rid(key_atoms: &[String]) -> Option<(u64, [u8; 32])> {
-    let [count_hex, rid_hex] = key_atoms else {
+fn signet_map_key_rid(key: &AlignedValue) -> Option<(u64, [u8; 32])> {
+    let [count, rid] = key.value.0.as_slice() else {
         return None;
     };
-    Some((fold_le_u64(count_hex)?, repad_atom_32(rid_hex)?))
+    Some((
+        u64::try_from(count).ok()?,
+        <[u8; 32]>::try_from(rid.clone()).ok()?,
+    ))
 }
 
 /// The central singleton's `respondCounterMap` ordinal: the on-chain per-rid watermark
@@ -251,16 +253,34 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// One entry of a central map, keyed by the composite `SignetMapKey`.
+#[derive(Clone, PartialEq)]
+pub(crate) struct MapEntry {
+    pub key: AlignedValue,
+    pub value: Node,
+}
+
 /// The entries of a central-tree field that must be a map, or `None` when the field
 /// could not be read at all.
-fn central_map_entries<'a>(
-    tree: &'a StateNode,
+fn central_map_entries(
+    tree: &Node,
     field: u8,
     field_name: &'static str,
     height: u64,
-) -> Option<&'a [MapEntry]> {
+) -> Option<Vec<MapEntry>> {
     match signet_field_node(tree, usize::from(field)) {
-        Ok(StateNode::Map { entries }) => Some(entries),
+        Ok(StateValue::Map(entries)) => Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    let (key, value) = &*entry;
+                    MapEntry {
+                        key: (**key).clone(),
+                        value: (**value).clone(),
+                    }
+                })
+                .collect(),
+        ),
         Ok(_) => {
             degraded_read(
                 "central-field-not-a-map",
@@ -284,45 +304,32 @@ fn central_map_entries<'a>(
 }
 
 /// Per-rid response counts from the central tree's field 2.
-fn response_counts(tree: &StateNode, height: u64) -> HashMap<[u8; 32], u64> {
+fn response_counts(tree: &Node, height: u64) -> HashMap<[u8; 32], u64> {
     central_map_entries(tree, RESPOND_COUNTER_FIELD, "respondCounterMap", height)
         .unwrap_or_default()
         .iter()
         .filter_map(|entry| {
             let rid = counter_map_rid(&entry.key)?;
-            let StateNode::Cell { atoms, .. } = &entry.value else {
+            let StateValue::Cell(count) = &entry.value else {
                 return Some((rid, 0));
             };
-            let count = atoms
+            let count = count
+                .value
+                .0
                 .first()
-                .and_then(|atom| fold_le_u64(atom))
+                .and_then(|atom| u64::try_from(atom).ok())
                 .unwrap_or(0);
             Some((rid, count))
         })
         .collect()
 }
 
-/// One trimmed `Bytes<32>` atom re-padded: the counter maps' single-atom key form.
-fn counter_map_rid(key_atoms: &[String]) -> Option<[u8; 32]> {
-    let [rid_hex] = key_atoms else {
+/// The counter maps' single-atom `Bytes<32>` key.
+fn counter_map_rid(key: &AlignedValue) -> Option<[u8; 32]> {
+    let [atom] = key.value.0.as_slice() else {
         return None;
     };
-    repad_atom_32(rid_hex)
-}
-
-/// Little-endian fold of a trimmed uint atom (at most 8 bytes), the wire rule every
-/// stored integer uses.
-fn fold_le_u64(atom_hex: &str) -> Option<u64> {
-    let bytes = hex::decode(atom_hex).ok()?;
-    if bytes.len() > 8 {
-        return None;
-    }
-    Some(
-        bytes
-            .iter()
-            .rev()
-            .fold(0u64, |acc, b| (acc << 8) | u64::from(*b)),
-    )
+    <[u8; 32]>::try_from(atom.clone()).ok()
 }
 
 // The reporting contract.
@@ -436,7 +443,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         at_hash: &str,
-    ) -> anyhow::Result<Option<StateNode>> {
+    ) -> anyhow::Result<Option<Node>> {
         match source
             .contract_state_tree(&self.config.central_address, at_hash)
             .await?
@@ -451,14 +458,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
     /// Field-1 entries of an already-fetched central tree, or `None` when the field
     /// could not be read.
-    fn notification_entries(tree: &StateNode, height: u64) -> Option<Vec<MapEntry>> {
+    fn notification_entries(tree: &Node, height: u64) -> Option<Vec<MapEntry>> {
         central_map_entries(
             tree,
             NOTIFICATION_MAP_FIELD,
             "signBidirectionalEventNotificationMap",
             height,
         )
-        .map(<[MapEntry]>::to_vec)
     }
 
     /// Per-block processing, shared by catchup and live.
@@ -489,11 +495,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let new_entries: Vec<&MapEntry> = match &parent_entries {
             Some(parent) => {
-                let parent_keys: HashSet<&[String]> =
-                    parent.iter().map(|entry| entry.key.as_slice()).collect();
+                let parent_keys: HashSet<&AlignedValue> =
+                    parent.iter().map(|entry| &entry.key).collect();
                 entries
                     .iter()
-                    .filter(|entry| !parent_keys.contains(entry.key.as_slice()))
+                    .filter(|entry| !parent_keys.contains(&entry.key))
                     .collect()
             }
             // No diff is possible, so this block emits nothing, giving up only the
@@ -566,7 +572,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 "malformed-map-key",
                 height,
                 None,
-                &format!("{} atoms in a SignetMapKey", entry.key.len()),
+                &format!("{} atoms in a SignetMapKey", entry.key.value.0.len()),
             ));
         };
         let notification = match decode_notification(&entry.value) {
@@ -1008,34 +1014,6 @@ mod tests {
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
 
     #[test]
-    fn classify_decode_propagates_a_sidecar_that_could_not_answer() {
-        let refused = anyhow::anyhow!(
-            "{}: /decode/contract-state 422",
-            crate::sidecar::REFUSED_BYTES_MSG
-        );
-        assert!(
-            matches!(
-                classify_decode(Err(refused)),
-                Ok(ContractState::Undecodable(_))
-            ),
-            "a refusal is the contract's own data property"
-        );
-
-        let unanswered = anyhow::anyhow!("sidecar could not answer: /decode/contract-state 502");
-        assert!(
-            classify_decode(Err(unanswered)).is_err(),
-            "an unanswered decode must propagate and restart the run"
-        );
-
-        let transport =
-            anyhow::anyhow!("sidecar /decode/contract-state request failed: connection reset");
-        assert!(
-            classify_decode(Err(transport)).is_err(),
-            "a transport fault must propagate and restart the run"
-        );
-    }
-
-    #[test]
     fn select_catchup_mode_degrades_pruned_by_default() {
         // Probe-and-degrade: pruned is a MODE, not an error, unless the operator opted
         // into strict refusal.
@@ -1070,10 +1048,9 @@ mod tests {
 
     // run() over an injected ChainSource.
 
-    use crate::sidecar::{
-        ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, MapEntry, StateNode,
-    };
-    use crate::test_utils::{cell_from_record, sample_record};
+    use crate::sidecar::{ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions};
+    use crate::test_utils::{array_of, cell_from_record, cell_of, key_of, map_of, sample_record};
+    use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
     use std::collections::HashMap;
@@ -1111,55 +1088,53 @@ mod tests {
         }
     }
 
-    fn trimmed_hex(bytes: &[u8]) -> String {
+    fn trim(bytes: &[u8]) -> Vec<u8> {
         let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-        hex::encode(&bytes[..end])
+        bytes[..end].to_vec()
     }
 
-    /// One notification-map entry: composite [count, rid] key atoms, V1 payload naming
-    /// CALLER and REQUESTS_FIELD.
-    fn notification_entry(count: u8, rid: &[u8; 32]) -> MapEntry {
+    /// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`.
+    fn signet_map_key(count: u8, rid: &[u8; 32]) -> AlignedValue {
+        AlignedValue {
+            value: Value(vec![ValueAtom(trim(&[count])), ValueAtom(trim(rid))]),
+            alignment: Alignment(vec![
+                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 8 }),
+                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
+            ]),
+        }
+    }
+
+    /// One notification-map entry: V1 payload naming CALLER and REQUESTS_FIELD.
+    fn notification_entry(count: u8, rid: &[u8; 32]) -> (AlignedValue, Node) {
         let mut payload = CALLER.to_vec();
         payload.push(REQUESTS_FIELD);
-        MapEntry {
-            key: vec![hex::encode([count]), trimmed_hex(rid)],
-            value: StateNode::Cell {
-                atoms: vec!["01".to_string(), hex::encode(payload)],
-                alignment: crate::test_utils::alignment_of(&[1, 128]),
-            },
-        }
+        (
+            signet_map_key(count, rid),
+            cell_of(&[vec![1u8], payload], &[1, 128]),
+        )
     }
 
     /// The central singleton: six flat fields, notification map at ordinal 1.
-    fn central_state(entries: Vec<MapEntry>) -> StateNode {
-        StateNode::Array {
-            children: vec![
-                StateNode::Null,
-                StateNode::Map { entries },
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Null,
-            ],
-        }
+    fn central_state(entries: Vec<(AlignedValue, Node)>) -> Node {
+        array_of(vec![
+            StateValue::Null,
+            map_of(entries),
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+        ])
     }
 
     /// The caller's five-field ledger with the record filed under its rid at field 4.
-    fn caller_state(record: &crate::records::SignBidirectionalRecord, rid: &[u8; 32]) -> StateNode {
-        StateNode::Array {
-            children: vec![
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Map {
-                    entries: vec![MapEntry {
-                        key: vec![trimmed_hex(rid)],
-                        value: cell_from_record(record),
-                    }],
-                },
-            ],
-        }
+    fn caller_state(record: &crate::records::SignBidirectionalRecord, rid: &[u8; 32]) -> Node {
+        array_of(vec![
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            map_of(vec![(key_of(*rid), cell_from_record(record))]),
+        ])
     }
 
     #[derive(Default)]
@@ -1167,7 +1142,7 @@ mod tests {
         head: u64,
         /// (address, at_hash) -> tree; absent means Ok(None), contract not present at
         /// that block.
-        states: HashMap<(String, String), StateNode>,
+        states: HashMap<(String, String), Node>,
         /// (address, at_hash) -> error message; checked BEFORE `states`, so a read can
         /// fail with e.g.
         state_errors: HashMap<(String, String), String>,
@@ -1202,7 +1177,7 @@ mod tests {
             std::future::pending().await
         }
 
-        fn set_state(&mut self, address: &str, at: u64, tree: StateNode) {
+        fn set_state(&mut self, address: &str, at: u64, tree: Node) {
             self.states.insert((address.to_string(), hash_of(at)), tree);
         }
 
@@ -1587,13 +1562,7 @@ mod tests {
         // Block 8's central state is present but field 1 is not a map, so the
         // notification map there cannot be read: a shape TRANSITION, since block 9's is
         // readable.
-        source.set_state(
-            &central,
-            8,
-            StateNode::Array {
-                children: vec![StateNode::Null; 6],
-            },
-        );
+        source.set_state(&central, 8, array_of(vec![StateValue::Null; 6]));
         source.set_state(
             &central,
             9,
@@ -1612,26 +1581,16 @@ mod tests {
         source.set_state(
             &hex::encode(CALLER),
             10,
-            StateNode::Array {
-                children: vec![
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Map {
-                        entries: vec![
-                            MapEntry {
-                                key: vec![trimmed_hex(&rid)],
-                                value: cell_from_record(&record),
-                            },
-                            MapEntry {
-                                key: vec![trimmed_hex(&other_rid)],
-                                value: cell_from_record(&other_record),
-                            },
-                        ],
-                    },
-                ],
-            },
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![
+                    (key_of(rid), cell_from_record(&record)),
+                    (key_of(other_rid), cell_from_record(&other_record)),
+                ]),
+            ]),
         );
 
         let mut harness = RunFixture::spawn(source, 8).await;
@@ -2023,30 +1982,24 @@ mod tests {
     /// (respondCounterMap, the phase-1 signature responses) carrying a per-rid response
     /// COUNT, the on-chain per-rid watermark.
     fn central_state_with_responses(
-        entries: Vec<MapEntry>,
+        entries: Vec<(AlignedValue, Node)>,
         responses: &[([u8; 32], u64)],
-    ) -> StateNode {
-        StateNode::Array {
-            children: vec![
-                StateNode::Null,
-                StateNode::Map { entries },
-                StateNode::Map {
-                    entries: responses
-                        .iter()
-                        .map(|(rid, count)| MapEntry {
-                            key: vec![trimmed_hex(rid)],
-                            value: StateNode::Cell {
-                                atoms: vec![trimmed_hex(&count.to_le_bytes())],
-                                alignment: crate::test_utils::alignment_of(&[8]),
-                            },
-                        })
-                        .collect(),
-                },
-                StateNode::Null,
-                StateNode::Null,
-                StateNode::Null,
-            ],
-        }
+    ) -> Node {
+        array_of(vec![
+            StateValue::Null,
+            map_of(entries),
+            map_of(
+                responses
+                    .iter()
+                    .map(|(rid, count)| {
+                        (key_of(*rid), cell_of(&[trim(&count.to_le_bytes())], &[8]))
+                    })
+                    .collect(),
+            ),
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+        ])
     }
 
     #[tokio::test]
@@ -2169,26 +2122,16 @@ mod tests {
         source.set_state(
             &hex::encode(CALLER),
             9,
-            StateNode::Array {
-                children: vec![
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Map {
-                        entries: vec![
-                            MapEntry {
-                                key: vec![trimmed_hex(&responded_rid)],
-                                value: cell_from_record(&responded_record),
-                            },
-                            MapEntry {
-                                key: vec![trimmed_hex(&rid)],
-                                value: cell_from_record(&record),
-                            },
-                        ],
-                    },
-                ],
-            },
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![
+                    (key_of(responded_rid), cell_from_record(&responded_record)),
+                    (key_of(rid), cell_from_record(&record)),
+                ]),
+            ]),
         );
 
         let mut harness = RunFixture::spawn(source, 5).await;
@@ -2291,26 +2234,16 @@ mod tests {
         source.set_state(
             &hex::encode(CALLER),
             9,
-            StateNode::Array {
-                children: vec![
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Null,
-                    StateNode::Map {
-                        entries: vec![
-                            MapEntry {
-                                key: vec![trimmed_hex(&bad_rid)],
-                                value: cell_from_record(&bad_record),
-                            },
-                            MapEntry {
-                                key: vec![trimmed_hex(&good_rid)],
-                                value: cell_from_record(&good_record),
-                            },
-                        ],
-                    },
-                ],
-            },
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![
+                    (key_of(bad_rid), cell_from_record(&bad_record)),
+                    (key_of(good_rid), cell_from_record(&good_record)),
+                ]),
+            ]),
         );
 
         let (live_tx, live_rx) = mpsc::channel(8);

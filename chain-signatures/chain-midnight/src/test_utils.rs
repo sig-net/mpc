@@ -3,7 +3,14 @@
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
 };
-use crate::sidecar::{AlignmentAtom, AlignmentSegment, StateNode};
+use midnight_base_crypto::fab::{
+    AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
+};
+use midnight_onchain_state::state::StateValue;
+use midnight_storage::storage::{Array, HashMap};
+use midnight_storage::DefaultDB;
+
+use crate::reader::Node;
 
 /// Wire-form atoms of a record, each field trimmed as the state layer stores it:
 /// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
@@ -94,26 +101,51 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     widths
 }
 
-pub(crate) fn cell_of(atoms: &[Vec<u8>], widths: &[u32]) -> StateNode {
-    StateNode::Cell {
-        atoms: atoms.iter().map(hex::encode).collect(),
-        alignment: alignment_of(widths),
-    }
+pub(crate) fn cell_of(atoms: &[Vec<u8>], widths: &[u32]) -> Node {
+    aligned_cell(atoms, alignment_of(widths))
+}
+
+/// A cell at an explicit alignment, for the cases that need a segment `alignment_of`
+/// cannot express.
+pub(crate) fn aligned_cell(atoms: &[Vec<u8>], alignment: Alignment) -> Node {
+    StateValue::from(AlignedValue {
+        value: Value(atoms.iter().map(|a| ValueAtom(a.clone())).collect()),
+        alignment,
+    })
 }
 
 /// `Bytes<width>` segments, the only alignment a signet record or notification uses.
-pub(crate) fn alignment_of(widths: &[u32]) -> Vec<AlignmentSegment> {
-    widths
-        .iter()
-        .map(|length| AlignmentSegment::Atom {
-            value: AlignmentAtom::Bytes { length: *length },
-        })
-        .collect()
+pub(crate) fn alignment_of(widths: &[u32]) -> Alignment {
+    Alignment(
+        widths
+            .iter()
+            .map(|length| AlignmentSegment::Atom(AlignmentAtom::Bytes { length: *length }))
+            .collect(),
+    )
 }
 
-/// The wire cell for `record`: its trimmed atoms beside the widths it declares.
-pub(crate) fn cell_from_record(record: &SignBidirectionalRecord) -> StateNode {
+/// The stored cell for `record`: its trimmed atoms beside the widths it declares.
+pub(crate) fn cell_from_record(record: &SignBidirectionalRecord) -> Node {
     cell_of(&atoms_from_record(record), &widths_from_record(record))
+}
+
+/// A `Bytes<32>` map key, the shape both counter maps and a caller's request index use.
+pub(crate) fn key_of(bytes: [u8; 32]) -> AlignedValue {
+    AlignedValue::from(bytes)
+}
+
+/// A ledger map from key/value pairs.
+pub(crate) fn map_of(entries: Vec<(AlignedValue, Node)>) -> Node {
+    let mut map: HashMap<AlignedValue, StateValue<DefaultDB>, DefaultDB> = HashMap::new();
+    for (key, value) in entries {
+        map = map.insert(key, value);
+    }
+    StateValue::Map(map)
+}
+
+/// A ledger array of fields.
+pub(crate) fn array_of(children: Vec<Node>) -> Node {
+    StateValue::Array(Array::new_from_slice(&children))
 }
 fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_midnight::{
     DecodedTransactions, IndexerConfig, MidnightConfig, RpcConfig, SidecarClient, SidecarConfig,
-    StateNode,
 };
 
 /// The sidecar package, and the chain-free entry point inside it.
@@ -21,24 +20,10 @@ const ENTRY: &str = "tests/serve-decode-only.ts";
 const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Real captured chain blobs and the sidecar's own frozen output for them.
-const STATE_1366: &[u8] =
-    include_bytes!("../../midnight-publisher-ts/tests/fixtures/singleton-post-state-1366.mn");
-const STATE_1365: &[u8] =
-    include_bytes!("../../midnight-publisher-ts/tests/fixtures/singleton-pre-state-1365.mn");
-const CALLER_STATE_1366: &[u8] =
-    include_bytes!("../../midnight-publisher-ts/tests/fixtures/caller-state-1366.mn");
-const GOLDEN_STATE_1366: &str =
-    include_str!("../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1366.json");
-const GOLDEN_STATE_1365: &str =
-    include_str!("../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1365.json");
 /// `{"tx":{"Midnight":"<hex>"}}`, the `send_mn_transaction` wrapper as captured.
 const NOTIFY_TX: &str = include_str!("../../midnight-publisher-ts/tests/fixtures/notify-tx.mn");
 const GOLDEN_BLOCK_1366: &str =
     include_str!("../../midnight-publisher-ts/tests/fixtures/golden-block-1366.json");
-
-/// The ledger tag `sidecar.rs` pins `EXPECTED_CONTRACT_STATE_TAG` against, as it
-/// appears in the captured bytes themselves.
-const CONTRACT_STATE_TAG: &[u8] = b"midnight:contract-state[v8]";
 
 struct Sidecar {
     child: Child,
@@ -155,16 +140,6 @@ impl Sidecar {
     }
 }
 
-/// Every `Null` in a decoded tree.
-fn count_nulls(node: &StateNode) -> usize {
-    match node {
-        StateNode::Null => 1,
-        StateNode::Cell { .. } => 0,
-        StateNode::Array { children } => children.iter().map(count_nulls).sum(),
-        StateNode::Map { entries } => entries.iter().map(|entry| count_nulls(&entry.value)).sum(),
-    }
-}
-
 #[tokio::test]
 #[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
 async fn health_satisfies_startup_compatibility_gate() {
@@ -204,42 +179,6 @@ async fn health_satisfies_startup_compatibility_gate() {
     assert!(
         err.contains("undeployed") && err.contains("testnet"),
         "both sides of the mismatch must be named: {err}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn decode_contract_state_matches_sidecar_goldens() {
-    // Real chain blobs in, the sidecar's frozen output for those same blobs out, over
-    // HTTP.
-    let sidecar = Sidecar::boot().await;
-    let client = sidecar.client("undeployed");
-
-    for (name, bytes, golden) in [
-        ("singleton-post-state-1366", STATE_1366, GOLDEN_STATE_1366),
-        ("singleton-pre-state-1365", STATE_1365, GOLDEN_STATE_1365),
-    ] {
-        let live = client
-            .decode_contract_state(bytes)
-            .await
-            .unwrap_or_else(|err| panic!("{name}: the live sidecar must decode it: {err:#}"));
-        let frozen: StateNode = serde_json::from_str(golden)
-            .unwrap_or_else(|err| panic!("{name}: its committed golden must parse: {err}"));
-        assert_eq!(
-            live, frozen,
-            "{name}: the live decode diverges from the sidecar's own committed golden"
-        );
-    }
-
-    // The caller's capture has no golden, and is here for the node vocabulary no golden
-    // carries: `{"kind":"null"}`, the unset ledger slot.
-    let caller = client
-        .decode_contract_state(CALLER_STATE_1366)
-        .await
-        .expect("the caller's captured state decodes");
-    assert!(
-        count_nulls(&caller) > 0,
-        "the caller capture must carry null nodes, or this proves nothing: {caller:?}"
     );
 }
 
@@ -317,95 +256,5 @@ async fn decode_transactions_yields_provenance_join() {
         mixed.skipped[0].starts_with("tx[0]:"),
         "the report names which blob was dropped: {:?}",
         mixed.skipped[0]
-    );
-}
-
-#[tokio::test]
-#[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn malformed_body_is_bad_request_and_not_retried() {
-    // The real `bad_request`, provoked rather than canned.
-    let sidecar = Sidecar::boot().await;
-    let client = sidecar.client("undeployed");
-
-    let err = client
-        .decode_contract_state(&[])
-        .await
-        .expect_err("empty bytes are not a contract state")
-        .to_string();
-    assert!(err.contains("bad_request"), "unexpected error: {err}");
-    assert!(
-        err.contains("`state`"),
-        "the sidecar names the key the client sent, so the message proves the request shape: {err}"
-    );
-    // A 4xx is terminal: `check_response` surfaces the status, `is_retryable` reads it,
-    // and the budget is never spent.
-    assert!(
-        err.contains("exhausted after 1 attempts"),
-        "a validation reject must not be retried: {err}"
-    );
-
-    // The other route's envelope, whose key and array shape are equally the server's to
-    // read: it answers by index.
-    let err = client
-        .decode_transactions(&[Vec::new()])
-        .await
-        .expect_err("an empty transaction blob is not hex")
-        .to_string();
-    assert!(
-        err.contains("bad_request") && err.contains("transactions[0]"),
-        "the sidecar must name the offending element: {err}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn unreadable_bytes_are_decode_failed_and_retried() {
-    // The 400/422 split, live: the envelope is fine and the LEDGER refuses the bytes.
-    let sidecar = Sidecar::boot().await;
-    let client = sidecar.client("undeployed");
-
-    let err = client
-        .decode_contract_state(&[0xde, 0xad, 0xbe, 0xef])
-        .await
-        .expect_err("the ledger refuses these bytes")
-        .to_string();
-    assert!(err.contains("decode_failed"), "unexpected error: {err}");
-    assert!(
-        err.contains("ContractState"),
-        "the sidecar's own diagnosis is surfaced verbatim: {err}"
-    );
-    // 422 is not one of the terminal 4xx codes, so the budget IS spent here: the same
-    // request really goes out three times.
-    assert!(
-        err.contains("exhausted after 3 attempts"),
-        "a retryable status must spend the whole budget: {err}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "boots the midnight-publisher-ts sidecar; run with --ignored"]
-async fn newer_ledger_is_named_ledger_mismatch() {
-    // The diagnosis `assert_compatible` exists to preempt, taken from the other end: a
-    // real captured state whose version tag has been advanced by one byte.
-    let sidecar = Sidecar::boot().await;
-    let client = sidecar.client("undeployed");
-
-    let mut skewed = STATE_1366.to_vec();
-    let tag = skewed
-        .windows(CONTRACT_STATE_TAG.len())
-        .position(|window| window == CONTRACT_STATE_TAG)
-        .expect("the captured state carries the tag this client is written against");
-    // `midnight:contract-state[v8]` -> `[v9]`, leaving an otherwise real blob.
-    skewed[tag + CONTRACT_STATE_TAG.len() - 2] = b'9';
-
-    let err = client
-        .decode_contract_state(&skewed)
-        .await
-        .expect_err("this build cannot read a v9 contract state")
-        .to_string();
-    assert!(err.contains("ledger_mismatch"), "unexpected error: {err}");
-    assert!(
-        err.contains("502"),
-        "a chain that moved ahead is the sidecar's fault to report, not the caller's: {err}"
     );
 }
