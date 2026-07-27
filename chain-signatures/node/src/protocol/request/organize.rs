@@ -76,8 +76,7 @@ impl OrganizingPhase {
                 .wait_for_active_participants(ctx, state, threshold)
                 .await
             else {
-                tracing::warn!(?sign_id, round = ?state.round, "no active participants, reorganizing");
-                return state.reorganize();
+                return state.reorganize("no active participants");
             };
 
             let max_rounds = state.round + PROPOSER_SEARCH_WINDOW;
@@ -130,12 +129,7 @@ impl OrganizingPhase {
             let permit = match ctx.limiter.acquire(remaining).await {
                 Ok(permit) => permit,
                 Err(SignLimitError::Timeout) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        round = ?state.round,
-                        "proposer timeout waiting for concurrency slot, reorganizing"
-                    );
-                    return state.reorganize();
+                    return state.reorganize("proposer timeout waiting for concurrency slot");
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
@@ -182,12 +176,7 @@ impl OrganizingPhase {
             let (reservation, participants) = match fetch {
                 Ok(value) => value,
                 Err(_) => {
-                    tracing::warn!(
-                        ?sign_id,
-                        round = ?state.round,
-                        "proposer timeout waiting for presignature, reorganizing"
-                    );
-                    return state.reorganize();
+                    return state.reorganize("proposer timeout waiting for presignature");
                 }
             };
 

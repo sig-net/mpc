@@ -20,7 +20,6 @@ impl PositPhase {
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
-        let round = state.round;
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
@@ -158,14 +157,9 @@ impl PositPhase {
             Ok(Ok(id)) => id,
             Ok(Err(phase)) => return Err(phase),
             Err(_) => {
-                tracing::warn!(
-                    ?sign_id,
-                    ?round,
-                    ?proposer,
-                    me=?ctx.governance.me,
-                    "deliberator timeout waiting for Propose, reorganizing"
-                );
-                return Err(state.reorganize());
+                return Err(state.reorganize(&format!(
+                    "deliberator timeout waiting for Propose from {proposer:?}"
+                )));
             }
         };
 
@@ -281,12 +275,7 @@ impl PositPhase {
                             }
 
                             if participants.len() < ctx.governance.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    "not enough start participants"
-                                );
-                                return state.reorganize();
+                                return state.reorganize("not enough Start participants");
                             }
 
                             tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
@@ -298,27 +287,26 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
-                            let num_ongoing = counter.num_peers_with_ongoing_generation();
-                            if ctx.governance.participants.len().saturating_sub(num_ongoing) < ctx.governance.threshold {
-                                state.pause_proposing_until = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
-                                tracing::info!(
-                                    ?sign_id,
-                                    ?round,
-                                    resume=?state.pause_proposing_until,
-                                    "pausing proposer: peers already generating this signature"
+                            let peers_already_generating = counter.num_peers_already_generating();
+                            let too_few_available = ctx
+                                .governance
+                                .participants
+                                .len()
+                                .saturating_sub(peers_already_generating)
+                                < ctx.governance.threshold;
+                            let reason = if too_few_available {
+                                state.pause_proposing_until = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(ctx.cfg.signature.generation_timeout),
                                 );
+                                "peers already generating this signature"
                             } else {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    ?from,
-                                    "received enough REJECTs, reorganizing"
-                                );
-                            }
+                                "received enough rejects"
+                            };
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
-                            return state.reorganize();
+                            return state.reorganize(reason);
                         }
 
                         // Starting as soon as we have enough accepts leaves
@@ -344,22 +332,20 @@ impl PositPhase {
                     }
                 }
                 _ = &mut posit_deadline => {
-                    if is_proposer {
-                        tracing::warn!(
-                            ?sign_id,
-                            accepts = counter.accepts.len(),
-                            threshold = ctx.governance.threshold,
-                            ?round,
-                            "proposer posit deadline reached, expiring round"
-                        );
-                        if let Some(_reservation) = presignature {
+                    let reason = if is_proposer {
+                        if presignature.is_some() {
                             tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
                         }
+                        format!(
+                            "proposer posit deadline reached ({} accepts, threshold {})",
+                            counter.accepts.len(),
+                            ctx.governance.threshold
+                        )
                     } else {
-                        tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
-                    }
+                        format!("deliberator posit timeout waiting for Start from {proposer:?}")
+                    };
 
-                    return state.reorganize();
+                    return state.reorganize(&reason);
                 }
                 _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
                     accept_deadline_reached = true;

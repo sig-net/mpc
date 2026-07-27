@@ -106,6 +106,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
         };
         storage.persist(&cp1).await?;
 
@@ -118,6 +119,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 20,
             pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
         };
         storage.persist(&cp2).await?;
 

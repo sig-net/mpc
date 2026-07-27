@@ -124,8 +124,15 @@ impl SignGenerator {
         })
     }
 
-    /// Receive the next protocol message, erroring out on timeout.
-    async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
+    /// Participants (excluding those in `seen`) we are still waiting on: the peers
+    /// an abort is blocked behind. `seen` holds everyone we have already heard from.
+    fn awaited(&self, seen: &[Participant]) -> Vec<Participant> {
+        awaited_peers(&self.participants, seen)
+    }
+
+    /// Receive the next protocol message, erroring out on timeout. `seen` lists the
+    /// participants already heard from, so an abort log can name who it waits on.
+    async fn recv(&mut self, seen: &[Participant]) -> Result<SignatureMessage, SignError> {
         let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
@@ -136,11 +143,21 @@ impl SignGenerator {
         {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
-                tracing::warn!(?sign_id, ?presignature_id, "signature generation aborted");
+                tracing::warn!(
+                    ?sign_id,
+                    ?presignature_id,
+                    awaited = ?self.awaited(seen),
+                    "signature generation aborted",
+                );
                 Err(SignError::Aborted)
             }
             Err(_err) => {
-                tracing::warn!(?sign_id, ?presignature_id, "signature generation timeout");
+                tracing::warn!(
+                    ?sign_id,
+                    ?presignature_id,
+                    awaited = ?self.awaited(seen),
+                    "signature generation timeout",
+                );
                 Err(SignError::Aborted)
             }
         }
@@ -158,6 +175,9 @@ impl SignGenerator {
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
         let mut poke_last_time = self.created;
+        // Participants we have received a message from this instance, seeded with
+        // `me` since we never wait on ourselves. Drives the awaited-peer abort logs.
+        let mut seen: Vec<Participant> = vec![me];
         crate::metrics::protocols::SIGNATURE_BEFORE_POKE_DELAY
             .observe(self.created.elapsed().as_millis() as f64);
 
@@ -173,6 +193,7 @@ impl SignGenerator {
                     tracing::error!(
                         ?sign_id,
                         ?err,
+                        awaited = ?self.awaited(&seen),
                         "signature generation failed on protocol advancement",
                     );
                     break Err(SignError::Aborted);
@@ -189,12 +210,15 @@ impl SignGenerator {
 
             match action {
                 Action::Wait => {
-                    let msg = self.recv().await.inspect_err(|_| {
+                    let msg = self.recv(&seen).await.inspect_err(|_| {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
                         if self.proposer == me {
                             crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                         }
                     })?;
+                    if !seen.contains(&msg.from) {
+                        seen.push(msg.from);
+                    }
                     self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
@@ -302,6 +326,16 @@ impl SignGenerator {
     }
 }
 
+/// Participants in `participants` not present in `seen`: the peers a stalled
+/// instance is still waiting on. Preserves participant order; small n, linear scan.
+fn awaited_peers(participants: &[Participant], seen: &[Participant]) -> Vec<Participant> {
+    participants
+        .iter()
+        .copied()
+        .filter(|p| !seen.contains(p))
+        .collect()
+}
+
 /// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
 fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
@@ -384,5 +418,34 @@ impl PendingPresignature {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(i: u32) -> Participant {
+        Participant::from(i)
+    }
+
+    #[test]
+    fn awaited_peers_returns_participants_not_yet_seen() {
+        let participants = vec![p(1), p(2), p(3), p(4)];
+        let seen = vec![p(1), p(3)];
+        assert_eq!(awaited_peers(&participants, &seen), vec![p(2), p(4)]);
+    }
+
+    #[test]
+    fn awaited_peers_empty_when_all_seen() {
+        let participants = vec![p(1), p(2)];
+        let seen = vec![p(2), p(1), p(9)];
+        assert!(awaited_peers(&participants, &seen).is_empty());
+    }
+
+    #[test]
+    fn awaited_peers_is_all_when_nothing_seen() {
+        let participants = vec![p(1), p(2)];
+        assert_eq!(awaited_peers(&participants, &[]), participants);
     }
 }

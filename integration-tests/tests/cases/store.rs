@@ -319,6 +319,13 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
+    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
+        use sha3::Digest;
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(status);
+        hasher.finalize().into()
+    }
+
     // 2. Persist first checkpoint (simulates consensus confirmation)
     let tx1 = mpc_primitives::PendingTx {
         sign_id: mpc_primitives::SignId::new([1u8; 32]),
@@ -328,6 +335,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: 10,
         pending_requests: vec![tx1],
+        cumulative_digest: cumulative_digest([0]),
     };
     storage.persist(&cp1).await?;
 
@@ -346,6 +354,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: 20,
         pending_requests: vec![tx2],
+        cumulative_digest: cumulative_digest([0]),
     };
     storage.persist(&cp2).await?;
 
