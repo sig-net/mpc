@@ -22,6 +22,10 @@ function parseFailure(reply: Reply): { code: string; message: string } {
   return JSON.parse(reply.body) as { code: string; message: string };
 }
 
+// The two alignment segments the signet contracts declare, likewise spelled out.
+const bytes = (length: number) => ({ tag: "atom", value: { tag: "bytes", length } }) as const;
+const FIELD = { tag: "atom", value: { tag: "field" } } as const;
+
 // The goldens are the decoder's own frozen output, so they detect a wire change
 // rather than proving correctness. What anchors that is below: a synthetic map
 // walked out of order, and the v8 -> v9 flip driven through the ledger's own
@@ -56,8 +60,9 @@ describe("offline: the schema the consumer parses", () => {
     if (tree.kind !== "array") throw new Error(`the caller ledger is an ordinal array, got ${tree.kind}`);
 
     // Ordinal 3 is the hub address, ordinal 2 its MPC attestation Secp256k1Point:
-    // 24- and 8-byte atoms in declaration order, trailing-zero-trimmed.
-    expect(tree.children[3]).toEqual({ kind: "cell", atoms: [SINGLETON] });
+    // 24- and 8-byte atoms in declaration order, trailing-zero-trimmed. The
+    // point's trailing field element is the case a width list could not carry.
+    expect(tree.children[3]).toEqual({ kind: "cell", atoms: [SINGLETON], alignment: [bytes(32)] });
     expect(tree.children[2]).toEqual({
       kind: "cell",
       atoms: [
@@ -67,18 +72,54 @@ describe("offline: the schema the consumer parses", () => {
         "d71494b2d5d4a256",
         "",
       ],
+      alignment: [bytes(24), bytes(8), bytes(24), bytes(8), FIELD],
     });
     // Ordinal 0 nests the live request, whose null nodes and empty atom pin the
-    // rest of the node vocabulary.
+    // rest of the node vocabulary. That empty atom is live proof of the loss the
+    // alignment repairs: trimmed to nothing, it still declares 8 bytes.
     if (tree.children[0]?.kind !== "array") throw new Error("ordinal 0 is the request block");
-    expect(tree.children[0].children[0]).toEqual({ kind: "cell", atoms: [REQUEST_ID] });
+    expect(tree.children[0].children[0]).toEqual({ kind: "cell", atoms: [REQUEST_ID], alignment: [bytes(32)] });
     expect(tree.children[0].children[1]).toEqual({
       kind: "array",
-      children: [{ kind: "null" }, { kind: "null" }, { kind: "cell", atoms: [""] }],
+      children: [{ kind: "null" }, { kind: "null" }, { kind: "cell", atoms: [""], alignment: [bytes(8)] }],
     });
     const requests = tree.children[4];
     if (requests?.kind !== "map") throw new Error("ordinal 4 is the request map");
     expect(requests.entries.map((entry) => entry.key)).toEqual([[REQUEST_ID]]);
+  });
+
+  it("carries each cell's alignment beside its atoms", () => {
+    const tree = decodeContractState(fixtureBytes("singleton-post-state-1366.mn"));
+    if (tree.kind !== "array") throw new Error(`the signet ledger is an ordinal array, got ${tree.kind}`);
+    const notifications = tree.children[1];
+    if (notifications?.kind !== "map") throw new Error("ordinal 1 is signBidirectionalEventNotificationMap");
+    const cell = notifications.entries[0]?.value;
+    if (cell?.kind !== "cell") throw new Error("a notification entry holds a cell");
+
+    // One segment per atom, and no signet cell declares an `option`, so the
+    // consumer reads the two lists positionally.
+    expect(cell.alignment).toHaveLength(cell.atoms.length);
+    expect(cell.alignment.map((segment) => segment.tag)).toEqual(cell.atoms.map(() => "atom"));
+    // The notification is `{ version: Uint<8>, payload: Bytes<128> }`, and this
+    // live payload is trimmed to 33 bytes: what the atom lost, the alignment keeps.
+    expect(cell.alignment).toEqual([bytes(1), bytes(128)]);
+    expect(cell.atoms[1]).toHaveLength(33 * 2);
+  });
+
+  it("reports an atom's declared width, not the width of what is stored", () => {
+    // Trailing zeros are trimmed on the way in, so a `Bytes<32>` holding 1 is
+    // stored as a single byte and only the alignment still says 32. Synthetic so
+    // the declared widths are chosen here rather than by whatever the chain holds.
+    const cell: AlignedValue = {
+      value: [Uint8Array.from([0x01]), new Uint8Array(20).fill(0xab), Uint8Array.from([0x07])],
+      alignment: [bytes(32), bytes(20), FIELD],
+    };
+
+    expect(walk(StateValue.newCell(cell))).toEqual({
+      kind: "cell",
+      atoms: ["01", "ab".repeat(20), "07"],
+      alignment: [bytes(32), bytes(20), FIELD],
+    });
   });
 
   it("sorts map entries by key hex", () => {
