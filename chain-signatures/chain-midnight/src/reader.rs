@@ -8,7 +8,7 @@ use crate::records::{
     SignBidirectionalEventNotification, SignBidirectionalRecord,
 };
 use crate::request_id::compute_request_id;
-use crate::sidecar::StateNode;
+use crate::sidecar::{AlignmentAtom, AlignmentSegment, StateNode};
 
 /// compactc chunk arity: past this many ledger fields the compiler stores fields in a
 /// depth-uniform tree of arity-15 chunks, filled remainder FIRST, so every chunk on the
@@ -19,12 +19,17 @@ const CHUNK_ARITY: usize = 15;
 /// `REQUEST_FIXED_VALUE_ATOMS + words + entries * (2 + keys)` atoms.
 ///
 /// The calldata `Maybe`'s three fixed atoms count even when `is_some` is false;
-/// treating it as absent mis-splits every plain-transfer record.
+/// treating it as absent mis-reads every plain-transfer record.
 pub const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
 
-/// How many rejected capacity splits the no-split error names before truncating: enough
-/// to see why, bounded so an adversarial cell cannot balloon the log line.
-const MAX_REPORTED_REJECTIONS: usize = 8;
+/// Atoms of the record's fixed head, `sender` through `calldata.no_words`. The calldata
+/// words begin here.
+const RECORD_HEAD_ATOMS: usize = 18;
+
+/// Atoms of the record's fixed tail, `caip2_id` and the two schemas. Parsed from the
+/// end, which is what makes the access-list boundary unambiguous: a storage key and
+/// `caip2_id` are both `Bytes<32>`, so only counting back from the end separates them.
+const RECORD_TAIL_ATOMS: usize = 3;
 
 /// Resolve a flat ledger field index to its node in the raw state tree.
 pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<&StateNode> {
@@ -65,171 +70,131 @@ pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<
     })
 }
 
-/// A record cell admitting more than one capacity split that decodes cleanly, hashes to
-/// the filed id, and would assemble a different transaction.
-#[derive(Debug)]
-pub struct AmbiguousRecord {
-    pub splits: usize,
-}
-
-impl std::fmt::Display for AmbiguousRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} capacity splits decode to the filed request id and disagree on the transaction \
-             they would sign; refusing to pick one by enumeration order",
-            self.splits
-        )
-    }
-}
-
-impl std::error::Error for AmbiguousRecord {}
-
-/// A record projected onto what can reach the signed transaction: every vector
-/// truncated to the count that governs it, and an absent `Maybe` contributing no
-/// calldata words.
-fn capacity_canonical(record: &SignBidirectionalRecord) -> SignBidirectionalRecord {
-    let mut out = record.clone();
-    let params = &mut out.tx_params;
-    let used_words = if params.calldata.is_some {
-        usize::from(params.calldata.value.no_words)
-    } else {
-        0
-    };
-    params.calldata.value.words.truncate(used_words);
-    params
-        .access_list
-        .truncate(usize::from(params.access_list_entry_count));
-    for entry in &mut params.access_list {
-        entry
-            .storage_keys
-            .truncate(usize::from(entry.storage_key_count));
-    }
-    out
-}
-
-/// Decode a stored request record by capacity enumeration.
+/// A cell's atoms beside the declared width of each, taken from the ledger's alignment.
 ///
-/// `expected_request_id` disambiguates but does not authenticate: when no split
-/// matches, the first clean decode is returned, and the caller's recompute is
-/// the only thing between that guess and a signature. Splits that decode to the
-/// same id but different transactions are refused rather than ordered.
-pub fn decode_record(
-    cell: &StateNode,
-    expected_request_id: &[u8; 32],
-) -> anyhow::Result<SignBidirectionalRecord> {
-    let StateNode::Cell { atoms: atom_hex } = cell else {
-        anyhow::bail!("request record node is not a cell");
+/// Every atom of a signet record is a `Bytes` atom. A `Compress`, `Field` or `Option`
+/// segment is refused here rather than guessed at: the runtime's own hash refuses
+/// `Compress` too, and none of the three appears in a record or a notification.
+fn cell_parts(cell: &StateNode, what: &str) -> anyhow::Result<(Vec<Vec<u8>>, Vec<u32>)> {
+    let StateNode::Cell { atoms, alignment } = cell else {
+        anyhow::bail!("{what} node is not a cell");
     };
-    let atoms: Vec<Vec<u8>> = atom_hex
+    anyhow::ensure!(
+        alignment.len() == atoms.len(),
+        "{what} cell declares {} alignment segments for {} atoms",
+        alignment.len(),
+        atoms.len()
+    );
+    let decoded = atoms
         .iter()
         .enumerate()
         .map(|(index, atom)| {
-            hex::decode(atom).with_context(|| format!("record atom {index} is not hex"))
+            hex::decode(atom).with_context(|| format!("{what} atom {index} is not hex"))
         })
-        .collect::<anyhow::Result<_>>()?;
-
-    anyhow::ensure!(
-        atoms.len() >= REQUEST_FIXED_VALUE_ATOMS,
-        "request record has {} value atoms, fewer than the {REQUEST_FIXED_VALUE_ATOMS} its fixed fields need",
-        atoms.len()
-    );
-    // Before any enumeration, and inside this function rather than at a call site a
-    // later caller could bypass.
-    anyhow::ensure!(
-        atoms.len() <= MAX_RECORD_ATOMS,
-        "request record has {} atoms, above the {MAX_RECORD_ATOMS}-atom enumeration cap; \
-         refusing to enumerate capacity splits for an adversarially large cell",
-        atoms.len()
-    );
-    let variable = atoms.len() - REQUEST_FIXED_VALUE_ATOMS;
-    // Schemas are exact-length by protocol convention, never NUL-padded and never
-    // ending in a zero byte, so the last two atoms' stored lengths are their declared
-    // widths.
-    let len_out = atoms[atoms.len() - 2].len();
-    let len_resp = atoms[atoms.len() - 1].len();
-
-    let mut rejections: Vec<String> = Vec::new();
-    // Scalars rather than a Vec of matches: a cell at the cap can match on thousands of
-    // splits, and collecting them would trade the CPU bound for an allocation one.
-    let mut matched: Option<SignBidirectionalRecord> = None;
-    let mut matched_projection: Option<SignBidirectionalRecord> = None;
-    let mut match_count = 0usize;
-    let mut material_ambiguity = false;
-    let mut fallback: Option<SignBidirectionalRecord> = None;
-
-    let mut consider = |words: usize, entries: usize, keys: usize| {
-        let record = match decode_at(&atoms, words, entries, keys, len_out, len_resp) {
-            Ok(record) => record,
-            Err(err) => {
-                if rejections.len() < MAX_REPORTED_REJECTIONS {
-                    rejections.push(format!(
-                        "({words} words, {entries} entries, {keys} keys): {err:#}"
-                    ));
-                }
-                return;
-            }
-        };
-        if compute_request_id(&record) != *expected_request_id {
-            if fallback.is_none() {
-                fallback = Some(record);
-            }
-            return;
-        }
-        match_count += 1;
-        let projection = capacity_canonical(&record);
-        match &matched_projection {
-            None => {
-                matched_projection = Some(projection);
-                matched = Some(record);
-            }
-            // A second reading of the same bytes that would sign differently.
-            Some(first) if *first != projection => material_ambiguity = true,
-            Some(_) => {}
-        }
-    };
-
-    // No access list: the variable atoms are calldata words alone.
-    consider(variable, 0, 0);
-    // With an access list: E entries of (2 + K) atoms each, the rest words.
-    let mut entries = 1;
-    while entries * 2 <= variable {
-        let mut keys = 0;
-        while entries * (2 + keys) <= variable {
-            consider(variable - entries * (2 + keys), entries, keys);
-            keys += 1;
-        }
-        entries += 1;
-    }
-
-    if material_ambiguity {
-        return Err(anyhow::Error::new(AmbiguousRecord {
-            splits: match_count,
-        }));
-    }
-    if let Some(record) = matched {
-        return Ok(record);
-    }
-    if let Some(record) = fallback {
-        return Ok(record);
-    }
-    anyhow::bail!(
-        "request record with {} value atoms ({variable} variable) matches no (calldata words, \
-         access-list entries, storage keys) capacity split; rejected attempts: {}",
-        atoms.len(),
-        rejections.join("; ")
-    )
+        .collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
+    let widths = alignment
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| match segment {
+            AlignmentSegment::Atom {
+                value: AlignmentAtom::Bytes { length },
+            } => Ok(*length),
+            AlignmentSegment::Atom { value } => anyhow::bail!(
+                "{what} atom {index} is aligned {value:?}, which carries no byte width"
+            ),
+            AlignmentSegment::Option { .. } => anyhow::bail!(
+                "{what} atom {index} is an alignment option, which no signet type declares"
+            ),
+        })
+        .collect::<anyhow::Result<Vec<u32>>>()?;
+    Ok((decoded, widths))
 }
 
-/// Ceiling on a record cell's atom count, and the only bound on the enumeration above.
-const MAX_RECORD_ATOMS: usize = 512;
+/// The capacity of each scaled vector, read off the declared widths.
+struct Capacities {
+    words: usize,
+    entries: usize,
+    keys: usize,
+}
+
+/// Recover the capacities from the alignment alone.
+///
+/// Every boundary is a width read. Calldata words are the run of `Bytes<32>` after the
+/// fixed head, closed by the `Bytes<1>` entry count. The access-list region is whatever
+/// lies between that and the three-atom tail, and since only an entry's address is
+/// `Bytes<20>`, counting those gives the entry capacity and the region divides evenly by
+/// it.
+fn capacities(widths: &[u32], atom_count: usize) -> anyhow::Result<Capacities> {
+    anyhow::ensure!(
+        atom_count >= REQUEST_FIXED_VALUE_ATOMS,
+        "request record has {atom_count} value atoms, fewer than the \
+         {REQUEST_FIXED_VALUE_ATOMS} its fixed fields need"
+    );
+    let tail = atom_count - RECORD_TAIL_ATOMS;
+
+    let mut index = RECORD_HEAD_ATOMS;
+    while index < tail && widths[index] == 32 {
+        index += 1;
+    }
+    let words = index - RECORD_HEAD_ATOMS;
+
+    anyhow::ensure!(
+        index < tail && widths[index] == 1,
+        "expected the Bytes<1> access-list entry count after {words} calldata words, found {}",
+        widths
+            .get(index)
+            .map_or("the record's tail".to_string(), |width| format!(
+                "Bytes<{width}>"
+            ))
+    );
+    index += 1;
+
+    let region = &widths[index..tail];
+    let entries = region.iter().filter(|width| **width == 20).count();
+    let keys = if entries == 0 {
+        anyhow::ensure!(
+            region.is_empty(),
+            "the access-list region holds {} atoms but declares no Bytes<20> entry address",
+            region.len()
+        );
+        0
+    } else {
+        anyhow::ensure!(
+            region.len().is_multiple_of(entries),
+            "the access-list region's {} atoms do not divide evenly across {entries} entries",
+            region.len()
+        );
+        let per_entry = region.len() / entries;
+        anyhow::ensure!(
+            per_entry >= 2,
+            "each access-list entry needs at least an address and a key count, got {per_entry} atoms"
+        );
+        per_entry - 2
+    };
+    Ok(Capacities {
+        words,
+        entries,
+        keys,
+    })
+}
+
+/// Decode a stored request record.
+///
+/// One deterministic pass: the alignment states every atom's declared width, so the
+/// capacities are read rather than searched, and a cell whose declared shape is not a
+/// signet record is refused instead of reinterpreted.
+pub fn decode_record(cell: &StateNode) -> anyhow::Result<SignBidirectionalRecord> {
+    let (atoms, widths) = cell_parts(cell, "request record")?;
+    let capacities = capacities(&widths, atoms.len())?;
+    decode_at(&atoms, &widths, &capacities)
+}
 
 /// The recompute-and-drop security gate: the record filed under `request_id` in the
 /// caller's request map, returned only if the id recomputed from the decoded record
 /// equals the id it was filed under.
 ///
-/// Not redundant with `decode_record`, though it looks it: on that function's
-/// fallback path this is the only check on a record filed under the wrong id.
+/// The decode is independent of the id, so this comparison is the only thing binding
+/// a record's contents to the key it was filed under.
 pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolved {
     let StateNode::Map { entries } = map else {
         return Resolved::Dropped {
@@ -244,17 +209,8 @@ pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolve
     else {
         return Resolved::Absent;
     };
-    let record = match decode_record(&entry.value, &request_id) {
+    let record = match decode_record(&entry.value) {
         Ok(record) => record,
-        // Downcast rather than error text: an ambiguous record is an
-        // operator-actionable signal about one integrator's contract shape, where an
-        // undecodable one is ordinary junk.
-        Err(err) if err.downcast_ref::<AmbiguousRecord>().is_some() => {
-            return Resolved::Dropped {
-                reason: "record-ambiguous",
-                detail: format!("{err:#}"),
-            };
-        }
         Err(err) => {
             return Resolved::Dropped {
                 reason: "record-undecodable",
@@ -311,27 +267,19 @@ fn key_matches_request_id(key_atoms: &[String], request_id: &[u8; 32]) -> bool {
 
 /// Decode the two-atom notification cell: version, then the 128-byte payload.
 pub fn decode_notification(cell: &StateNode) -> anyhow::Result<SignBidirectionalEventNotification> {
-    let StateNode::Cell { atoms: atom_hex } = cell else {
-        anyhow::bail!("notification node is not a cell");
-    };
+    let (atoms, widths) = cell_parts(cell, "notification")?;
     anyhow::ensure!(
-        atom_hex.len() == 2,
+        atoms.len() == 2,
         "notification cell has {} atoms, expected 2 (version, payload)",
-        atom_hex.len()
+        atoms.len()
     );
-    let atoms: Vec<Vec<u8>> = atom_hex
-        .iter()
-        .enumerate()
-        .map(|(index, atom)| {
-            hex::decode(atom).with_context(|| format!("notification atom {index} is not hex"))
-        })
-        .collect::<anyhow::Result<_>>()?;
     let cursor = &mut AtomCursor {
         atoms: &atoms,
+        widths: &widths,
         pos: 0,
     };
     Ok(SignBidirectionalEventNotification {
-        version: uint(cursor, u128::from(u8::MAX), "notification version")? as u8,
+        version: uint(cursor, 1, u128::from(u8::MAX), "notification version")? as u8,
         payload: bytes_n::<128>(cursor, "notification payload")?,
     })
 }
@@ -368,52 +316,74 @@ pub fn unpack_notification_v1(
 
 struct AtomCursor<'a> {
     atoms: &'a [Vec<u8>],
+    widths: &'a [u32],
     pos: usize,
 }
 
 impl<'a> AtomCursor<'a> {
-    fn shift(&mut self, what: &'static str) -> anyhow::Result<&'a [u8]> {
+    /// Consume one atom, asserting the width the ledger declared for it.
+    ///
+    /// The declared width is the type check: a field whose stored bytes happen to fit
+    /// still fails here if the contract declared it as something else, which is what
+    /// makes decoding a single pass rather than a search.
+    fn shift(&mut self, declared: u32, what: &'static str) -> anyhow::Result<&'a [u8]> {
         let atom = self
             .atoms
             .get(self.pos)
             .ok_or_else(|| anyhow::anyhow!("atom {} missing: expected {what}", self.pos))?;
+        let found = self.widths[self.pos];
+        anyhow::ensure!(
+            found == declared,
+            "{what}: atom {} is declared Bytes<{found}>, expected Bytes<{declared}>",
+            self.pos
+        );
+        anyhow::ensure!(
+            atom.len() <= declared as usize,
+            "{what}: atom {} stores {} bytes under a declared Bytes<{declared}>",
+            self.pos,
+            atom.len()
+        );
         self.pos += 1;
         Ok(atom)
     }
+
+    /// The width declared for the next atom, without consuming it.
+    fn peek_width(&self) -> anyhow::Result<u32> {
+        self.widths
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("atom {} missing: the record ends early", self.pos))
+    }
 }
 
-/// `Bytes<N>`: the stored atom is trailing-zero-trimmed; re-pad to the declared width,
-/// rejecting an atom wider than it.
+/// `Bytes<N>`: the stored atom is trailing-zero-trimmed, so re-pad it to the width the
+/// ledger declared.
 fn bytes_n<const N: usize>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<[u8; N]> {
-    let atom = cursor.shift(what)?;
-    anyhow::ensure!(
-        atom.len() <= N,
-        "{what}: atom is {} bytes, wider than Bytes<{N}>",
-        atom.len()
-    );
+    let atom = cursor.shift(N as u32, what)?;
     let mut out = [0u8; N];
     out[..atom.len()].copy_from_slice(atom);
     Ok(out)
 }
 
-/// Runtime-width `Bytes<Len>`: same rule at a width known only at runtime.
-fn bytes_dyn(cursor: &mut AtomCursor, len: usize, what: &'static str) -> anyhow::Result<Vec<u8>> {
-    let atom = cursor.shift(what)?;
-    anyhow::ensure!(
-        atom.len() <= len,
-        "{what}: atom is {} bytes, wider than Bytes<{len}>",
-        atom.len()
-    );
+/// `Bytes<Len>` at a per-integrator width, taken from the alignment rather than from
+/// what the atom happens to store.
+fn bytes_dyn(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<Vec<u8>> {
+    let declared = cursor.peek_width()? as usize;
+    let atom = cursor.shift(declared as u32, what)?;
     let mut out = atom.to_vec();
-    out.resize(len, 0);
+    out.resize(declared, 0);
     Ok(out)
 }
 
-/// `Uint` and enum atoms fold little-endian at whatever stored length they have; only
-/// the folded value is range-checked, mirroring the runtime descriptors (which check
-/// `res > maxValue`, not the atom length).
-fn uint(cursor: &mut AtomCursor, max: u128, what: &'static str) -> anyhow::Result<u128> {
-    let atom = cursor.shift(what)?;
+/// `Uint` and enum atoms fold little-endian from their trimmed form; the declared width
+/// is asserted, and the folded value is range-checked as the runtime descriptors do.
+fn uint(
+    cursor: &mut AtomCursor,
+    declared: u32,
+    max: u128,
+    what: &'static str,
+) -> anyhow::Result<u128> {
+    let atom = cursor.shift(declared, what)?;
     let mut value: u128 = 0;
     for (index, byte) in atom.iter().enumerate() {
         if *byte == 0 {
@@ -426,70 +396,81 @@ fn uint(cursor: &mut AtomCursor, max: u128, what: &'static str) -> anyhow::Resul
     Ok(value)
 }
 
-/// `Boolean`: the empty atom is false, `[1]` is true, anything else rejects.
+/// `Boolean`: declared one byte, the empty atom is false, `[1]` is true.
 fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> {
-    let atom = cursor.shift(what)?;
+    let atom = cursor.shift(1, what)?;
     anyhow::ensure!(atom.is_empty() || atom == [1], "{what}: not a Boolean atom");
     Ok(!atom.is_empty())
 }
 
-/// One full record decode at a fixed capacity split.
+/// One full record decode at the capacities the alignment reported.
 fn decode_at(
     atoms: &[Vec<u8>],
-    words: usize,
-    entries: usize,
-    keys: usize,
-    len_out: usize,
-    len_resp: usize,
+    widths: &[u32],
+    capacities: &Capacities,
 ) -> anyhow::Result<SignBidirectionalRecord> {
-    let cursor = &mut AtomCursor { atoms, pos: 0 };
+    let cursor = &mut AtomCursor {
+        atoms,
+        widths,
+        pos: 0,
+    };
     let record = SignBidirectionalRecord {
         sender: bytes_n::<32>(cursor, "sender")?,
-        request_nonce: uint(cursor, u128::from(u64::MAX), "request_nonce")? as u64,
-        key_version: uint(cursor, u128::from(u8::MAX), "key_version")? as u8,
+        request_nonce: uint(cursor, 8, u128::from(u64::MAX), "request_nonce")? as u64,
+        key_version: uint(cursor, 1, u128::from(u8::MAX), "key_version")? as u8,
         path: bytes_n::<32>(cursor, "path")?,
-        algo: uint(cursor, 1, "algo")? as u8,
-        dest: uint(cursor, 1, "dest")? as u8,
+        algo: uint(cursor, 1, 1, "algo")? as u8,
+        dest: uint(cursor, 1, 1, "dest")? as u8,
         params: bytes_n::<64>(cursor, "params")?,
-        tx_param_type: uint(cursor, 1, "tx_param_type")? as u8,
-        tx_params: decode_tx_params(cursor, words, entries, keys)?,
+        tx_param_type: uint(cursor, 1, 1, "tx_param_type")? as u8,
+        tx_params: decode_tx_params(cursor, capacities)?,
         caip2_id: bytes_n::<32>(cursor, "caip2_id")?,
-        output_deserialization_schema: bytes_dyn(cursor, len_out, "output_deserialization_schema")?,
-        respond_serialization_schema: bytes_dyn(cursor, len_resp, "respond_serialization_schema")?,
+        output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
+        respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,
     };
+    // The capacities were derived from the same widths this pass asserted, so a
+    // leftover atom means the two disagree and the record must not be signed.
+    anyhow::ensure!(
+        cursor.pos == atoms.len(),
+        "request record decoded {} of {} atoms",
+        cursor.pos,
+        atoms.len()
+    );
     Ok(record)
 }
 
 fn decode_tx_params(
     cursor: &mut AtomCursor,
-    words: usize,
-    entries: usize,
-    keys: usize,
+    &Capacities {
+        words,
+        entries,
+        keys,
+    }: &Capacities,
 ) -> anyhow::Result<EvmType2TxParams> {
-    let chain_id = uint(cursor, u128::from(u64::MAX), "chain_id")? as u64;
-    let nonce = uint(cursor, u128::from(u64::MAX), "nonce")? as u64;
-    let max_priority_fee_per_gas = uint(cursor, u128::MAX, "max_priority_fee_per_gas")?;
-    let max_fee_per_gas = uint(cursor, u128::MAX, "max_fee_per_gas")?;
-    let gas_limit = uint(cursor, u128::from(u64::MAX), "gas_limit")? as u64;
+    let chain_id = uint(cursor, 8, u128::from(u64::MAX), "chain_id")? as u64;
+    let nonce = uint(cursor, 8, u128::from(u64::MAX), "nonce")? as u64;
+    let max_priority_fee_per_gas = uint(cursor, 16, u128::MAX, "max_priority_fee_per_gas")?;
+    let max_fee_per_gas = uint(cursor, 16, u128::MAX, "max_fee_per_gas")?;
+    let gas_limit = uint(cursor, 8, u128::from(u64::MAX), "gas_limit")? as u64;
     let to = bytes_n::<20>(cursor, "to")?;
-    let value = uint(cursor, u128::MAX, "value")?;
+    let value = uint(cursor, 16, u128::MAX, "value")?;
 
     // The flag does not gate the atoms: selector, no_words and every word slot are
     // consumed either way.
     let is_some = boolean(cursor, "calldata.is_some")?;
     let selector = bytes_n::<4>(cursor, "calldata.selector")?;
-    let no_words = uint(cursor, u128::from(u16::MAX), "calldata.no_words")? as u16;
+    let no_words = uint(cursor, 2, u128::from(u16::MAX), "calldata.no_words")? as u16;
     let mut word_slots = Vec::with_capacity(words);
     for _ in 0..words {
         word_slots.push(bytes_n::<32>(cursor, "calldata word")?);
     }
 
     let access_list_entry_count =
-        uint(cursor, u128::from(u8::MAX), "access_list_entry_count")? as u8;
+        uint(cursor, 1, u128::from(u8::MAX), "access_list_entry_count")? as u8;
     let mut access_list = Vec::with_capacity(entries);
     for _ in 0..entries {
         let address = bytes_n::<20>(cursor, "access list address")?;
-        let storage_key_count = uint(cursor, u128::from(u8::MAX), "storage_key_count")? as u8;
+        let storage_key_count = uint(cursor, 1, u128::from(u8::MAX), "storage_key_count")? as u8;
         let mut storage_keys = Vec::with_capacity(keys);
         for _ in 0..keys {
             storage_keys.push(bytes_n::<32>(cursor, "storage key")?);
@@ -528,16 +509,16 @@ mod tests {
     use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
     use crate::sidecar::StateNode;
     use crate::test_utils::{
-        atoms_from_record, cell_of, sample_record, sample_record_with_unused_access_list,
+        alignment_of, atoms_from_record, cell_from_record, cell_of, sample_record,
+        sample_record_with_partial_access_list, sample_record_with_unused_access_list,
+        widths_from_record,
     };
     fn leaf(marker: u8) -> StateNode {
-        StateNode::Cell {
-            atoms: vec![hex::encode([marker])],
-        }
+        cell_of(&[vec![marker]], &[1])
     }
 
     fn marker_of(node: &StateNode) -> u8 {
-        let StateNode::Cell { atoms } = node else {
+        let StateNode::Cell { atoms, .. } = node else {
             panic!("expected a leaf cell, got a non-cell node")
         };
         hex::decode(&atoms[0]).expect("marker hex")[0]
@@ -626,10 +607,8 @@ mod tests {
 
     #[test]
     fn decode_record_names_too_few_atoms() {
-        let short = StateNode::Cell {
-            atoms: vec!["ab".to_string(); 21],
-        };
-        let err = decode_record(&short, &[0u8; 32])
+        let short = cell_of(&vec![vec![0xab]; 21], &[1u32; 21]);
+        let err = decode_record(&short)
             .expect_err("21 atoms cannot hold the fixed fields")
             .to_string();
         assert!(
@@ -644,9 +623,7 @@ mod tests {
         payload[..32].copy_from_slice(&[0xab; 32]);
         payload[32] = 4;
 
-        let cell = StateNode::Cell {
-            atoms: vec![hex::encode([1u8]), hex::encode(payload)],
-        };
+        let cell = cell_of(&[vec![1u8], payload.to_vec()], &[1, 128]);
         let notification = decode_notification(&cell).expect("v1 notification decodes");
         assert_eq!(
             notification,
@@ -680,12 +657,6 @@ mod tests {
         (record, rid)
     }
 
-    fn record_with_unused_access_list_and_rid() -> (SignBidirectionalRecord, [u8; 32]) {
-        let record = sample_record_with_unused_access_list();
-        let rid = crate::request_id::compute_request_id(&record);
-        (record, rid)
-    }
-
     /// A map whose keys are SINGLE atoms (the caller-map shape).
     fn map_of(entries: Vec<(String, StateNode)>) -> StateNode {
         StateNode::Map {
@@ -702,7 +673,7 @@ mod tests {
     #[test]
     fn resolve_verified_record_drops_spoofed_filing() {
         let (record, rid) = record_and_rid();
-        let cell = cell_of(&atoms_from_record(&record));
+        let cell = cell_from_record(&record);
 
         // Genuine filing: the id it is stored under is the id it hashes to.
         let map = map_of(vec![(hex::encode(rid), cell.clone())]);
@@ -712,10 +683,11 @@ mod tests {
         );
 
         // Spoofed filing: the same record bytes stored under an id they do NOT hash to.
+        // The decode never sees the id, so only the gate can drop this.
         let spoofed = [0x99; 32];
         assert!(
-            decode_record(&cell, &spoofed).is_ok(),
-            "decode must accept the spoofed filing via its fallback; only the gate drops it"
+            decode_record(&cell).is_ok(),
+            "the decode is id-independent, so it must still succeed here"
         );
         let map = map_of(vec![(hex::encode(spoofed), cell)]);
         assert!(
@@ -737,9 +709,9 @@ mod tests {
         let map = map_of(vec![
             (
                 hex::encode(poisoned_rid),
-                cell_of(&[vec![1], vec![2], vec![3]]),
+                cell_of(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
             ),
-            (hex::encode(rid), cell_of(&atoms_from_record(&record))),
+            (hex::encode(rid), cell_from_record(&record)),
         ]);
 
         // The undecodable cell drops without panicking...
@@ -788,170 +760,10 @@ mod tests {
         }
         assert!(trimmed.len() < 32, "the key must actually be trimmed");
 
-        let map = map_of(vec![(
-            hex::encode(&trimmed),
-            cell_of(&atoms_from_record(&record)),
-        )]);
+        let map = map_of(vec![(hex::encode(&trimmed), cell_from_record(&record))]);
         assert_eq!(
             resolve_verified_record(&map, rid),
             Resolved::Found(Box::new(record))
-        );
-    }
-
-    // ------------------------------------------------------------------ Fail-closed
-    // capacity ambiguity.
-
-    /// An atom list where first-match-wins would sign a transaction the record does not
-    /// describe.
-    fn ambiguous_cell_atoms() -> Vec<Vec<u8>> {
-        vec![
-            vec![0xab; 32],               // sender
-            vec![7],                      // request_nonce
-            vec![1],                      // key_version
-            b"caller-path".to_vec(),      // path
-            Vec::new(),                   // algo = 0
-            Vec::new(),                   // dest = 0
-            Vec::new(),                   // params = 0
-            Vec::new(),                   // tx_param_type = 0
-            vec![0x69, 0x7a],             // chain_id 31337, little-endian
-            vec![3],                      // nonce
-            vec![1],                      // max_priority_fee_per_gas
-            vec![2],                      // max_fee_per_gas
-            vec![0x08, 0x52],             // gas_limit 21000, little-endian
-            vec![0xcd; 20],               // to
-            vec![5],                      // value
-            vec![1],                      // calldata.is_some
-            vec![0xca, 0x11, 0xab, 0x1e], // calldata.selector
-            Vec::new(),                   // calldata.no_words = 0
-            vec![1],                      // contested: word[0] | entry_count
-            Vec::new(),                   // contested
-            Vec::new(),                   // contested
-            Vec::new(),                   // contested
-            b"eip155:31337".to_vec(),     // caip2_id
-            b"uint256".to_vec(),          // output schema
-            b"uint256".to_vec(),          // respond schema
-        ]
-    }
-
-    /// The two readings of [`ambiguous_cell_atoms`], as records.
-    fn ambiguous_pair() -> (SignBidirectionalRecord, SignBidirectionalRecord) {
-        use crate::records::{CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams};
-
-        let build = |words: Vec<[u8; 32]>, count: u8, access_list: Vec<EvmAccessListEntry>| {
-            let mut path = [0u8; 32];
-            path[..11].copy_from_slice(b"caller-path");
-            let mut caip2_id = [0u8; 32];
-            caip2_id[..12].copy_from_slice(b"eip155:31337");
-            SignBidirectionalRecord {
-                sender: [0xab; 32],
-                request_nonce: 7,
-                key_version: 1,
-                path,
-                algo: 0,
-                dest: 0,
-                params: [0; 64],
-                tx_param_type: 0,
-                tx_params: EvmType2TxParams {
-                    chain_id: 31337,
-                    nonce: 3,
-                    max_priority_fee_per_gas: 1,
-                    max_fee_per_gas: 2,
-                    gas_limit: 21000,
-                    to: [0xcd; 20],
-                    value: 5,
-                    calldata: CompactMaybe {
-                        is_some: true,
-                        value: EvmCalldata {
-                            selector: [0xca, 0x11, 0xab, 0x1e],
-                            no_words: 0,
-                            words,
-                        },
-                    },
-                    access_list_entry_count: count,
-                    access_list,
-                },
-                caip2_id,
-                output_deserialization_schema: b"uint256".to_vec(),
-                respond_serialization_schema: b"uint256".to_vec(),
-            }
-        };
-
-        let mut word = [0u8; 32];
-        word[0] = 1;
-        let split_a = build(
-            vec![word],
-            0,
-            vec![EvmAccessListEntry {
-                address: [0; 20],
-                storage_key_count: 0,
-                storage_keys: Vec::new(),
-            }],
-        );
-        let split_b = build(
-            Vec::new(),
-            1,
-            vec![EvmAccessListEntry {
-                address: [0; 20],
-                storage_key_count: 0,
-                storage_keys: vec![[0u8; 32]],
-            }],
-        );
-        (split_a, split_b)
-    }
-
-    #[test]
-    fn decode_record_refuses_material_capacity_ambiguity() {
-        let (split_a, split_b) = ambiguous_pair();
-        let rid = compute_request_id(&split_b);
-
-        // The premise, asserted rather than assumed: two DISTINCT records share one
-        // request id, and they would be signed differently.
-        assert_eq!(
-            compute_request_id(&split_a),
-            rid,
-            "the two splits must share a request id"
-        );
-        assert_ne!(split_a, split_b, "but they must be different records");
-        assert_ne!(
-            crate::tx::serialized_transaction(&split_a).expect("a assembles"),
-            crate::tx::serialized_transaction(&split_b).expect("b assembles"),
-            "and they must assemble to different transactions, or this proves nothing"
-        );
-
-        let err = decode_record(&cell_of(&ambiguous_cell_atoms()), &rid)
-            .expect_err("a material ambiguity must be refused, not resolved by enumeration order");
-        let ambiguous = err
-            .downcast_ref::<AmbiguousRecord>()
-            .expect("the refusal must be typed so the caller can label it");
-        assert_eq!(ambiguous.splits, 2, "both splits matched the filed id");
-
-        // And it reaches the caller as its own drop reason, not merged with ordinary
-        // junk.
-        let map = map_of(vec![(hex::encode(rid), cell_of(&ambiguous_cell_atoms()))]);
-        assert!(matches!(
-            resolve_verified_record(&map, rid),
-            Resolved::Dropped {
-                reason: "record-ambiguous",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn decode_record_accepts_immaterial_capacity_ambiguity() {
-        // The other side of fail-closed, and the reason the check compares the SIGNED
-        // projection rather than the whole record: this oracle vector is provably
-        // capacity-ambiguous too (every entries=2 split spans the same 202 preimage
-        // bytes of zeros, hence one shared id), but every matching split assembles the
-        // SAME transaction, so refusing it would drop a record the oracle itself
-        // produced.
-        let (record, rid) = record_with_unused_access_list_and_rid();
-        let decoded = decode_record(&cell_of(&atoms_from_record(&record)), &rid)
-            .expect("an immaterial ambiguity must still decode");
-        assert_eq!(
-            crate::tx::serialized_transaction(&decoded).expect("assembles"),
-            crate::tx::serialized_transaction(&record).expect("assembles"),
-            "the returned split must sign what the filed record describes"
         );
     }
 
@@ -959,7 +771,7 @@ mod tests {
     fn resolve_verified_record_rejects_composite_key() {
         // The caller's request map is keyed by ONE Bytes<32> atom.
         let (record, rid) = record_and_rid();
-        let cell = cell_of(&atoms_from_record(&record));
+        let cell = cell_from_record(&record);
 
         // Absent rather than Dropped: an unmatched key means the id is not in this
         // index at all, which is the ordinary negative.
@@ -993,26 +805,27 @@ mod tests {
         // Every atom here originates in a CALLER's own contract state, so a decode that
         // coerces instead of rejecting lets the caller choose which record the MPC
         // reconstructs.
-        let (record, rid) = record_and_rid();
+        let record = sample_record();
         let atoms = atoms_from_record(&record);
+        let widths = widths_from_record(&record);
 
         // A Compact Boolean is the EMPTY atom or [1]; [2] is not "true".
         let mut not_boolean = atoms.clone();
         not_boolean[15] = vec![2];
-        let err = decode_record(&cell_of(&not_boolean), &rid)
+        let err = decode_record(&cell_of(&not_boolean, &widths))
             .expect_err("a non-Boolean calldata.is_some atom must reject")
             .to_string();
         assert!(err.contains("Boolean"), "err: {err}");
 
-        // An atom wider than its declared Bytes<N> is a typed mismatch, never a
+        // An atom storing more than its declared width is a typed mismatch, never a
         // truncation: silently dropping the tail would change the record while leaving
         // the decode looking clean.
         let mut over_wide = atoms.clone();
         over_wide[0] = vec![0xab; 33];
-        let err = decode_record(&cell_of(&over_wide), &rid)
+        let err = decode_record(&cell_of(&over_wide, &widths))
             .expect_err("a 33-byte sender atom must reject")
             .to_string();
-        assert!(err.contains("wider than Bytes<32>"), "err: {err}");
+        assert!(err.contains("stores 33 bytes"), "err: {err}");
     }
 
     #[test]
@@ -1028,45 +841,124 @@ mod tests {
             vec![hex::encode([1u8]), hex::encode(payload), hex::encode([0u8])],
         ] {
             let count = atoms.len();
-            let err = decode_notification(&StateNode::Cell { atoms })
-                .expect_err("only a two-atom notification cell decodes")
-                .to_string();
+            let widths = vec![1u32; count];
+            let err = decode_notification(&cell_of(
+                &atoms
+                    .iter()
+                    .map(|atom| hex::decode(atom).expect("hex"))
+                    .collect::<Vec<_>>(),
+                &widths,
+            ))
+            .expect_err("only a two-atom notification cell decodes")
+            .to_string();
             assert!(err.contains("expected 2"), "{count} atoms: {err}");
         }
     }
 
     #[test]
-    fn decode_record_rejects_oversized_cell() {
-        // 33-byte atoms, deliberately: IF enumeration ever ran on these, every split
-        // would die instantly on the first fixed field (33 > 32 for sender's
-        // Bytes<32>), so the mutant that removes the cap fails FAST here on the error
-        // class rather than hanging CI.
-        let over = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS + 1];
-        let err = decode_record(&cell_of(&over), &[0x11; 32])
-            .expect_err("a cell above the cap is refused")
-            .to_string();
-        assert!(
-            err.contains("enumeration cap"),
-            "the cap error must name itself, got: {err}"
-        );
-        assert!(
-            !err.contains("matches no"),
-            "a capped cell is a cap rejection, not a malformed record, got: {err}"
-        );
+    fn decode_record_reads_capacities_from_declared_widths() {
+        // Every scaled vector at a different capacity, with counts below capacity, so a
+        // decode that inferred the split from anything but the widths would misread it.
+        for record in [
+            sample_record(),
+            sample_record_with_unused_access_list(),
+            sample_record_with_partial_access_list(),
+        ] {
+            let decoded = decode_record(&cell_from_record(&record))
+                .unwrap_or_else(|err| panic!("the record must decode: {err:#}"));
+            assert_eq!(decoded, record, "the decode must round-trip the record");
+        }
+    }
 
-        // At exactly the cap, enumeration RUNS and reports the ordinary no-split
-        // rejection: the boundary is exclusive-above.
-        let at_cap = vec![vec![0xaa; 33]; MAX_RECORD_ATOMS];
-        let err = decode_record(&cell_of(&at_cap), &[0x11; 32])
-            .expect_err("no split can match 33-byte atoms")
+    #[test]
+    fn decode_record_rejects_a_width_the_layout_does_not_declare() {
+        // The declared width IS the type check. A sender stored in 20 bytes fits a
+        // Bytes<20> perfectly well, so nothing about the stored bytes catches this; only
+        // the alignment does, and without it this record would decode as some other
+        // shape entirely.
+        let record = sample_record();
+        let atoms = atoms_from_record(&record);
+        let mut widths = widths_from_record(&record);
+        widths[0] = 20;
+        let err = decode_record(&cell_of(&atoms, &widths))
+            .expect_err("a sender declared Bytes<20> is not a signet record")
             .to_string();
         assert!(
-            err.contains("matches no"),
-            "an at-cap cell goes through enumeration, got: {err}"
+            err.contains("Bytes<20>") && err.contains("Bytes<32>"),
+            "the error must name both widths: {err}"
         );
-        assert!(
-            !err.contains("enumeration cap"),
-            "an at-cap cell is not a cap rejection, got: {err}"
-        );
+    }
+
+    #[test]
+    fn decode_record_rejects_an_alignment_that_does_not_cover_the_atoms() {
+        let record = sample_record();
+        let atoms = atoms_from_record(&record);
+        let mut widths = widths_from_record(&record);
+        widths.pop();
+        let err = decode_record(&cell_of(&atoms, &widths))
+            .expect_err("one segment per atom, or the pairing is a guess")
+            .to_string();
+        assert!(err.contains("alignment segments"), "err: {err}");
+    }
+
+    #[test]
+    fn decode_record_rejects_widthless_alignment_atoms() {
+        // Compress and Field carry no byte width, and Option is a nested disjunction.
+        // A signet record declares none of the three, and the runtime's own hash refuses
+        // Compress outright, so treating any of them as a width would be an invention.
+        //
+        // The assertion is on the REASON, not merely on failing: an implementation that
+        // invented a width for these would still fail here, just with a width mismatch
+        // further down, so "it errored" proves nothing about this rule.
+        let record = sample_record();
+        let atoms = atoms_from_record(&record);
+        let widths = widths_from_record(&record);
+        for (name, segment, expected) in [
+            (
+                "compress",
+                AlignmentSegment::Atom {
+                    value: AlignmentAtom::Compress,
+                },
+                "carries no byte width",
+            ),
+            (
+                "field",
+                AlignmentSegment::Atom {
+                    value: AlignmentAtom::Field,
+                },
+                "carries no byte width",
+            ),
+            (
+                "option",
+                AlignmentSegment::Option {
+                    value: vec![alignment_of(&[32])],
+                },
+                "alignment option",
+            ),
+        ] {
+            let mut alignment = alignment_of(&widths);
+            alignment[0] = segment;
+            let cell = StateNode::Cell {
+                atoms: atoms.iter().map(hex::encode).collect(),
+                alignment,
+            };
+            let err = decode_record(&cell).unwrap_err().to_string();
+            assert!(
+                err.contains("atom 0") && err.contains(expected),
+                "the {name} segment must be refused as a widthless alignment, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_notification_checks_declared_widths() {
+        // The singleton stores a notification as Bytes<1> then Bytes<128>. A payload
+        // declared narrower is a different type, and its trimmed bytes cannot say so.
+        let mut payload = [0u8; 128];
+        payload[..32].copy_from_slice(&[0xab; 32]);
+        let err = decode_notification(&cell_of(&[vec![1u8], payload.to_vec()], &[1, 64]))
+            .expect_err("a payload declared Bytes<64> is not a notification")
+            .to_string();
+        assert!(err.contains("Bytes<128>"), "err: {err}");
     }
 }

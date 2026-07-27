@@ -290,7 +290,7 @@ fn response_counts(tree: &StateNode, height: u64) -> HashMap<[u8; 32], u64> {
         .iter()
         .filter_map(|entry| {
             let rid = counter_map_rid(&entry.key)?;
-            let StateNode::Cell { atoms } = &entry.value else {
+            let StateNode::Cell { atoms, .. } = &entry.value else {
                 return Some((rid, 0));
             };
             let count = atoms
@@ -1073,7 +1073,7 @@ mod tests {
     use crate::sidecar::{
         ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, MapEntry, StateNode,
     };
-    use crate::test_utils::{atoms_from_record, cell_of, sample_record};
+    use crate::test_utils::{cell_from_record, sample_record};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
     use std::collections::HashMap;
@@ -1125,6 +1125,7 @@ mod tests {
             key: vec![hex::encode([count]), trimmed_hex(rid)],
             value: StateNode::Cell {
                 atoms: vec!["01".to_string(), hex::encode(payload)],
+                alignment: crate::test_utils::alignment_of(&[1, 128]),
             },
         }
     }
@@ -1154,7 +1155,7 @@ mod tests {
                 StateNode::Map {
                     entries: vec![MapEntry {
                         key: vec![trimmed_hex(rid)],
-                        value: cell_of(&atoms_from_record(record)),
+                        value: cell_from_record(record),
                     }],
                 },
             ],
@@ -1621,11 +1622,11 @@ mod tests {
                         entries: vec![
                             MapEntry {
                                 key: vec![trimmed_hex(&rid)],
-                                value: cell_of(&atoms_from_record(&record)),
+                                value: cell_from_record(&record),
                             },
                             MapEntry {
                                 key: vec![trimmed_hex(&other_rid)],
-                                value: cell_of(&atoms_from_record(&other_record)),
+                                value: cell_from_record(&other_record),
                             },
                         ],
                     },
@@ -2036,6 +2037,7 @@ mod tests {
                             key: vec![trimmed_hex(rid)],
                             value: StateNode::Cell {
                                 atoms: vec![trimmed_hex(&count.to_le_bytes())],
+                                alignment: crate::test_utils::alignment_of(&[8]),
                             },
                         })
                         .collect(),
@@ -2177,11 +2179,11 @@ mod tests {
                         entries: vec![
                             MapEntry {
                                 key: vec![trimmed_hex(&responded_rid)],
-                                value: cell_of(&atoms_from_record(&responded_record)),
+                                value: cell_from_record(&responded_record),
                             },
                             MapEntry {
                                 key: vec![trimmed_hex(&rid)],
-                                value: cell_of(&atoms_from_record(&record)),
+                                value: cell_from_record(&record),
                             },
                         ],
                     },
@@ -2299,11 +2301,11 @@ mod tests {
                         entries: vec![
                             MapEntry {
                                 key: vec![trimmed_hex(&bad_rid)],
-                                value: cell_of(&atoms_from_record(&bad_record)),
+                                value: cell_from_record(&bad_record),
                             },
                             MapEntry {
                                 key: vec![trimmed_hex(&good_rid)],
-                                value: cell_of(&atoms_from_record(&good_record)),
+                                value: cell_from_record(&good_record),
                             },
                         ],
                     },

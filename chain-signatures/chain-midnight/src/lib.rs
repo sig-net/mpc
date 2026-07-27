@@ -18,6 +18,6 @@ pub use convert::{to_sign_request, MidnightChainCtx};
 pub use indexer::MidnightIndexer;
 pub use publisher::MidnightPublisher;
 pub use sidecar::{
-    ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, Health, LedgerTags,
-    MapEntry, SidecarClient, StateNode,
+    AlignmentAtom, AlignmentSegment, ClaimedCall, DecodedCall, DecodedTransaction,
+    DecodedTransactions, Health, LedgerTags, MapEntry, SidecarClient, StateNode,
 };

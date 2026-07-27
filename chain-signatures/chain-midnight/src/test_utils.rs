@@ -3,7 +3,7 @@
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
 };
-use crate::sidecar::StateNode;
+use crate::sidecar::{AlignmentAtom, AlignmentSegment, StateNode};
 
 /// Wire-form atoms of a record, each field trimmed as the state layer stores it:
 /// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
@@ -57,10 +57,63 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
     atoms
 }
 
-pub(crate) fn cell_of(atoms: &[Vec<u8>]) -> StateNode {
+/// The width the contract declares for each atom of a record, in atom order. The wire
+/// carries this beside the atoms, so a fixture without it is not a record cell.
+pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
+    let tx = &record.tx_params;
+    let mut widths: Vec<u32> = vec![
+        32, // sender
+        8,  // request_nonce
+        1,  // key_version
+        32, // path
+        1,  // algo
+        1,  // dest
+        64, // params
+        1,  // tx_param_type
+        8,  // chain_id
+        8,  // nonce
+        16, // max_priority_fee_per_gas
+        16, // max_fee_per_gas
+        8,  // gas_limit
+        20, // to
+        16, // value
+        1,  // calldata.is_some
+        4,  // calldata.selector
+        2,  // calldata.no_words
+    ];
+    widths.extend(std::iter::repeat_n(32, tx.calldata.value.words.len()));
+    widths.push(1); // access_list_entry_count
+    for entry in &tx.access_list {
+        widths.push(20);
+        widths.push(1);
+        widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
+    }
+    widths.push(32); // caip2_id
+    widths.push(record.output_deserialization_schema.len() as u32);
+    widths.push(record.respond_serialization_schema.len() as u32);
+    widths
+}
+
+pub(crate) fn cell_of(atoms: &[Vec<u8>], widths: &[u32]) -> StateNode {
     StateNode::Cell {
         atoms: atoms.iter().map(hex::encode).collect(),
+        alignment: alignment_of(widths),
     }
+}
+
+/// `Bytes<width>` segments, the only alignment a signet record or notification uses.
+pub(crate) fn alignment_of(widths: &[u32]) -> Vec<AlignmentSegment> {
+    widths
+        .iter()
+        .map(|length| AlignmentSegment::Atom {
+            value: AlignmentAtom::Bytes { length: *length },
+        })
+        .collect()
+}
+
+/// The wire cell for `record`: its trimmed atoms beside the widths it declares.
+pub(crate) fn cell_from_record(record: &SignBidirectionalRecord) -> StateNode {
+    cell_of(&atoms_from_record(record), &widths_from_record(record))
 }
 fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];

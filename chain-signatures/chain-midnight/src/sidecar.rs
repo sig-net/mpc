@@ -15,14 +15,46 @@ const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
+/// One atom's declared shape, the ledger's `AlignmentAtom` verbatim.
+///
+/// Only `Bytes` carries a width. `Compress` and `Field` have none, which is why the
+/// wire form cannot be a flat width list.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "tag", rename_all = "lowercase")]
+pub enum AlignmentAtom {
+    Compress,
+    Field,
+    Bytes { length: u32 },
+}
+
+/// One segment of a cell's alignment, the ledger's `AlignmentSegment` verbatim.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "tag", rename_all = "lowercase")]
+pub enum AlignmentSegment {
+    Atom { value: AlignmentAtom },
+    Option { value: Vec<Vec<AlignmentSegment>> },
+}
+
 /// Decoded contract state, internally tagged on `kind` exactly as the sidecar emits it
-/// (`{"kind":"cell","atoms":[..]}`, `{"kind":"null"}`).
+/// (`{"kind":"cell","atoms":[..],"alignment":[..]}`, `{"kind":"null"}`).
+///
+/// A cell's `alignment` runs one segment per atom, in atom order. It is load-bearing:
+/// stored atoms are trailing-zero-trimmed, so the declared width of a field is
+/// recoverable only from here. Consumers decode by the declared width and never by
+/// what a stored atom happens to be.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StateNode {
-    Cell { atoms: Vec<String> },
-    Array { children: Vec<StateNode> },
-    Map { entries: Vec<MapEntry> },
+    Cell {
+        atoms: Vec<String>,
+        alignment: Vec<AlignmentSegment>,
+    },
+    Array {
+        children: Vec<StateNode>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
     Null,
 }
 
