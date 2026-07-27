@@ -23,11 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js
@@ -78,7 +78,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
 
       # Run cargo-audit to check for vulnerable dependencies
       - uses: rustsec/audit-check@v2.0.0
