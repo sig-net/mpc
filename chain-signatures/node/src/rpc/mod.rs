@@ -15,13 +15,14 @@ pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use dashmap::DashSet;
 use k256::{AffinePoint, Secp256k1};
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -394,6 +395,8 @@ impl RpcExecutor {
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
+        // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
+        let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
         loop {
             let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -401,17 +404,25 @@ impl RpcExecutor {
             };
 
             let chain = action.request.chain;
+            let sign_id = action.request.id;
+
+            if !in_flight.insert(sign_id) {
+                tracing::info!(?sign_id, ?chain, "publish already in flight; skipping duplicate");
+                continue;
+            }
 
             // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
             let Some(publisher) = publishers.get(&chain) else {
+                in_flight.remove(&sign_id);
                 tracing::warn!(?chain, "no publisher configured for chain");
                 continue;
             };
 
-            // Spawn a task to execute the publish action.
             let publisher = publisher.clone();
+            let in_flight = in_flight.clone();
             tokio::spawn(async move {
                 execute_publish(publisher, action).await;
+                in_flight.remove(&sign_id);
             });
         }
     }
