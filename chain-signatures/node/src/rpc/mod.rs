@@ -70,11 +70,12 @@ pub struct RpcChannel {
 impl RpcChannel {
     pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
         let tx = self.tx.clone();
+        let created_at = Instant::now();
         tokio::spawn(async move {
             if let Err(err) = tx
                 .send(RpcAction::VoteCheckpoint {
                     checkpoint,
-                    created_at: Instant::now(),
+                    created_at,
                 })
                 .await
             {
