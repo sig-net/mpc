@@ -876,4 +876,40 @@ mod tests {
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
         assert_eq!(sol_count.load(Ordering::SeqCst), SOL_ACTION_COUNT);
     }
+
+    #[tokio::test]
+    async fn executor_dedupes_concurrent_publishes_with_the_same_sign_id() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let sign_id = SignId::new([7u8; 32]);
+
+        // Multiple publishes for the SAME SignId
+        for _ in 0..5 {
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::Ethereum,
+                SignKind::Sign,
+                sign_id,
+            )))
+            .await
+            .unwrap();
+        }
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+
+        // Let the single in-flight publish finish.
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
 }
