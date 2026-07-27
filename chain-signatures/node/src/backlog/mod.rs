@@ -6,7 +6,8 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PendingTx,
+    SignId, SignKind,
 };
 use sha3::Digest;
 use std::collections::{BTreeMap, HashMap};

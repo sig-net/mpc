@@ -8,7 +8,7 @@ use crate::backlog::Backlog;
 use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::{Chain, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
