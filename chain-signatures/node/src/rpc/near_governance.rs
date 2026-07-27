@@ -94,7 +94,17 @@ impl NearGovernanceClient {
             }
         };
 
-        Ok(Some(transaction.json()?))
+        match transaction.into_result() {
+            Ok(transaction) => Ok(Some(transaction.json()?)),
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::CheckpointBehind.to_string()) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
