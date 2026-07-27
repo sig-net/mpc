@@ -407,7 +407,11 @@ impl RpcExecutor {
             let sign_id = action.request.id;
 
             if !in_flight.insert(sign_id) {
-                tracing::info!(?sign_id, ?chain, "publish already in flight; skipping duplicate");
+                tracing::info!(
+                    ?sign_id,
+                    ?chain,
+                    "publish already in flight; skipping duplicate"
+                );
                 continue;
             }
 
@@ -553,7 +557,7 @@ mod tests {
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_primitives::SignKind;
+    use mpc_primitives::{SignId, SignKind};
 
     /// Vote churn must be absorbed without completing; real governance changes
     /// and leaving the running state must be delivered.
@@ -724,6 +728,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -758,6 +763,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -790,12 +796,14 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::NEAR,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Solana,
             SignKind::Sign,
+            SignId::new([1u8; 32]),
         )))
         .await
         .unwrap();
@@ -840,19 +848,21 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
 
         // Send multiple publish actions for NEAR and Solana
-        for _ in 0..NEAR_ACTION_COUNT {
+        for i in 0..NEAR_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::NEAR,
                 SignKind::Sign,
+                SignId::new([i as u8; 32]),
             )))
             .await
             .unwrap();
         }
 
-        for _ in 0..SOL_ACTION_COUNT {
+        for i in 0..SOL_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Solana,
                 SignKind::Sign,
+                SignId::new([(NEAR_ACTION_COUNT + i) as u8; 32]),
             )))
             .await
             .unwrap();
