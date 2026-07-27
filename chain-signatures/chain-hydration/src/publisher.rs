@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::indexer_hydration::HydrationConfig;
+use crate::config::HydrationConfig;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{SignId, SignKind, Signature};
@@ -296,7 +296,7 @@ impl ChainPublisher for HydrationClient {
                             ?sign_id,
                             ?e,
                             "Hydration publish signature: failed to publish respond bidirectional signature"
-                        );
+                        )
                     })?;
 
                 tracing::info!(

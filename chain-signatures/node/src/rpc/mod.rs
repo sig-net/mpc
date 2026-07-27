@@ -1,4 +1,3 @@
-mod hydration;
 mod near_governance;
 
 use crate::config::Config;
@@ -9,8 +8,7 @@ use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-// TODO: move clients elsewhere
-pub use hydration::HydrationClient;
+pub use mpc_chain_hydration::HydrationClient;
 pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
