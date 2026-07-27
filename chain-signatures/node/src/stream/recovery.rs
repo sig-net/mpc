@@ -1,7 +1,6 @@
 use crate::backlog::{consensus, Backlog};
 use crate::mesh::{self, MeshState};
 use crate::node_client::NodeClient;
-use crate::rpc::RpcChannel;
 use crate::types::CheckpointWatcher;
 
 use mpc_primitives::Chain;
@@ -10,8 +9,7 @@ use tokio::sync::watch;
 
 /// Node-side checkpoint recovery:
 /// waits for an active mesh, optionally loads the latest local checkpoint into the
-/// backlog, then aligns the backlog with the consensus checkpoint feed, aborting
-/// in-flight RPC tasks for this chain if a regression occurred.
+/// backlog, then aligns the backlog with the consensus checkpoint feed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     chain: Chain,
@@ -20,7 +18,6 @@ pub(crate) async fn recover_backlog(
     checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
-    rpc: &RpcChannel,
     threshold: usize,
     my_account_id: &AccountId,
 ) {
@@ -48,13 +45,6 @@ pub(crate) async fn recover_backlog(
         }
     }
 
-    // A recovery without local loading is triggered by a regression or watchdog
-    // restart. Abort stale RPC work before alignment so failed peer lookup or
-    // backlog recovery cannot leave retries running indefinitely.
-    if !load_local {
-        rpc.abort_chain(chain).await;
-    }
-
     // Returns None when no alignment is needed (the normal case); Some(height) when
     // the backlog was regressed.
     if consensus::align_backlog_with_consensus(
@@ -69,55 +59,5 @@ pub(crate) async fn recover_backlog(
     .is_some()
     {
         tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backlog::Backlog;
-    use crate::mesh::MeshState;
-    use crate::node_client::NodeClient;
-    use crate::rpc::RpcAction;
-    use crate::stream::test_utils::test_rpc_channel;
-    use mpc_primitives::CheckpointDigest;
-    use std::time::Duration;
-    use tokio::sync::watch;
-
-    #[tokio::test]
-    async fn recovery_aborts_rpc_before_failed_alignment() {
-        let chain = Chain::Ethereum;
-        let backlog = Backlog::new();
-        backlog.set_processed_block(chain, 100).await;
-        let checkpoint = backlog.checkpoint(chain).await.unwrap();
-        let (_checkpoint_tx, mut checkpoints_rx) = watch::channel(Some(CheckpointDigest {
-            height: checkpoint.block_height,
-            digest: [9; 32],
-        }));
-        let (_mesh_tx, mut mesh_state) = watch::channel(MeshState::default());
-        let (rpc, mut rpc_rx) = test_rpc_channel(1);
-        let node_client = NodeClient::new(&Default::default());
-        let account_id: AccountId = "test.near".parse().unwrap();
-
-        let action = tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::select! {
-                action = rpc_rx.recv() => action,
-                _ = recover_backlog(
-                    chain,
-                    false,
-                    &backlog,
-                    &mut checkpoints_rx,
-                    &mut mesh_state,
-                    &node_client,
-                    &rpc,
-                    0,
-                    &account_id,
-                ) => panic!("recovery should wait for peer alignment"),
-            }
-        })
-        .await
-        .expect("abort should be sent before alignment waits for peers")
-        .expect("RPC channel should remain open");
-        assert!(matches!(action, RpcAction::AbortChain(Chain::Ethereum)));
     }
 }
