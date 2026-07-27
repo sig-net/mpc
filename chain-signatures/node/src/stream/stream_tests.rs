@@ -610,7 +610,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         RpcAction::VoteCheckpoint { checkpoint, .. } => {
             panic!("unexpected checkpoint vote: {checkpoint:?}");
         }
-        RpcAction::AbortChain(chain) => {
+        RpcAction::AbortCheckpoints(chain) => {
             panic!("unexpected chain abort: {chain:?}");
         }
     }

@@ -49,7 +49,7 @@ pub enum RpcAction {
         checkpoint: ConsensusCheckpointDigest,
         created_at: Instant,
     },
-    AbortChain(Chain),
+    AbortCheckpoints(Chain),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl RpcChannel {
     }
 
     pub async fn abort_checkpoints(&self, chain: Chain) {
-        if let Err(err) = self.tx.send(RpcAction::AbortChain(chain)).await {
+        if let Err(err) = self.tx.send(RpcAction::AbortCheckpoints(chain)).await {
             tracing::error!(%err, ?chain, "failed to send RPC chain abort");
         }
     }
@@ -432,8 +432,8 @@ impl RpcExecutor {
         near: Option<NearGovernanceClient>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
-        let mut cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
-        let mut abort_times = HashMap::<Chain, Instant>::new();
+        let mut checkpoint_cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
+        let mut checkpoint_abort_times = HashMap::<Chain, Instant>::new();
         // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
         let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
         loop {
@@ -445,14 +445,6 @@ impl RpcExecutor {
             match action {
                 RpcAction::Publish(action) => {
                     let chain = action.request.chain;
-                    if abort_times
-                        .get(&chain)
-                        .is_some_and(|abort_time| *abort_time >= action.timestamp)
-                    {
-                        tracing::info!(?chain, ?action.request.id, "discarding stale RPC publish");
-                        continue;
-                    }
-
                     let Some(publisher) = publishers.get(&chain) else {
                         tracing::warn!(?chain, "no publisher configured for chain");
                         continue;
@@ -469,19 +461,13 @@ impl RpcExecutor {
                     }
 
                     let publisher = publisher.clone();
-                    let cancellation = cancellation_tokens.entry(chain).or_default().clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
                         let _guard = InFlightGuard {
                             in_flight,
                             id: sign_id,
                         };
-                        tokio::select! {
-                            _ = cancellation.cancelled() => {
-                                tracing::info!(?chain, ?sign_id, "cancelled RPC publish");
-                            }
-                            _ = execute_publish(publisher, action) => {}
-                        }
+                        execute_publish(publisher, action).await;
                     });
                 }
                 RpcAction::VoteCheckpoint {
@@ -489,7 +475,7 @@ impl RpcExecutor {
                     created_at,
                 } => {
                     let chain = checkpoint.chain;
-                    if abort_times
+                    if checkpoint_abort_times
                         .get(&chain)
                         .is_some_and(|abort_time| *abort_time >= created_at)
                     {
@@ -502,7 +488,10 @@ impl RpcExecutor {
                         continue;
                     };
 
-                    let cancellation = cancellation_tokens.entry(chain).or_default().clone();
+                    let cancellation = checkpoint_cancellation_tokens
+                        .entry(chain)
+                        .or_default()
+                        .clone();
                     tokio::spawn(async move {
                         tokio::select! {
                             _ = cancellation.cancelled() => {
@@ -512,11 +501,14 @@ impl RpcExecutor {
                         }
                     });
                 }
-                RpcAction::AbortChain(chain) => {
-                    abort_times.insert(chain, Instant::now());
-                    cancellation_tokens.entry(chain).or_default().cancel();
-                    cancellation_tokens.insert(chain, CancellationToken::new());
-                    tracing::info!(?chain, "cancelled RPC tasks for chain");
+                RpcAction::AbortCheckpoints(chain) => {
+                    checkpoint_abort_times.insert(chain, Instant::now());
+                    checkpoint_cancellation_tokens
+                        .entry(chain)
+                        .or_default()
+                        .cancel();
+                    checkpoint_cancellation_tokens.insert(chain, CancellationToken::new());
+                    tracing::info!(?chain, "cancelled checkpoint vote tasks");
                 }
             }
         }
@@ -796,18 +788,6 @@ mod tests {
         }
     }
 
-    struct CountingFailingPublisher {
-        call_count: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl ChainPublisher for CountingFailingPublisher {
-        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            anyhow::bail!("publisher failed")
-        }
-    }
-
     fn test_participants() -> Participants {
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -1040,50 +1020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_aborts_publish_on_chain_abort() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
-        publishers.insert(
-            Chain::Ethereum,
-            Arc::new(CountingFailingPublisher {
-                call_count: call_count.clone(),
-            }),
-        );
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
-        });
-
-        tx.send(RpcAction::Publish(make_publish_action(
-            Chain::Ethereum,
-            SignKind::Sign,
-            SignId::new([2u8; 32]),
-        )))
-        .await
-        .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while call_count.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("publish task should start");
-
-        tx.send(RpcAction::AbortChain(Chain::Ethereum))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-        drop(tx);
-        dispatch.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn executor_aborts_checkpoint_vote_on_chain_abort() {
+    async fn executor_aborts_checkpoint_vote_on_abort_checkpoints() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
@@ -1129,7 +1066,7 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tx.send(RpcAction::AbortChain(Chain::Ethereum))
+        tx.send(RpcAction::AbortCheckpoints(Chain::Ethereum))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1137,37 +1074,6 @@ mod tests {
         drop(tx);
         dispatch.await.unwrap();
         mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn executor_discards_delayed_publish_after_chain_abort() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
-        publishers.insert(
-            Chain::Ethereum,
-            Arc::new(CountingPublisher {
-                call_count: call_count.clone(),
-            }),
-        );
-
-        let stale_action =
-            make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([3u8; 32]));
-        let (tx, mut rx) = mpsc::channel(16);
-        tx.send(RpcAction::AbortChain(Chain::Ethereum))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(1)).await;
-        tx.send(RpcAction::Publish(stale_action)).await.unwrap();
-
-        let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 0);
-
-        drop(tx);
-        dispatch.await.unwrap();
     }
 
     #[tokio::test]

@@ -86,8 +86,8 @@ pub(super) fn test_mock_network(
                         RpcAction::VoteCheckpoint { checkpoint, .. } => {
                             format!("RpcAction::VoteCheckpoint({checkpoint:?})")
                         },
-                        RpcAction::AbortChain(chain) => {
-                            format!("RpcAction::AbortChain({chain:?})")
+                        RpcAction::AbortCheckpoints(chain) => {
+                            format!("RpcAction::AbortCheckpoints({chain:?})")
                         }
                     };
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action");

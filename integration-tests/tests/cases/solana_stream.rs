@@ -568,7 +568,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         RpcAction::VoteCheckpoint { checkpoint, .. } => {
             panic!("unexpected checkpoint vote: {checkpoint:?}");
         }
-        RpcAction::AbortChain(chain) => {
+        RpcAction::AbortCheckpoints(chain) => {
             panic!("unexpected chain abort: {chain:?}");
         }
     }

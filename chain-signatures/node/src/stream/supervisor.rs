@@ -215,7 +215,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             }
         };
 
-        // On requiring restart of the supervisor, we should abort all RPC tasks where 
+        // On requiring restart of the supervisor, we should abort all RPC tasks where
         // we are trying to vote the checkpoints into
         if matches!(exit, Exit::Restart) {
             ctx.rpc.abort_checkpoints(chain).await;
@@ -547,7 +547,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
                 .await
                 .expect("regression should abort RPC work immediately"),
-            Some(RpcAction::AbortChain(Chain::Ethereum))
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
         ));
         first_cancel.notified().await;
         // Unblock the restart's consensus alignment (no peers serve the digest).
