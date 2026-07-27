@@ -7372,6 +7372,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-hydration"
+version = "1.16.8"
+dependencies = [
+ "alloy",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "parity-scale-codec",
+ "serde",
+ "serde_json",
+ "sp-core",
+ "sp-runtime",
+ "sp-state-machine",
+ "sp-trie",
+ "subxt",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "mpc-chain-integration-core"
 version = "1.16.8"
 dependencies = [
@@ -7528,6 +7557,7 @@ dependencies = [
  "mockito",
  "mpc-chain-canton",
  "mpc-chain-ethereum",
+ "mpc-chain-hydration",
  "mpc-chain-integration-core",
  "mpc-chain-near",
  "mpc-chain-solana",

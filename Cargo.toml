@@ -12,6 +12,7 @@ members = [
     "chain-signatures/chain-solana",
     "chain-signatures/chain-ethereum",
     "chain-signatures/chain-near",
+    "chain-signatures/chain-hydration",
 ]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
@@ -75,6 +76,11 @@ alloy-sol-types = "1.4.1"
 solana-client = "2.3.13"
 futures-util = "0.3.31"
 parity-scale-codec = { version = "3", features = ["derive"] }
+subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native", "unstable-light-client"] }
+sp-core = { version = "38.1", default-features = false, features = ["std"] }
+sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
+sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
+sp-state-machine = { version = "0.48", default-features = false, features = ["std"] }
 
 near-account-id = "1.0.0"
 near-crypto = "0.28.0"
@@ -89,6 +95,7 @@ mpc-chain-canton = { path = "./chain-signatures/chain-canton" }
 mpc-chain-ethereum = { path = "./chain-signatures/chain-ethereum" }
 mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
+mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
