@@ -32,7 +32,7 @@ impl SignState {
             round: 0,
             request,
             mesh_state,
-            budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
+            budget: TimeoutBudget::new(round_timeout(0)),
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
@@ -62,7 +62,7 @@ impl SignState {
     fn bump_round(&mut self) {
         let prev_round = self.round;
         self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
-        self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+        self.budget.reset(round_timeout(self.round));
         self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }

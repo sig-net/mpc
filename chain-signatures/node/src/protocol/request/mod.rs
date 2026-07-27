@@ -20,9 +20,6 @@ use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
 use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
-use rand::rngs::StdRng;
-use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,13 +41,10 @@ use task::SignTask;
 
 pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
 
-/// How many rounds ahead the organizing phase searches for an active proposer.
-const PROPOSER_SEARCH_WINDOW: usize = 512;
-
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
-/// Timeout budget for organizing and posit phases (shorter under test for speed).
+/// Maximum timeout budget for organizing and posit phases (shorter under test for speed).
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     5
 } else {
@@ -60,6 +54,28 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 /// A proposer tries to include all eligible deliberators but will go ahead with
 /// a subset after this timeout, if above the minimum threshold.
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Shortest a round may be. A round has to fit a Propose broadcast plus accept
+/// gathering, and an accepted deliberator keeps waiting twice
+/// [`ACCEPT_POSIT_TIMEOUT`] no matter what the budget says. Below that, a round
+/// cannot complete and rotating through it is pure churn.
+const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
+    .saturating_mul(2)
+    .saturating_add(Duration::from_secs(1));
+
+/// Added to floor per round, so a request that keeps failing gets more time
+const ROUND_TIMEOUT_STEP: Duration = Duration::from_secs(1);
+
+/// Timeout for round `r`: round 0 gets [`ORGANIZE_POSIT_TIMEOUT`], later rounds
+/// start at [`ROUND_TIMEOUT_FLOOR`] and grow linearly back up to it. Depends
+/// only on `r`, so peers that agree on the round agree on the deadline.
+fn round_timeout(round: usize) -> Duration {
+    if round == 0 {
+        return ORGANIZE_POSIT_TIMEOUT;
+    }
+    let steps = u32::try_from(round - 1).unwrap_or(u32::MAX);
+    (ROUND_TIMEOUT_FLOOR + ROUND_TIMEOUT_STEP * steps).min(ORGANIZE_POSIT_TIMEOUT)
+}
 
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
 /// so that late-arriving peer posit messages do not re-create orphan queues.
@@ -625,5 +641,30 @@ mod tests {
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_posit_queues_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
+    }
+
+    #[test]
+    fn round_timeout_schedule() {
+        // Every round must outlast a deliberator's post-Accept wait, or the
+        // round is too short for any proposer to gather accepts and rotating
+        // through it accomplishes nothing.
+        let min_viable = 2 * ACCEPT_POSIT_TIMEOUT;
+        for r in 0..64usize {
+            assert!(
+                round_timeout(r) > min_viable,
+                "round {r} is too short to complete"
+            );
+        }
+
+        // Rotating past a dead proposer must be cheaper than the round-0 wait,
+        // otherwise the schedule buys nothing.
+        assert!(round_timeout(1) < round_timeout(0));
+
+        // A request that keeps failing gets back to the full round-0 budget
+        // rather than retrying forever on short rounds.
+        assert_eq!(round_timeout(64), ORGANIZE_POSIT_TIMEOUT);
+
+        // `round` derives from a peer-supplied value, so it may be arbitrary.
+        assert_eq!(round_timeout(usize::MAX), ORGANIZE_POSIT_TIMEOUT);
     }
 }

@@ -230,7 +230,7 @@ impl PositPhase {
             // to gather more accepts before sending Start.
             // We must wait at least that long so we don't abandon the round after promising to participate,
             // which would cause the proposer's generation phase to hang.
-            let min_wait = ACCEPT_POSIT_TIMEOUT + Duration::from_millis(500);
+            let min_wait = 2 * ACCEPT_POSIT_TIMEOUT;
             if remaining < min_wait {
                 remaining = min_wait;
             }
