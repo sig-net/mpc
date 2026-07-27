@@ -1,5 +1,4 @@
-//! Chunk-tree walk, capacity enumeration, and record decode over sidecar `StateNode`
-//! trees.
+//! Chunk-tree walk and record decode over sidecar `StateNode` trees.
 
 use anyhow::Context as _;
 
@@ -15,20 +14,14 @@ use crate::sidecar::{AlignmentAtom, AlignmentSegment, StateNode};
 /// rightmost spine is full.
 const CHUNK_ARITY: usize = 15;
 
-/// Atom count of a record excluding the capacity-scaled vectors: a stored cell holds
-/// `REQUEST_FIXED_VALUE_ATOMS + words + entries * (2 + keys)` atoms.
-///
-/// The calldata `Maybe`'s three fixed atoms count even when `is_some` is false;
-/// treating it as absent mis-reads every plain-transfer record.
+/// Atoms of a record excluding its capacity-scaled vectors. The calldata `Maybe`'s
+/// three atoms count even when `is_some` is false.
 pub const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
 
-/// Atoms of the record's fixed head, `sender` through `calldata.no_words`. The calldata
-/// words begin here.
+/// `sender` through `calldata.no_words`; the calldata words begin here.
 const RECORD_HEAD_ATOMS: usize = 18;
 
-/// Atoms of the record's fixed tail, `caip2_id` and the two schemas. Parsed from the
-/// end, which is what makes the access-list boundary unambiguous: a storage key and
-/// `caip2_id` are both `Bytes<32>`, so only counting back from the end separates them.
+/// `caip2_id` and the two schemas.
 const RECORD_TAIL_ATOMS: usize = 3;
 
 /// Resolve a flat ledger field index to its node in the raw state tree.
@@ -70,11 +63,8 @@ pub fn signet_field_node(root: &StateNode, flat_index: usize) -> anyhow::Result<
     })
 }
 
-/// A cell's atoms beside the declared width of each, taken from the ledger's alignment.
-///
-/// Every atom of a signet record is a `Bytes` atom. A `Compress`, `Field` or `Option`
-/// segment is refused here rather than guessed at: the runtime's own hash refuses
-/// `Compress` too, and none of the three appears in a record or a notification.
+/// A cell's atoms beside each one's declared width. Signet declares only `Bytes` atoms,
+/// so a widthless or nested segment is refused rather than assigned a width.
 fn cell_parts(cell: &StateNode, what: &str) -> anyhow::Result<(Vec<Vec<u8>>, Vec<u32>)> {
     let StateNode::Cell { atoms, alignment } = cell else {
         anyhow::bail!("{what} node is not a cell");
@@ -110,20 +100,14 @@ fn cell_parts(cell: &StateNode, what: &str) -> anyhow::Result<(Vec<Vec<u8>>, Vec
     Ok((decoded, widths))
 }
 
-/// The capacity of each scaled vector, read off the declared widths.
 struct Capacities {
     words: usize,
     entries: usize,
     keys: usize,
 }
 
-/// Recover the capacities from the alignment alone.
-///
-/// Every boundary is a width read. Calldata words are the run of `Bytes<32>` after the
-/// fixed head, closed by the `Bytes<1>` entry count. The access-list region is whatever
-/// lies between that and the three-atom tail, and since only an entry's address is
-/// `Bytes<20>`, counting those gives the entry capacity and the region divides evenly by
-/// it.
+/// Each scaled vector's capacity, read off the declared widths. The tail is taken from
+/// the end because `caip2_id` and a storage key are both `Bytes<32>`.
 fn capacities(widths: &[u32], atom_count: usize) -> anyhow::Result<Capacities> {
     anyhow::ensure!(
         atom_count >= REQUEST_FIXED_VALUE_ATOMS,
@@ -178,23 +162,16 @@ fn capacities(widths: &[u32], atom_count: usize) -> anyhow::Result<Capacities> {
     })
 }
 
-/// Decode a stored request record.
-///
-/// One deterministic pass: the alignment states every atom's declared width, so the
-/// capacities are read rather than searched, and a cell whose declared shape is not a
-/// signet record is refused instead of reinterpreted.
+/// Decode a stored request record in one pass, refusing a cell whose declared widths
+/// are not a signet record's.
 pub fn decode_record(cell: &StateNode) -> anyhow::Result<SignBidirectionalRecord> {
     let (atoms, widths) = cell_parts(cell, "request record")?;
     let capacities = capacities(&widths, atoms.len())?;
     decode_at(&atoms, &widths, &capacities)
 }
 
-/// The recompute-and-drop security gate: the record filed under `request_id` in the
-/// caller's request map, returned only if the id recomputed from the decoded record
-/// equals the id it was filed under.
-///
-/// The decode is independent of the id, so this comparison is the only thing binding
-/// a record's contents to the key it was filed under.
+/// The recompute-and-drop gate. The decode never sees `request_id`, so this comparison
+/// is the only thing binding a record's contents to the key it was filed under.
 pub fn resolve_verified_record(map: &StateNode, request_id: [u8; 32]) -> Resolved {
     let StateNode::Map { entries } = map else {
         return Resolved::Dropped {
@@ -321,11 +298,8 @@ struct AtomCursor<'a> {
 }
 
 impl<'a> AtomCursor<'a> {
-    /// Consume one atom, asserting the width the ledger declared for it.
-    ///
-    /// The declared width is the type check: a field whose stored bytes happen to fit
-    /// still fails here if the contract declared it as something else, which is what
-    /// makes decoding a single pass rather than a search.
+    /// Consume one atom, asserting the width the ledger declared for it. That assertion
+    /// is the type check: stored bytes that merely fit prove nothing.
     fn shift(&mut self, declared: u32, what: &'static str) -> anyhow::Result<&'a [u8]> {
         let atom = self
             .atoms
@@ -347,7 +321,6 @@ impl<'a> AtomCursor<'a> {
         Ok(atom)
     }
 
-    /// The width declared for the next atom, without consuming it.
     fn peek_width(&self) -> anyhow::Result<u32> {
         self.widths
             .get(self.pos)
@@ -356,8 +329,7 @@ impl<'a> AtomCursor<'a> {
     }
 }
 
-/// `Bytes<N>`: the stored atom is trailing-zero-trimmed, so re-pad it to the width the
-/// ledger declared.
+/// `Bytes<N>`, re-padded from its trailing-zero-trimmed stored form.
 fn bytes_n<const N: usize>(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<[u8; N]> {
     let atom = cursor.shift(N as u32, what)?;
     let mut out = [0u8; N];
@@ -365,8 +337,7 @@ fn bytes_n<const N: usize>(cursor: &mut AtomCursor, what: &'static str) -> anyho
     Ok(out)
 }
 
-/// `Bytes<Len>` at a per-integrator width, taken from the alignment rather than from
-/// what the atom happens to store.
+/// `Bytes<Len>` at the per-integrator width the alignment declares.
 fn bytes_dyn(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<Vec<u8>> {
     let declared = cursor.peek_width()? as usize;
     let atom = cursor.shift(declared as u32, what)?;
@@ -375,8 +346,8 @@ fn bytes_dyn(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<Vec<
     Ok(out)
 }
 
-/// `Uint` and enum atoms fold little-endian from their trimmed form; the declared width
-/// is asserted, and the folded value is range-checked as the runtime descriptors do.
+/// `Uint` and enum atoms, folded little-endian and range-checked as the runtime
+/// descriptors do.
 fn uint(
     cursor: &mut AtomCursor,
     declared: u32,
@@ -396,14 +367,13 @@ fn uint(
     Ok(value)
 }
 
-/// `Boolean`: declared one byte, the empty atom is false, `[1]` is true.
+/// `Boolean`: the empty atom is false, `[1]` is true.
 fn boolean(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<bool> {
     let atom = cursor.shift(1, what)?;
     anyhow::ensure!(atom.is_empty() || atom == [1], "{what}: not a Boolean atom");
     Ok(!atom.is_empty())
 }
 
-/// One full record decode at the capacities the alignment reported.
 fn decode_at(
     atoms: &[Vec<u8>],
     widths: &[u32],
@@ -428,8 +398,7 @@ fn decode_at(
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
         respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,
     };
-    // The capacities were derived from the same widths this pass asserted, so a
-    // leftover atom means the two disagree and the record must not be signed.
+    // A leftover atom means the capacities and this pass disagree.
     anyhow::ensure!(
         cursor.pos == atoms.len(),
         "request record decoded {} of {} atoms",
@@ -509,7 +478,7 @@ mod tests {
     use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
     use crate::sidecar::StateNode;
     use crate::test_utils::{
-        alignment_of, atoms_from_record, cell_from_record, cell_of, sample_record,
+        alignment_of, atoms_from_record, cell_from_record, cell_of, minimal_record, sample_record,
         sample_record_with_partial_access_list, sample_record_with_unused_access_list,
         widths_from_record,
     };
@@ -606,18 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_record_names_too_few_atoms() {
-        let short = cell_of(&vec![vec![0xab]; 21], &[1u32; 21]);
-        let err = decode_record(&short)
-            .expect_err("21 atoms cannot hold the fixed fields")
-            .to_string();
-        assert!(
-            err.contains("21") && err.contains("22"),
-            "the error must name both counts: {err}"
-        );
-    }
-
-    #[test]
     fn unpack_notification_v1_rejects_other_versions() {
         let mut payload = [0u8; 128];
         payload[..32].copy_from_slice(&[0xab; 32]);
@@ -683,11 +640,10 @@ mod tests {
         );
 
         // Spoofed filing: the same record bytes stored under an id they do NOT hash to.
-        // The decode never sees the id, so only the gate can drop this.
         let spoofed = [0x99; 32];
         assert!(
             decode_record(&cell).is_ok(),
-            "the decode is id-independent, so it must still succeed here"
+            "the decode never sees the id, so only the gate can drop this"
         );
         let map = map_of(vec![(hex::encode(spoofed), cell)]);
         assert!(
@@ -698,7 +654,7 @@ mod tests {
                     ..
                 }
             ),
-            "the gate must drop the fallback under its own reason"
+            "the gate must drop it under its own reason"
         );
     }
 
@@ -829,37 +785,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_notification_requires_two_atoms() {
-        // version and payload, nothing else: a cell of any other shape is a schema
-        // change and must fail closed rather than decode whatever the first two atoms
-        // happen to be.
-        let mut payload = [0u8; 128];
-        payload[..32].copy_from_slice(&[0xab; 32]);
-        payload[32] = 4;
-        for atoms in [
-            vec![hex::encode([1u8])],
-            vec![hex::encode([1u8]), hex::encode(payload), hex::encode([0u8])],
-        ] {
-            let count = atoms.len();
-            let widths = vec![1u32; count];
-            let err = decode_notification(&cell_of(
-                &atoms
-                    .iter()
-                    .map(|atom| hex::decode(atom).expect("hex"))
-                    .collect::<Vec<_>>(),
-                &widths,
-            ))
-            .expect_err("only a two-atom notification cell decodes")
-            .to_string();
-            assert!(err.contains("expected 2"), "{count} atoms: {err}");
-        }
-    }
-
-    #[test]
     fn decode_record_reads_capacities_from_declared_widths() {
-        // Every scaled vector at a different capacity, with counts below capacity, so a
-        // decode that inferred the split from anything but the widths would misread it.
+        // Counts below capacity throughout, so a decode inferring the split from
+        // anything but the widths would misread it.
         for record in [
+            minimal_record(),
             sample_record(),
             sample_record_with_unused_access_list(),
             sample_record_with_partial_access_list(),
@@ -868,54 +798,29 @@ mod tests {
                 .unwrap_or_else(|err| panic!("the record must decode: {err:#}"));
             assert_eq!(decoded, record, "the decode must round-trip the record");
         }
-    }
 
-    #[test]
-    fn decode_record_reads_the_minimal_record() {
-        // Every scaled vector empty: exactly REQUEST_FIXED_VALUE_ATOMS atoms, so the
-        // word scan and the access-list region are both empty and adjacent. This is the
-        // lower boundary of the capacity walk, and it is the plain-transfer shape, which
-        // is the one a decoder is most likely to mis-split.
-        let mut record = sample_record();
-        record.tx_params.calldata = crate::records::CompactMaybe {
-            is_some: false,
-            value: crate::records::EvmCalldata {
-                selector: [0; 4],
-                no_words: 0,
-                words: Vec::new(),
-            },
-        };
-        record.tx_params.access_list_entry_count = 0;
-        record.tx_params.access_list = Vec::new();
-
-        let cell = cell_from_record(&record);
-        let StateNode::Cell { atoms, .. } = &cell else {
+        let minimal = cell_from_record(&minimal_record());
+        let StateNode::Cell { atoms, .. } = &minimal else {
             panic!("cell_from_record must build a cell")
         };
-        assert_eq!(
-            atoms.len(),
-            REQUEST_FIXED_VALUE_ATOMS,
-            "the minimal record must sit exactly on the fixed-atom count"
-        );
-        assert_eq!(
-            decode_record(&cell).expect("the minimal record decodes"),
-            record
-        );
+        assert_eq!(atoms.len(), REQUEST_FIXED_VALUE_ATOMS);
+
+        // One atom below the boundary is refused rather than underflowing the tail.
+        let err = decode_record(&cell_of(&vec![vec![0xab]; 21], &[1u32; 21]))
+            .expect_err("21 atoms cannot hold the fixed fields")
+            .to_string();
+        assert!(err.contains("21") && err.contains("22"), "err: {err}");
     }
 
     #[test]
     fn decode_record_rejects_a_malformed_access_list_region() {
-        // The entry capacity is counted from the Bytes<20> addresses, so a region that
-        // counts cleanly but is laid out wrongly must still die in the per-atom pass
-        // rather than decode into some other record.
+        // A region whose arithmetic works out but whose layout is wrong must still die
+        // in the per-atom pass rather than decode into some other record.
         let record = sample_record_with_partial_access_list();
         let atoms = atoms_from_record(&record);
         let mut widths = widths_from_record(&record);
-        // Swap an entry's address and its key count: the region still holds the same
-        // number of Bytes<20> atoms, so the capacity arithmetic is unchanged.
-        //
-        // The SECOND Bytes<20>, deliberately: the first is `to`, which sits in the fixed
-        // head, and perturbing that would prove nothing about the access-list region.
+        // The SECOND Bytes<20>: the first is `to` in the fixed head. Swapping an
+        // entry's address with its key count leaves the capacity arithmetic unchanged.
         let first_entry = widths
             .iter()
             .enumerate()
@@ -935,10 +840,8 @@ mod tests {
 
     #[test]
     fn decode_record_rejects_a_width_the_layout_does_not_declare() {
-        // The declared width IS the type check. A sender stored in 20 bytes fits a
-        // Bytes<20> perfectly well, so nothing about the stored bytes catches this; only
-        // the alignment does, and without it this record would decode as some other
-        // shape entirely.
+        // A sender stored in 20 bytes fits a Bytes<20> perfectly well, so only the
+        // alignment catches this.
         let record = sample_record();
         let atoms = atoms_from_record(&record);
         let mut widths = widths_from_record(&record);
@@ -966,13 +869,8 @@ mod tests {
 
     #[test]
     fn decode_record_rejects_widthless_alignment_atoms() {
-        // Compress and Field carry no byte width, and Option is a nested disjunction.
-        // A signet record declares none of the three, and the runtime's own hash refuses
-        // Compress outright, so treating any of them as a width would be an invention.
-        //
-        // The assertion is on the REASON, not merely on failing: an implementation that
-        // invented a width for these would still fail here, just with a width mismatch
-        // further down, so "it errored" proves nothing about this rule.
+        // Assert the REASON, not merely that it failed: an implementation that invented
+        // a width for these would also fail, just with a width mismatch further down.
         let record = sample_record();
         let atoms = atoms_from_record(&record);
         let widths = widths_from_record(&record);
@@ -1014,14 +912,24 @@ mod tests {
     }
 
     #[test]
-    fn decode_notification_checks_declared_widths() {
-        // The singleton stores a notification as Bytes<1> then Bytes<128>. A payload
-        // declared narrower is a different type, and its trimmed bytes cannot say so.
+    fn decode_notification_rejects_any_other_shape() {
+        // Bytes<1> then Bytes<128>, and nothing else. A payload declared narrower is a
+        // different type, and its trimmed bytes cannot say so.
         let mut payload = [0u8; 128];
         payload[..32].copy_from_slice(&[0xab; 32]);
-        let err = decode_notification(&cell_of(&[vec![1u8], payload.to_vec()], &[1, 64]))
-            .expect_err("a payload declared Bytes<64> is not a notification")
-            .to_string();
-        assert!(err.contains("Bytes<128>"), "err: {err}");
+        for (atoms, widths, expected) in [
+            (vec![vec![1u8]], vec![1u32], "expected 2"),
+            (
+                vec![vec![1u8], payload.to_vec(), vec![0u8]],
+                vec![1, 128, 1],
+                "expected 2",
+            ),
+            (vec![vec![1u8], payload.to_vec()], vec![1, 64], "Bytes<128>"),
+        ] {
+            let err = decode_notification(&cell_of(&atoms, &widths))
+                .expect_err("only a two-atom Bytes<1>/Bytes<128> cell decodes")
+                .to_string();
+            assert!(err.contains(expected), "err: {err}");
+        }
     }
 }

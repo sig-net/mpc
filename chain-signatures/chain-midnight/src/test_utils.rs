@@ -165,9 +165,24 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
     }
 }
 
+/// The smallest legal record: both scaled vectors empty, so the cell sits exactly on
+/// `REQUEST_FIXED_VALUE_ATOMS`. This is the plain-transfer shape.
+pub(crate) fn minimal_record() -> SignBidirectionalRecord {
+    let mut record = sample_record();
+    record.tx_params.calldata = CompactMaybe {
+        is_some: false,
+        value: EvmCalldata {
+            selector: [0; 4],
+            no_words: 0,
+            words: Vec::new(),
+        },
+    };
+    record.tx_params.access_list_entry_count = 0;
+    record.tx_params.access_list = Vec::new();
+    record
+}
+
 /// `sample_record` carrying an access list at capacity with every slot unused.
-/// Every `entries = 2` split spans the same run of zero bytes, so the record is
-/// capacity-ambiguous while every matching split assembles the same transaction.
 pub(crate) fn sample_record_with_unused_access_list() -> SignBidirectionalRecord {
     let mut record = sample_record();
     record.tx_params.access_list_entry_count = 0;

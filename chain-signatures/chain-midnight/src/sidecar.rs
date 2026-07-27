@@ -15,10 +15,8 @@ const EXPECTED_ZSWAP_TAG: &str = "midnight:zswap-ledger-state[v5]";
 const EXPECTED_LEDGER_PARAMETERS_TAG: &str = "midnight:ledger-parameters[v8]";
 const EXPECTED_TRANSACTION_TAG: &str = "midnight:transaction[v12]";
 
-/// One atom's declared shape, the ledger's `AlignmentAtom` verbatim.
-///
-/// Only `Bytes` carries a width. `Compress` and `Field` have none, which is why the
-/// wire form cannot be a flat width list.
+/// The ledger's `AlignmentAtom`. Only `Bytes` carries a width, which is why the wire
+/// form cannot be a flat width list.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "lowercase")]
 pub enum AlignmentAtom {
@@ -27,7 +25,7 @@ pub enum AlignmentAtom {
     Bytes { length: u32 },
 }
 
-/// One segment of a cell's alignment, the ledger's `AlignmentSegment` verbatim.
+/// The ledger's `AlignmentSegment`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "lowercase")]
 pub enum AlignmentSegment {
@@ -38,10 +36,8 @@ pub enum AlignmentSegment {
 /// Decoded contract state, internally tagged on `kind` exactly as the sidecar emits it
 /// (`{"kind":"cell","atoms":[..],"alignment":[..]}`, `{"kind":"null"}`).
 ///
-/// A cell's `alignment` runs one segment per atom, in atom order. It is load-bearing:
-/// stored atoms are trailing-zero-trimmed, so the declared width of a field is
-/// recoverable only from here. Consumers decode by the declared width and never by
-/// what a stored atom happens to be.
+/// A cell's `alignment` runs one segment per atom. Stored atoms are trailing-zero
+/// trimmed, so a field's declared width is recoverable only from there.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StateNode {
