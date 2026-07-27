@@ -218,7 +218,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // On requiring restart of the supervisor, we should abort all RPC tasks where 
         // we are trying to vote the checkpoints into
         if matches!(exit, Exit::Restart) {
-            ctx.rpc.abort_chain(chain).await;
+            ctx.rpc.abort_checkpoints(chain).await;
         }
 
         if !run_finished {

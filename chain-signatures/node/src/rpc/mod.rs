@@ -83,7 +83,7 @@ impl RpcChannel {
         });
     }
 
-    pub async fn abort_chain(&self, chain: Chain) {
+    pub async fn abort_checkpoints(&self, chain: Chain) {
         if let Err(err) = self.tx.send(RpcAction::AbortChain(chain)).await {
             tracing::error!(%err, ?chain, "failed to send RPC chain abort");
         }
