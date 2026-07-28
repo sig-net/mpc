@@ -53,21 +53,3 @@ export async function listening(config: Config, client: NodeClient, onFatal?: ()
   };
 }
 
-// Not a direct handler call: the envelope is as much of the contract as the decoded tree.
-export async function request(path: string, init?: RequestInit): Promise<Reply> {
-  const server = await listening(TEST_CONFIG, forbiddenClient("a decode seam touched the node client"));
-  try {
-    const { status, body } = await server.send(path, init);
-    return { status, body };
-  } finally {
-    server.close();
-  }
-}
-
-export function post(path: string, body: string): Promise<Reply> {
-  return request(path, { method: "POST", body });
-}
-
-export function get(path: string): Promise<Reply> {
-  return request(path);
-}
