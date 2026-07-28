@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::utils::test::{make_indexed, make_signature, scalar};
     use k256::AffinePoint;
-    use mpc_primitives::{Chain, SignKind};
+    use mpc_primitives::{Chain, SignId, SignKind};
 
     #[test]
     fn publish_action_accepts_valid_signature() {
@@ -69,7 +69,13 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let output = make_signature(&sk, epsilon, payload);
-        let request = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+        let request = make_indexed(
+            Chain::NEAR,
+            epsilon,
+            payload,
+            SignKind::Sign,
+            SignId::new([0u8; 32]),
+        );
 
         assert!(PublishAction::new(pk, request, output, vec![]).is_some());
     }
@@ -83,7 +89,13 @@ mod tests {
 
         let mut output = make_signature(&sk, epsilon, payload);
         output.s += k256::Scalar::ONE;
-        let request = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+        let request = make_indexed(
+            Chain::NEAR,
+            epsilon,
+            payload,
+            SignKind::Sign,
+            SignId::new([0u8; 32]),
+        );
 
         assert!(PublishAction::new(pk, request, output, vec![]).is_none());
     }

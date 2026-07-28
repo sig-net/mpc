@@ -64,7 +64,7 @@ near-fetch.workspace = true
 near-sdk.workspace = true
 near-jsonrpc-client = "0.15.0"
 near-primitives.workspace = true
-near-workspaces = "0.16.0"
+near-workspaces = "0.21.0"
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true

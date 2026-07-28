@@ -1,5 +1,5 @@
 use mpc_chain_integration_core::{ChainTelemetry, PublishAction, PublisherTelemetry};
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, ChainConfig as _};
 
 use super::{
     indexers::LATEST_BLOCK_NUMBER,

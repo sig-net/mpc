@@ -366,7 +366,7 @@ mod tests {
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
-    use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
+    use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
 
     /// Fast retry strategy for testing
@@ -453,7 +453,11 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = make_publish_action(Chain::Canton, SignKind::SignBidirectional(event));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::SignBidirectional(event),
+            SignId::new([0u8; 32]),
+        );
         assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
@@ -488,7 +492,11 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(tx),
+            SignId::new([0u8; 32]),
+        );
         assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
@@ -510,7 +518,11 @@ mod tests {
             chain_ctx: None, // Missing
         };
 
-        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(tx),
+            SignId::new([0u8; 32]),
+        );
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("missing chain_ctx"));
     }
@@ -543,7 +555,11 @@ mod tests {
             output: vec![],
             chain_ctx: Some(chain_ctx),
         };
-        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(tx),
+            SignId::new([0u8; 32]),
+        );
 
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("500"));
@@ -587,7 +603,11 @@ mod tests {
             output: vec![],
             chain_ctx: Some(chain_ctx),
         };
-        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(tx),
+            SignId::new([0u8; 32]),
+        );
 
         assert!(client.publish_signature(&action).await.is_ok());
         ok.assert_async().await;
@@ -621,7 +641,11 @@ mod tests {
             output: vec![],
             chain_ctx: Some(chain_ctx),
         };
-        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(tx),
+            SignId::new([0u8; 32]),
+        );
 
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("400"));

@@ -18,7 +18,9 @@ use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
+use mpc_primitives::{
+    ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
+};
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

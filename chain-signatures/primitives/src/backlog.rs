@@ -147,7 +147,14 @@ impl ConsensusCheckpointDigest {
     }
 
     pub fn sign_id(&self) -> SignId {
-        SignId::from_checkpoint(self.chain, self.height, &self.sign_payload_hash())
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(b"checkpoint");
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.height.to_le_bytes());
+        hasher.update(self.sign_payload_hash());
+        hasher.update(crate::LATEST_MPC_KEY_VERSION.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
+        SignId::new(request_id)
     }
 }
 
