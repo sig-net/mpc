@@ -30,11 +30,11 @@ const NOTIFY_HEIGHT = 1366;
 
 /**
  * The write-path harness singleton: the CURRENT contract build, deployed
- * fresh (`tests/bootstrap-live.ts`) with one respond posted by
- * `tests/respond-live.ts`, captured at the block that post landed in. Kept
- * separate from the decode singleton above: the write path executes the
- * compiled circuit against this state, so its embedded verifier keys must
- * match `dist/managed` — redeploy and recapture on every contract change.
+ * fresh (`devtools/bootstrap-live.ts`) with one respond posted against it,
+ * captured at the block that post landed in. Kept separate from the decode
+ * singleton above: the write path executes the compiled circuit against this
+ * state, so its embedded verifier keys must match `dist/managed`, which means
+ * redeploy and recapture on every contract change.
  */
 const RESPOND_SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 const RESPOND_STATE_HEIGHT = 37571;

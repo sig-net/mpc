@@ -1,47 +1,34 @@
-// Every non-200 is `{"code","message"}`. The code is the stable half a caller
+// Every rejected line is `{"code","message"}`. The code is the stable half a caller
 // branches on; the message is evidence, reworded freely. A dependency's rendered
-// cause chain goes to the LOG, never the wire.
+// cause chain goes to STDERR, never to stdout: stdout is the wire.
 
-// `fatal` marks the LAST reply this process will send: the server stops once it is flushed.
-export type Reply = { readonly status: number; readonly body: string; readonly fatal?: true };
-
-// Split by what the caller should DO, which is why several share a status.
+// Split by whose fault it is, which is the only thing the caller can act on: fix
+// the request, fix the deployment, wait, or read the log.
 export type ErrorCode =
   | "bad_request"
-  | "not_found"
-  // Bytes read from the CHAIN carry a tag this build does not speak.
-  | "ledger_mismatch"
-  | "contract_absent"
-  // Deployed verifier keys differ from this build's. Redeploy or repoint `MIDNIGHT_PUB_MANAGED_DIR`.
+  // The deployed contract exposes no operation by the requested name, so the managed
+  // dir was built for a different contract. Redeploy or repoint `MIDNIGHT_PUB_MANAGED_DIR`.
+  // A NAME check, not a key check: a managed dir whose circuit names still match but
+  // whose verifier keys have moved on passes it, and the caller pays to prove an Intent
+  // the chain will then reject. Comparing keys needs the deployed ones, which only the
+  // caller has.
   | "contract_mismatch"
-  | "state_conflict"
-  | "node_unavailable"
-  | "prove_failed"
-  // No spendable dust right now: one wallet sustains roughly one post per 35 seconds.
-  | "wallet_unfunded"
+  // Bytes on the wire carry a ledger tag this build does not speak, so the two halves
+  // of the seam were compiled against different ledger crates. Nothing retries past this.
+  | "ledger_mismatch"
+  // No funding wallet: this deployment configured none, or the facade never synced one.
   | "wallet_unsynced"
-  // Another respond holds the one dust UTXO. Retry when it answers, ~35s.
+  // Another submit holds the one dust UTXO. Retry when it answers, ~35s.
   | "wallet_busy"
+  // No spendable dust right now: one wallet sustains roughly one submit per 35 seconds.
+  | "wallet_unfunded"
   | "balance_failed"
+  | "prove_failed"
   | "submit_rejected"
+  // Someone wrote the contract state between the read the intent was built against and
+  // the submit, so the transcript no longer replays. Read again and rebuild.
+  | "state_conflict"
   | "internal";
-
-export const STATUS: Readonly<Record<ErrorCode, number>> = {
-  bad_request: 400,
-  not_found: 404,
-  ledger_mismatch: 502,
-  contract_absent: 409,
-  contract_mismatch: 409,
-  state_conflict: 409,
-  node_unavailable: 502,
-  prove_failed: 502,
-  wallet_unfunded: 503,
-  wallet_unsynced: 503,
-  wallet_busy: 503,
-  balance_failed: 502,
-  submit_rejected: 502,
-  internal: 500,
-};
 
 export class PublisherError extends Error {
   constructor(readonly code: ErrorCode, message: string, options?: ErrorOptions) {
@@ -76,21 +63,6 @@ export function describeFailure(error: unknown): string {
     current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
   }
   return parts.join(": ") || String(error);
-}
-
-// `evidence` is LOG-ONLY: it renders Effect's whole cause chain, which the wire must not carry.
-export function fail(code: ErrorCode, message: string, logLabel?: string, evidence?: unknown): Reply {
-  if (logLabel !== undefined && code !== "bad_request") {
-    console.error(`${logLabel} [${code}]: ${String(evidence ?? message).slice(0, 4_000)}`);
-  }
-  return { status: STATUS[code], body: JSON.stringify({ code, message }) };
-}
-
-// A `PublisherError` names itself; anything else answers `unclassified`.
-export function replyTo(error: unknown, logLabel: string, unclassified: ErrorCode = "internal"): Reply {
-  const named = error instanceof PublisherError;
-  const evidence = named && error.cause !== undefined ? error.cause : error;
-  return fail(named ? error.code : unclassified, named ? error.message : describeFailure(error), logLabel, evidence);
 }
 
 export function jsonObject(body: string): Record<string, unknown> {

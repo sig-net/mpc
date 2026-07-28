@@ -20,5 +20,6 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  // Everything is typechecked here; only `src/` is emitted, by `tsconfig.build.json`.
+  "include": ["src/**/*.ts", "tests/**/*.ts", "devtools/**/*.ts"]
 }
