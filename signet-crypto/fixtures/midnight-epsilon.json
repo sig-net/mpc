@@ -3,7 +3,8 @@
     "package": "@sig-net/midnight@0.14.0",
     "source": "src/epsilon-derivation.ts",
     "function": "deriveEpsilon(requester, path, chainId = MIDNIGHT_TESTNET_CHAIN_ID)",
-    "generator": "signet-crypto/fixtures/midnight-epsilon.mjs"
+    "encoding": "the returned bigint as lowercase hex, left-padded to 64 chars",
+    "regenerate": "re-run that function against the package version above; never hand-edit a value to green a failing test"
   },
   "constants": {
     "epsilon_derivation_prefix": "sig.network v2.0.0 epsilon derivation",
