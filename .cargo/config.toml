@@ -6,9 +6,6 @@ rustflags = [
   "-C", "link-arg=dynamic_lookup",
 ]
 
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "near"]
-
 [target.aarch64-apple-darwin]
 rustflags = [
   "-L", "/opt/homebrew/lib",
