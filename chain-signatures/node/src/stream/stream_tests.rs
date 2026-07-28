@@ -147,6 +147,32 @@ async fn test_stream_handles_sign_and_respond() {
     }
 }
 
+#[tokio::test]
+async fn test_stream_rejects_gap_in_block_heights() {
+    let backlog = Backlog::new();
+    // Pre-reorg state: block 44 was the last processed height.
+    backlog.set_processed_block(Chain::Ethereum, 44).await;
+
+    let root_pk = k256::ProjectivePoint::GENERATOR.to_affine();
+    let (sign_tx, _) = mpsc::channel(8);
+
+    // Model the indexer's reorg-drop output: block 45 was reorged and dropped
+    // (no event emitted for it), but blocks 46 and 47 were processed normally.
+    let indexer = EthereumTestIndexer::new(vec![
+        Some(ChainEvent::CatchupCompleted),
+        Some(ChainEvent::Block(46)),
+        Some(ChainEvent::Block(47)),
+        None,
+    ]);
+
+    run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
+
+    // A gap (45 missing) must NOT let the checkpoint advance: 46 and 47 are
+    // rejected, leaving the checkpoint at 44 until the dropped height is
+    // reprocessed.
+    assert_eq!(backlog.get_processed_block(Chain::Ethereum).await, Some(44));
+}
+
 /// Build a `SignKind::SignBidirectional` request from Solana to Ethereum.
 /// Returns `(IndexedSignRequest, SignArgs, SecretKey)`
 fn build_solana_to_ethereum_bidirectional_request(
