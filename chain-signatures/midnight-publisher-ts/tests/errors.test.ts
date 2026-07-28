@@ -66,7 +66,7 @@ describe("what the wallet and the submission wrapper actually render", () => {
 describe("the status map", () => {
   it("gives every code a non-2xx status", () => {
     const codes: readonly ErrorCode[] = [
-      "bad_request", "not_found", "decode_failed", "ledger_mismatch",
+      "bad_request", "not_found", "ledger_mismatch",
       "contract_absent", "contract_mismatch", "state_conflict", "node_unavailable",
       "prove_failed", "wallet_unfunded", "wallet_unsynced", "wallet_busy",
       "balance_failed", "submit_rejected", "internal",

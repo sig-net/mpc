@@ -9,8 +9,6 @@ export type Reply = { readonly status: number; readonly body: string; readonly f
 export type ErrorCode =
   | "bad_request"
   | "not_found"
-  // The ledger refused bytes the CALLER supplied.
-  | "decode_failed"
   // Bytes read from the CHAIN carry a tag this build does not speak.
   | "ledger_mismatch"
   | "contract_absent"
@@ -31,7 +29,6 @@ export type ErrorCode =
 export const STATUS: Readonly<Record<ErrorCode, number>> = {
   bad_request: 400,
   not_found: 404,
-  decode_failed: 422,
   ledger_mismatch: 502,
   contract_absent: 409,
   contract_mismatch: 409,
