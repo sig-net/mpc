@@ -83,15 +83,15 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use mpc_chain_midnight::IndexerConfig;
+    use std::time::Duration;
 
     #[test]
     fn tuning_fields_do_not_survive_the_cli_round_trip() {
         // Known limitation, pinned deliberately: only the two
         // endpoint/identity fields have flags, so `from_config` discards the
-        // tuning sub-structs and `into_config` reinstates their defaults.
-        // `archive_probe_window` and `require_archive_state` therefore cannot
-        // traverse a process restart. Adding real flags flips this into a
-        // round-trip assert.
+        // tuning sub-structs and `into_config` reinstates their defaults, which
+        // means no tuning can traverse a process restart. Adding real flags
+        // flips this into a round-trip assert.
         crate::cli::tests::assert_midnight_env_unset();
 
         let mut cfg = MidnightConfig {
@@ -100,8 +100,8 @@ mod tests {
             rpc: Default::default(),
             indexer: Default::default(),
         };
-        cfg.indexer.archive_probe_window = 77;
-        cfg.indexer.require_archive_state = true;
+        cfg.indexer.live_block_buffer = 77;
+        cfg.indexer.stall_timeout = Duration::from_secs(7);
         assert_ne!(
             cfg.indexer,
             IndexerConfig::default(),

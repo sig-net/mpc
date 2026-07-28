@@ -29,13 +29,6 @@ impl Default for RpcConfig {
 /// Tuning for the indexing pipeline (catchup and the live finalized-head loop).
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexerConfig {
-    /// How many blocks back a contract-state read may walk when the node has pruned the
-    /// state at the block being asked for; also the depth of the startup archive-state
-    /// probe, which asks for state at `finalized head - archive_probe_window`
-    pub archive_probe_window: u64,
-    /// Refuse to start when the startup probe finds the node pruned within
-    /// `archive_probe_window`.
-    pub require_archive_state: bool,
     pub live_block_buffer: usize,
     /// How long the finalized-head subscription may go silent before `run()` returns
     /// and lets the supervisor restart it
@@ -45,8 +38,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            archive_probe_window: 1024,
-            require_archive_state: false,
             live_block_buffer: 16384,
             stall_timeout: Duration::from_secs(60),
         }
@@ -102,13 +93,6 @@ mod tests {
             rpc: Default::default(),
             indexer: Default::default(),
         }
-    }
-
-    #[test]
-    fn default_config_does_not_require_archive_state() {
-        // Probe-and-degrade is the default policy: a pruned node logs loudly and falls
-        // back to watermark catchup.
-        assert!(!IndexerConfig::default().require_archive_state);
     }
 
     #[test]

@@ -26,21 +26,6 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 pub(crate) const STATE_UNSERVABLE_MSG: &str =
     "midnight node cannot serve contract state at that block (pruned or unknown hash)";
 
-/// All-zero placeholder address for the archive probe: the probe asks whether the node
-/// can ANSWER a state query at an old block, not about any real contract, so "contract
-/// not present" is as much positive evidence as served state bytes.
-const PROBE_ADDRESS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-
-/// What the startup probe concluded about the node's state retention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveState {
-    /// Contract state at `head - archive_probe_window` was reachable.
-    Archive,
-    /// The node could not serve state at `probed_height`, a finalized ancestor whose
-    /// hash the node itself supplied: the pruning signature.
-    Pruned { probed_height: u64 },
-}
-
 /// A finalized block, wrapping the subxt handle so extrinsics can be fetched lazily.
 pub struct FinalizedBlock {
     block: subxt::blocks::Block<SubstrateConfig, OnlineClient<SubstrateConfig>>,
@@ -201,20 +186,6 @@ impl MidnightRpc {
         .await
     }
 
-    /// Probes whether the node retains contract state `window` blocks behind the
-    /// finalized head, classifying it [`ArchiveState::Archive`] or
-    /// [`ArchiveState::Pruned`].
-    pub async fn probe_archive_state(&self, window: u64) -> anyhow::Result<ArchiveState> {
-        probe_archive_state_over(
-            &self.legacy,
-            &self.rpc,
-            self.request_timeout,
-            self.retry,
-            window,
-        )
-        .await
-    }
-
     /// The finalized head as a [`BlockRef`]: the head hash, then its header for the
     /// number and parent, each read on the ordinary retry budget.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
@@ -319,9 +290,9 @@ impl MidnightRpc {
     }
 }
 
-/// [`MidnightRpc::contract_state`] over explicit transports, so the archive probe, and
-/// its offline tests, can run it without an `OnlineClient`, whose construction fetches
-/// metadata and therefore needs a whole node.
+/// [`MidnightRpc::contract_state`] over explicit transports, so its offline tests can
+/// run it without an `OnlineClient`, whose construction fetches metadata and therefore
+/// needs a whole node.
 async fn contract_state_over(
     rpc: &RpcClient,
     request_timeout: Duration,
@@ -361,58 +332,6 @@ async fn contract_state_over(
             }
         }
     })
-}
-
-/// [`MidnightRpc::probe_archive_state`] over explicit transports: the probe needs only
-/// legacy chain calls and the raw client, so tests drive it through an in-process
-/// [`subxt::backend::rpc::RpcClientT`] stub.
-async fn probe_archive_state_over(
-    legacy: &LegacyRpcMethods<SubstrateConfig>,
-    rpc: &RpcClient,
-    request_timeout: Duration,
-    retry: RetryConfig,
-    window: u64,
-) -> anyhow::Result<ArchiveState> {
-    // Every read here rides the ordinary retry_rpc budget ONCE; the probe adds no loop
-    // of its own.
-    let head_hash = retry_rpc!(request_timeout, retry, "midnight_probe_finalized_head", {
-        legacy
-            .chain_get_finalized_head()
-            .await
-            .context("archive probe: failed to fetch the finalized head")
-    })?;
-    let header = retry_rpc!(request_timeout, retry, "midnight_probe_head_header", {
-        legacy
-            .chain_get_header(Some(head_hash))
-            .await
-            .context("archive probe: failed to fetch the finalized head header")
-    })?
-    .context("midnight node returned no header for its own finalized head")?;
-    let head_height = u64::from(header.number);
-
-    let probed_height = head_height.saturating_sub(window).max(1);
-    let probed_hash = retry_rpc!(request_timeout, retry, "midnight_probe_block_hash", {
-        legacy
-            .chain_get_block_hash(Some(NumberOrHex::Number(probed_height)))
-            .await
-            .context("archive probe: failed to fetch the probed block hash")
-    })?
-    .with_context(|| {
-        format!("midnight node has no block hash for finalized ancestor {probed_height}")
-    })?;
-
-    let at_hash = format!("0x{}", hex::encode(probed_hash.as_bytes()));
-    match contract_state_over(rpc, request_timeout, retry, PROBE_ADDRESS, &at_hash).await {
-        // Served state and contract-not-present both mean the node reached the state at
-        // the probed block and searched it: positive evidence.
-        Ok(_) => Ok(ArchiveState::Archive),
-        Err(err) if err.to_string().contains(STATE_UNSERVABLE_MSG) => {
-            Ok(ArchiveState::Pruned { probed_height })
-        }
-        Err(err) => Err(err.context(format!(
-            "archive probe could not classify the node at height {probed_height}"
-        ))),
-    }
 }
 
 /// The pure filter-and-decode step for one extrinsic: `Some(blob)` iff `(pallet,
@@ -579,13 +498,6 @@ mod tests {
             .expect("subscribe finalized");
         let block = blocks.next().await.expect("one finalized block");
 
-        // Probe classification against a real node: both -32602 message strings and the
-        // success shape are transcribed offline, and this is the one place that checks
-        // them live.
-        rpc.probe_archive_state(config.indexer.archive_probe_window)
-            .await
-            .expect("the probe must classify a live node, whichever way");
-
         let blobs = rpc
             .send_mn_transaction_bytes(&block)
             .await
@@ -597,18 +509,12 @@ mod tests {
         }
     }
 
-    // Archive-state probe over an in-process JSON-RPC stub.
+    // Contract-state reads over an in-process JSON-RPC stub.
 
-    /// One canned reply for a stubbed JSON-RPC method.
+    /// One canned reply for a stubbed JSON-RPC method: a JSON-RPC error response,
+    /// with the code and message as the node sends them.
     #[derive(Clone)]
-    enum Canned {
-        /// Raw JSON of a successful `result` field (already quoted if a string).
-        Json(String),
-        /// A JSON-RPC error response: code and message, as the node sends them.
-        NodeError(i32, &'static str),
-        /// A transport-level fault (connection trouble), retryable by default.
-        Transport(&'static str),
-    }
+    struct Canned(i32, &'static str);
 
     /// In-process JSON-RPC node: canned per-method replies consumed in order with the
     /// last one sticky, and every call recorded so tests can pin exactly what was
@@ -677,19 +583,12 @@ mod tests {
                         queue.front().expect("stub queues are never empty").clone()
                     }
                 };
-                match canned {
-                    Canned::Json(raw) => {
-                        Ok(RawValue::from_string(raw).expect("canned json is valid"))
-                    }
-                    Canned::NodeError(code, message) => Err(RawRpcError::User(UserError {
-                        code,
-                        message: message.to_string(),
-                        data: None,
-                    })),
-                    Canned::Transport(message) => {
-                        Err(RawRpcError::Client(message.to_string().into()))
-                    }
-                }
+                let Canned(code, message) = canned;
+                Err(RawRpcError::User(UserError {
+                    code,
+                    message: message.to_string(),
+                    data: None,
+                }))
             })
         }
 
@@ -699,49 +598,15 @@ mod tests {
             _params: Option<Box<RawValue>>,
             _unsub: &'a str,
         ) -> RawRpcFuture<'a, RawRpcSubscription> {
-            Box::pin(async { panic!("the archive probe never subscribes") })
+            Box::pin(async { panic!("these tests never subscribe") })
         }
     }
 
-    const HEAD_HASH_HEX: &str =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
-    const PROBED_HASH_HEX: &str =
-        "0x5555555555555555555555555555555555555555555555555555555555555555";
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    const ADDRESS: &str = "abababababababababababababababababababababababababababababababab";
+    const AT_HASH: &str = "0x5555555555555555555555555555555555555555555555555555555555555555";
+    const READ_TIMEOUT: Duration = Duration::from_secs(5);
     const NOT_PRESENT_MSG: &str = "Contract not present at the requested address";
     const UNSERVABLE_MSG: &str = "Unable to get requested contract state";
-
-    fn json_str(value: &str) -> Canned {
-        Canned::Json(format!("\"{value}\""))
-    }
-
-    /// A finalized header whose only load-bearing field is `number`.
-    fn head_header(number_hex: &str) -> Canned {
-        Canned::Json(format!(
-            r#"{{"parentHash":"0x{filler}","number":"{number_hex}","stateRoot":"0x{filler}","extrinsicsRoot":"0x{filler}","digest":{{"logs":[]}}}}"#,
-            filler = "22".repeat(32),
-        ))
-    }
-
-    /// The standard healthy-chain reply set: finalized head, its header at
-    /// `head_number_hex`, one hash for whatever height gets asked, and the given
-    /// `midnight_contractState` reply.
-    fn probe_replies(
-        head_number_hex: &str,
-        contract_state: Canned,
-    ) -> Vec<(&'static str, Vec<Canned>)> {
-        vec![
-            ("chain_getFinalizedHead", vec![json_str(HEAD_HASH_HEX)]),
-            ("chain_getHeader", vec![head_header(head_number_hex)]),
-            ("chain_getBlockHash", vec![json_str(PROBED_HASH_HEX)]),
-            ("midnight_contractState", vec![contract_state]),
-        ]
-    }
-
-    fn probe_harness(node: &StubNode) -> (LegacyRpcMethods<SubstrateConfig>, RpcClient) {
-        let rpc = RpcClient::new(node.clone());
-        (LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone()), rpc)
-    }
 
     /// A budget of `max_times` retries with near-zero delays, so tests pin attempt
     /// counts without waiting out production backoff.
@@ -755,131 +620,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_archive_state_detects_archive_node() {
-        // "Contract not present at the requested address" is POSITIVE evidence: the
-        // node reached the state at head - window and looked for the throwaway probe
-        // address.
-        let node = StubNode::new(probe_replies(
-            "0x400", // head at 1024
-            Canned::NodeError(-32602, NOT_PRESENT_MSG),
-        ));
-        let (legacy, rpc) = probe_harness(&node);
-
-        let state = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(0), 100)
-            .await
-            .expect("a contract-not-present reply classifies cleanly");
-        assert_eq!(state, ArchiveState::Archive);
-
-        // The walk-back is pinned at the wire: head 1024, window 100, so the hash
-        // request must name height 924 and the state read must use the returned hash,
-        // never the head's own.
-        assert_eq!(
-            node.calls_to("chain_getBlockHash"),
-            vec!["[924]".to_string()]
-        );
-        assert_eq!(
-            node.calls_to("midnight_contractState"),
-            vec![format!("[\"{PROBE_ADDRESS}\",\"{PROBED_HASH_HEX}\"]")],
-        );
-    }
-
-    #[tokio::test]
-    async fn probe_archive_state_detects_archive_node_serving_state() {
-        // Some contract DOES live at the probed address: served state bytes are the
-        // other face of positive evidence.
-        let node = StubNode::new(probe_replies("0x400", json_str("0x0104")));
-        let (legacy, rpc) = probe_harness(&node);
-
-        let state = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(0), 100)
-            .await
-            .expect("served state classifies cleanly");
-        assert_eq!(state, ArchiveState::Archive);
-    }
-
-    #[tokio::test]
-    async fn probe_archive_state_errors_on_unknown_error() {
-        // Anything that is neither shape must PROPAGATE: calling an unknown fault
-        // "pruned" would silently degrade catchup on a misconfigured endpoint, and
-        // calling it "archive" would be worse.
-        let node = StubNode::new(probe_replies(
-            "0x400",
-            Canned::NodeError(-32000, "Internal error: storage backend fault"),
-        ));
-        let (legacy, rpc) = probe_harness(&node);
-
-        let err = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(0), 100)
-            .await
-            .expect_err("an unknown node error must not classify");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("could not classify"),
-            "the probe must say it could not classify, got: {text}"
-        );
-        assert!(
-            text.contains("midnight_contractState failed"),
-            "the underlying read failure must stay in the chain, got: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn probe_archive_state_clamps_window_at_block_one() {
-        // Head 0x32 = 50 with a window of 100: the subtraction saturates and block 0 is
-        // not probeable, so the probe asks at exactly T = max(1, H - window) = 1.
-        let node = StubNode::new(probe_replies(
-            "0x32",
-            Canned::NodeError(-32602, NOT_PRESENT_MSG),
-        ));
-        let (legacy, rpc) = probe_harness(&node);
-
-        let state = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(0), 100)
-            .await
-            .expect("a short chain still probes");
-        assert_eq!(state, ArchiveState::Archive);
-        assert_eq!(node.calls_to("chain_getBlockHash"), vec!["[1]".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn probe_archive_state_uses_existing_retry_budget() {
-        // The probe adds no backoff of its own, but every read still goes through
-        // retry_rpc once, so a transient transport fault retries within the EXISTING
-        // budget and the probe still classifies.
-        let mut replies = probe_replies("0x400", Canned::NodeError(-32602, NOT_PRESENT_MSG));
-        replies[0]
-            .1
-            .insert(0, Canned::Transport("connection reset by peer"));
-        let node = StubNode::new(replies);
-        let (legacy, rpc) = probe_harness(&node);
-
-        let state = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(2), 100)
-            .await
-            .expect("a transient fault within budget still classifies");
-        assert_eq!(state, ArchiveState::Archive);
-        assert_eq!(
-            node.calls_to("chain_getFinalizedHead").len(),
-            2,
-            "one fault, one retry, no more"
-        );
-    }
-
-    #[tokio::test]
     async fn contract_state_pruned_answer_spends_one_budget() {
-        // Also the pruning-signature classification pin: "Unable to get requested
-        // contract state" at a hash the node itself just served for a finalized
-        // ancestor is what identifies a pruned node, and the variant carries the height
-        // so the policy layer can name it.
-        let node = StubNode::new(probe_replies(
-            "0x400",
-            Canned::NodeError(-32602, UNSERVABLE_MSG),
-        ));
-        let (legacy, rpc) = probe_harness(&node);
-
-        let state = probe_archive_state_over(&legacy, &rpc, PROBE_TIMEOUT, attempts(2), 100)
+        // Both node answers arrive as -32602 and are told apart only by message, so
+        // pin each: "not present" is a definitive Ok(None) that must not be retried,
+        // while the pruned-or-unknown-hash answer is an error the budget spends on.
+        let node = StubNode::new(vec![(
+            "midnight_contractState",
+            vec![Canned(-32602, NOT_PRESENT_MSG)],
+        )]);
+        let rpc = RpcClient::new(node.clone());
+        let absent = contract_state_over(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
             .await
-            .expect("pruned is a classification, not an error");
-        assert_eq!(state, ArchiveState::Pruned { probed_height: 924 });
+            .expect("contract-not-present is an answer, not a failure");
+        assert_eq!(absent, None);
+        assert_eq!(node.calls_to("midnight_contractState").len(), 1);
+
+        let node = StubNode::new(vec![(
+            "midnight_contractState",
+            vec![Canned(-32602, UNSERVABLE_MSG)],
+        )]);
+        let rpc = RpcClient::new(node.clone());
+        let err = contract_state_over(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
+            .await
+            .expect_err("a pruned or unknown hash is a failure");
+        assert!(is_state_unservable(&err), "{err:#}");
         assert_eq!(node.calls_to("midnight_contractState").len(), 3);
-        assert_eq!(node.calls_to("chain_getFinalizedHead").len(), 1);
-        assert_eq!(node.calls_to("chain_getHeader").len(), 1);
-        assert_eq!(node.calls_to("chain_getBlockHash").len(), 1);
     }
 }
