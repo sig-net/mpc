@@ -49,3 +49,38 @@ act (`expose_secret()`), never an accidental `#[derive(Debug)]` or `{:?}`.
 7. **Process boundaries.** Secrets enter via env vars or files, never argv, in
    production — argv is world-readable. The test harness's argv spawning is
    local-only and never used with real keys.
+
+## Planned enforcement automation
+
+Each rule gets a mechanical check; discipline is the fallback, not the plan.
+
+### Compile-time
+
+- **Clippy config**: `clippy.toml` `disallowed-types` for printable third-party
+  key types (e.g. `near_crypto::SecretKey`), so every legitimate use site
+  carries a visible `#[allow]`; workspace lints deny `dbg_macro` and
+  `print_stdout` (rules 1–4).
+- **Static trait assertions**: our secret types must implement neither
+  `Display` nor `Serialize` — asserted at compile time
+  (`assert_not_impl_any!`) so the impl can never be added back (rules 2, 5).
+
+### Test-time
+
+- **Redaction unit tests**: for every secret-bearing type, construct it with a
+  known key and assert `{:?}` prints `"<hidden>"` and never the key material —
+  in raw, hex, or base58 form (rules 2, 4).
+- **Integration log tripwire**: the test harness knows every key it generates;
+  scan spawned-node output for any of them in any encoding and fail the run on
+  a hit. Catches leaks through dependencies that no type-level control sees
+  (rule 4).
+
+### Repository scanning
+
+- **gitleaks in CI** (and GitHub push protection when available): block secrets
+  from entering git history; allowlist only documented throwaway test vectors
+  (rule 6).
+
+### Review routing
+
+- **CODEOWNERS** on secret-bearing paths (`keys/`, chain configs, this file):
+  every diff touching secret handling gets a designated reviewer.
