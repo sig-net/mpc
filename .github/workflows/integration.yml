@@ -52,7 +52,6 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
           target: wasm32-unknown-unknown
-          override: true
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -146,7 +145,6 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
           target: wasm32-unknown-unknown
-          override: true
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL

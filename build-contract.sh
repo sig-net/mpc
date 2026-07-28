@@ -1,3 +1,6 @@
 #!/bin/sh
 
-cargo +1.93.0 build -p mpc-contract --release --target wasm32-unknown-unknown $@
+cargo +1.93.0 near build non-reproducible-wasm \
+    --manifest-path chain-signatures/contract/Cargo.toml \
+    --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined' \
+    $@

@@ -39,7 +39,6 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
           target: wasm32-unknown-unknown
-          override: true
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -66,7 +65,7 @@ jobs:
 
       - name: Build governance contract
         run: |
-          cargo near build non-reproducible-wasm --manifest-path chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined'
+          ./build-contract.sh
           mkdir -p target/wasm32-unknown-unknown/release
           cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm
 

@@ -54,7 +54,7 @@ if [ -z "$CC" ] && [ -x "/opt/homebrew/opt/llvm/bin/clang" ]; then
     export CC="/opt/homebrew/opt/llvm/bin/clang"
 fi
 
-cargo +1.93.0 near build non-reproducible-wasm --manifest-path $ROOT_DIR/chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined' $CONTRACT_FEATURES
+./build-contract.sh $CONTRACT_FEATURES
 
 mkdir -p $ROOT_DIR/target/wasm32-unknown-unknown/release
 cp $ROOT_DIR/target/near/mpc_contract/mpc_contract.wasm $ROOT_DIR/target/wasm32-unknown-unknown/release/mpc_contract.wasm

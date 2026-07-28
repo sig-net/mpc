@@ -31,7 +31,6 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
           target: wasm32-unknown-unknown
-          override: true
 
       - name: Install cargo-near
         run: |
@@ -47,6 +46,6 @@ jobs:
 
       - name: Build & Deploy Dev Contract
         run: |
-          cargo near build non-reproducible-wasm --manifest-path chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined'
+          ./build-contract.sh
           (yes || true) | near deploy dev.sig-net.testnet target/near/mpc_contract/mpc_contract.wasm
           near call dev.sig-net.testnet migrate '{}' --accountId dev.sig-net.testnet --gas 300000000000000
