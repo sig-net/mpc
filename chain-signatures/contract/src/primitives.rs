@@ -1,12 +1,13 @@
-pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
 use crate::state::ProtocolContractState;
 
-use mpc_primitives::{borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
+use signet_primitives::{borsh_scalar, SignId, Signature};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
@@ -385,13 +386,6 @@ pub struct InternalSignRequest {
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,
-}
-
-#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]
-pub struct SignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
 }
 
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]

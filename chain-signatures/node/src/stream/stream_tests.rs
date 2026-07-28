@@ -1,4 +1,4 @@
-use super::*;
+use super::supervisor::run_supervised;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -11,350 +11,61 @@ use crate::stream::test_utils::{
 use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
 };
 use near_primitives::types::AccountId;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
-/// Holds the events for a `VecEventStream`.  If the original event list
-/// contains a `CatchupCompleted` marker, the constructor splits the list
-/// around it: events *before* the marker are delivered first (simulating
-/// catchup-phase events), then the pipeline's own `CatchupCompleted` is
-/// awaited from the indexer channel, and finally events *after* the marker
-/// are delivered (simulating post-catchup / live events).
-///
-/// This keeps the pipeline as the sole owner of `pipeline_caught_up` —
-/// `run_stream` never writes to the atomic, matching production semantics.
-struct VecEventStreamState {
-    started: bool,
-    pre_events: Vec<Option<ChainEvent>>,
-    post_events: Vec<Option<ChainEvent>>,
-    pipeline_rx: Option<mpsc::Receiver<ChainEvent>>,
-    pipeline_catchup_done: bool,
-}
-
-impl VecEventStreamState {
-    fn new(events: Vec<Option<ChainEvent>>) -> Self {
-        let split_pos = events
-            .iter()
-            .position(|e| matches!(e, Some(ChainEvent::CatchupCompleted)));
-        let (pre, post) = if let Some(pos) = split_pos {
-            (events[..pos].to_vec(), events[pos + 1..].to_vec())
-        } else {
-            (vec![], events)
-        };
-        Self {
-            started: false,
-            pre_events: pre,
-            post_events: post,
-            pipeline_rx: None,
-            pipeline_catchup_done: false,
+/// A mock `ChainIndexer` that emits a scripted sequence of `ChainEvent`s, then
+/// exits `Ok` (shutting the supervisor down). A `None` entry terminates early.
+macro_rules! impl_test_indexer {
+    ($indexer:ident, $chain:expr) => {
+        pub struct $indexer {
+            events: Vec<Option<ChainEvent>>,
         }
-    }
-}
 
-macro_rules! impl_vec_event_stream {
-    ($stream:ident, $indexer:ident, $chain:expr) => {
-        struct $stream(VecEventStreamState);
-
-        impl $stream {
+        impl $indexer {
             pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
-                Self(VecEventStreamState::new(events))
+                Self { events }
             }
-        }
-
-        struct $indexer {
-            events_tx: Option<mpsc::Sender<ChainEvent>>,
         }
 
         #[async_trait]
         impl ChainIndexer for $indexer {
             const CHAIN: Chain = $chain;
 
-            type Block = ();
-            type Iter = futures_util::stream::Empty<Self::Block>;
-
-            async fn next(&mut self) -> Option<Self::Block> {
-                None
-            }
-
-            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                futures_util::stream::empty()
-            }
-
-            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-                if let Some(events_tx) = &self.events_tx {
-                    events_tx.send(ChainEvent::CatchupCompleted).await?;
-                }
-                Ok(())
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl ChainStream for $stream {
-            type Indexer = $indexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                self.0.started = true;
-                let (tx, rx) = mpsc::channel(16);
-                self.0.pipeline_rx = Some(rx);
-                Ok($indexer {
-                    events_tx: Some(tx),
-                })
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                // 1. Deliver pre-catchup events (arrived during catchup).
-                if !self.0.pre_events.is_empty() {
-                    return self.0.pre_events.remove(0);
-                }
-
-                // 2. Wait for pipeline lifecycle events (CatchupCompleted).
-                if !self.0.pipeline_catchup_done {
-                    if let Some(rx) = &mut self.0.pipeline_rx {
-                        while let Some(event) = rx.recv().await {
-                            let done = matches!(event, ChainEvent::CatchupCompleted);
-                            if done {
-                                self.0.pipeline_catchup_done = true;
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                for event in &self.events {
+                    let Some(event) = event else {
+                        return Ok(());
+                    };
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        res = events_tx.send(event.clone()) => {
+                            if res.is_err() {
+                                return Ok(());
                             }
-                            return Some(event);
                         }
                     }
-                    self.0.pipeline_catchup_done = true;
                 }
-
-                // 3. Deliver post-catchup events (arrived during livestream).
-                if self.0.post_events.is_empty() {
-                    return None;
-                }
-                self.0.post_events.remove(0)
+                Ok(())
             }
         }
     };
 }
 
-impl_vec_event_stream!(SolanaTestStream, DisabledSolanaIndexer, Chain::Solana);
-impl_vec_event_stream!(EthereumTestStream, DisabledEthereumIndexer, Chain::Ethereum);
-
-#[derive(Clone)]
-struct TestLinearControl {
-    persisted_height: Option<u64>,
-    live_items: Vec<u64>,
-    catchup_failures: Arc<Mutex<HashMap<u64, usize>>>,
-    live_failures: Arc<Mutex<HashMap<u64, usize>>>,
-}
-
-impl TestLinearControl {
-    fn new(persisted_height: Option<u64>, live_items: Vec<u64>) -> Self {
-        Self {
-            persisted_height,
-            live_items,
-            catchup_failures: Arc::new(Mutex::new(HashMap::new())),
-            live_failures: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn fail_catchup_once(self, height: u64) -> Self {
-        self.catchup_failures.lock().unwrap().insert(height, 1);
-        self
-    }
-
-    fn fail_live_once(self, height: u64) -> Self {
-        self.live_failures.lock().unwrap().insert(height, 1);
-        self
-    }
-
-    fn consume_failure(map: &Mutex<HashMap<u64, usize>>, height: u64) -> bool {
-        let mut failures = map.lock().unwrap();
-        let Some(remaining) = failures.get_mut(&height) else {
-            return false;
-        };
-        if *remaining == 0 {
-            return false;
-        }
-        *remaining -= 1;
-        true
-    }
-}
-
-struct TestLinearStream {
-    control: TestLinearControl,
-    rx: mpsc::Receiver<ChainEvent>,
-    tx: mpsc::Sender<ChainEvent>,
-}
-
-impl TestLinearStream {
-    fn new(control: TestLinearControl) -> Self {
-        let (tx, rx) = mpsc::channel(16);
-        Self { control, rx, tx }
-    }
-}
-
-struct TestLinearIndexer {
-    control: TestLinearControl,
-    tx: mpsc::Sender<ChainEvent>,
-    live_items: Vec<u64>,
-    pending_live_block: Option<u64>,
-}
-
-#[async_trait]
-impl ChainIndexer for TestLinearIndexer {
-    const CHAIN: Chain = Chain::Ethereum;
-    type Block = u64;
-    type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
-
-    const RETRY_DELAY: Duration = Duration::from_millis(1);
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        self.live_items = self.control.live_items.clone().into_iter().collect();
-        Ok(self.control.live_items.first().copied())
-    }
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        if let Some(block) = self.pending_live_block {
-            return Some(block);
-        }
-
-        let block = self.live_items.first().copied()?;
-        self.pending_live_block = Some(block);
-        Some(block)
-    }
-
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let start = self
-            .control
-            .persisted_height
-            .map(|height| height + 1)
-            .unwrap_or(anchor_height);
-        let items: Vec<Self::Block> = (start..anchor_height).collect();
-        futures_util::stream::iter(items.into_iter())
-    }
-
-    async fn process_catchup(&mut self, &height: &Self::Block) -> anyhow::Result<()> {
-        if TestLinearControl::consume_failure(&self.control.catchup_failures, height) {
-            anyhow::bail!("synthetic catchup failure at height {height}");
-        }
-        self.tx.send(ChainEvent::Block(height)).await?;
-        Ok(())
-    }
-
-    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        if TestLinearControl::consume_failure(&self.control.live_failures, *block) {
-            anyhow::bail!("synthetic live failure at height {block}");
-        }
-        self.tx.send(ChainEvent::Block(*block)).await?;
-        self.pending_live_block = None;
-        if !self.live_items.is_empty() {
-            self.live_items.remove(0);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ChainStream for TestLinearStream {
-    type Indexer = TestLinearIndexer;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        Ok(TestLinearIndexer {
-            control: self.control.clone(),
-            tx: self.tx.clone(),
-            live_items: Vec::new(),
-            pending_live_block: None,
-        })
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.rx.recv().await
-    }
-}
-
-#[tokio::test]
-async fn test_run_linearized_source_orders_catchup_before_live() {
-    let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-    let mut indexer = stream.start().await.unwrap();
-    indexer.livestream().await.unwrap();
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (_sign_tx, _sign_rx) = mpsc::channel(1);
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Catchup { anchor_height: 4 },
-        indexer,
-        cp_rx,
-        Backlog::new(),
-        _sign_tx,
-        m_rx,
-        NodeClient::new(&Default::default()),
-        0,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-
-    pipeline.run().await;
-
-    let mut observed = Vec::new();
-    while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-        .await
-        .ok()
-        .flatten()
-    {
-        observed.push(event);
-    }
-
-    assert!(matches!(observed[0], ChainEvent::Block(2)));
-    assert!(matches!(observed[1], ChainEvent::Block(3)));
-    assert!(matches!(observed[2], ChainEvent::Block(4)));
-    assert!(matches!(observed[3], ChainEvent::Block(5)));
-}
-
-#[tokio::test]
-async fn test_run_linearized_source_retries_without_reordering() {
-    let mut stream = TestLinearStream::new(
-        TestLinearControl::new(Some(1), vec![4, 5])
-            .fail_catchup_once(3)
-            .fail_live_once(4),
-    );
-    let mut indexer = stream.start().await.unwrap();
-    indexer.livestream().await.unwrap();
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let (_m_tx, m_rx) = watch::channel(MeshState::default());
-    let (_stx, _srx) = mpsc::channel(1);
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Catchup { anchor_height: 4 },
-        indexer,
-        cp_rx,
-        Backlog::new(),
-        _stx,
-        m_rx,
-        NodeClient::new(&Default::default()),
-        0,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-    pipeline.run().await;
-
-    let mut observed = Vec::new();
-    while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-        .await
-        .ok()
-        .flatten()
-    {
-        observed.push(event);
-    }
-
-    assert!(matches!(observed[0], ChainEvent::Block(2)));
-    assert!(matches!(observed[1], ChainEvent::Block(3)));
-    assert!(matches!(observed[2], ChainEvent::Block(4)));
-    assert!(matches!(observed[3], ChainEvent::Block(5)));
-}
+impl_test_indexer!(SolanaTestIndexer, Chain::Solana);
+impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
@@ -377,7 +88,7 @@ async fn test_stream_handles_sign_and_respond() {
     // Prepare a respond event that matches the sign id
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
             request: request.clone(),
@@ -401,9 +112,9 @@ async fn test_stream_handles_sign_and_respond() {
     let (rpc, _rpc_rx) = test_rpc_channel(4);
 
     // Run the indexer
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx.clone(),
             rpc,
@@ -412,7 +123,7 @@ async fn test_stream_handles_sign_and_respond() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -495,7 +206,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let (request, _args, root_sk) = build_solana_to_ethereum_bidirectional_request(42);
     let sign_id = request.id;
     let root_pk = root_sk.public_key().to_projective().to_affine();
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
             request: request.clone(),
@@ -516,9 +227,9 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let node_client = NodeClient::new(&Default::default());
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx,
             rpc,
@@ -527,7 +238,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -585,7 +296,7 @@ async fn test_respond_event_advances_to_pending_execution() {
         .await;
 
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
-    let client = SolanaTestStream::new(vec![
+    let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::Respond(sig_responded)),
         None,
@@ -603,9 +314,9 @@ async fn test_respond_event_advances_to_pending_execution() {
     let node_client = NodeClient::new(&Default::default());
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
-    run_stream(
-        client,
-        StreamContext::new(
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
             backlog.clone(),
             sign_tx,
             rpc,
@@ -614,7 +325,7 @@ async fn test_respond_event_advances_to_pending_execution() {
             node_client,
             cp_rx,
         ),
-        NoopChainTelemetry,
+        mpc_chain_integration_core::NoopChainTelemetry,
     )
     .await;
 
@@ -740,7 +451,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 
     let respond = signature_responded_event(sign_id, mpc_sig, Chain::Ethereum);
 
-    let client = EthereumTestStream::new(vec![
+    let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::Respond(respond)),
         Some(ChainEvent::CatchupCompleted),
         None,
@@ -749,7 +460,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let backlog = Backlog::persisted(storage);
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
-    run_stream_with_two_node_mesh(client, sign_tx, backlog.clone(), root_pk).await;
+    run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
         Err(_) | Ok(None) => {}
@@ -782,7 +493,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
 
     let replacement =
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
-    let client = EthereumTestStream::new(vec![
+    let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
             request: replacement,
             block_timestamp: None,
@@ -795,7 +506,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
     run_stream_with_two_node_mesh(
-        client,
+        indexer,
         sign_tx,
         backlog.clone(),
         k256::ProjectivePoint::GENERATOR.to_affine(),
@@ -851,7 +562,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         )
         .await;
 
-    let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+    let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -865,9 +576,9 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let node_client = NodeClient::new(&Default::default());
 
     let run_handle = tokio::spawn(async move {
-        run_stream(
-            client,
-            StreamContext::new(
+        run_supervised(
+            indexer,
+            crate::stream::StreamContext::new(
                 backlog,
                 sign_tx,
                 rpc,
@@ -876,7 +587,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
                 node_client,
                 cp_rx,
             ),
-            NoopChainTelemetry,
+            mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await;
     });
@@ -931,7 +642,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
         )
         .await;
 
-    let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+    let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -945,9 +656,9 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let node_client = NodeClient::new(&Default::default());
 
     let run_handle = tokio::spawn(async move {
-        run_stream(
-            client,
-            StreamContext::new(
+        run_supervised(
+            indexer,
+            crate::stream::StreamContext::new(
                 backlog,
                 sign_tx,
                 rpc,
@@ -956,7 +667,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
                 node_client,
                 cp_rx,
             ),
-            NoopChainTelemetry,
+            mpc_chain_integration_core::NoopChainTelemetry,
         )
         .await;
     });
@@ -965,304 +676,4 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     assert!(matches!(no_publish, Err(_) | Ok(None)));
 
     run_handle.abort();
-}
-
-#[tokio::test]
-async fn test_recovery_transitions_to_catchup() {
-    struct MockCatchupIndexer {
-        catchup_started_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    }
-
-    #[async_trait]
-    impl ChainIndexer for MockCatchupIndexer {
-        const CHAIN: Chain = Chain::Solana;
-        type Block = u64;
-        type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
-        const RETRY_DELAY: Duration = Duration::from_millis(1);
-
-        async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-            Ok(Some(10))
-        }
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            None
-        }
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::iter(vec![1].into_iter())
-        }
-
-        async fn process_catchup(&mut self, _block: &Self::Block) -> anyhow::Result<()> {
-            if let Some(tx) = self.catchup_started_tx.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            std::future::pending::<()>().await;
-            Ok(())
-        }
-    }
-
-    let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
-    let sign_id = SignId::new([111u8; 32]);
-    let args = test_sign_args(1);
-
-    backlog
-        .insert(IndexedSignRequest::sign(
-            sign_id,
-            args.clone(),
-            Chain::Solana,
-            current_unix_timestamp(),
-        ))
-        .await;
-    backlog.set_processed_block(Chain::Solana, 5).await;
-    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
-
-    let (_cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest {
-        height: checkpoint.block_height,
-        digest: checkpoint.digest(),
-    }));
-    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-
-    let (_stx, _srx) = mpsc::channel(1);
-    let (catchup_tx, catchup_rx) = oneshot::channel();
-    let indexer = MockCatchupIndexer {
-        catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
-    };
-
-    let (pipeline, _state_rx) = ChainPipeline::new(
-        indexer,
-        cp_rx,
-        backlog,
-        _stx,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        0,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-    let task_handle = tokio::spawn(pipeline.run());
-
-    // process_catchup being called proves the pipeline reached Catchup state.
-    timeout(Duration::from_secs(1), catchup_rx)
-        .await
-        .expect("should reach catchup processing")
-        .unwrap();
-
-    task_handle.abort();
-}
-
-#[tokio::test]
-async fn test_runtime_regression_triggers_recovery() {
-    struct MockLiveIndexer {
-        next_called_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    }
-
-    #[async_trait]
-    impl ChainIndexer for MockLiveIndexer {
-        const CHAIN: Chain = Chain::Solana;
-        type Block = u64;
-        type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
-        const RETRY_DELAY: Duration = Duration::from_millis(1);
-
-        async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-            Ok(Some(10))
-        }
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            if let Some(tx) = self.next_called_tx.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            std::future::pending::<Option<Self::Block>>().await
-        }
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::iter(vec![].into_iter())
-        }
-    }
-
-    let storage = CheckpointStorage::in_memory();
-    let backlog = Backlog::persisted(storage.clone());
-    let sign_id = SignId::new([222u8; 32]);
-    let args = test_sign_args(2);
-
-    backlog
-        .insert(IndexedSignRequest::sign(
-            sign_id,
-            args.clone(),
-            Chain::Solana,
-            current_unix_timestamp(),
-        ))
-        .await;
-    backlog.set_processed_block(Chain::Solana, 10).await;
-    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
-    let digest = checkpoint.digest();
-
-    let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest { height: 10, digest }));
-    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let (next_called_tx, next_called_rx) = oneshot::channel();
-    let (_stx, _srx) = mpsc::channel(1);
-    let indexer = MockLiveIndexer {
-        next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
-    };
-
-    let (pipeline, mut state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Live,
-        indexer,
-        cp_rx,
-        backlog,
-        _stx,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        1,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-    let task_handle = tokio::spawn(pipeline.run());
-
-    timeout(Duration::from_secs(1), next_called_rx)
-        .await
-        .expect("should call next() in Live loop")
-        .unwrap();
-
-    let mismatched_digest = [99u8; 32];
-    cp_tx
-        .send(Some(CheckpointDigest {
-            height: 8,
-            digest: mismatched_digest,
-        }))
-        .unwrap();
-
-    timeout(Duration::from_secs(1), async {
-        loop {
-            let s = *state_rx.borrow_and_update();
-            if matches!(s, ChainStreaming::Recovery { .. }) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("should transition back to Recovery state upon regression");
-
-    task_handle.abort();
-}
-
-#[tokio::test]
-async fn test_regression_triggers_full_recovery_cycle() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    struct E2EIndexer {
-        tx: mpsc::Sender<ChainEvent>,
-        livestream_count: Arc<AtomicU32>,
-    }
-
-    #[async_trait]
-    impl ChainIndexer for E2EIndexer {
-        const CHAIN: Chain = Chain::Ethereum;
-        type Block = u64;
-        type Iter = futures_util::stream::Empty<Self::Block>;
-        const RETRY_DELAY: Duration = Duration::from_millis(1);
-
-        async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-            self.livestream_count.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(10))
-        }
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            std::future::pending::<Option<Self::Block>>().await
-        }
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            futures_util::stream::empty()
-        }
-
-        async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
-            self.tx.send(ChainEvent::CatchupInProgress).await?;
-            Ok(())
-        }
-
-        async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-            self.tx.send(ChainEvent::CatchupCompleted).await?;
-            Ok(())
-        }
-    }
-
-    let chain = Chain::Ethereum;
-    let backlog = Backlog::new();
-    backlog.set_processed_block(chain, 10).await;
-    let cp = backlog.checkpoint(chain).await.unwrap();
-    let matching_digest = cp.digest();
-
-    let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest {
-        height: 10,
-        digest: matching_digest,
-    }));
-    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let (events_tx, mut events_rx) = mpsc::channel(16);
-    let livestream_count = Arc::new(AtomicU32::new(0));
-    let indexer = E2EIndexer {
-        tx: events_tx,
-        livestream_count: livestream_count.clone(),
-    };
-    let (sign_tx, _sign_rx) = mpsc::channel(1);
-    let node_client = NodeClient::new(&Default::default());
-
-    let (pipeline, _state_rx) = ChainPipeline::new(
-        indexer,
-        cp_rx,
-        backlog,
-        sign_tx,
-        mesh_rx,
-        node_client,
-        0,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-    let handle = tokio::spawn(pipeline.run());
-
-    // 1st cycle: Recovery → Catchup → Live
-    // Wait for CatchupCompleted which means the pipeline reached Live.
-    timeout(Duration::from_secs(5), async {
-        while let Some(event) = events_rx.recv().await {
-            if matches!(event, ChainEvent::CatchupCompleted) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("should complete 1st Recovery → Catchup → Live");
-
-    // Trigger regression: send a digest that doesn't match local.
-    cp_tx
-        .send(Some(CheckpointDigest {
-            height: 100,
-            digest: [99u8; 32],
-        }))
-        .unwrap();
-
-    // Restore matching digest so align_backlog_with_consensus in Recovery
-    // can complete (with 0 peers, find_consensus_checkpoint loops forever
-    // unless the consensus digest changes, which triggers an early abort).
-    // yield_now() gives the pipeline a chance to observe the mismatched digest
-    // in wait_detected_regression before we overwrite it.
-    tokio::task::yield_now().await;
-    cp_tx
-        .send(Some(CheckpointDigest {
-            height: 10,
-            digest: matching_digest,
-        }))
-        .unwrap();
-
-    // 2nd cycle: Recovery → Catchup → Live
-    timeout(Duration::from_secs(6), async {
-        while let Some(event) = events_rx.recv().await {
-            if matches!(event, ChainEvent::CatchupCompleted) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("should complete 2nd Recovery → Catchup → Live");
-
-    handle.abort();
 }

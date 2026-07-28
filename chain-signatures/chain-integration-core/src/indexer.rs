@@ -1,71 +1,20 @@
-use std::time::Duration;
-
-use futures_util::Stream;
 use mpc_primitives::{Chain, ChainEvent};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveStreamStatus {
-    Continue,
-    Reconnect,
-    Shutdown,
-}
-
-// TODO: Consider removing default implementations from the trait and force to implement (also removes dependency for `tokio` and `tracing` in this crate)
-/// Interface for a chain indexer that can catch up and livestream events from a specific chain.
+/// Interface for a chain indexer that owns its full catchup + live loop.
+///
+/// Implementations emit the ordered event sequence (catchup events →
+/// [`ChainEvent::CatchupCompleted`] → live events) on `events_tx`, resuming from
+/// the chain's persisted progress and its own current tip. `cancel` is honoured
+/// for supervisor-driven kill+restart on regression/watchdog.
 #[async_trait::async_trait]
-pub trait ChainIndexer: Send + 'static {
+pub trait ChainIndexer: Send + Sync + 'static {
     const CHAIN: Chain;
-    type Block: Send;
-    type Iter: Stream<Item = Self::Block> + Send + Unpin + 'static;
 
-    const RETRY_DELAY: Duration = Duration::from_millis(500);
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        Ok(None)
-    }
-
-    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter;
-
-    async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
-        let _ = item;
-        Ok(())
-    }
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        None
-    }
-
-    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        let _ = block;
-        Ok(())
-    }
-
-    async fn process_next_block(&mut self) -> LiveStreamStatus {
-        let Some(block) = self.next().await else {
-            return LiveStreamStatus::Shutdown;
-        };
-
-        while let Err(err) = self.process(&block).await {
-            tracing::warn!(?err, "live block processing failed; retrying");
-            tokio::time::sleep(Self::RETRY_DELAY).await;
-        }
-        LiveStreamStatus::Continue
-    }
-}
-
-/// Interface for a chain stream that can be started and can provide the next chain event.
-#[async_trait::async_trait]
-pub trait ChainStream: Send + 'static {
-    type Indexer: ChainIndexer + Send;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer>;
-    async fn next_event(&mut self) -> Option<ChainEvent>;
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()>;
 }

@@ -1,0 +1,22 @@
+[package]
+name = "signet-primitives"
+version.workspace = true
+edition = "2021"
+description = "Interface types for the SigNet network"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sig-net/mpc"
+
+[dependencies]
+borsh.workspace = true
+enum-map.workspace = true
+hex.workspace = true
+k256.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.12", features = ["custom"] }

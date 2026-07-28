@@ -7,6 +7,10 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
+use near_fetch::result::ExecutionFinalResult;
+use near_jsonrpc_client::errors::{
+    JsonRpcError, JsonRpcServerError, JsonRpcServerResponseStatusError,
+};
 use near_primitives::hash::CryptoHash;
 use near_primitives::views::ExecutionOutcomeWithIdView;
 use near_primitives::views::ExecutionStatusView;
@@ -38,15 +42,27 @@ enum Outcome {
     Signatures(Vec<FullSignature<Secp256k1>>),
 }
 
+/// Read the transaction status, treating a timed-out query as "not known yet". near-fetch
+/// intends the same but matches the timeout as a handler error, while a node that misses
+/// its polling window answers with HTTP 408, which the client surfaces as a response-status
+/// error, so near-fetch's own handling never fires.
+async fn poll_status(
+    status: &AsyncTransactionStatus,
+) -> Result<Poll<ExecutionFinalResult>, WaitForError> {
+    match status.status().await {
+        Ok(poll) => Ok(poll),
+        Err(near_fetch::Error::RpcTransactionError(JsonRpcError::ServerError(
+            JsonRpcServerError::ResponseStatusError(JsonRpcServerResponseStatusError::TimeoutError),
+        ))) => Ok(Poll::Pending),
+        Err(err) => Err(WaitForError::JsonRpc(format!("{err:?}"))),
+    }
+}
+
 pub async fn signature_responded(
     status: AsyncTransactionStatus,
 ) -> Result<FullSignature<Secp256k1>, WaitForError> {
     let is_tx_ready = || async {
-        let Poll::Ready(outcome) = status
-            .status()
-            .await
-            .map_err(|err| WaitForError::JsonRpc(format!("{err:?}")))?
-        else {
+        let Poll::Ready(outcome) = poll_status(&status).await? else {
             return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         };
 
@@ -80,19 +96,18 @@ pub async fn batch_signature_responded(
     status: AsyncTransactionStatus,
 ) -> Result<Vec<FullSignature<Secp256k1>>, WaitForError> {
     let is_tx_ready = || async {
-        let Poll::Ready(outcome) = status
-            .status()
-            .await
-            .map_err(|err| WaitForError::JsonRpc(format!("{err:?}")))?
-        else {
+        let Poll::Ready(outcome) = poll_status(&status).await? else {
             return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         };
 
+        // Retrying surfaces the last attempt's error, so a settled failure has to leave the
+        // loop as `Ok` or a later timed-out poll masks it. That is what `Outcome` is for.
+        // A status that has settled neither way is not an answer, so it keeps retrying.
+        if outcome.is_failure() {
+            return Ok(Outcome::Failed(format!("status: {:?}", outcome.status())));
+        }
         if !outcome.is_success() {
-            return Err(WaitForError::Signature(SignatureError::Failed(format!(
-                "status: {:?}",
-                outcome.status()
-            ))));
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         }
 
         let receipt_outcomes = outcome.details.receipt_outcomes();

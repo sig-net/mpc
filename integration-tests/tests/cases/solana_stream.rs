@@ -1,12 +1,11 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
-use mpc_chain_solana::{SolConfig, SolanaStream};
+use mpc_chain_integration_core::{
+    utils::stream::chain_event_channel, ChainIndexer, NoopChainTelemetry, StateManager,
+};
+use mpc_chain_solana::{SolConfig, SolanaIndexer};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
@@ -16,10 +15,10 @@ use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, StreamContext};
+use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::{
-    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId,
-    Signature, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -27,6 +26,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use std::time::Duration;
 
@@ -43,99 +43,94 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-async fn stream_solana(
-    config: SolConfig,
-) -> Result<(
-    SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<Option<CheckpointDigest>>,
-)> {
-    let (backlog, _, _) = test_dependencies();
-    stream_solana_with_backlog(config, backlog).await
+struct RunningSolanaIndexer {
+    events_rx: mpsc::Receiver<ChainEvent>,
+    cancel: CancellationToken,
+    run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
-async fn stream_solana_with_backlog(
+impl RunningSolanaIndexer {
+    async fn next_event(&mut self) -> Option<ChainEvent> {
+        self.events_rx.recv().await
+    }
+}
+
+impl Drop for RunningSolanaIndexer {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.run_handle.abort();
+    }
+}
+
+async fn run_solana_indexer(config: SolConfig) -> Result<RunningSolanaIndexer> {
+    let (backlog, _, _) = test_dependencies();
+    run_solana_indexer_with_backlog(config, backlog).await
+}
+
+async fn run_solana_indexer_with_backlog(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<(
-    SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<Option<CheckpointDigest>>,
-)> {
-    let mut stream = SolanaStream::new(config, backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaStream")?;
-    let indexer = ChainStream::start(&mut stream).await?;
-    let (cp_tx, cp_rx) = watch::channel(None);
-    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let node_client = NodeClient::new(&Default::default());
-    // Start from Recovery so that handle_recovery() calls livestream(), which
-    // spawns the live event subscription and initializes the live_rx channel.
-    // Starting in Live would skip this initialization and produce no events.
-    let (sign_tx, _sign_rx) = mpsc::channel(1);
-    let (pipeline, _state_rx) = ChainPipeline::new(
-        indexer,
-        cp_rx,
-        backlog,
-        sign_tx,
-        mesh_rx,
-        node_client,
-        0,
-        "test.near".parse().unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    );
-    tokio::spawn(pipeline.run());
+) -> Result<RunningSolanaIndexer> {
+    let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry)
+        .context("failed to create SolanaIndexer")?;
+    let (events_tx, mut events_rx) = chain_event_channel();
+    let cancel = CancellationToken::new();
+    let run_handle = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { indexer.run(events_tx, cancel).await }
+    });
 
-    // Wait until the pipeline completes Recovery → Catchup → Live so the WS
-    // subscription is established before callers begin submitting transactions.
+    // Wait until catchup completes so the WS subscription and anchor are established
+    // before callers begin submitting transactions.
     timeout(Duration::from_secs(30), async {
         loop {
-            match stream.next_event().await {
+            match events_rx.recv().await {
                 Some(ChainEvent::CatchupCompleted) => return Ok(()),
                 Some(_) => continue,
-                None => anyhow::bail!("pipeline shut down before reaching Live state"),
+                None => anyhow::bail!("indexer stopped before completing catchup"),
             }
         }
     })
     .await
-    .context("timed out waiting for pipeline to reach Live state")??;
+    .context("timed out waiting for catchup to complete")??;
 
-    Ok((stream, cp_tx))
+    Ok(RunningSolanaIndexer {
+        events_rx,
+        cancel,
+        run_handle,
+    })
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request<S: StateManager, T: ChainTelemetry>(
-    stream: &mut SolanaStream<S, T>,
-) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(indexer: &mut RunningSolanaIndexer) -> Result<IndexedSignRequest> {
     loop {
-        match timeout(Duration::from_secs(6), stream.next_event()).await {
+        match timeout(Duration::from_secs(6), indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
             Ok(Some(ChainEvent::Block(_))) => continue,
-            Ok(Some(ChainEvent::CatchupInProgress)) => {
-                tracing::info!("received CatchupInProgress event while waiting for SignRequest");
-                continue;
-            }
             Ok(Some(ChainEvent::CatchupCompleted)) => {
                 tracing::info!("received CatchupCompleted event while waiting for SignRequest");
                 continue;
             }
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
-            Ok(None) => anyhow::bail!("stream returned None"),
+            Ok(None) => anyhow::bail!("indexer returned None"),
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),
         }
     }
 }
 
-/// Test that SolanaStream can parse basic Sign events
+/// Test that the Solana indexer can parse basic Sign events
 ///
 /// This test:
 /// 1. Spins up Solana sandbox and deploys contract
-/// 2. Creates a SolanaStream with test configuration
+/// 2. Creates a SolanaIndexer with test configuration
 /// 3. Submits a Sign request directly to the contract
-/// 4. Verifies stream.next_event() returns ChainEvent::SignRequest with correct data
+/// 4. Verifies the indexer emits ChainEvent::SignRequest with correct data
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let (mut stream, _cp_tx) = stream_solana(config).await?;
+    let mut indexer = run_solana_indexer(config).await?;
 
     // Submit sign request
     let payload = [1u8; 32];
@@ -146,7 +141,7 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
         .await?;
 
     // Wait for SignRequest event
-    let req = wait_for_sign_request(&mut stream).await?;
+    let req = wait_for_sign_request(&mut indexer).await?;
 
     // Verify the request
     assert_eq!(req.chain, Chain::Solana);
@@ -157,14 +152,14 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaStream emits block events regularly
+/// Test that the Solana indexer emits block events regularly
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_emits_blocks() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
 
     let config = solana.get_config(program_address);
-    let (mut stream, _cp_tx) = stream_solana(config).await?;
+    let mut indexer = run_solana_indexer(config).await?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -175,7 +170,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     // Collect events and verify we get block markers
     let mut found_block = false;
     for _ in 0..5 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(3), stream.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(3), indexer.next_event()).await {
             if matches!(event, ChainEvent::Block(_)) {
                 found_block = true;
                 break;
@@ -187,7 +182,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaStream can linearly catch up when starting behind
+/// Test that the Solana indexer can linearly catch up when starting behind
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_catchup_linear() -> Result<()> {
     let solana = solana_sandbox().await?;
@@ -195,7 +190,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 
     // Create first client and process some events
     let config = solana.get_config(program_address.clone());
-    let (mut stream1, _cp_tx) = stream_solana(config.clone()).await?;
+    let mut indexer1 = run_solana_indexer(config.clone()).await?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -209,7 +204,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), stream1.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_millis(500), indexer1.next_event()).await {
             match event {
                 ChainEvent::SignRequest { .. } => seen_by_client1 += 1,
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
@@ -221,10 +216,10 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     assert!(last_block_client1 > 0, "first client saw no block events");
 
     // Drop first client
-    drop(stream1);
+    drop(indexer1);
 
     // Create new client immediately (before more events) - should start processing from now
-    let (mut stream2, _cp_tx2) = stream_solana(config).await?;
+    let mut indexer2 = run_solana_indexer(config).await?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -238,7 +233,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut sign_events = Vec::new();
     let mut caught_up = false;
     for _ in 0..20 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(1), stream2.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer2.next_event()).await {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
                     sign_events.push(request);
@@ -266,13 +261,13 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaStream can parse SignBidirectional events
+/// Test that the Solana indexer can parse SignBidirectional events
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let (mut stream, _cp_tx) = stream_solana(config).await?;
+    let mut indexer = run_solana_indexer(config).await?;
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
@@ -294,7 +289,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
         .await?;
 
     // Wait for SignRequest event
-    let req = wait_for_sign_request(&mut stream).await?;
+    let req = wait_for_sign_request(&mut indexer).await?;
 
     // Verify it's a bidirectional sign request
     assert_eq!(req.chain, Chain::Solana);
@@ -306,13 +301,13 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaStream handles multiple concurrent submissions
+/// Test that the Solana indexer handles multiple concurrent submissions
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_concurrent_events() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let (mut stream, _cp_tx) = stream_solana(config).await?;
+    let mut indexer = run_solana_indexer(config).await?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -334,7 +329,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
         }
 
         if let Ok(Some(ChainEvent::SignRequest { request, .. })) =
-            timeout(remaining, stream.next_event()).await
+            timeout(remaining, indexer.next_event()).await
         {
             sign_events.push(request);
         }
@@ -366,7 +361,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let (mut stream1, _cp_tx) = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
+    let mut indexer1 = run_solana_indexer_with_backlog(config.clone(), backlog.clone()).await?;
     // Submit request and wait for a block marker
     solana
         .sign(
@@ -382,7 +377,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut checkpoint_block = None;
     while Instant::now() < deadline {
-        match timeout(Duration::from_secs(1), stream1.next_event()).await {
+        match timeout(Duration::from_secs(1), indexer1.next_event()).await {
             Ok(Some(ChainEvent::Block(block))) => {
                 tracing::info!(block, "received block event");
                 checkpoint_block = Some(block);
@@ -402,10 +397,10 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         checkpoint_block.is_some(),
         "did not receive block event within time"
     );
-    drop(stream1);
+    drop(indexer1);
 
     // Create new client with same backlog - should resume from checkpoint
-    let (mut stream2, _cp_tx2) = stream_solana_with_backlog(config, backlog.clone()).await?;
+    let mut indexer2 = run_solana_indexer_with_backlog(config, backlog.clone()).await?;
 
     // Verify the backlog was persisted
     let persisted_block = backlog.get_processed_block(Chain::Solana).await;
@@ -429,7 +424,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     // New client should pick up new events
     timeout(Duration::from_secs(5), async {
         loop {
-            match stream2.next_event().await {
+            match indexer2.next_event().await {
                 Some(ChainEvent::SignRequest { request, .. }) => break Ok(request),
                 Some(other) => {
                     tracing::info!(?other, "received non-sign/block event");
@@ -497,8 +492,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(config, recovered_backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaStream")?;
+    let indexer = SolanaIndexer::new(config, recovered_backlog.clone(), NoopChainTelemetry)
+        .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
@@ -523,8 +518,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(async move {
-        run_stream(
-            stream,
+        run_supervised(
+            indexer,
             StreamContext::new(
                 recovered_backlog.clone(),
                 sign_tx.clone(),

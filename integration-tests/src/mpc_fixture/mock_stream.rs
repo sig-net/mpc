@@ -1,12 +1,13 @@
+use anyhow::Context as _;
 use async_trait::async_trait;
-use mpc_chain_integration_core::{ChainIndexer, ChainStream};
+use mpc_chain_integration_core::ChainIndexer;
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
 use mpc_primitives::{Chain, ChainEvent, SignKind};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Clone)]
 pub struct MockStream {
@@ -15,7 +16,7 @@ pub struct MockStream {
 
 /// Holds chain events to be processed in tests.
 ///
-/// Events are grouped into blocks and drained by calling `next_event`.
+/// Events are grouped into blocks and drained by the indexer's `run()`.
 #[derive(Default)]
 pub struct InnerMockStream {
     /// The current simulated block height. Events are only released on
@@ -23,10 +24,7 @@ pub struct InnerMockStream {
     block_height: u64,
     /// Events for blocks >= `block_height`, not ready to be published, yet.
     future_blocks: Vec<Vec<ChainEvent>>,
-    /// Ordered control events that must not be overtaken by later block events.
-    control_events: VecDeque<ChainEvent>,
-    /// Events already produced < `block_height` but not yet consumed by
-    /// `next_event()`.
+    /// Events already produced < `block_height` but not yet consumed.
     pending_events: Vec<ChainEvent>,
 }
 
@@ -34,59 +32,46 @@ pub struct MockIndexer {
     inner: Arc<Mutex<InnerMockStream>>,
 }
 
-#[async_trait]
-impl ChainIndexer for MockIndexer {
-    const CHAIN: Chain = Chain::Solana;
-    type Block = ();
-    type Iter = futures_util::stream::Empty<()>;
-
-    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-        futures_util::stream::empty()
-    }
-
-    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .await
-            .control_events
-            .push_back(ChainEvent::CatchupInProgress);
-        Ok(())
-    }
-
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .await
-            .control_events
-            .push_back(ChainEvent::CatchupCompleted);
-        Ok(())
+impl MockIndexer {
+    pub fn from_stream(stream: &MockStream) -> Self {
+        Self {
+            inner: stream.inner.clone(),
+        }
     }
 }
 
 #[async_trait]
-impl ChainStream for MockStream {
-    type Indexer = MockIndexer;
+impl ChainIndexer for MockIndexer {
+    const CHAIN: Chain = Chain::Solana;
 
-    async fn start(&mut self) -> anyhow::Result<MockIndexer> {
-        Ok(MockIndexer {
-            inner: self.inner.clone(),
-        })
-    }
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // No catchup data — emit immediately, then forward prepared events.
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("mock events_tx closed during catchup")?;
 
-    async fn next_event(&mut self) -> Option<ChainEvent> {
         loop {
-            let mut guard = self.inner.lock().await;
-            let out = guard.control_events.pop_front();
-            if out.is_some() {
-                return out;
+            let event = self.inner.lock().await.pending_events.pop();
+            if let Some(event) = event {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    res = events_tx.send(event) => {
+                        if res.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
             }
-            let out = guard.pending_events.pop();
-            if out.is_some() {
-                return out;
-            }
-            drop(guard);
-            // TODO: would be better to avoid sleep by awaiting new data
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 }
@@ -99,7 +84,6 @@ impl MockStream {
         let cloned = InnerMockStream {
             block_height: guard.block_height,
             future_blocks: guard.future_blocks.clone(),
-            control_events: guard.control_events.clone(),
             pending_events: guard.pending_events.clone(),
         };
         Self {
@@ -121,7 +105,7 @@ impl MockStream {
     /// Add a future block containing arbitrary chain events.
     pub async fn prepare_block_of_events(&self, events: &[ChainEvent]) {
         let mut guard = self.inner.lock().await;
-        guard.future_blocks.push(events.to_vec());
+        guard.future_blocks.push(events.to_vec())
     }
 
     /// Add a future block that contains events corresponding to the provided rpc actions.

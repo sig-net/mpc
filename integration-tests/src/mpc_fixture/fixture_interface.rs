@@ -14,7 +14,7 @@ use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
 use mpc_node::protocol::{MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, IndexedSignRequest, SignCommand};
+use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -40,6 +40,8 @@ pub struct MpcFixtureNode {
     pub msg_channel: MessageChannel,
     pub mock_streams: HashMap<Chain, MockStream>,
 
+    /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
+    pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
@@ -72,6 +74,7 @@ impl MpcFixture {
             old_participants: running.participants.clone(),
             new_participants: running.participants.clone(),
             threshold: running.threshold,
+            new_threshold: running.threshold,
             public_key: running.public_key,
             finished_votes: Default::default(),
             cancel_votes: Default::default(),

@@ -30,6 +30,7 @@ semver.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
@@ -63,7 +64,7 @@ near-fetch.workspace = true
 near-sdk.workspace = true
 near-jsonrpc-client = "0.15.0"
 near-primitives.workspace = true
-near-workspaces = "0.16.0"
+near-workspaces = "0.21.0"
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true

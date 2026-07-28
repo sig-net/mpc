@@ -15,13 +15,14 @@ pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use dashmap::DashSet;
 use k256::{AffinePoint, Secp256k1};
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -41,7 +42,7 @@ pub enum RpcAction {
     Publish(PublishAction),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceInfo {
     pub me: Participant,
     pub threshold: usize,
@@ -188,6 +189,26 @@ impl ContractStateWatcher {
     pub async fn next_state(&mut self) -> Option<ProtocolState> {
         let _ = self.contract_state.changed().await;
         self.contract_state.borrow_and_update().clone()
+    }
+
+    pub async fn next_governance(&mut self, current: GovernanceInfo) -> Option<GovernanceInfo> {
+        loop {
+            if self.contract_state.changed().await.is_err() {
+                return None;
+            }
+            let Some(state) = self.contract_state.borrow_and_update().clone() else {
+                continue;
+            };
+            let next = state.governance(&self.account_id).unwrap_or_else(|| {
+                let mut stale = current.clone();
+                stale.is_running = false;
+                stale
+            });
+            if next != current {
+                tracing::info!(old = ?current, new = ?next, "signing governance changed");
+                return Some(next);
+            }
+        }
     }
 
     pub fn mark_changed(&mut self) {
@@ -374,6 +395,8 @@ impl RpcExecutor {
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
+        // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
+        let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
         loop {
             let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -381,16 +404,31 @@ impl RpcExecutor {
             };
 
             let chain = action.request.chain;
+            let sign_id = action.request.id;
+
+            if !in_flight.insert(sign_id) {
+                tracing::info!(
+                    ?sign_id,
+                    ?chain,
+                    "publish already in flight; skipping duplicate"
+                );
+                continue;
+            }
 
             // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
             let Some(publisher) = publishers.get(&chain) else {
+                in_flight.remove(&sign_id);
                 tracing::warn!(?chain, "no publisher configured for chain");
                 continue;
             };
 
-            // Spawn a task to execute the publish action.
             let publisher = publisher.clone();
+            let in_flight = in_flight.clone();
             tokio::spawn(async move {
+                let _guard = InFlightGuard {
+                    in_flight,
+                    id: sign_id,
+                };
                 execute_publish(publisher, action).await;
             });
         }
@@ -465,6 +503,19 @@ async fn update_contract_data(
     }
 }
 
+/// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
+/// including during a panic unwind, so the slot is always freed for re-publish.
+struct InFlightGuard {
+    in_flight: Arc<DashSet<SignId>>,
+    id: SignId,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.remove(&self.id);
+    }
+}
+
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
     let chain = action.request.chain;
@@ -522,7 +573,71 @@ mod tests {
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_primitives::SignKind;
+    use mpc_primitives::{SignId, SignKind};
+
+    /// Vote churn must be absorbed without completing; real governance changes
+    /// and leaving the running state must be delivered.
+    #[tokio::test]
+    async fn next_governance_filters_non_governance_changes() {
+        let account_id: AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+        let (mut watcher, tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let governance = watcher.governance().unwrap();
+
+        let running = |epoch, join_votes| RunningContractState {
+            epoch,
+            public_key: k256::AffinePoint::default(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes,
+            leave_votes: Default::default(),
+            threshold: 1,
+        };
+
+        // Vote churn: state changed, governance content did not.
+        let churn = crate::protocol::contract::primitives::Votes {
+            votes: [("p-1".parse().unwrap(), Default::default())].into(),
+        };
+        tx.send(Some(ProtocolState::Running(running(0, churn))))
+            .unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            watcher.next_governance(governance.clone()),
+        )
+        .await;
+        assert!(pending.is_err(), "vote churn must not wake next_governance");
+
+        // Epoch bump: a real governance change is delivered.
+        tx.send(Some(ProtocolState::Running(running(1, Default::default()))))
+            .unwrap();
+        let next = watcher.next_governance(governance.clone()).await.unwrap();
+        assert_eq!(next.epoch, 1);
+
+        // Leaving the running state is reported as is_running = false.
+        let resharing = ResharingContractState {
+            old_epoch: 1,
+            old_participants: participants.clone(),
+            new_participants: participants.clone(),
+            threshold: 1,
+            new_threshold: 1,
+            public_key: k256::AffinePoint::default(),
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        };
+        tx.send(Some(ProtocolState::Resharing(resharing))).unwrap();
+        let next = watcher.next_governance(next).await.unwrap();
+        assert!(!next.is_running);
+
+        // Channel closed.
+        drop(tx);
+        assert!(watcher.next_governance(next).await.is_none());
+    }
 
     /// A publisher that counts the number of times it has been called.
     struct CountingPublisher {
@@ -582,6 +697,7 @@ mod tests {
             old_participants: participants.clone(),
             new_participants: participants.clone(),
             threshold: 2,
+            new_threshold: 2,
             public_key: AffinePoint::default(),
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
@@ -628,6 +744,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -662,6 +779,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -694,12 +812,14 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::NEAR,
             SignKind::Sign,
+            SignId::new([0u8; 32]),
         )))
         .await
         .unwrap();
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Solana,
             SignKind::Sign,
+            SignId::new([1u8; 32]),
         )))
         .await
         .unwrap();
@@ -744,19 +864,21 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
 
         // Send multiple publish actions for NEAR and Solana
-        for _ in 0..NEAR_ACTION_COUNT {
+        for i in 0..NEAR_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::NEAR,
                 SignKind::Sign,
+                SignId::new([i as u8; 32]),
             )))
             .await
             .unwrap();
         }
 
-        for _ in 0..SOL_ACTION_COUNT {
+        for i in 0..SOL_ACTION_COUNT {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Solana,
                 SignKind::Sign,
+                SignId::new([(NEAR_ACTION_COUNT + i) as u8; 32]),
             )))
             .await
             .unwrap();
@@ -769,5 +891,41 @@ mod tests {
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
         assert_eq!(sol_count.load(Ordering::SeqCst), SOL_ACTION_COUNT);
+    }
+
+    #[tokio::test]
+    async fn executor_dedupes_concurrent_publishes_with_the_same_sign_id() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let sign_id = SignId::new([7u8; 32]);
+
+        // Multiple publishes for the SAME SignId
+        for _ in 0..5 {
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::Ethereum,
+                SignKind::Sign,
+                sign_id,
+            )))
+            .await
+            .unwrap();
+        }
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+
+        // Let the single in-flight publish finish.
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }

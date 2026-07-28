@@ -373,12 +373,6 @@ pub async fn run<T: ChainTelemetry>(
             checkpoints_rx.clone(),
         );
         ctx.caught_up = true;
-        // Hydration still drives stream ops directly instead of ChainPipeline.
-        // Open the pipeline-owned forwarding veto so shared stream ops behave
-        // like the previous caught_up-only path. Remove this once Hydration is
-        // migrated to ChainPipeline.
-        ctx.pipeline_caught_up
-            .store(true, std::sync::atomic::Ordering::Release);
         ctx
     };
 

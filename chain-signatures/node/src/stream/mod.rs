@@ -1,8 +1,6 @@
 pub mod ops;
-pub mod pipeline;
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+pub(crate) mod recovery;
+pub mod supervisor;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
@@ -15,20 +13,10 @@ use crate::stream::ops::{
 };
 use crate::types::CheckpointWatcher;
 
-pub use crate::stream::pipeline::ChainPipeline;
-
 use anyhow::Context;
-use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
+use mpc_chain_integration_core::ChainTelemetry;
 use mpc_primitives::{Chain, ChainEvent, SignCommand};
 use tokio::sync::{mpsc, watch};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainStreaming {
-    Recovery { load_local: bool },
-    Catchup { anchor_height: u64 },
-    Live,
-    Reconnect,
-}
 
 /// Shared, per-chain dependencies
 pub struct StreamContext {
@@ -39,27 +27,7 @@ pub struct StreamContext {
     pub mesh_state: watch::Receiver<MeshState>,
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
-    /// In-band caught-up flag, toggled by the `CatchupInProgress` /
-    /// `CatchupCompleted` markers dequeued from the event stream. Ordered
-    /// with chain events, so it drives requeue/resume timing.
     pub caught_up: bool,
-    /// Out-of-band flag shared with the pipeline to immediately veto forwarding
-    /// during regression recovery. The pipeline sets this to `false` at the top
-    /// of `handle_recovery()` — before any async work — so `run_stream` stops
-    /// forwarding buffered events that may be from a diverged fork, even before
-    /// the in-band `CatchupInProgress` marker is dequeued from the event channel.
-    /// The pipeline sets it back to `true` when catchup completes.
-    ///
-    /// Starts as `false` because the pipeline always begins in Recovery state —
-    /// it will store `true` once the initial catchup completes.
-    ///
-    /// Reconnect does NOT clear this flag: buffered events during a reconnect
-    /// are from valid blocks and safe to forward. Reconnect relies solely on the
-    /// in-band `CatchupInProgress` marker for its caught-up gating.
-    ///
-    /// The pipeline is the sole writer; `run_stream` and the event processors
-    /// only ever read it.
-    pub pipeline_caught_up: Arc<AtomicBool>,
 }
 
 impl StreamContext {
@@ -81,66 +49,24 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
-            pipeline_caught_up: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Events are only forwarded to signing when both the in-band `caught_up`
-    /// flag and the pipeline's out-of-band veto agree.
-    pub fn effectively_caught_up(&self) -> bool {
-        self.caught_up && self.pipeline_caught_up.load(Ordering::Acquire)
-    }
-}
-
-/// Shared indexer loop: recovers backlog then processes events from the stream
-pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
-    mut stream: S,
-    mut ctx: StreamContext,
-    telemetry: T,
-) {
-    let chain = S::Indexer::CHAIN;
-    tracing::info!(%chain, "starting stream");
-
-    let threshold = ctx.contract_watcher.wait_threshold().await;
-
-    let indexer = match stream.start().await {
-        Ok(indexer) => indexer,
-        Err(err) => {
-            tracing::error!(?err, %chain, "failed to start stream");
-            return;
+    /// Forward a sign command to the signing pipeline, but only when caught up.
+    /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
+    pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
+        if self.caught_up {
+            self.sign_tx
+                .send(cmd)
+                .await
+                .context("sign command channel closed")?;
         }
-    };
-
-    let (pipeline, _state_rx) = ChainPipeline::new(
-        indexer,
-        ctx.checkpoints_rx.clone(),
-        ctx.backlog.clone(),
-        ctx.sign_tx.clone(),
-        ctx.mesh_state.clone(),
-        ctx.node_client.clone(),
-        threshold,
-        ctx.contract_watcher.account_id().clone(),
-        ctx.pipeline_caught_up.clone(),
-    );
-    let indexer_task = tokio::spawn(pipeline.run());
-
-    let root_pk = ctx.contract_watcher.wait_public_key().await;
-
-    loop {
-        let Some(event) = stream.next_event().await else {
-            break;
-        };
-        if let Err(err) = handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await {
-            tracing::error!(?err, %chain, "failed to process chain event");
-        }
+        Ok(())
     }
-
-    tracing::warn!(%chain, "stream shutting down");
-    indexer_task.abort();
 }
 
 /// Dispatch a single chain event to the appropriate processor.
-async fn handle_chain_event<T: ChainTelemetry>(
+pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
     event: ChainEvent,
     ctx: &mut StreamContext,
     telemetry: &T,
@@ -148,9 +74,6 @@ async fn handle_chain_event<T: ChainTelemetry>(
     chain: Chain,
 ) -> anyhow::Result<()> {
     match event {
-        ChainEvent::CatchupInProgress => {
-            ctx.caught_up = false;
-        }
         ChainEvent::CatchupCompleted => {
             if ctx.caught_up {
                 return Ok(());

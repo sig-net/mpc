@@ -12,7 +12,6 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
 use anchor_client::{Client, Cluster as AnchorCluster};
-use anyhow::Context as _;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
@@ -908,7 +907,7 @@ fn parse_sol_signature(
 /// Ethereum contract signature request outcome
 pub struct EthSignOutcome {
     pub signer_address: Address,
-    pub contract_address: String,
+    pub contract_address: Address,
     pub eth_tx_hash: Option<String>,
     pub deposit_amount: u64,
     pub signature: FullSignature<Secp256k1>,
@@ -939,7 +938,7 @@ impl fmt::Debug for EthSignOutcome {
 /// ETH contract signature request builder
 pub struct EthSignAction<'a> {
     sign_action: SignAction<'a>,
-    contract_addr: String,
+    contract_addr: Address,
     signer: PrivateKeySigner,
     deposit_amount: U256,
     algo: String,
@@ -950,13 +949,10 @@ pub struct EthSignAction<'a> {
 impl<'a> EthSignAction<'a> {
     pub fn new(sign_action: SignAction<'a>) -> Self {
         let eth = sign_action.nodes.cfg.eth.as_ref().unwrap().clone();
-        let signer = PrivateKeySigner::from_str(eth.account_sk.as_ref())
-            .with_context(|| "invalid private key")
-            .unwrap();
         Self {
             sign_action,
-            contract_addr: eth.contract_address.clone(),
-            signer,
+            contract_addr: eth.contract_address,
+            signer: eth.account_sk,
             deposit_amount: U256::from(1), // 1 wei
             algo: "ECDSA".to_string(),
             dest: "ethereum".to_string(),
@@ -966,7 +962,7 @@ impl<'a> EthSignAction<'a> {
 
     /// Set the ETH contract address to interact with
     pub fn contract_address(mut self, address: &str) -> Self {
-        self.contract_addr = address.to_string();
+        self.contract_addr = address.parse().expect("invalid contract address");
         self
     }
 
@@ -1039,13 +1035,9 @@ impl EthSignAction<'_> {
             .unwrap_or_else(|| rand::thread_rng().gen());
         let payload_hash = *alloy::primitives::keccak256(payload);
         let rpc_url = "https://ethereum-sepolia-rpc.publicnode.com";
-        let contract_addr: Address = self
-            .contract_addr
-            .parse()
-            .with_context(|| format!("invalid contract address {}", self.contract_addr))?;
 
         tracing::info!(
-            "calling ETH ChainSignatures contract: contract=0x{}, payload={:?}, path={}, algo={}, dest={}, params={}, deposit={}",
+            "calling ETH ChainSignatures contract: contract={}, payload={:?}, path={}, algo={}, dest={}, params={}, deposit={}",
             self.contract_addr,
             payload,
             path,
@@ -1060,7 +1052,7 @@ impl EthSignAction<'_> {
         let provider = ProviderBuilder::new()
             .wallet(self.signer)
             .connect_http(rpc_url.parse()?);
-        let contract = ChainSignatures::new(contract_addr, provider.clone());
+        let contract = ChainSignatures::new(self.contract_addr, provider.clone());
 
         // Prepare the sign request
         let sign_request = ChainSignatures::SignRequest {
@@ -1073,7 +1065,7 @@ impl EthSignAction<'_> {
         };
 
         tracing::info!(
-            contract = format!("0x{}", self.contract_addr),
+            contract = %self.contract_addr,
             from = format!("0x{:x}", signer_address),
             payload = format!("0x{}", hex::encode(payload_hash)),
             path,
@@ -1149,7 +1141,7 @@ impl EthSignAction<'_> {
 
             // filter for SignatureResponded events
             let filter = alloy::rpc::types::Filter::new()
-                .address(contract_addr)
+                .address(self.contract_addr)
                 .from_block(current_block.saturating_sub(10)) // Look back 10 blocks
                 .to_block(current_block)
                 .event_signature(alloy::primitives::keccak256(

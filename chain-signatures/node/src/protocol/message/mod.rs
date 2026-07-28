@@ -21,7 +21,7 @@ pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
-pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
+pub use sub::Subscriber;
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -31,7 +31,9 @@ pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::MAX_FILTER_SIZE;
-use crate::protocol::message::sub::{SubscribeId, SubscribeRequest, SubscribeResponse};
+use crate::protocol::message::sub::{
+    SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,
+};
 use crate::protocol::message::types::Round;
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
@@ -176,127 +178,95 @@ impl MessageChannel {
         Some(subscription)
     }
 
-    pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
-        let Some(subscription) = self.subscribe(SubscribeId::Triple(id)).await else {
-            tracing::warn!(id, "failed to subscribe for triple");
+    /// Subscribe, returning an already-closed receiver on failure so the
+    /// caller's recv loop ends instead of panicking.
+    async fn subscribe_or_closed<T: SubscriptionMessage>(
+        &self,
+        id: SubscribeId,
+        what: &'static str,
+    ) -> mpsc::Receiver<T> {
+        let Some(subscription) = self.subscribe(id).await else {
+            tracing::warn!(what, ?id, "failed to subscribe");
             return mpsc::channel(1).1;
         };
-        match subscription {
-            SubscribeResponse::Triple(rx) => rx,
-            _ => {
-                tracing::warn!(id, "received unexpected subscribe response for triple");
-                mpsc::channel(1).1
-            }
+        T::receiver(subscription).unwrap_or_else(|| {
+            tracing::warn!(what, ?id, "received unexpected subscribe response");
+            mpsc::channel(1).1
+        })
+    }
+
+    /// Like `subscribe_or_closed`, but panics: these subscriptions are
+    /// required for the node to make progress.
+    async fn subscribe_required<T: SubscriptionMessage>(
+        &self,
+        id: SubscribeId,
+        what: &'static str,
+    ) -> mpsc::Receiver<T> {
+        let Some(subscription) = self.subscribe(id).await else {
+            panic!("failed to subscribe for {what} {id:?}");
+        };
+        T::receiver(subscription)
+            .unwrap_or_else(|| panic!("received unexpected subscribe response for {what} {id:?}"))
+    }
+
+    async fn send_unsubscribe(&self, id: SubscribeId, what: &'static str) {
+        if self
+            .subscribe
+            .send(SubscribeRequest::unsubscribe(id))
+            .await
+            .is_err()
+        {
+            tracing::warn!(what, ?id, "unable to send unsubscribe request");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         }
+    }
+
+    pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
+        self.subscribe_or_closed(SubscribeId::Triple(id), "triple")
+            .await
     }
 
     pub async fn unsubscribe_triple(&self, id: TripleId) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Triple(id)))
-            .await
-            .is_err()
-        {
-            tracing::warn!(id, "unable to send unsubscribe request for triple message");
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(SubscribeId::Triple(id), "triple")
+            .await;
     }
 
-    /// Subscribe to the triple posit. It returns a dropped channel in the case that something
-    /// in the MessageInbox has gone wrong and unexpected, leading to the handling loop of whoever
-    /// has a handle to this newly created channel to just abort.
     pub async fn subscribe_triple_posit(
         &self,
     ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::TriplePosit).await else {
-            tracing::warn!("failed to subscribe for triple posits");
-            return mpsc::channel(1).1;
-        };
-        match subscription {
-            SubscribeResponse::TriplePosit(rx) => rx,
-            _ => {
-                tracing::warn!("received unexpected subscribe response for triple posits");
-                mpsc::channel(1).1
-            }
-        }
+        self.subscribe_or_closed(SubscribeId::TriplePosit, "triple posit")
+            .await
     }
 
     pub async fn unsubscribe_triple_posit(self) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::TriplePosit))
-            .await
-            .is_err()
-        {
-            tracing::warn!("unable to send unsubscribe request for triple posits");
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(SubscribeId::TriplePosit, "triple posit")
+            .await;
     }
 
     pub async fn subscribe_presignature(
         &self,
         id: PresignatureId,
     ) -> mpsc::Receiver<PresignatureMessage> {
-        let Some(subscription) = self.subscribe(SubscribeId::Presignature(id)).await else {
-            tracing::warn!(id, "failed to subscribe for presignature");
-            return mpsc::channel(1).1;
-        };
-        match subscription {
-            SubscribeResponse::Presignature(rx) => rx,
-            _ => {
-                tracing::warn!(
-                    id,
-                    "received unexpected subscribe response for presignature"
-                );
-                mpsc::channel(1).1
-            }
-        }
+        self.subscribe_or_closed(SubscribeId::Presignature(id), "presignature")
+            .await
     }
 
     pub async fn unsubscribe_presignature(&self, id: PresignatureId) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Presignature(id)))
-            .await
-            .is_err()
-        {
-            tracing::warn!("unable to send unsubscribe request for presignature");
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(SubscribeId::Presignature(id), "presignature")
+            .await;
     }
 
     pub async fn subscribe_presignature_posit(
         &self,
     ) -> mpsc::Receiver<(FullPresignatureId, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::PresignaturePosit).await else {
-            tracing::warn!("failed to subscribe for presignature posits");
-            return mpsc::channel(1).1;
-        };
-        match subscription {
-            SubscribeResponse::PresignaturePosit(rx) => rx,
-            _ => {
-                tracing::warn!("received unexpected subscribe response for presignature posits");
-                mpsc::channel(1).1
-            }
-        }
+        self.subscribe_or_closed(SubscribeId::PresignaturePosit, "presignature posit")
+            .await
     }
 
     pub async fn unsubscribe_presignature_posit(self) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(
-                SubscribeId::PresignaturePosit,
-            ))
-            .await
-            .is_err()
-        {
-            tracing::warn!("unable to send unsubscribe request for presignature posits");
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(SubscribeId::PresignaturePosit, "presignature posit")
+            .await;
     }
 
     pub async fn subscribe_signature(
@@ -304,113 +274,45 @@ impl MessageChannel {
         sign_id: SignId,
         presignature_id: PresignatureId,
     ) -> mpsc::Receiver<SignatureMessage> {
-        let Some(subscription) = self
-            .subscribe(SubscribeId::Signature(sign_id, presignature_id))
-            .await
-        else {
-            tracing::warn!(
-                ?sign_id,
-                ?presignature_id,
-                "failed to subscribe for signature"
-            );
-            return mpsc::channel(1).1;
-        };
-        match subscription {
-            SubscribeResponse::Signature(rx) => rx,
-            _ => {
-                tracing::warn!(
-                    ?sign_id,
-                    ?presignature_id,
-                    "received unexpected subscribe response for signature"
-                );
-                mpsc::channel(1).1
-            }
-        }
+        self.subscribe_or_closed(
+            SubscribeId::Signature(sign_id, presignature_id),
+            "signature",
+        )
+        .await
     }
 
     pub async fn unsubscribe_signature(&self, sign_id: SignId, presignature_id: PresignatureId) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Signature(
-                sign_id,
-                presignature_id,
-            )))
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                ?sign_id,
-                ?presignature_id,
-                "unable to send unsubscribe request for signature"
-            );
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(
+            SubscribeId::Signature(sign_id, presignature_id),
+            "signature",
+        )
+        .await;
     }
 
     pub async fn subscribe_signature_posit(
         &self,
     ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::SignaturePosit).await else {
-            tracing::warn!("failed to subscribe for signature posit");
-            return mpsc::channel(1).1;
-        };
-
-        match subscription {
-            SubscribeResponse::SignaturePosit(rx) => rx,
-            _ => {
-                tracing::warn!("received unexpected subscribe response for signature posit");
-                mpsc::channel(1).1
-            }
-        }
+        self.subscribe_or_closed(SubscribeId::SignaturePosit, "signature posit")
+            .await
     }
 
     pub async fn unsubscribe_signature_posit(self) {
-        if self
-            .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::SignaturePosit))
-            .await
-            .is_err()
-        {
-            tracing::warn!("unable to send unsubscribe request for signature posit");
-        } else {
-            set_channel_capacity_tx("subscribe", &self.subscribe);
-        };
+        self.send_unsubscribe(SubscribeId::SignaturePosit, "signature posit")
+            .await;
     }
 
     pub async fn subscribe_generation(&self) -> mpsc::Receiver<GeneratingMessage> {
-        let Some(subscription) = self.subscribe(SubscribeId::Generating).await else {
-            panic!("failed to subscribe for generation");
-        };
-        match subscription {
-            SubscribeResponse::Generating(rx) => rx,
-            _ => {
-                panic!("received unexpected subscribe response for generation");
-            }
-        }
+        self.subscribe_required(SubscribeId::Generating, "generation")
+            .await
     }
 
     pub async fn subscribe_resharing(&self) -> mpsc::Receiver<ResharingMessage> {
-        let Some(subscription) = self.subscribe(SubscribeId::Resharing).await else {
-            panic!("failed to subscribe for resharing");
-        };
-        match subscription {
-            SubscribeResponse::Resharing(rx) => rx,
-            _ => {
-                panic!("received unexpected subscribe response for resharing");
-            }
-        }
+        self.subscribe_required(SubscribeId::Resharing, "resharing")
+            .await
     }
 
     pub async fn subscribe_ready(&self) -> mpsc::Receiver<ReadyMessage> {
-        let Some(subscription) = self.subscribe(SubscribeId::Ready).await else {
-            panic!("failed to subscribe for resharing readiness");
-        };
-        match subscription {
-            SubscribeResponse::Ready(rx) => rx,
-            _ => {
-                panic!("received unexpected subscribe response for resharing readiness");
-            }
-        }
+        self.subscribe_required(SubscribeId::Ready, "resharing readiness")
+            .await
     }
 }

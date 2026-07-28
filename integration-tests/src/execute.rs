@@ -1,6 +1,6 @@
 use anyhow::Context;
 use async_process::Child;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, ChainConfig as _};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;

@@ -11,6 +11,7 @@ borsh.workspace = true
 k256.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+signet-primitives.workspace = true
 near-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,7 +29,7 @@ digest = "0.10.7"
 
 # near dependencies
 near-crypto.workspace = true
-near-workspaces = "0.16.0"
+near-workspaces = "0.21.0"
 
 [features]
 default = []

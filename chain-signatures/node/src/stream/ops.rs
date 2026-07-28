@@ -7,7 +7,8 @@ use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignCommand, SignId, SignKind, Signature, SignatureRespondedEvent,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
 };
 
 pub(crate) async fn process_sign_request(
@@ -20,13 +21,7 @@ pub(crate) async fn process_sign_request(
 
     ctx.backlog.insert(sign_request.clone()).await;
 
-    if ctx.effectively_caught_up() {
-        let chain = sign_request.chain;
-        ctx.sign_tx
-            .send(SignCommand::Request(sign_request))
-            .await
-            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
-    }
+    ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
     Ok(())
 }
@@ -107,23 +102,19 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    let responded_signature = respond_event.signature;
+    verify_entry_signature(root_pk, &entry, &respond_event.signature, sign_id)?;
 
-    verify_entry_signature(root_pk, &entry, &responded_signature, sign_id)?;
-
-    let event = match &entry.request.kind {
+    match &entry.request.kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             ctx.backlog.remove(source_chain, &sign_id).await;
-            if ctx.effectively_caught_up() {
-                ctx.sign_tx
-                    .send(SignCommand::Completion(sign_id))
-                    .await
-                    .context("failed to send completion for respond event")?;
-            }
-            return Ok(());
+            ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+            Ok(())
         }
-        SignKind::SignBidirectional(event) => event,
+        SignKind::SignBidirectional(event) => {
+            advance_bidirectional_to_execution(&entry, event, respond_event, sign_id, root_pk, ctx)
+                .await
+        }
         SignKind::RespondBidirectional(_) => {
             anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
         }
@@ -132,7 +123,20 @@ pub(crate) async fn process_respond_event(
                 "unexpected sign type: Checkpoint should not be generated from a sign event"
             );
         }
-    };
+    }
+}
+
+/// Advance a bidirectional sign request from "signature responded" to
+/// "pending execution".
+async fn advance_bidirectional_to_execution(
+    entry: &crate::backlog::BacklogEntry,
+    event: &SignBidirectionalEvent,
+    respond_event: SignatureRespondedEvent,
+    sign_id: SignId,
+    root_pk: mpc_primitives::PublicKey,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let source_chain = respond_event.chain;
 
     if entry.execution_tx().is_some() {
         tracing::info!(
@@ -153,7 +157,7 @@ pub(crate) async fn process_respond_event(
     let epsilon = event.epsilon()?;
     let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
 
-    let mpc_sig = responded_signature;
+    let mpc_sig = respond_event.signature;
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
@@ -239,16 +243,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     }
 
-    if ctx.effectively_caught_up() {
-        ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to send completion for respond bidirectional for sign id {sign_id:?}"
-                )
-            })?;
-    }
+    ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
 }
@@ -341,7 +336,7 @@ pub async fn process_execution_confirmed(
     // Execution confirmations are observed on the target chain, but the follow-up
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
-    if ctx.effectively_caught_up() || chain != target_chain {
+    if ctx.caught_up || chain != target_chain {
         ctx.sign_tx
             .send(SignCommand::Request(sign_request))
             .await
@@ -361,7 +356,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 
     // should not create checkpoint for blocks that are not caught up, as that would
     // try to create signatures for checkpoints where we are not live.
-    if !ctx.effectively_caught_up() {
+    if !ctx.caught_up {
         return Ok(());
     }
     let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {

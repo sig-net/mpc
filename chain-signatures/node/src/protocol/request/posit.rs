@@ -20,7 +20,6 @@ impl PositPhase {
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
-        let round = state.round;
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
@@ -53,11 +52,11 @@ impl PositPhase {
                                 id: PositProtocolId::Signature(
                                     sign_id,
                                     *presignature_id,
-                                    *peer_round,
+                                    state.round,
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::InvalidRequest,
+                                    PositRejectReason::StaleRound,
                                 ),
                             },
                         )
@@ -158,14 +157,9 @@ impl PositPhase {
             Ok(Ok(id)) => id,
             Ok(Err(phase)) => return Err(phase),
             Err(_) => {
-                tracing::warn!(
-                    ?sign_id,
-                    ?round,
-                    ?proposer,
-                    me=?ctx.governance.me,
-                    "deliberator timeout waiting for Propose, reorganizing"
-                );
-                return Err(state.reorganize());
+                return Err(state.reorganize(&format!(
+                    "deliberator timeout waiting for Propose from {proposer:?}"
+                )));
             }
         };
 
@@ -281,12 +275,7 @@ impl PositPhase {
                             }
 
                             if participants.len() < ctx.governance.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    "not enough start participants"
-                                );
-                                return state.reorganize();
+                                return state.reorganize("not enough Start participants");
                             }
 
                             tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
@@ -298,27 +287,26 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
-                            let num_ongoing = counter.num_peers_with_ongoing_generation();
-                            if ctx.governance.participants.len().saturating_sub(num_ongoing) < ctx.governance.threshold {
-                                state.pause_proposing_until = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
-                                tracing::info!(
-                                    ?sign_id,
-                                    ?round,
-                                    resume=?state.pause_proposing_until,
-                                    "pausing proposer: peers already generating this signature"
+                            let peers_already_generating = counter.num_peers_already_generating();
+                            let too_few_available = ctx
+                                .governance
+                                .participants
+                                .len()
+                                .saturating_sub(peers_already_generating)
+                                < ctx.governance.threshold;
+                            let reason = if too_few_available {
+                                state.pause_proposing_until = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(ctx.cfg.signature.generation_timeout),
                                 );
+                                "peers already generating this signature"
                             } else {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    ?from,
-                                    "received enough REJECTs, reorganizing"
-                                );
-                            }
+                                "received enough rejects"
+                            };
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
-                            return state.reorganize();
+                            return state.reorganize(reason);
                         }
 
                         // Starting as soon as we have enough accepts leaves
@@ -344,22 +332,20 @@ impl PositPhase {
                     }
                 }
                 _ = &mut posit_deadline => {
-                    if is_proposer {
-                        tracing::warn!(
-                            ?sign_id,
-                            accepts = counter.accepts.len(),
-                            threshold = ctx.governance.threshold,
-                            ?round,
-                            "proposer posit deadline reached, expiring round"
-                        );
-                        if let Some(_reservation) = presignature {
+                    let reason = if is_proposer {
+                        if presignature.is_some() {
                             tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
                         }
+                        format!(
+                            "proposer posit deadline reached ({} accepts, threshold {})",
+                            counter.accepts.len(),
+                            ctx.governance.threshold
+                        )
                     } else {
-                        tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
-                    }
+                        format!("deliberator posit timeout waiting for Start from {proposer:?}")
+                    };
 
-                    return state.reorganize();
+                    return state.reorganize(&reason);
                 }
                 _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
                     accept_deadline_reached = true;
@@ -414,5 +400,116 @@ impl PositPhase {
                 .await;
         }
         participants
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::message::Message;
+    use crate::protocol::presignature::Presignature;
+    use deadpool_redis::Runtime;
+
+    /// A deliberator that rejects a Propose from a *behind* proposer must stamp
+    /// the reject with its own (higher) round, not echo the sender's round.
+    /// Otherwise the behind proposer never learns it is behind and climbs one
+    /// round per attempt instead of catching up in a single `bump_round`.
+    #[tokio::test]
+    async fn reject_of_older_round_carries_rejectors_round() {
+        let me = Participant::from(1);
+        let proposer = Participant::from(0);
+
+        let account_id: near_account_id::AccountId = "p-1".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&proposer, ParticipantInfo::new(0));
+        participants.insert(&me, ParticipantInfo::new(1));
+
+        let governance = GovernanceInfo {
+            me,
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [proposer, me].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        // The reject path never touches presignatures, so the lazy pool is
+        // never actually connected.
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, mut outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+
+        let mut ctx = SignTask {
+            governance,
+            sign_id: SignId::new([0u8; 32]),
+            presignatures,
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog: Backlog::new(),
+            cfg: ProtocolConfig::default(),
+            is_proposer: Arc::new(AtomicBool::new(false)),
+            limiter: SignLimiter::new(1),
+            node_account_id: account_id,
+        };
+
+        let request = IndexedSignRequest::new(
+            ctx.sign_id,
+            mpc_primitives::SignArgs {
+                entropy: [0u8; 32],
+                epsilon: k256::Scalar::from(1u64),
+                payload: k256::Scalar::from(2u64),
+                path: "test".to_string(),
+                key_version: 0,
+            },
+            Chain::Ethereum,
+            0,
+            SignKind::Sign,
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let mut state = SignState::new(request, mesh_rx);
+
+        // We are ahead of the proposer: our round is 5, the incoming Propose is
+        // for round 2. Give the round a short budget so `wait_for_propose`
+        // times out and returns shortly after emitting the reject.
+        state.round = 5;
+        state.budget.reset(Duration::from_millis(200));
+
+        let posit_queue = SignPositWorkQueue::new();
+        posit_queue.push(SignTaskMessage::PositMessage {
+            presignature_id: 42,
+            round: 2,
+            from: proposer,
+            action: PositAction::Propose,
+        });
+
+        // Behind-proposer Propose is rejected; the call then times out waiting
+        // for a valid one and reorganizes.
+        let phase =
+            PositPhase::wait_for_propose(&mut ctx, &mut state, &posit_queue, proposer).await;
+        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+
+        let sent = outbox
+            .intercept_outgoing_messages()
+            .try_recv()
+            .expect("a reject should have been sent to the behind proposer");
+        assert_eq!(sent.from, me);
+        assert_eq!(sent.to, proposer);
+
+        let Message::Posit(posit) = sent.message else {
+            panic!("expected a posit message");
+        };
+        let PositProtocolId::Signature(_, _, reject_round) = posit.id else {
+            panic!("expected a signature posit id");
+        };
+        // The reject carries our round (5), not the sender's echoed round (2).
+        assert_eq!(reject_round, 5);
+        assert!(matches!(
+            posit.action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
     }
 }

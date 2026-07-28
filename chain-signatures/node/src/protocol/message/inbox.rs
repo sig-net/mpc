@@ -196,16 +196,18 @@ impl MessageInbox {
             .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
+    /// Decrypt and dedup pending batches, returning each alongside its
+    /// authenticated sender.
     fn decrypt(
         &mut self,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-    ) -> Vec<Message> {
+    ) -> Vec<(Participant, Vec<Message>)> {
         let mut retry = Vec::new();
 
-        let mut messages = Vec::new();
+        let mut batches = Vec::new();
         while let Some((encrypted, timestamp)) = self.pending_decrypt.pop_front() {
-            let decrypted: Result<Vec<Message>, _> =
+            let decrypted: Result<(Participant, Vec<Message>), _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
                     if self.idempotent.put(sig.clone(), ()).is_some() {
                         Err(MessageError::Idempotent)
@@ -215,7 +217,7 @@ impl MessageInbox {
                 });
 
             match decrypted {
-                Ok(decrypted) => messages.extend(decrypted),
+                Ok(batch) => batches.push(batch),
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
                         retry.push((encrypted, timestamp));
@@ -228,6 +230,36 @@ impl MessageInbox {
         }
 
         self.pending_decrypt.extend(retry);
+        batches
+    }
+
+    /// Drop messages whose claimed sender differs from the authenticated
+    /// envelope sender, and whole batches we sent to ourselves.
+    fn verify_senders(
+        batches: Vec<(Participant, Vec<Message>)>,
+        me: Option<Participant>,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        for (authenticated_from, batch) in batches {
+            // Only our key signs as us: a local send bug or a peer
+            // echoing our own traffic back.
+            if Some(authenticated_from) == me {
+                tracing::error!("inbox: dropping a batch we sent to ourselves");
+                continue;
+            }
+            messages.extend(batch.into_iter().filter(|msg| match msg.claimed_sender() {
+                Some(claimed_from) if claimed_from != authenticated_from => {
+                    tracing::error!(
+                        ?authenticated_from,
+                        ?claimed_from,
+                        typename = msg.typename(),
+                        "inbox: dropping message with spoofed sender"
+                    );
+                    false
+                }
+                _ => true,
+            }));
+        }
         messages
     }
 
@@ -387,11 +419,13 @@ impl MessageInbox {
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
+                    let me = contract.me().await;
                     let cipher_sk = config.local.network.cipher_sk;
 
                     self.expire(expiration);
                     self.pending_decrypt.push_back((encrypted, Instant::now()));
-                    let messages = self.decrypt(&cipher_sk, &participants);
+                    let batches = self.decrypt(&cipher_sk, &participants);
+                    let messages = Self::verify_senders(batches, me);
 
                     // update filter before fanning out messages.
                     self.filter.try_update();
@@ -421,8 +455,18 @@ mod tests {
     use mpc_keys::hpke;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn test_inbox() {
+    struct InboxTestSetup {
+        epoch: u64,
+        from: Participant,
+        sign_sk: near_crypto::SecretKey,
+        cipher_pk: hpke::PublicKey,
+        channel: MessageChannel,
+        inbox: tokio::task::JoinHandle<()>,
+        _config_tx: watch::Sender<Config>,
+        _contract_tx: watch::Sender<Option<crate::protocol::ProtocolState>>,
+    }
+
+    fn inbox_setup() -> InboxTestSetup {
         let epoch = 299;
         let from = Participant::from(0);
         let (cipher_sk, cipher_pk) = hpke::generate();
@@ -462,136 +506,240 @@ mod tests {
         let (inbox, _outbox, channel) = MessageChannel::new();
         let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
-        // Case 1:
-        // Check that the inbox received our messages correctly:
-        {
-            let batch = vec![
-                Message::Triple(TripleMessage {
-                    id: 1,
-                    epoch,
-                    from,
-                    data: vec![128u8; 1024],
-                    timestamp: 1,
-                }),
-                Message::Triple(crate::protocol::message::TripleMessage {
-                    id: 2,
-                    epoch,
-                    from,
-                    data: vec![255u8; 2048],
-                    timestamp: 2,
-                }),
-                Message::Triple(TripleMessage {
-                    id: 3,
-                    epoch,
-                    from,
-                    data: vec![101u8; 1337],
-                    timestamp: 3,
-                }),
-            ];
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.send_inbox(encrypted).await;
-
-            let mut recv1 = channel.subscribe_triple(1).await;
-            let mut recv2 = channel.subscribe_triple(2).await;
-            let mut recv3 = channel.subscribe_triple(3).await;
-
-            let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
-                (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
-                _ => panic!("failed to join on inbox"),
-            };
-
-            assert_eq!(m1.id, 1);
-            assert_eq!(m2.id, 2);
-            assert_eq!(m3.id, 3);
-
-            channel.unsubscribe_triple(1).await;
-            channel.unsubscribe_triple(2).await;
-            channel.unsubscribe_triple(3).await;
+        InboxTestSetup {
+            epoch,
+            from,
+            sign_sk,
+            cipher_pk,
+            channel,
+            inbox,
+            _config_tx,
+            _contract_tx,
         }
+    }
 
-        // Case 2:
-        // Check that inbox filters work correctly, and that the first message did not make it through:
-        let filter_id = 2;
-        let batch = vec![
+    fn triple_batch(epoch: u64, from: Participant) -> Vec<Message> {
+        vec![
             Message::Triple(TripleMessage {
                 id: 1,
                 epoch,
                 from,
-                data: vec![129u8; 1024],
+                data: vec![128u8; 1024],
                 timestamp: 1,
             }),
             Message::Triple(TripleMessage {
-                id: filter_id,
+                id: 2,
                 epoch,
                 from,
-                data: vec![229u8; 2048],
+                data: vec![255u8; 2048],
                 timestamp: 2,
             }),
             Message::Triple(TripleMessage {
                 id: 3,
                 epoch,
                 from,
-                data: vec![121u8; 1337],
+                data: vec![101u8; 1337],
                 timestamp: 3,
             }),
+        ]
+    }
+
+    /// Check that the inbox receives our messages correctly.
+    #[tokio::test]
+    async fn test_inbox_receives_messages() {
+        let setup = inbox_setup();
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
+
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(2).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
+
+        let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
+            (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
+            _ => panic!("failed to join on inbox"),
+        };
+
+        assert_eq!(m1.id, 1);
+        assert_eq!(m2.id, 2);
+        assert_eq!(m3.id, 3);
+
+        setup.inbox.abort();
+    }
+
+    /// Check that inbox filters work correctly, and that the filtered message
+    /// does not make it through.
+    #[tokio::test]
+    async fn test_inbox_filters_messages() {
+        let setup = inbox_setup();
+        let filter_id = 2;
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(filter_id).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
+
+        setup.channel.filter_triple(filter_id).await;
+        setup.channel.send_inbox(encrypted).await;
+
+        let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
+            (Some(m1), Some(m3)) => (m1, m3),
+            _ => panic!("failed to join on inbox"),
+        };
+
+        assert_eq!(m1.id, 1);
+        assert_eq!(m3.id, 3);
+
+        // Expect to timeout here since the message gets filtered out.
+        let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+        assert!(result.is_err());
+
+        setup.inbox.abort();
+    }
+
+    /// Check idempotency. The same set of messages encrypted and signed again
+    /// should produce the same signature. Thus sending the same encrypted
+    /// message should be idempotent and no new messages should be received by
+    /// the subscribers.
+    #[tokio::test]
+    async fn test_inbox_idempotency() {
+        let setup = inbox_setup();
+        let batch = triple_batch(setup.epoch, setup.from);
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
+
+        let mut recv1 = setup.channel.subscribe_triple(1).await;
+        let mut recv2 = setup.channel.subscribe_triple(2).await;
+        let mut recv3 = setup.channel.subscribe_triple(3).await;
+
+        match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
+            (Some(_), Some(_), Some(_)) => {}
+            _ => panic!("failed to join on inbox"),
+        }
+
+        setup.channel.unsubscribe_triple(1).await;
+        setup.channel.unsubscribe_triple(2).await;
+        setup.channel.unsubscribe_triple(3).await;
+
+        // Encrypting the same batch again produces the same signature, so the
+        // inbox should drop it as a duplicate.
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        setup.channel.send_inbox(encrypted).await;
+        let mut recv1 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(1),
+        )
+        .await
+        .unwrap();
+        let mut recv2 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(2),
+        )
+        .await
+        .unwrap();
+        let mut recv3 = tokio::time::timeout(
+            Duration::from_millis(300),
+            setup.channel.subscribe_triple(3),
+        )
+        .await
+        .unwrap();
+
+        let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
+        let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
+        let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
+
+        assert!(result1.is_err());
+        assert!(result2.is_err());
+        assert!(result3.is_err());
+
+        setup.inbox.abort();
+    }
+
+    /// Forged inner senders and self-sent batches are dropped.
+    #[test]
+    fn test_inbox_drops_spoofed_and_self_sent_messages() {
+        let me = Participant::from(0);
+        let peer = Participant::from(1);
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let my_sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let peer_sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt1");
+        let mut participants = Participants::default();
+        for (p, sign_sk) in [(me, &my_sign_sk), (peer, &peer_sign_sk)] {
+            participants.insert(
+                &p,
+                ParticipantInfo {
+                    sign_pk: sign_sk.public_key(),
+                    cipher_pk: cipher_pk.clone(),
+                    id: p.into(),
+                    url: "http://localhost:3030".to_string(),
+                    account_id: "test.near".parse().unwrap(),
+                },
+            );
+        }
+        let participants = ParticipantMap::One(participants);
+        let (mut inbox, _outbox, _channel) = MessageChannel::new();
+
+        // Envelope signed by `peer`, inner messages claiming `me`: forged.
+        let spoofed = triple_batch(0, me);
+        let encrypted = SignedMessage::encrypt(&spoofed, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
+
+        // Mixed batch: only the forged message is dropped.
+        let mixed = vec![
+            Message::Triple(TripleMessage {
+                id: 4,
+                epoch: 0,
+                from: me, // forged: envelope is signed by `peer`
+                data: vec![1u8; 8],
+                timestamp: 1,
+            }),
+            Message::Triple(TripleMessage {
+                id: 5,
+                epoch: 0,
+                from: peer,
+                data: vec![2u8; 8],
+                timestamp: 2,
+            }),
+            Message::Unknown(HashMap::new()),
         ];
-        {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let encrypted = SignedMessage::encrypt(&mixed, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let survivors = MessageInbox::verify_senders(batches, Some(me));
+        assert_eq!(survivors.len(), 2);
+        assert!(matches!(&survivors[0], Message::Triple(msg) if msg.id == 5));
+        assert!(matches!(&survivors[1], Message::Unknown(_)));
 
-            let mut recv1 = channel.subscribe_triple(1).await;
-            let mut recv2 = channel.subscribe_triple(filter_id).await;
-            let mut recv3 = channel.subscribe_triple(3).await;
+        // Self-signed batch: dropped whole.
+        let self_sent = triple_batch(1, me);
+        let encrypted = SignedMessage::encrypt(&self_sent, me, &my_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
-            channel.filter_triple(filter_id).await;
-            channel.send_inbox(encrypted).await;
+        // Wrong signing key: rejected at signature verification already.
+        let forged_envelope = triple_batch(3, peer);
+        let encrypted =
+            SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        assert!(inbox.decrypt(&cipher_sk, &participants).is_empty());
 
-            let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
-                (Some(m1), Some(m3)) => (m1, m3),
-                _ => panic!("failed to join on inbox"),
-            };
-
-            assert_eq!(m1.id, 1);
-            assert_eq!(m3.id, 3);
-
-            // Expect to timeout here since the message gets filtered out.
-            let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-            assert!(result.is_err());
-
-            channel.unsubscribe_triple(1).await;
-            channel.unsubscribe_triple(2).await;
-            channel.unsubscribe_triple(3).await;
-        }
-
-        // Case 3:
-        // Check idempotentcy. The same set of messages (from case 2) encrypted and signed again should produce
-        // the same signature. Thus sending the same encrypted message should be idempotent and no new messages
-        // should be received by the subscribers.
-        {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.send_inbox(encrypted).await;
-            let mut recv1 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
-                    .await
-                    .unwrap();
-            let mut recv2 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(2))
-                    .await
-                    .unwrap();
-            let mut recv3 =
-                tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(3))
-                    .await
-                    .unwrap();
-
-            let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
-            let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-            let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
-
-            assert!(result1.is_err());
-            assert!(result2.is_err());
-            assert!(result3.is_err());
-        }
-
-        inbox.abort();
+        // Control: consistent sender passes through.
+        let valid = triple_batch(2, peer);
+        let encrypted = SignedMessage::encrypt(&valid, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let batches = inbox.decrypt(&cipher_sk, &participants);
+        assert_eq!(MessageInbox::verify_senders(batches, Some(me)).len(), 3);
     }
 
     #[tokio::test]

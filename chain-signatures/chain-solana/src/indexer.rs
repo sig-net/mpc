@@ -1,7 +1,7 @@
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -13,13 +13,16 @@ use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::stream::StreamExt;
+use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::hashing::{compute_request_id, hash_payload},
-    ChainIndexer, ChainStream, ChainTelemetry, LiveStreamStatus, StateManager,
+    utils::{
+        hashing::{compute_request_id, hash_payload},
+        task::AbortOnDrop,
+    },
+    ChainIndexer, ChainTelemetry, StateManager,
 };
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
@@ -42,8 +45,9 @@ use solana_transaction_status::{
     UiParsedInstruction,
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
-use crate::client::{SolanaCatchupBlock, MAX_CONCURRENT_CHUNK_SIZE};
+use crate::client::SolanaCatchupBlock;
 use crate::utils::current_unix_timestamp;
 use crate::{SolConfig, SolanaClient};
 
@@ -57,61 +61,19 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-/// Solana stream that implements the new ChainStream abstraction
-pub struct SolanaStream<S: StateManager, T: ChainTelemetry> {
-    rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<SolanaStreamStartState<S, T>>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
-    pub program_id: Pubkey,
-    pub client: SolanaClient,
-    pub events_tx: mpsc::Sender<ChainEvent>,
-    pub state_manager: S,
-    pub telemetry: T,
-    pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
-    pub live_task: Option<tokio::task::JoinHandle<()>>,
-}
-
-struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
-
-impl AbortOnDrop {
-    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self(Some(handle))
-    }
-
-    fn into_handle(mut self) -> tokio::task::JoinHandle<()> {
-        self.0.take().expect("join handle already taken")
-    }
-}
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
-            handle.abort();
-        }
-    }
-}
-
-struct SolanaStreamStartState<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
-    rpc_http_url: String,
-    rpc_ws_url: String,
+    client: SolanaClient,
     state_manager: S,
     telemetry: T,
-    tx: mpsc::Sender<ChainEvent>,
 }
 
-impl<S: StateManager, T: ChainTelemetry> Drop for SolanaStream<S, T> {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
+type CatchupBlockItem = (u64, SolanaCatchupBlock);
 
-impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
+impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
+    /// Delay between retries of transient RPC failures
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+
     pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
             format!(
@@ -120,201 +82,237 @@ impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
             )
         })?;
 
-        let (tx, rx) = chain_event_channel();
-
-        Ok(SolanaStream {
-            rx: Some(rx),
-            start_state: Some(SolanaStreamStartState {
-                program_id,
-                rpc_http_url: sol.rpc_http_url.clone(),
-                rpc_ws_url: sol.rpc_ws_url.clone(),
-                state_manager,
-                telemetry,
-                tx,
-            }),
-            tasks: Vec::new(),
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager, T: ChainTelemetry> ChainStream for SolanaStream<S, T> {
-    type Indexer = SolanaIndexer<S, T>;
-
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        let Some(start_state) = self.start_state.take() else {
-            anyhow::bail!("solana stream already started");
-        };
-
         let client = SolanaClient::for_indexer(
-            start_state.rpc_http_url.clone(),
-            start_state.rpc_ws_url.clone(),
-            start_state.program_id,
+            sol.rpc_http_url.clone(),
+            sol.rpc_ws_url.clone(),
+            program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
 
-        let indexer = SolanaIndexer {
-            program_id: start_state.program_id,
+        Ok(Self {
+            program_id,
             client,
-            events_tx: start_state.tx.clone(),
-            state_manager: start_state.state_manager,
-            telemetry: start_state.telemetry,
-            live_rx: None,
-            live_task: None,
+            state_manager,
+            telemetry,
+        })
+    }
+
+    /// Catchup items in `[processed + 1, anchor)` fetched in chunks.
+    /// `fetch_slots` failures are propagated so the supervisor can restart.
+    async fn catchup_blocks(
+        &self,
+        anchor_height: u64,
+    ) -> anyhow::Result<
+        Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
+    > {
+        let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
+            return Ok(Box::pin(stream::empty()));
         };
 
-        Ok(indexer)
+        let pages =
+            Self::paginate_slots(self.client.clone(), self.program_id, start_slot, end_slot);
+        Ok(Self::fetch_blocks_for_pages(self.client.clone(), pages))
     }
 
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        match self.rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
-    }
-}
-
-#[async_trait]
-impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
-    const CHAIN: Chain = Chain::Solana;
-    type Block = (u64, SolanaCatchupBlock);
-    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        if let Some(prev) = self.live_task.take() {
-            tracing::info!("aborting previous solana live subscription task");
-            prev.abort();
-        }
-        self.live_rx = None;
-
-        let (live_tx, live_rx) = chain_event_channel();
-        let (anchor_tx, anchor_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(subscribe_and_buffer_live_events(
-            self.program_id,
-            self.client.clone(),
-            live_tx,
-            anchor_tx,
-            self.telemetry.clone(),
-        ));
-
-        // From here until anchor_rx resolves, livestream() may be cancelled by
-        // handle_reconnect's select!. If that happens, abort the spawned task.
-        let guard = AbortOnDrop::new(handle);
-
-        let anchor_height = anchor_rx.await?;
-
-        self.live_rx = Some(live_rx);
-        self.live_task = Some(guard.into_handle());
-
-        Ok(Some(anchor_height))
-    }
-
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        // Get the last persisted processed block height from backlog
-        // TODO: https://github.com/sig-net/mpc/issues/777
+    /// Range of slots that still need to be caught up, inclusive on both ends.
+    /// `None` means we're already caught up.
+    // TODO: https://github.com/sig-net/mpc/issues/777
+    async fn catchup_range(&self, anchor_height: u64) -> Option<(u64, u64)> {
         let start_slot = self
             .state_manager
             .get_processed_block(Chain::Solana)
             .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
-        let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
-        if start_slot > end_slot {
-            return Box::pin(futures_util::stream::empty());
+
+        let end_slot = anchor_height.saturating_sub(1);
+        (start_slot <= end_slot).then_some((start_slot, end_slot))
+    }
+
+    /// Paginate `getSignaturesForAddress` backwards from the anchor, yielding
+    /// pages of slots within `[start_slot, end_slot]`. Stops once the cursor
+    /// walks past `start_slot` or the RPC runs dry.
+    fn paginate_slots(
+        client: SolanaClient,
+        program_id: Pubkey,
+        start_slot: u64,
+        end_slot: u64,
+    ) -> impl Stream<Item = anyhow::Result<BTreeSet<u64>>> {
+        struct PageState {
+            client: SolanaClient,
+            program_id: Pubkey,
+            start_slot: u64,
+            end_slot: u64,
+            cursor: Option<Signature>,
+            finished: bool,
         }
 
-        // TODO: should probably propagate the error, but it would require updating the ChainIndexer trait
-        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
-            Ok(slots) => slots,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to fetch slots for catchup, returning empty stream"
-                );
-                return Box::pin(futures_util::stream::empty());
-            }
-        };
-        let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
-
-        let client = self.client.clone();
-        let stream = futures_util::stream::unfold(
-            (remaining_slots, client, VecDeque::new()),
-            |state| async move {
-                let (mut remaining_slots, client, mut current_chunk) = state;
-                loop {
-                    if let Some(block) = current_chunk.pop_front() {
-                        return Some((block, (remaining_slots, client, current_chunk)));
-                    }
-                    if remaining_slots.is_empty() {
-                        return None;
-                    }
-
-                    let chunk_slots: BTreeSet<u64> = remaining_slots
-                        .drain(..std::cmp::min(MAX_CONCURRENT_CHUNK_SIZE, remaining_slots.len()))
-                        .collect();
-
-                    let blocks = client.fetch_blocks_for_slots(chunk_slots).await;
-                    current_chunk = blocks.into_iter().collect();
-                }
+        stream::unfold(
+            PageState {
+                client,
+                program_id,
+                start_slot,
+                end_slot,
+                cursor: None,
+                finished: false,
             },
-        );
+            |mut state| async move {
+                if state.finished {
+                    return None;
+                }
+
+                let batch = match state
+                    .client
+                    .fetch_signatures_from_latest(&state.program_id, state.cursor)
+                    .await
+                {
+                    Ok(b) if b.is_empty() => return None,
+                    Ok(b) => b,
+                    Err(e) => {
+                        state.finished = true;
+                        return Some((Err(e), state));
+                    }
+                };
+
+                state.cursor = batch
+                    .last()
+                    .and_then(|s| Signature::from_str(&s.signature).ok());
+                if state.cursor.is_none() {
+                    state.finished = true;
+                }
+
+                let mut slots = BTreeSet::new();
+                for sig in batch {
+                    if sig.slot < state.start_slot {
+                        state.finished = true;
+                    } else if sig.slot <= state.end_slot {
+                        slots.insert(sig.slot);
+                    }
+                }
+
+                Some((Ok(slots), state))
+            },
+        )
+    }
+
+    /// Fetch blocks for each page of slots and flatten into a stream of `(slot, block)` items.
+    fn fetch_blocks_for_pages(
+        client: SolanaClient,
+        pages: impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>> {
+        let stream = pages
+            .filter_map(|res| async move {
+                match res {
+                    Ok(slots) if slots.is_empty() => None,
+                    Ok(slots) => Some(Ok(slots)),
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .then(move |res| {
+                let client = client.clone();
+                async move {
+                    let slots = res?;
+                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await;
+                    let items: Vec<CatchupBlockItem> = slots
+                        .into_iter()
+                        .map(|s| {
+                            let block = blocks.remove(&s).unwrap_or(SolanaCatchupBlock::Missing);
+                            (s, block)
+                        })
+                        .collect();
+                    Ok(items)
+                }
+            })
+            .map(|res| match res {
+                Ok(items) => {
+                    let stream_items: Vec<anyhow::Result<CatchupBlockItem>> =
+                        items.into_iter().map(Ok).collect();
+                    stream::iter(stream_items)
+                }
+                Err(e) => stream::iter(vec![Err(e)]),
+            })
+            .flatten();
 
         Box::pin(stream)
     }
 
-    async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
+    async fn process_catchup_item(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        slot: u64,
+        block: &SolanaCatchupBlock,
+    ) -> anyhow::Result<()> {
         match block {
-            SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
+            SolanaCatchupBlock::Block(block) => self.process_block(events_tx, slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.client.get_block(*slot).await?;
-                self.process_block(*slot, &block).await
+                let block = self.client.get_block(slot).await?;
+                self.process_block(events_tx, slot, &block).await
             }
         }
     }
 
-    async fn process_next_block(&mut self) -> LiveStreamStatus {
-        let Some(rx) = self.live_rx.as_mut() else {
-            return LiveStreamStatus::Shutdown;
-        };
-        let Some(event) = rx.recv().await else {
-            tracing::warn!("solana livestream channel closed; reconnecting");
-            self.live_rx = None;
-            return LiveStreamStatus::Reconnect;
-        };
-        if let Err(err) = self.events_tx.send(event).await {
-            tracing::warn!(?err, "failed to forward live solana event");
-            return LiveStreamStatus::Shutdown;
-        }
-        LiveStreamStatus::Continue
-    }
-
-    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::CatchupInProgress).await?;
-        Ok(())
-    }
-
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::CatchupCompleted).await?;
-        Ok(())
-    }
-}
-
-impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {
-    fn drop(&mut self) {
-        if let Some(task) = self.live_task.take() {
-            task.abort();
+    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
+    /// succeeds or `cancel` fires.
+    async fn process_catchup_retrying(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        slot: u64,
+        block: &SolanaCatchupBlock,
+        cancel: &CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = self.process_catchup_item(events_tx, slot, block) => {
+                    match result {
+                        Ok(()) => return,
+                        Err(err) => {
+                            tracing::warn!(?err, slot, "solana catchup block processing failed; retrying");
+                        }
+                    }
+                }
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Self::RETRY_DELAY) => {}
+            }
         }
     }
-}
 
-impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
-    async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
+    /// Live phase: forward events produced by the live subscription until
+    /// `cancel` fires or the producer terminates.
+    async fn forward_live_events(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        live_rx: &mut mpsc::Receiver<ChainEvent>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                event = live_rx.recv() => event,
+            };
+            let Some(event) = event else {
+                anyhow::bail!("solana live event producer terminated");
+            };
+            events_tx
+                .send(event)
+                .await
+                .context("failed to forward live solana event")?;
+        }
+    }
+
+    async fn process_block(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        height: u64,
+        block: &UiConfirmedBlock,
+    ) -> anyhow::Result<()> {
         // Update indexed block metrics
         self.telemetry.block_indexed(height);
 
         let Some(transactions) = &block.transactions else {
-            self.events_tx.send(ChainEvent::Block(height)).await?;
+            events_tx.send(ChainEvent::Block(height)).await?;
             return Ok(());
         };
 
@@ -331,11 +329,66 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             };
 
             let signature = extract_tx_signature(&tx.transaction)?;
-            emit_events(&self.events_tx, &self.program_id, signature, tx, logs).await?;
+            emit_events(events_tx, &self.program_id, signature, tx, logs).await?;
         }
 
-        self.events_tx.send(ChainEvent::Block(height)).await?;
+        events_tx.send(ChainEvent::Block(height)).await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
+    const CHAIN: Chain = Chain::Solana;
+
+    async fn run(
+        &self,
+        events_tx: mpsc::Sender<ChainEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // Start the live subscription first: it buffers events while catchup
+        // runs, and resolves the anchor slot once the WS is live so catchup
+        // covers `[persisted_block, anchor)` with no gaps. The abort-on-drop
+        // guard ties the task's lifetime to this `run()`.
+
+        // TODO: live channel is bounded, if catchup takes too long live
+        // channel will fill up and block subscription task, websocket connection will be closed.
+        // Consider better solution.
+        let (live_tx, mut live_rx) = chain_event_channel();
+        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
+        let _live_task = AbortOnDrop(tokio::spawn(subscribe_and_buffer_live_events(
+            self.program_id,
+            self.client.clone(),
+            live_tx,
+            anchor_tx,
+            self.telemetry.clone(),
+        )));
+
+        let anchor = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            anchor = anchor_rx => anchor.context("solana live subscription ended before resolving anchor slot")?,
+        };
+
+        let mut catchup_iter = self.catchup_blocks(anchor).await?;
+        loop {
+            let item = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                item = catchup_iter.next() => item,
+            };
+            let Some(res) = item else { break };
+            // Propagate RPC page errors so supervisor restarts cleanly
+            let (slot, block) = res?;
+            self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
+                .await;
+        }
+
+        events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .context("failed to send catchup completed event")?;
+
+        self.forward_live_events(&events_tx, &mut live_rx, &cancel)
+            .await
     }
 }
 
@@ -482,7 +535,7 @@ impl SolanaSignEvent {
 
 /// Subscribe to the live WS feed, preprocess events into `ChainEvent`s, and buffer them
 /// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
-/// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
+/// via `anchor_tx` so that `run()` can bound catchup with it.
 ///
 /// The anchor is resolved inside `subscribe_to_program_events` immediately after the WS
 /// subscription is established — ensuring the subscription is live before we anchor, so
@@ -495,15 +548,20 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     telemetry: T,
 ) {
     let mut anchor_tx = Some(anchor_tx);
+    // Deliberately does not resubscribe in-place: blocks produced while the
+    // websocket was down would be silently skipped. Returning drops `live_tx`,
+    // which ends `forward_live_events` and fails `run()`, so the supervisor
+    // restarts the indexer — resolving a fresh anchor and catching up
+    // `[persisted_block, anchor)` before live events resume.
     if let Err(err) =
         subscribe_to_program_events(program_id, &client, live_tx, &mut anchor_tx, telemetry).await
     {
         tracing::warn!("Live solana subscription failed: {:?}", err);
     }
-    // live_tx is dropped here, causing process_next_block to see channel close
-    // and return LiveStreamStatus::Reconnect
 }
 
+// TODO: move this to an events.rs file
+// TODO: enhance to handle malformed events and prevent panic
 fn parse_cpi_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
@@ -617,6 +675,8 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     // with no gaps. We do not wait for the first WS event because that could deadlock if
     // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
     if let Some(anchor_tx) = anchor_tx.take() {
+        // TODO: this should probably use client.get_slot with retry strategy,
+        // otherwise if RPC fails the anchor will not be sent and catchup will not run
         match client
             .rpc_client
             .get_slot_with_commitment(CommitmentConfig::confirmed())
@@ -653,6 +713,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     let program_invoke_log = format!("Program {program_id} invoke [");
 
     loop {
+        // TODO: this might introduce CPU overhead if the WS is busy, consider a more efficient alternative
         cleanup_seen_cache(&mut seen, ttl);
         tokio::select! {
             // Receive WS logs
@@ -770,6 +831,8 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
     logs.iter().any(|l| l.starts_with(start_with))
 }
 
+// TODO: move this to an events.rs file
+// TODO: enhance to handle malformed events and prevent panic
 fn parse_cpi_respond_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
@@ -874,6 +937,7 @@ fn parse_cpi_respond_events(
     Ok((respond_bidirectional_events, signature_responded_events))
 }
 
+// TODO: move this to an events.rs file
 enum SolanaEvents {
     Sign(Vec<SolanaSignEvent>),
     Respond {
@@ -912,9 +976,17 @@ async fn emit_events(
 ) -> anyhow::Result<()> {
     match SolanaEvents::parse(tx, program_id, logs)? {
         SolanaEvents::Sign(events) => {
-            let signature = signature.as_ref().to_vec();
+            let sig_bytes = signature.as_ref().to_vec();
             for ev in events {
-                if let Some(request) = ev.build_sign_request(&signature) {
+                if let Some(request) = ev.build_sign_request(&sig_bytes) {
+                    // `signature` is the Solana transaction signature, i.e. the tx hash
+                    // shown in explorers and used as the getTransaction lookup key. Log it
+                    // next to the sign_id so a given tx can be matched to its request.
+                    tracing::info!(
+                        tx_hash = %signature,
+                        sign_id = ?request.id,
+                        "solana sign request parsed",
+                    );
                     events_tx
                         .send(ChainEvent::SignRequest {
                             request,
@@ -1020,6 +1092,65 @@ mod tests {
     use solana_transaction_status::{
         TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
     };
+
+    /// Create a test indexer with a mock state manager and a given RPC URL.
+    fn test_indexer(
+        url: &str,
+        state_manager: MockStateManager,
+    ) -> SolanaIndexer<MockStateManager, NoopChainTelemetry> {
+        let program_id = Pubkey::new_unique();
+        let client = SolanaClient::for_indexer(
+            url.to_string(),
+            url.replace("http", "ws"),
+            program_id,
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .with_fast_retry();
+        SolanaIndexer {
+            program_id,
+            client,
+            state_manager,
+            telemetry: NoopChainTelemetry,
+        }
+    }
+
+    /// Create a mock signature entry for testing, with a given slot.
+    fn signature_entry(slot: u64) -> serde_json::Value {
+        serde_json::json!({
+            "signature": Signature::new_unique().to_string(),
+            "slot": slot,
+            "err": null,
+            "memo": null,
+            "blockTime": null,
+            "confirmationStatus": "confirmed"
+        })
+    }
+
+    /// Create a mock JSON-RPC response for a list of signature entries.
+    fn signatures_response(entries: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": entries
+        })
+        .to_string()
+    }
+
+    /// Create a mock JSON-RPC response for a block at a given slot.
+    fn block_response(id: usize, slot: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "result": {
+                "blockHeight": slot,
+                "blockTime": null,
+                "blockhash": "11111111111111111111111111111111",
+                "parentSlot": slot.saturating_sub(1),
+                "previousBlockhash": "11111111111111111111111111111111",
+                "transactions": [],
+                "rewards": []
+            }
+        })
+    }
 
     #[test]
     fn request_id_matches_ethabi() {
@@ -1153,6 +1284,152 @@ mod tests {
         assert!(meta.err.is_some(), "expected err to be set");
     }
 
+    #[tokio::test]
+    async fn catchup_blocks_empty_when_up_to_date() {
+        let server = mockito::Server::new_async().await;
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        const ANCHOR_SLOT: u64 = 10;
+
+        // No processed block persisted: start == anchor, so no catchup and no RPC calls.
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn catchup_blocks_propagates_fetch_slots_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(3) // 1 attempt + 2 retries (fast retry config)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+        const ANCHOR_SLOT: u64 = 10;
+
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        let first = stream.next().await;
+        assert!(first.is_some() && first.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn catchup_processes_slots_in_order() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Signatures walk back from the anchor: slots 9..=6 are in range,
+        // slot 5 (< start_slot 6) terminates the walk.
+        let entries: Vec<_> = [9, 8, 7, 6, 5].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([
+            block_response(0, 6),
+            block_response(1, 7),
+            block_response(2, 8),
+            block_response(3, 9),
+        ])
+        .to_string();
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        const ANCHOR_SLOT: u64 = 10;
+
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+
+        while let Some(res) = stream.next().await {
+            let (slot, block) = res.unwrap();
+            indexer
+                .process_catchup_retrying(&events_tx, slot, &block, &cancel)
+                .await;
+        }
+
+        // Verify that the events were emitted in order
+        for expected in 6..=9 {
+            let event = events_rx.recv().await.unwrap();
+            assert!(
+                matches!(event, ChainEvent::Block(slot) if slot == expected),
+                "expected Block({expected}), got {event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_live_events_forwards_until_cancel() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let (live_tx, mut live_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        live_tx.send(ChainEvent::Block(42)).await.unwrap();
+
+        let mut forward = Box::pin(indexer.forward_live_events(&events_tx, &mut live_rx, &cancel));
+        tokio::select! {
+            result = &mut forward => panic!("forwarding ended early: {result:?}"),
+            event = events_rx.recv() => {
+                assert!(matches!(event, Some(ChainEvent::Block(42))));
+            }
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), &mut forward)
+            .await
+            .expect("forwarding should stop promptly on cancel")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forward_live_events_bails_when_producer_drops() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+        let (live_tx, mut live_rx) = mpsc::channel::<ChainEvent>(16);
+        drop(live_tx);
+
+        let result = indexer
+            .forward_live_events(&events_tx, &mut live_rx, &CancellationToken::new())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_catchup_retrying_stops_on_cancel() {
+        // No mock: any RPC attempt fails after fast retries; cancel must
+        // interrupt the retry loop without waiting for it.
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.process_catchup_retrying(&events_tx, 7, &SolanaCatchupBlock::Missing, &cancel),
+        )
+        .await
+        .expect("process_catchup_retrying should stop promptly on cancel");
+    }
+
     // Very expensive test in terms of RPC usage.
     #[tokio::test]
     #[ignore]
@@ -1183,22 +1460,19 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         );
 
-        let mut indexer = SolanaIndexer {
+        let indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
-            events_tx,
             state_manager,
             telemetry: NoopChainTelemetry,
-            live_rx: None,
-            live_task: None,
         };
 
-        // Initialize livestream (resolves anchor slot via get_slot and starts WS)
+        // Resolve anchor slot
         let anchor_height = indexer
-            .livestream()
+            .client
+            .get_slot()
             .await
-            .expect("Failed to initialize livestream")
-            .expect("Anchor height missing");
+            .expect("Failed to fetch current slot");
 
         tracing::debug!("Resolved anchor slot: {anchor_height}");
 
@@ -1211,23 +1485,26 @@ mod tests {
             .set_processed_block(Chain::Solana, start_slot.saturating_sub(1))
             .await;
 
-        // Run catchup range
-        let catchup_stream = indexer.catchup_range(anchor_height).await;
-        tokio::pin!(catchup_stream);
-        let mut processed_any = false;
-        while let Some(item) = catchup_stream.next().await {
-            indexer
-                .process_catchup(&item)
-                .await
-                .expect("Failed to process catchup block");
-            processed_any = true;
+        // Start the indexer in a separate task
+        let cancel = CancellationToken::new();
+        let run_handle = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { indexer.run(events_tx, cancel).await }
+        });
+
+        // Drain events until catchup completes
+        loop {
+            match events_rx.recv().await {
+                Some(ChainEvent::CatchupCompleted) => {
+                    tracing::debug!("Solana catchup complete");
+                    break;
+                }
+                Some(event) => tracing::debug!("Received event: {:?}", event),
+                None => break,
+            }
         }
 
-        tracing::debug!("Solana catchup complete. Processed blocks: {processed_any}");
-
-        // Check if any events were received in the channel
-        while let Ok(event) = events_rx.try_recv() {
-            tracing::debug!("Received event: {:?}", event);
-        }
+        cancel.cancel();
+        run_handle.abort();
     }
 }

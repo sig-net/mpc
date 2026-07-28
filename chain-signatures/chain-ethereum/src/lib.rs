@@ -16,6 +16,6 @@ mod respond_bidirectional;
 mod test_utils;
 mod util;
 
-pub use client::MaybeBlock;
-pub use config::EthConfig;
-pub use indexer::EthereumStream;
+pub use client::{CatchupItem, MaybeBlock};
+pub use config::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
+pub use indexer::EthereumIndexer;
