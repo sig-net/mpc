@@ -90,7 +90,8 @@ midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
 midnight-transient-crypto = "3.0.0"
-midnight-ledger-v9 = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9", default-features = false }
+midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.4", features = ["can-panic"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -113,23 +114,24 @@ signet-program = { path = "./chain-signatures/contract-sol" }
 # This fix has yet to be propagated to crates.io so we will patch it instead.
 x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek", rev = "5b7082bbc8e0b2106ab0d956064f61fa0f393cdc" }
 
-# Ledger 9 is not published to crates.io while it is prerelease. Every crate comes from
-# ONE branch so the whole set is a single git source: per-crate tags give cargo two
-# copies of base-crypto (the tags' own path= siblings do not unify with a patched
-# crates-io entry), and the trait impls then belong to different crates.
-midnight-base-crypto          = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-base-crypto-derive   = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-coin-structure       = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-onchain-state        = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-serialize            = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-serialize-macros     = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-storage              = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-storage-core         = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-storage-macros       = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-midnight-transient-crypto     = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
-# zkir still wants the 2.2.0 line, which was never published to crates.io; the ledger
-# workspace resolves it from this tag too.
-midnight-transient-crypto-2_2 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1", package = "midnight-transient-crypto" }
+# Ledger 9 is not published to crates.io while it is prerelease. Per-crate TAGS,
+# not one branch: the node repo's own ledger helpers carry the ledger-7 and
+# ledger-8 lines alongside ledger 9, and a branch patch is semver-compatible with
+# what those older lines ask for, so it captures all three at once and they stop
+# compiling. Each tag's version is disjoint from the older lines, so the patch
+# reaches only ledger 9. This table is the midnight-node repo's, verbatim.
+midnight-ledger-v9            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "crate-ledger-9.1.0.0-rc.3" }
+midnight-zswap                = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zswap-9.0.0-rc.3" }
+midnight-coin-structure       = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "coin-structure-3.0.0-rc.1" }
+midnight-base-crypto          = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-1.1.0-rc.2" }
+midnight-base-crypto-derive   = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-derive-1.1.0-rc.2" }
+midnight-transient-crypto     = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-3.0.0-rc.2" }
+midnight-transient-crypto-old = { package = "midnight-transient-crypto", git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1" }
+midnight-onchain-vm           = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-vm-4.0.0-rc.2" }
+midnight-onchain-state        = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-state-4.0.0-rc.3" }
+midnight-onchain-runtime      = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-runtime-4.0.0-rc.2" }
+midnight-zkir                 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zkir-2.2.0-rc.3" }
+midnight-serialize            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "serialize-1.2.0-rc.1" }
 
 
 # big optimization even in test builds for math heavy crates
