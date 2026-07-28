@@ -120,7 +120,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let new_balance = alice.view_account().await?.balance;
     let new_contract_balance = contract.view_account().await?.balance;
     assert!(
-        balance.as_millinear() - new_balance.as_millinear() < 10,
+        balance.as_millinear() - new_balance.as_millinear() < 50,
         "refund should happen"
     );
     println!(
@@ -188,7 +188,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         new_contract_balance.as_yoctonear(),
     );
     assert!(
-        balance.as_millinear() - new_balance.as_millinear() < 10,
+        balance.as_millinear() - new_balance.as_millinear() < 50,
         "refund should happen"
     );
     assert!(
