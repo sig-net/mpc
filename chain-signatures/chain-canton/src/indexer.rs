@@ -7,7 +7,7 @@ use crate::ledger_api;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream::{Empty, SplitSink, SplitStream};
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
@@ -320,10 +320,6 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
-
-    // TODO: not used, required by trait, remove later
-    type Block = ();
-    type Iter = Empty<()>;
 
     // TODO: add unit tests for `run()` mirroring Ethereum's `RunFixture`
     // (catchup ordering, live-after-catchup, cancel-during-catchup, cancel-while-live).

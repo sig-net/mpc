@@ -1,17 +1,10 @@
-# The midnight publisher's offline gate: typecheck, the full vitest suite, and
-# the Rust consumer driving this service over real HTTP. All of it stack-free by
-# design (pure codecs against checked-in fixtures, stubbed write-path
-# orchestration).
+# The midnight publisher's offline gate: typecheck plus the full vitest suite,
+# stack-free by design (the write-path orchestration is stubbed, and the
+# request parsing under it needs nothing but the body).
 #
 # The live end-to-end path (boot the dockerized stack, deploy a singleton,
 # prove/balance/submit, confirm on chain) is deliberately NOT automated here.
 # It is run on demand from `tests/respond-live.ts`, which carries the runbook.
-# That exclusion is about the CHAIN, not about mocking: the sidecar contract
-# tests below boot this service for real and speak HTTP to it, and still need no
-# node, no proof server, no indexer and no wallet.
-#
-# The filters cover BOTH packages, because those tests exist to catch drift
-# between the two languages and so have to run when either side moves.
 name: midnight-publisher-ts
 
 on:
@@ -19,13 +12,11 @@ on:
     paths:
       - ".github/workflows/midnight-publisher-ts.yml"
       - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
   push:
     branches: [develop]
     paths:
       - ".github/workflows/midnight-publisher-ts.yml"
       - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
 
 jobs:
   test:

@@ -18,7 +18,7 @@ impl ChainPublisher for MidnightPublisher {
 mod tests {
     use super::*;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_primitives::{Chain, SignBidirectionalEvent, SignKind};
+    use mpc_primitives::{Chain, SignBidirectionalEvent, SignId, SignKind};
 
     #[tokio::test]
     async fn publish_signature_reports_failure() {
@@ -38,7 +38,11 @@ mod tests {
             chain_ctx: None,
         };
 
-        let action = make_publish_action(Chain::Midnight, SignKind::SignBidirectional(event));
+        let action = make_publish_action(
+            Chain::Midnight,
+            SignKind::SignBidirectional(event),
+            SignId::new([0u8; 32]),
+        );
         assert!(MidnightPublisher.publish_signature(&action).await.is_err());
     }
 }

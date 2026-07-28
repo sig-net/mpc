@@ -16,8 +16,8 @@ use futures_util::{stream, Stream, StreamExt};
 use mpc_chain_integration_core::utils::task::AbortOnDrop;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
-    SignId,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
+    IndexedSignRequest, SignId,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,6 +101,9 @@ enum BackfillOutcome {
 }
 
 impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
+    /// Delay between retries of transient RPC failures
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+
     pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
         let contract_address = eth.contract_address;
@@ -1095,8 +1098,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
-    type Block = CatchupItem;
-    type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn run(
         &self,

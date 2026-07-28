@@ -8471,6 +8471,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signature 2.2.0",
+ "signet-primitives",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -8490,6 +8491,7 @@ dependencies = [
  "near-sdk",
  "serde_json",
  "sha3",
+ "signet-crypto",
 ]
 
 [[package]]
@@ -8522,6 +8524,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
+ "dashmap 6.1.0",
  "deadpool-redis",
  "ed25519-zebra",
  "enum-map",
@@ -8595,15 +8598,13 @@ version = "1.16.8"
 dependencies = [
  "borsh 1.5.7",
  "ciborium",
- "enum-map",
  "getrandom 0.2.16",
  "hex",
  "k256",
  "serde",
  "serde_bytes",
- "serde_json",
  "sha3",
- "thiserror 1.0.69",
+ "signet-primitives",
 ]
 
 [[package]]
@@ -13071,6 +13072,32 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "signet-crypto"
+version = "1.16.8"
+dependencies = [
+ "getrandom 0.2.16",
+ "k256",
+ "sha3",
+ "signet-primitives",
+]
+
+[[package]]
+name = "signet-primitives"
+version = "1.16.8"
+dependencies = [
+ "borsh 1.5.7",
+ "enum-map",
+ "getrandom 0.2.16",
+ "hex",
+ "k256",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

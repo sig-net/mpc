@@ -1,6 +1,5 @@
 // Shared test scaffolding: the arrange step only.
 
-import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
@@ -10,14 +9,6 @@ import type { NodeClient } from "../src/node.js";
 import { buildServer } from "../src/server.js";
 
 export const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
-
-export function fixtureBytes(name: string): Uint8Array {
-  return Uint8Array.from(readFileSync(`${FIXTURES}${name}`));
-}
-
-export function goldenText(name: string): string {
-  return readFileSync(`${FIXTURES}${name}`, "utf8");
-}
 
 // Endpoints that fail loudly if anything tries to use them. Spread it to vary a field.
 export const TEST_CONFIG: Config = {

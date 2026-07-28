@@ -18,7 +18,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::stream::Empty;
 use futures_util::StreamExt as _;
 use mpc_chain_integration_core::utils::task::AbortOnDrop;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
@@ -976,10 +975,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> {
     const CHAIN: Chain = Chain::Midnight;
-
-    // TODO: not used, required by trait, remove later
-    type Block = ();
-    type Iter = Empty<()>;
 
     async fn run(
         &self,

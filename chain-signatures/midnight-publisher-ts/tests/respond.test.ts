@@ -299,6 +299,9 @@ const offlineConfig: Config = { ...TEST_CONFIG, managedDir: "/nonexistent" };
 
 const BAD_REQUESTS: [string, string, string | RegExp][] = [
   ["a malformed body", "{", /^invalid JSON:/],
+  // Pinned byte for byte, not prefix-matched: this is the one message a caller
+  // sees for well-formed JSON that is not an object.
+  ["a non-object body", "[]", "invalid JSON: expected a JSON object"],
   ["a bad address", JSON.stringify(bidirectional({ contract_address: "nope" })), "invalid request: `contract_address` must be 64 lowercase hex"],
   [
     "an unknown circuit",
@@ -306,13 +309,6 @@ const BAD_REQUESTS: [string, string, string | RegExp][] = [
     "invalid request: `circuit` must be respond or respondBidirectional",
   ],
 ];
-
-describe("the JSON preamble", () => {
-  it("is byte-identical on this seam, not merely prefix-matched", () => {
-    // Pinned on both sides so unifying them with `/decode/contract-state` cannot move one.
-    expect(() => parseRespondRequest("[]")).toThrow("invalid JSON: expected a JSON object");
-  });
-});
 
 describe("handleRespond: the bad_request path never touches the chain", () => {
   it.each(BAD_REQUESTS)("returns bad_request for %s", async (_label, body, expected) => {
