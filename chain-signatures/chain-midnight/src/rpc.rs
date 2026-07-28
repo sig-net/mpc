@@ -10,7 +10,7 @@ use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;
 use subxt::client::OnlineClient;
-use subxt::ext::codec::{Compact, Decode};
+use subxt::ext::codec::{Compact, Decode, Encode};
 use subxt::ext::subxt_rpcs::rpc_params;
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
@@ -30,6 +30,24 @@ pub(crate) const STATE_UNSERVABLE_MSG: &str =
 /// can ANSWER a state query at an old block, not about any real contract, so "contract
 /// not present" is as much positive evidence as served state bytes.
 const PROBE_ADDRESS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// `MidnightRuntimeApi::get_ledger_parameters`, spelled the way `sp_api` names a
+/// dispatch entry point: `{Trait}_{method}`. Read from node 2.0.0-rc.4's own v15
+/// metadata on 2026-07-28, which lists this entry point under `MidnightRuntimeApi`;
+/// the polkadot.js camelCase spelling is a client-side alias and does not resolve
+/// here, and `state_call` answers an unknown entry point with a bare "function
+/// doesn't exist" that carries no diagnosis.
+const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
+
+/// `MidnightRuntimeApi::get_zswap_chain_state`, from the same metadata read as
+/// [`LEDGER_PARAMETERS_ENTRY`].
+const ZSWAP_CHAIN_STATE_ENTRY: &str = "MidnightRuntimeApi_get_zswap_chain_state";
+
+/// Substrate's own signature for "this node cannot reach state at that hash",
+/// pruned or never known: `sp_blockchain::Error::UnknownBlock` reaches the caller
+/// as `Client error: UnknownBlock: ...`. `state_call` carries no per-pallet
+/// message to match on, unlike `midnight_contractState`.
+const UNKNOWN_BLOCK_MSG: &str = "UnknownBlock";
 
 /// What the startup probe concluded about the node's state retention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +219,43 @@ impl MidnightRpc {
         .await
     }
 
+    /// The ledger parameters at `at_block_hash_0x` (`0x`-prefixed). Fees drift per
+    /// block, so a caller proving against a state must read these at that state's
+    /// own hash.
+    // Only the respond path reads this pair, and it does not call into this crate,
+    // which exports no part of `mod rpc`: unreachable to the dead-code pass, which
+    // CI promotes to an error.
+    #[allow(dead_code)]
+    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
+        ledger_parameters_over(
+            &self.legacy,
+            self.request_timeout,
+            self.retry,
+            at_block_hash_0x,
+        )
+        .await
+    }
+
+    /// The zswap ledger state at `at_block_hash_0x`, which is the whole chain's, not
+    /// one contract's. `address_64hex` (64 hex chars, no `0x`) selects nothing: the
+    /// entry point declares an address argument and ignores it, so unlike
+    /// [`Self::contract_state`] there is no absent case for this to report.
+    #[allow(dead_code)]
+    pub async fn zswap_chain_state(
+        &self,
+        address_64hex: &str,
+        at_block_hash_0x: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        zswap_chain_state_over(
+            &self.legacy,
+            self.request_timeout,
+            self.retry,
+            address_64hex,
+            at_block_hash_0x,
+        )
+        .await
+    }
+
     /// Probes whether the node retains contract state `window` blocks behind the
     /// finalized head, classifying it [`ArchiveState::Archive`] or
     /// [`ArchiveState::Pruned`].
@@ -267,10 +322,7 @@ impl MidnightRpc {
         &self,
         hash_0x: &str,
     ) -> anyhow::Result<Vec<Vec<u8>>> {
-        let bytes: [u8; 32] = hex::decode(hash_0x.trim_start_matches("0x"))
-            .context("block hash is not hex")?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("block hash is not 32 bytes"))?;
+        let hash = block_hash(hash_0x)?;
         let block = retry_rpc!(
             self.request_timeout,
             self.retry,
@@ -278,7 +330,7 @@ impl MidnightRpc {
             {
                 self.client
                     .blocks()
-                    .at(H256::from(bytes))
+                    .at(hash)
                     .await
                     .context("failed to fetch a finalized block by hash")
             }
@@ -361,6 +413,128 @@ async fn contract_state_over(
             }
         }
     })
+}
+
+fn block_hash(hash_0x: &str) -> anyhow::Result<H256> {
+    let bytes: [u8; 32] = hex::decode(hash_0x.trim_start_matches("0x"))
+        .context("block hash is not hex")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("block hash is not 32 bytes"))?;
+    Ok(H256::from(bytes))
+}
+
+/// The bare payload of a `Result<Vec<u8>, _>` runtime-API answer: discriminant byte
+/// and compact length both dropped, leaving the tagged blob the ledger
+/// deserializers take. Both entry points read here answer in that shape at
+/// `MidnightRuntimeApi` version 2, which is what `midnight_apiVersions` reports on
+/// node 2.0.0-rc.4; anything older answers with a bare `Vec<u8>` whose first byte
+/// would be read here as the discriminant.
+///
+/// `None` is the `Err` variant. The error is never decoded, only its discriminant,
+/// so a ledger error this build has never seen still reads as an `Err` rather than
+/// as a decode failure. Neither read here has an absent case, so both callers turn
+/// it into a fault, but they do it outside the retry budget: the runtime has
+/// settled the question and re-asking spends attempts on a fixed answer.
+fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    let (variant, mut payload) = answer
+        .split_first()
+        .context("runtime api returned an empty Result envelope")?;
+    match *variant {
+        0 => {
+            let value = Vec::<u8>::decode(&mut payload)
+                .context("runtime api Ok payload is not a SCALE Vec<u8>")?;
+            anyhow::ensure!(
+                payload.is_empty(),
+                "runtime api Ok payload has {} trailing bytes",
+                payload.len()
+            );
+            Ok(Some(value))
+        }
+        1 => Ok(None),
+        other => anyhow::bail!("runtime api returned Result variant {other}"),
+    }
+}
+
+/// One `MidnightRuntimeApi` read: a `state_call` at `at_block_hash_0x`, unwrapped
+/// to the bare payload. Takes the transport explicitly for the same reason
+/// [`contract_state_over`] does, and goes through [`LegacyRpcMethods`] rather than
+/// the crate's `OnlineClient`: `runtime_api().at(hash).call_raw(..)` puts the same
+/// three parameters on the same `state_call` through the legacy backend, but an
+/// `OnlineClient` cannot be built offline, and its backend adds a reconnect loop
+/// outside the retry budget below.
+async fn runtime_api_bytes_over(
+    legacy: &LegacyRpcMethods<SubstrateConfig>,
+    request_timeout: Duration,
+    retry: RetryConfig,
+    entry_point: &str,
+    call_parameters: &[u8],
+    at_block_hash_0x: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let at = block_hash(at_block_hash_0x)?;
+    // Same split as contract_state_over: whatever the runtime itself answers is
+    // definitive and returns Ok, Err envelope included, while transport faults and a
+    // node that cannot reach the state surface as Err and spend the retry budget.
+    retry_rpc!(request_timeout, retry, "midnight_state_call", {
+        match legacy
+            .state_call(entry_point, Some(call_parameters), Some(at))
+            .await
+        {
+            Ok(answer) => unwrap_runtime_api_result(&answer),
+            Err(err) if err.to_string().contains(UNKNOWN_BLOCK_MSG) => {
+                Err(anyhow::Error::new(err).context(STATE_UNSERVABLE_MSG))
+            }
+            Err(err) => Err(anyhow::Error::new(err).context(format!("{entry_point} failed"))),
+        }
+    })
+}
+
+/// [`MidnightRpc::ledger_parameters`] over an explicit transport.
+async fn ledger_parameters_over(
+    legacy: &LegacyRpcMethods<SubstrateConfig>,
+    request_timeout: Duration,
+    retry: RetryConfig,
+    at_block_hash_0x: &str,
+) -> anyhow::Result<Vec<u8>> {
+    runtime_api_bytes_over(
+        legacy,
+        request_timeout,
+        retry,
+        LEDGER_PARAMETERS_ENTRY,
+        &[],
+        at_block_hash_0x,
+    )
+    .await?
+    // An Err is the node declining to produce the chain's own fee schedule, which
+    // leaves nothing to prove against.
+    .with_context(|| format!("midnight node has no ledger parameters at {at_block_hash_0x}"))
+}
+
+/// [`MidnightRpc::zswap_chain_state`] over an explicit transport.
+async fn zswap_chain_state_over(
+    legacy: &LegacyRpcMethods<SubstrateConfig>,
+    request_timeout: Duration,
+    retry: RetryConfig,
+    address_64hex: &str,
+    at_block_hash_0x: &str,
+) -> anyhow::Result<Vec<u8>> {
+    // The entry point declares a `Vec<u8>`, so the address goes on the wire SCALE
+    // encoded, length prefix and all. The bare 32 bytes do not fail legibly: they
+    // trap the runtime wasm on an `unreachable` instruction.
+    let call_parameters = hex::decode(address_64hex.trim_start_matches("0x"))
+        .context("contract address is not hex")?
+        .encode();
+    runtime_api_bytes_over(
+        legacy,
+        request_timeout,
+        retry,
+        ZSWAP_CHAIN_STATE_ENTRY,
+        &call_parameters,
+        at_block_hash_0x,
+    )
+    .await?
+    // Global state, so an Err is the chain having no zswap state at all, never a
+    // contract this address failed to name.
+    .with_context(|| format!("midnight node has no zswap chain state at {at_block_hash_0x}"))
 }
 
 /// [`MidnightRpc::probe_archive_state`] over explicit transports: the probe needs only
@@ -566,6 +740,7 @@ mod tests {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".to_string(),
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -862,6 +1037,204 @@ mod tests {
             2,
             "one fault, one retry, no more"
         );
+    }
+
+    // MidnightRuntimeApi reads over `state_call`.
+
+    /// A contract deployed on the chain the live answers below were measured against.
+    const DEPLOYED_ADDRESS: &str =
+        "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
+    /// No contract at this one.
+    const BARE_ADDRESS: &str = "abababababababababababababababababababababababababababababababab";
+    /// What a node that cannot reach state at the requested hash answers a
+    /// `state_call` with, pruned or never known.
+    const PRUNED_STATE_CALL_MSG: &str =
+        "Client error: UnknownBlock: State already discarded for 0x5555";
+    /// `Err(LedgerApiError::ContractNotPresent)`, the whole two-byte answer node
+    /// 2.0.0-rc.4 gives `get_contract_state` for [`BARE_ADDRESS`].
+    const SCALE_ERR: &[u8] = &[0x01, 0x0b];
+
+    fn legacy_over(node: &StubNode) -> LegacyRpcMethods<SubstrateConfig> {
+        LegacyRpcMethods::<SubstrateConfig>::new(RpcClient::new(node.clone()))
+    }
+
+    /// A `state_call` reply: the runtime API's SCALE answer as the `0x` hex string
+    /// the node serializes `Bytes` to.
+    fn state_call_reply(scale: &[u8]) -> Canned {
+        json_str(&format!("0x{}", hex::encode(scale)))
+    }
+
+    /// SCALE `Ok(payload)` of a `Result<Vec<u8>, _>`: the zero variant byte, then
+    /// the payload length-prefixed.
+    fn scale_ok(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x00];
+        bytes.extend_from_slice(&scale_vec(payload));
+        bytes
+    }
+
+    #[tokio::test]
+    async fn ledger_parameters_calls_the_runtime_api_and_unwraps_the_payload() {
+        // The bare payload is what the ledger deserializer takes; handing back the
+        // SCALE envelope would put a variant byte and a length prefix in front of the
+        // tag and fail far from here. Sized to the answer node 2.0.0-rc.4 gives: a
+        // 791-byte tagged blob in a 794-byte envelope, so the compact length lands in
+        // its two-byte form and a strip that always dropped one byte is caught.
+        let mut params = b"midnight:ledger-parameters[v8]:".to_vec();
+        params.resize(791, 0x5a);
+        let envelope = scale_ok(&params);
+        assert_eq!(
+            envelope.len(),
+            794,
+            "one discriminant byte, a two-byte compact length, then the blob"
+        );
+        let node = StubNode::new([("state_call", vec![state_call_reply(&envelope)])]);
+
+        let read = ledger_parameters_over(
+            &legacy_over(&node),
+            PROBE_TIMEOUT,
+            attempts(0),
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect("an Ok answer unwraps");
+        assert_eq!(read, params);
+
+        // Spelled out rather than built from the constant, so a renamed entry point
+        // fails here instead of agreeing with itself. A nullary runtime API takes
+        // empty call parameters, and the hash is the caller's, never the best block.
+        assert_eq!(
+            node.calls_to("state_call"),
+            vec![format!(
+                "[\"MidnightRuntimeApi_get_ledger_parameters\",\"0x\",\"{HEAD_HASH_HEX}\"]"
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn zswap_chain_state_ignores_the_address_and_returns_global_state() {
+        // Deliberate, and measured against node 2.0.0-rc.4: a deployed contract's
+        // address and 32 bytes of 0xab drew byte-identical 1588-byte payloads. The
+        // entry point declares an address and selects nothing with it, so this read is
+        // the whole chain's zswap state and has no absent case. Nobody should "fix"
+        // the caller to key zswap state by contract.
+        //
+        // Offline, the stub cannot re-prove what the node does; what it pins is this
+        // crate's half of it. Both addresses reach the wire, distinctly, so the
+        // argument is passed as the runtime API declares it, and the same answer comes
+        // back as the same bytes either way: no address-keyed handling, and no Option
+        // for a caller to read absence out of.
+        let global = b"midnight:zswap-ledger-state[v5]:global".to_vec();
+        let node = StubNode::new([("state_call", vec![state_call_reply(&scale_ok(&global))])]);
+        let legacy = legacy_over(&node);
+
+        let at_deployed = zswap_chain_state_over(
+            &legacy,
+            PROBE_TIMEOUT,
+            attempts(0),
+            DEPLOYED_ADDRESS,
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect("a served answer unwraps");
+        let at_bare = zswap_chain_state_over(
+            &legacy,
+            PROBE_TIMEOUT,
+            attempts(0),
+            BARE_ADDRESS,
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect("an address with no contract is answered just the same");
+
+        assert_eq!(at_deployed, global);
+        assert_eq!(at_deployed, at_bare);
+
+        let calls = node.calls_to("state_call");
+        assert!(calls[0].contains(DEPLOYED_ADDRESS));
+        assert!(calls[1].contains(BARE_ADDRESS));
+    }
+
+    #[tokio::test]
+    async fn a_runtime_api_err_answer_is_a_settled_fault() {
+        // Neither read here has an absent case, so an Err envelope is a fault for
+        // both. It is still the runtime's own answer rather than a transport fault:
+        // one call each, never a retry, because no number of re-asks changes it.
+        let node = StubNode::new([("state_call", vec![state_call_reply(SCALE_ERR)])]);
+        let legacy = legacy_over(&node);
+
+        ledger_parameters_over(&legacy, PROBE_TIMEOUT, attempts(2), HEAD_HASH_HEX)
+            .await
+            .expect_err("a node with no ledger parameters cannot be proved against");
+        assert_eq!(node.calls_to("state_call").len(), 1);
+
+        zswap_chain_state_over(
+            &legacy,
+            PROBE_TIMEOUT,
+            attempts(2),
+            DEPLOYED_ADDRESS,
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect_err("a chain with no zswap state cannot be proved against");
+        assert_eq!(node.calls_to("state_call").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn zswap_chain_state_scale_encodes_the_address() {
+        // The entry point takes a `Vec<u8>`, so the address arrives length-prefixed.
+        // compact(32) is one byte, 32 << 2 = 0x80, hand-built so the prefix is pinned
+        // non-circularly. The bare 32 bytes do not come back as a decode error: node
+        // 2.0.0-rc.4 traps the runtime wasm on an `unreachable` instruction, which is
+        // why this is pinned at the wire rather than left to a live failure.
+        let node = StubNode::new([("state_call", vec![state_call_reply(&scale_ok(b"zswap"))])]);
+
+        let state = zswap_chain_state_over(
+            &legacy_over(&node),
+            PROBE_TIMEOUT,
+            attempts(0),
+            DEPLOYED_ADDRESS,
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect("a served answer unwraps");
+
+        assert_eq!(state, b"zswap");
+        assert_eq!(
+            node.calls_to("state_call"),
+            vec![format!(
+                "[\"MidnightRuntimeApi_get_zswap_chain_state\",\"0x80{DEPLOYED_ADDRESS}\",\"{HEAD_HASH_HEX}\"]"
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_api_reads_spend_the_contract_state_retry_budget() {
+        // `state_call` carries no per-pallet "not present" message to tell apart, so
+        // the only classification left is the pruning signature, and like
+        // contract_state it is an Err that spends the whole budget before surfacing.
+        let node = StubNode::new([(
+            "state_call",
+            vec![Canned::NodeError(-32000, PRUNED_STATE_CALL_MSG)],
+        )]);
+        let legacy = legacy_over(&node);
+
+        let err = ledger_parameters_over(&legacy, PROBE_TIMEOUT, attempts(2), HEAD_HASH_HEX)
+            .await
+            .expect_err("a node that cannot reach the state must not answer");
+        assert!(is_state_unservable(&err), "got: {err:#}");
+        assert_eq!(node.calls_to("state_call").len(), 3);
+
+        let err = zswap_chain_state_over(
+            &legacy,
+            PROBE_TIMEOUT,
+            attempts(2),
+            DEPLOYED_ADDRESS,
+            HEAD_HASH_HEX,
+        )
+        .await
+        .expect_err("a node that cannot reach the state must not answer");
+        assert!(is_state_unservable(&err), "got: {err:#}");
+        assert_eq!(node.calls_to("state_call").len(), 6);
     }
 
     #[tokio::test]

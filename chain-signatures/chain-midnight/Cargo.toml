@@ -19,6 +19,7 @@ midnight-serialize.workspace = true
 midnight-storage.workspace = true
 midnight-transient-crypto.workspace = true
 midnight-ledger-v9.workspace = true
+midnight-node-ledger-helpers.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true

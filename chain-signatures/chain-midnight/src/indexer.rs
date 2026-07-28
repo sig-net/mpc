@@ -1302,6 +1302,7 @@ mod tests {
                     node_ws_url: "ws://127.0.0.1:1".to_string(),
                     central_address: central_address(),
                     network_id: "undeployed".to_string(),
+                    publisher: Default::default(),
                     rpc: Default::default(),
                     indexer: Default::default(),
                 },
@@ -1751,6 +1752,7 @@ mod tests {
                 node_ws_url: "ws://127.0.0.1:1".to_string(),
                 central_address: central,
                 network_id: "undeployed".to_string(),
+                publisher: Default::default(),
                 rpc: Default::default(),
                 indexer: Default::default(),
             },
@@ -2268,6 +2270,7 @@ mod tests {
             node_ws_url: String::new(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".to_string(),
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };

@@ -37,7 +37,9 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
+use mpc_chain_midnight::{
+    IntentGen, MidnightConfig, MidnightIndexer, MidnightPublisher, MidnightRpc,
+};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
@@ -46,6 +48,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -531,15 +534,65 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
         }
-        // MidnightPublisher is a unit struct: there is no publish path yet, and
-        // its publish_signature bails so a request keeps retrying rather than
-        // settling as published.
-        if self.midnight.is_some() {
-            publishers.insert(Chain::Midnight, Arc::new(MidnightPublisher));
+        if let Some(midnight) = &self.midnight {
+            if let Some(client) = midnight_publisher(midnight).await {
+                publishers.insert(Chain::Midnight, client);
+            }
         }
 
         publishers
     }
+}
+
+/// The Midnight publisher, when this deployment has one.
+///
+/// Gated on the funding seed rather than on the chain being configured, which is the
+/// one place Midnight differs from the arms above it. `MidnightConfig::validate`
+/// deliberately accepts an empty seed: Midnight deploys indexer-only today, so every
+/// existing deployment supplies the endpoint flags and no seed, and making the seed
+/// mandatory would both break those deployments and force a node that never spends to
+/// invent a credential, putting a fake secret in a real deployment. The gate's shape is
+/// this repo's own, absent config means the component does not spawn rather than the
+/// node refuses to start.
+async fn midnight_publisher(config: &MidnightConfig) -> Option<Arc<MidnightPublisher>> {
+    if config.publisher.funding_seed.is_empty() {
+        // Loud, and at boot: an operator who meant to run a publisher and forgot the
+        // flag would otherwise learn about it from a signature that is indexed, routed
+        // and then never answered.
+        tracing::warn!(
+            "midnight is configured with no funding seed, so no midnight publisher is \
+             registered and this node will index midnight requests without answering \
+             them. Supply --midnight-funding-seed to register one."
+        );
+        return None;
+    }
+    match build_midnight_publisher(config).await {
+        Ok(publisher) => Some(Arc::new(publisher)),
+        Err(err) => {
+            tracing::error!(?err, "failed to create midnight publisher");
+            None
+        }
+    }
+}
+
+/// The publisher's own node connection and intent builder.
+///
+/// A second connection to the node the indexer also dials: `MidnightIndexer` opens its
+/// own inside `run()` and does not expose it. The builder is spawned only here, so this
+/// stays the single child process however many times it is asked for.
+async fn build_midnight_publisher(config: &MidnightConfig) -> anyhow::Result<MidnightPublisher> {
+    // Dialed before the builder is spawned, so a node this deployment cannot reach
+    // costs no child process.
+    let rpc = Arc::new(MidnightRpc::connect(config).await?);
+    let intent_gen = Arc::new(IntentGen::spawn(&config.publisher, &config.network_id).await?);
+    // This token is never cancelled. `MidnightPublisher::new` takes one so that a
+    // proving run in flight stops with the node instead of holding it open through
+    // shutdown, and THAT PROPERTY IS NOT DELIVERED HERE: the node has no process-wide
+    // shutdown token to thread in, because `run` coordinates shutdown by awaiting join
+    // handles and `run_supervised` mints a fresh token per indexer run. Delivering it
+    // means threading a real token from `run` down through `RpcHandles::new` to here.
+    // Until then a proving run in flight still runs to completion at shutdown.
+    MidnightPublisher::new(&config.publisher, rpc, intent_gen, CancellationToken::new())
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -933,6 +986,9 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::sync::Mutex;
+
+    use mpc_chain_midnight::PublisherConfig;
 
     use super::*;
 
@@ -1131,6 +1187,12 @@ mod tests {
             "MPC_MIDNIGHT_NODE_WS_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_NETWORK_ID",
+            "MPC_MIDNIGHT_FUNDING_SEED",
+            "MPC_MIDNIGHT_MANAGED_DIR",
+            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
+            "MPC_MIDNIGHT_PROOF_SERVER_URL",
+            "MPC_MIDNIGHT_INDEXER_URL",
+            "MPC_MIDNIGHT_INDEXER_WS_URL",
         ] {
             assert!(
                 std::env::var_os(var).is_none(),
@@ -1150,6 +1212,8 @@ mod tests {
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
         let central_address = "ab".repeat(32);
+        let funding_seed = "0f".repeat(32);
+        let intent_gen_command = r#"["node","dist/main.js"]"#;
         let argv = [
             "mpc-node",
             "start",
@@ -1171,6 +1235,14 @@ mod tests {
             &central_address,
             "--midnight-network-id",
             "undeployed",
+            "--midnight-funding-seed",
+            &funding_seed,
+            "--midnight-managed-dir",
+            "/var/lib/mpc/midnight",
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1181,12 +1253,129 @@ mod tests {
             central_address.as_str(),
             "--midnight-network-id",
             "undeployed",
+            "--midnight-funding-seed",
+            funding_seed.as_str(),
+            "--midnight-managed-dir",
+            "/var/lib/mpc/midnight",
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
         ] {
             assert!(
                 out.contains(&expected.to_string()),
                 "into_str_args dropped {expected}"
             );
         }
+    }
+
+    /// Never dialed: `publishers()` only stores the client in the registry.
+    fn near_client() -> NearClient {
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        );
+        NearClient::new(
+            "http://127.0.0.1:1",
+            &account_id,
+            signer,
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        )
+    }
+
+    /// Collects what a `tracing` subscriber writes, so a test can assert on a startup
+    /// line. The publisher gate's whole output when it declines is that line, so
+    /// without this the decision is unobservable and only its absence from the
+    /// registry could be checked, which an unreachable node also produces.
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+    impl LogSink {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A fully configured Midnight deployment whose publisher the caller decides. Every
+    /// other field is held equal across the tests below.
+    fn midnight_args(publisher: PublisherConfig) -> MidnightArgs {
+        MidnightArgs::from_config(Some(MidnightConfig {
+            // Port 1 is privileged and unbound, so the dial is refused rather than
+            // left to a timeout.
+            node_ws_url: "ws://127.0.0.1:1".to_string(),
+            central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            publisher,
+            rpc: Default::default(),
+            indexer: Default::default(),
+        }))
+    }
+
+    /// A node that answers as well as indexes.
+    ///
+    /// The seed does not travel alone: the child validates the seed and the endpoints
+    /// the funding wallet reaches the chain through as one all-or-none set, so this and
+    /// `PublisherConfig::default()` differ by every one of them rather than by the seed.
+    /// `node_ws_url` is absent because it has no flag to survive `from_config` in;
+    /// `into_config` copies it off the node url above.
+    fn responding_publisher() -> PublisherConfig {
+        PublisherConfig {
+            funding_seed: "0f".repeat(32),
+            proof_server_url: "http://127.0.0.1:6300".to_string(),
+            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `publishers()` over a Midnight-only config, with everything it logged at WARN
+    /// or above.
+    async fn publishers_with_logs(
+        midnight: MidnightArgs,
+    ) -> (HashMap<Chain, Arc<dyn ChainPublisher>>, String) {
+        let chains = ChainConfigs::from_args(
+            EthArgs::from_config(None),
+            SolArgs::from_config(None),
+            HydrationArgs::from_config(None),
+            CantonArgs::from_config(None),
+            midnight,
+        )
+        .unwrap();
+
+        let sink = LogSink::default();
+        let publishers = {
+            // `#[tokio::test]` runs on a current-thread runtime, so the awaits below
+            // stay on the thread this thread-local guard was installed on.
+            let _guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(sink.clone())
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            );
+            chains.publishers(near_client()).await
+        };
+        (publishers, sink.text())
     }
 
     /// The Midnight config gate: with no Midnight flags supplied, the chain
@@ -1211,19 +1400,7 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        );
-        // Never dialed: publishers() only stores the client in the registry.
-        let near = NearClient::new(
-            "http://127.0.0.1:1",
-            &account_id,
-            signer,
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        );
-        let publishers = chains.publishers(near).await;
+        let publishers = chains.publishers(near_client()).await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1235,5 +1412,54 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    /// The publisher gate. `MidnightConfig::validate` accepts an empty funding seed
+    /// because every Midnight deployment today is indexer-only, so a seedless node is
+    /// a supported configuration and must start: it simply registers no publisher.
+    /// Nothing else in the tree pins that, and a refactor tidying the arm into
+    /// `if self.midnight.is_some()` would register a publisher with no wallet behind
+    /// it, which fails per signature instead of once at boot.
+    #[tokio::test]
+    async fn midnight_without_a_funding_seed_registers_no_publisher() {
+        assert_midnight_env_unset();
+
+        let (publishers, logs) = publishers_with_logs(midnight_args(Default::default())).await;
+
+        assert!(
+            !publishers.contains_key(&Chain::Midnight),
+            "a midnight deployment with no funding seed must register no publisher"
+        );
+        assert!(
+            logs.contains("--midnight-funding-seed"),
+            "the warning must name the flag that would enable the publisher, or an \
+             operator who forgot it learns from an unanswered signature: {logs}"
+        );
+        assert!(
+            !logs.contains("failed to create midnight publisher"),
+            "the seed is checked before anything is dialed or spawned: {logs}"
+        );
+    }
+
+    /// The other side of that gate. A seed opens it, and construction is then attempted
+    /// against the node: `MidnightRpc::connect` fetches subxt metadata at construction,
+    /// so no publisher can be built here without a running node, and the observable
+    /// difference from the seedless case is which of the two lines is logged. Building
+    /// against a live node is an integration concern.
+    #[tokio::test]
+    async fn a_funding_seed_opens_the_midnight_publisher_gate() {
+        assert_midnight_env_unset();
+
+        let (_publishers, logs) = publishers_with_logs(midnight_args(responding_publisher())).await;
+
+        assert!(
+            !logs.contains("--midnight-funding-seed"),
+            "a seeded deployment must not be told its publisher went unregistered: {logs}"
+        );
+        assert!(
+            logs.contains("failed to create midnight publisher"),
+            "a seeded deployment must go on to build the publisher, and this one has no \
+             node to build it against: {logs}"
+        );
     }
 }
