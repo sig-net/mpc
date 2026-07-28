@@ -106,10 +106,8 @@ fn claimed_of(call: &ContractCall<ProofMarker, DefaultDB>) -> Vec<ClaimedCall> {
 mod tests {
     use super::*;
 
-    const NOTIFY_TX: &[u8] =
-        include_bytes!("../../midnight-publisher-ts/tests/fixtures/notify-tx.mn");
-    const GOLDEN: &str =
-        include_str!("../../midnight-publisher-ts/tests/fixtures/golden-block-1366.json");
+    const NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx.mn");
+    const GOLDEN: &str = include_str!("../fixtures/golden-block-1366.json");
 
     /// The golden was minted by an independently written decoder, so reproducing it for
     /// the same captured transaction bytes is evidence this decode is right rather than

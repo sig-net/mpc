@@ -19,14 +19,10 @@ mod tests {
     use super::*;
     use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
 
-    const STATE_1366: &[u8] =
-        include_bytes!("../../midnight-publisher-ts/tests/fixtures/singleton-post-state-1366.mn");
-    const GOLDEN_1366: &str =
-        include_str!("../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1366.json");
-    const STATE_1365: &[u8] =
-        include_bytes!("../../midnight-publisher-ts/tests/fixtures/singleton-pre-state-1365.mn");
-    const GOLDEN_1365: &str =
-        include_str!("../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1365.json");
+    const STATE_1366: &[u8] = include_bytes!("../fixtures/singleton-post-state-1366.mn");
+    const GOLDEN_1366: &str = include_str!("../fixtures/golden-state-singleton-1366.json");
+    const STATE_1365: &[u8] = include_bytes!("../fixtures/singleton-pre-state-1365.mn");
+    const GOLDEN_1365: &str = include_str!("../fixtures/golden-state-singleton-1365.json");
 
     /// The JSON shape the goldens are written in, rendered from the native types so a
     /// decode can be compared against one byte for byte.
