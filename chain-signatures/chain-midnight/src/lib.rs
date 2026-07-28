@@ -8,18 +8,15 @@ mod reader;
 pub mod records;
 mod request_id;
 mod rpc;
-mod sidecar;
 mod state;
 #[cfg(test)]
 mod test_utils;
 mod tx;
+mod tx_decode;
 
-pub use config::{IndexerConfig, MidnightConfig, RpcConfig, SidecarConfig};
+pub use config::{IndexerConfig, MidnightConfig, RpcConfig};
 pub use convert::{to_sign_request, MidnightChainCtx};
 pub use indexer::MidnightIndexer;
 pub use publisher::MidnightPublisher;
-pub use sidecar::{
-    ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions, Health, LedgerTags,
-    SidecarClient,
-};
 pub use state::decode_contract_state;
+pub use tx_decode::{ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions};

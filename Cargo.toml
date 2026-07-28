@@ -87,6 +87,8 @@ midnight-base-crypto = "1.1.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
+midnight-transient-crypto = "3.0.0"
+midnight-ledger-v9 = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9", default-features = false }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -121,6 +123,9 @@ midnight-storage              = { git = "https://github.com/midnightntwrk/midnig
 midnight-storage-core         = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
 midnight-storage-macros       = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
 midnight-transient-crypto     = { git = "https://github.com/midnightntwrk/midnight-ledger", branch = "ledger-9" }
+# zkir still wants the 2.2.0 line, which was never published to crates.io; the ledger
+# workspace resolves it from this tag too.
+midnight-transient-crypto-2_2 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1", package = "midnight-transient-crypto" }
 
 
 # big optimization even in test builds for math heavy crates

@@ -563,12 +563,10 @@ mod tests {
         use futures_util::StreamExt as _;
 
         let config = crate::config::MidnightConfig {
-            sidecar_url: "http://127.0.0.1:8790".to_string(),
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".to_string(),
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         };
         let rpc = MidnightRpc::connect(&config).await.expect("connect");

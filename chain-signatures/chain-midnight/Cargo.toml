@@ -17,10 +17,11 @@ midnight-base-crypto.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
+midnight-transient-crypto.workspace = true
+midnight-ledger-v9.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Crate-local rather than workspace so this manifest states its own features.

@@ -4,36 +4,28 @@ use mpc_chain_midnight::MidnightConfig;
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_midnight_options")]
 pub struct MidnightArgs {
-    /// Base URL of the `midnight-publisher-ts` sidecar.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_SIDECAR_URL"),
-        requires_all = [
-            "midnight_node_ws_url",
-            "midnight_central_address",
-            "midnight_network_id",
-        ]
-    )]
-    pub midnight_sidecar_url: Option<String>,
     /// Midnight node WebSocket RPC URL.
     #[arg(
         long,
         env("MPC_MIDNIGHT_NODE_WS_URL"),
-        requires = "midnight_sidecar_url"
+        requires_all = [
+            "midnight_central_address",
+            "midnight_network_id",
+        ]
     )]
     pub midnight_node_ws_url: Option<String>,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
-        requires = "midnight_sidecar_url"
+        requires = "midnight_node_ws_url"
     )]
     pub midnight_central_address: Option<String>,
-    /// Ledger network id. Must equal the sidecar's `MIDNIGHT_PUB_NETWORK_ID`.
+    /// Ledger network id.
     #[arg(
         long,
         env("MPC_MIDNIGHT_NETWORK_ID"),
-        requires = "midnight_sidecar_url"
+        requires = "midnight_node_ws_url"
     )]
     pub midnight_network_id: Option<String>,
 }
@@ -41,9 +33,6 @@ pub struct MidnightArgs {
 impl MidnightArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(8);
-        if let Some(v) = self.midnight_sidecar_url {
-            args.extend(["--midnight-sidecar-url".to_string(), v]);
-        }
         if let Some(v) = self.midnight_node_ws_url {
             args.extend(["--midnight-node-ws-url".to_string(), v]);
         }
@@ -63,8 +52,7 @@ impl MidnightArgs {
     /// only guarantees the four flags arrive together, never that
     /// `central_address` is 64 lowercase hex.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
-        let (Some(sidecar_url), Some(node_ws_url), Some(central_address), Some(network_id)) = (
-            self.midnight_sidecar_url,
+        let (Some(node_ws_url), Some(central_address), Some(network_id)) = (
             self.midnight_node_ws_url,
             self.midnight_central_address,
             self.midnight_network_id,
@@ -72,12 +60,10 @@ impl MidnightArgs {
             return Ok(None);
         };
         let config = MidnightConfig {
-            sidecar_url,
             node_ws_url,
             central_address,
             network_id,
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         };
         config.validate()?;
@@ -87,26 +73,22 @@ impl MidnightArgs {
     pub fn from_config(config: Option<MidnightConfig>) -> Self {
         match config {
             Some(c) => {
-                // The rpc/sidecar/indexer tuning sub-structs have no CLI flags;
+                // The rpc/indexer tuning sub-structs have no CLI flags;
                 // into_config reinstates their defaults on the other side.
                 let MidnightConfig {
-                    sidecar_url,
                     node_ws_url,
                     central_address,
                     network_id,
                     rpc: _,
-                    sidecar: _,
                     indexer: _,
                 } = c;
                 MidnightArgs {
-                    midnight_sidecar_url: Some(sidecar_url),
                     midnight_node_ws_url: Some(node_ws_url),
                     midnight_central_address: Some(central_address),
                     midnight_network_id: Some(network_id),
                 }
             }
             None => MidnightArgs {
-                midnight_sidecar_url: None,
                 midnight_node_ws_url: None,
                 midnight_central_address: None,
                 midnight_network_id: None,
@@ -132,12 +114,10 @@ mod tests {
         crate::cli::tests::assert_midnight_env_unset();
 
         let mut cfg = MidnightConfig {
-            sidecar_url: "http://127.0.0.1:8790".into(),
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".into(),
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         };
         cfg.indexer.archive_probe_window = 77;
@@ -157,7 +137,6 @@ mod tests {
         .expect("a valid config passes the boundary check")
         .expect("all four flagged fields are set");
 
-        assert_eq!(reparsed.sidecar_url, cfg.sidecar_url);
         assert_eq!(reparsed.node_ws_url, cfg.node_ws_url);
         assert_eq!(reparsed.central_address, cfg.central_address);
         assert_eq!(reparsed.network_id, cfg.network_id);
@@ -177,12 +156,10 @@ mod tests {
         crate::cli::tests::assert_midnight_env_unset();
 
         let cfg = MidnightConfig {
-            sidecar_url: "http://127.0.0.1:8790".into(),
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".into(),
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         };
         let args = MidnightArgs::from_config(Some(cfg.clone()));

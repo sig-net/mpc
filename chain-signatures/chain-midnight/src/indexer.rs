@@ -7,8 +7,8 @@ use crate::reader::{
     Resolved,
 };
 use crate::rpc::{is_state_unservable, ArchiveState, BlockRef, MidnightRpc};
-use crate::sidecar::{DecodedTransactions, SidecarClient};
 use crate::state::decode_contract_state;
+use crate::tx_decode::{decode_transactions, DecodedTransactions};
 
 use midnight_base_crypto::fab::AlignedValue;
 use midnight_onchain_state::state::StateValue;
@@ -91,10 +91,9 @@ pub fn select_catchup_mode(
     }
 }
 
-/// The node-and-sidecar reads `run()` consumes, as a test seam.
+/// The node reads `run()` consumes, as a test seam.
 #[async_trait]
 pub(crate) trait ChainSource: Send + Sync {
-    async fn assert_sidecar_compatible(&self) -> anyhow::Result<()>;
     async fn probe_archive_state(&self, window: u64) -> anyhow::Result<ArchiveState>;
     async fn finalized_head(&self) -> anyhow::Result<BlockRef>;
     async fn block_at(&self, number: u64) -> anyhow::Result<BlockRef>;
@@ -123,24 +122,18 @@ fn classify_decode(decoded: anyhow::Result<Node>) -> anyhow::Result<ContractStat
 
 struct LiveSource {
     rpc: MidnightRpc,
-    sidecar: SidecarClient,
 }
 
 impl LiveSource {
     async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         Ok(Self {
             rpc: MidnightRpc::connect(config).await?,
-            sidecar: SidecarClient::new(config)?,
         })
     }
 }
 
 #[async_trait]
 impl ChainSource for LiveSource {
-    async fn assert_sidecar_compatible(&self) -> anyhow::Result<()> {
-        self.sidecar.assert_compatible().await
-    }
-
     async fn probe_archive_state(&self, window: u64) -> anyhow::Result<ArchiveState> {
         self.rpc.probe_archive_state(window).await
     }
@@ -174,14 +167,14 @@ impl ChainSource for LiveSource {
                 skipped: Vec::new(),
             });
         }
-        let decoded = self.sidecar.decode_transactions(&blobs).await?;
+        let decoded = decode_transactions(&blobs);
         if !decoded.skipped.is_empty() {
             // Advisory, like the rest of provenance: an unreadable blob costs
             // attribution for this block, never a request.
             tracing::warn!(
                 height = block.number,
                 reason = "provenance-blob-skipped",
-                "sidecar could not decode {} of {} transaction blobs: {:?}",
+                "could not decode {} of {} transaction blobs: {:?}",
                 decoded.skipped.len(),
                 blobs.len(),
                 decoded.skipped
@@ -384,7 +377,7 @@ enum Retried<T> {
 /// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
 ///
 /// The per-item retry the other chains' indexers apply around their own block
-/// processing: a node or sidecar hiccup costs one retry here, not a supervised
+/// processing: a node hiccup costs one retry here, not a supervised
 /// restart that re-runs backlog recovery, re-probes state retention, re-anchors and
 /// re-queues the pending backlog. Only the pruning signature escapes, as
 /// [`Retried::Unservable`]: no number of retries makes a pruned node serve state,
@@ -637,7 +630,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &caller_hex,
                 ));
             }
-            // The caller's own bytes, refused by the sidecar: a per-entry data property
+            // The caller's own bytes, refused by the decoder: a per-entry data property
             // like the rest.
             ContractState::Undecodable(err) => {
                 return Ok(drop_entry(
@@ -834,13 +827,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        // Startup gates.
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            compatible = source.assert_sidecar_compatible() => {
-                compatible.context("midnight sidecar compatibility gate failed")?;
-            }
-        }
+        // Startup gate.
         let state = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             state = source.probe_archive_state(self.config.indexer.archive_probe_window) => state?,
@@ -1048,8 +1035,8 @@ mod tests {
 
     // run() over an injected ChainSource.
 
-    use crate::sidecar::{ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions};
     use crate::test_utils::{array_of, cell_from_record, cell_of, key_of, map_of, sample_record};
+    use crate::tx_decode::{ClaimedCall, DecodedCall, DecodedTransaction};
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
@@ -1150,8 +1137,8 @@ mod tests {
         /// read and then lets the read succeed, which is how a test distinguishes a
         /// retry from a restart: a restarting indexer never reaches the success.
         transient_state_errors: std::sync::Mutex<HashMap<(String, String), (String, usize)>>,
-        /// (address, at_hash) -> sidecar decode rejection; the node served the bytes
-        /// and the SIDECAR refused them.
+        /// (address, at_hash) -> decode rejection; the node served the bytes
+        /// and the DECODER refused them.
         undecodable_states: HashMap<(String, String), String>,
         /// block hash -> decoded transactions; absent means empty.
         txs: HashMap<String, DecodedTransactions>,
@@ -1214,28 +1201,19 @@ mod tests {
             );
         }
 
-        /// Injects the sidecar's real refusal for one (address, height): its state walk
-        /// fails closed on any `StateValue` variant outside null/cell/array/map, which
-        /// a `MerkleTree` ledger field is.
+        /// Injects a real decode failure for one (address, height): the ledger's own
+        /// deserializer refuses bytes whose tag is not the contract state this build
+        /// speaks, which is how a chain that moved ahead of us surfaces.
         fn set_undecodable(&mut self, address: &str, at: u64) {
             self.undecodable_states.insert(
                 (address.to_string(), hash_of(at)),
-                format!(
-                    "{}: /decode/contract-state 422 Unprocessable Entity: code=decode_failed \
-                     message=unsupported StateValue variant in signet contract state: \
-                     boundedMerkleTree",
-                    crate::sidecar::REFUSED_BYTES_MSG
-                ),
+                "contract state did not deserialize: unexpected tag".to_string(),
             );
         }
     }
 
     #[async_trait]
     impl ChainSource for FixtureSource {
-        async fn assert_sidecar_compatible(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
         async fn probe_archive_state(&self, _window: u64) -> anyhow::Result<ArchiveState> {
             Ok(self.probe.unwrap_or(ArchiveState::Archive))
         }
@@ -1326,12 +1304,10 @@ mod tests {
         async fn spawn_with_state(source: FixtureSource, state: MockStateManager) -> Self {
             let indexer = MidnightIndexer::new(
                 MidnightConfig {
-                    sidecar_url: "http://127.0.0.1:1".to_string(),
                     node_ws_url: "ws://127.0.0.1:1".to_string(),
                     central_address: central_address(),
                     network_id: "undeployed".to_string(),
                     rpc: Default::default(),
-                    sidecar: Default::default(),
                     indexer: Default::default(),
                 },
                 state.clone(),
@@ -1533,7 +1509,7 @@ mod tests {
             9,
             central_state(vec![notification_entry(1, &rid)]),
         );
-        // The caller contract IS present; the sidecar cannot walk its state.
+        // The caller contract IS present; its state does not deserialize.
         source.set_undecodable(&hex::encode(CALLER), 9);
 
         let mut harness = RunFixture::spawn(source, 8).await;
@@ -1613,7 +1589,7 @@ mod tests {
 
     #[tokio::test]
     async fn catchup_retries_a_transient_read_instead_of_degrading() {
-        // A node or sidecar hiccup costs a retry, not a switch to the watermark walk.
+        // A node hiccup costs a retry, not a switch to the watermark walk.
         // Block 8 is where the fault lands, so it is block 8's OWN emission that proves
         // the retry: degrading instead would abandon the range and emit only the
         // anchor, skipping 8 entirely.
@@ -1644,7 +1620,7 @@ mod tests {
             &hex::encode(CALLER),
             8,
             1,
-            "sidecar /decode/contract-state request failed: connection reset by peer",
+            "contract state read failed: connection reset by peer",
         );
 
         let mut harness = RunFixture::spawn(source, 6).await;
@@ -1685,7 +1661,7 @@ mod tests {
             &hex::encode(CALLER),
             9,
             1,
-            "sidecar /decode/contract-state request failed: connection reset by peer",
+            "contract state read failed: connection reset by peer",
         );
 
         let mut harness = RunFixture::spawn(source, 8).await;
@@ -1777,12 +1753,10 @@ mod tests {
         state.set_processed_block(Chain::Midnight, 8).await;
         let indexer = MidnightIndexer::new(
             MidnightConfig {
-                sidecar_url: "http://127.0.0.1:1".to_string(),
                 node_ws_url: "ws://127.0.0.1:1".to_string(),
                 central_address: central,
                 network_id: "undeployed".to_string(),
                 rpc: Default::default(),
-                sidecar: Default::default(),
                 indexer: Default::default(),
             },
             state,
@@ -2296,12 +2270,10 @@ mod tests {
     #[tokio::test]
     async fn midnight_indexer_new_rejects_unusable_config() {
         let config = MidnightConfig {
-            sidecar_url: "http://127.0.0.1:8790".to_string(),
             node_ws_url: String::new(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".to_string(),
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         };
         let Err(err) = TestIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await

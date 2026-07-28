@@ -1,4 +1,4 @@
-//! Midnight node and sidecar configuration.
+//! Midnight node configuration.
 
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
@@ -20,29 +20,6 @@ impl Default for RpcConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
                 max_times: 5,
-                jitter: true,
-            },
-        }
-    }
-}
-
-/// Timeouts and retry budget for the `midnight-publisher-ts` sidecar.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SidecarConfig {
-    pub request_timeout: Duration,
-    /// Slower and shorter than the node budget: retrying hard only deepens wallet
-    /// contention
-    pub retry: RetryConfig,
-}
-
-impl Default for SidecarConfig {
-    fn default() -> Self {
-        Self {
-            request_timeout: Duration::from_secs(30),
-            retry: RetryConfig {
-                min_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(30),
-                max_times: 3,
                 jitter: true,
             },
         }
@@ -79,14 +56,12 @@ impl Default for IndexerConfig {
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
-    pub sidecar_url: String,
     pub node_ws_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
     /// Ledger network id.
     pub network_id: String,
     pub rpc: RpcConfig,
-    pub sidecar: SidecarConfig,
     pub indexer: IndexerConfig,
 }
 
@@ -100,10 +75,6 @@ impl MidnightConfig {
             "midnight config: node_ws_url is empty"
         );
         anyhow::ensure!(
-            !self.sidecar_url.is_empty(),
-            "midnight config: sidecar_url is empty"
-        );
-        anyhow::ensure!(
             self.central_address.len() == 64
                 && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
             "midnight config: central_address must be 64 hex characters with no 0x prefix, \
@@ -111,7 +82,7 @@ impl MidnightConfig {
             self.central_address.len()
         );
         // Required rather than normalised: the address flows verbatim into chain_ctx
-        // and is compared against the sidecar's lowercase addresses during attribution,
+        // and is compared against the decoder's lowercase addresses during attribution,
         // so an uppercase value would silently never match.
         anyhow::ensure!(
             !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
@@ -128,12 +99,10 @@ mod tests {
 
     fn valid_config() -> MidnightConfig {
         MidnightConfig {
-            sidecar_url: "http://127.0.0.1:8790".to_string(),
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
             network_id: "undeployed".to_string(),
             rpc: Default::default(),
-            sidecar: Default::default(),
             indexer: Default::default(),
         }
     }
@@ -167,13 +136,8 @@ mod tests {
         let err = prefixed.validate().unwrap_err().to_string();
         assert!(err.contains("central_address"), "unexpected error: {err}");
 
-        let mut empty_sidecar = valid_config();
-        empty_sidecar.sidecar_url = String::new();
-        let err = empty_sidecar.validate().unwrap_err().to_string();
-        assert!(err.contains("sidecar_url"), "unexpected error: {err}");
-
         // Lowercase is canonical, not a courtesy: attribution compares this address
-        // against sidecar-returned lowercase hex, so an uppercase config value would
+        // against decoder-returned lowercase hex, so an uppercase config value would
         // silently never match.
         let mut uppercase = valid_config();
         uppercase.central_address = "AB".repeat(32);

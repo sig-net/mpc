@@ -1124,11 +1124,10 @@ mod tests {
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
     /// `--midnight-*` flags, so a set variable can silently backfill a flag
     /// `into_str_args` dropped and turn the round-trip test green. Those
-    /// fixtures use the values a developer running a local sidecar exports,
+    /// fixtures use the values a developer running a local stack exports,
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
-            "MPC_MIDNIGHT_SIDECAR_URL",
             "MPC_MIDNIGHT_NODE_WS_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_NETWORK_ID",
@@ -1166,8 +1165,6 @@ mod tests {
             "project",
             "--redis-url",
             "redis://127.0.0.1:6379",
-            "--midnight-sidecar-url",
-            "http://127.0.0.1:8790",
             "--midnight-node-ws-url",
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
@@ -1178,8 +1175,6 @@ mod tests {
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
         for expected in [
-            "--midnight-sidecar-url",
-            "http://127.0.0.1:8790",
             "--midnight-node-ws-url",
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
