@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+#[path = "support/sandbox.rs"]
+mod sandbox;
+pub use sandbox::{contract_file_path, SANDBOX_VERSION};
 
 use digest::{Digest, FixedOutput};
 use ecdsa::signature::Verifier;
@@ -23,23 +26,6 @@ pub const PARTICIPANT_LEN: usize = 3;
 /// Protocol 84 is where the runtime starts accepting the bulk-memory and reference-types
 /// opcodes rustc emits past 1.81, and 2.12.0 is the first sandbox release carrying it.
 /// near-workspaces defaults to an older one, which rejects the contract at deploy time.
-pub const SANDBOX_VERSION: &str = "2.12.0";
-
-pub fn contract_file_path() -> PathBuf {
-    let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let target_dir = if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        let target_dir = PathBuf::from(target_dir);
-        if Path::new(&target_dir).is_absolute() {
-            target_dir
-        } else {
-            workspace_dir.join(target_dir)
-        }
-    } else {
-        workspace_dir.join("target")
-    };
-    target_dir.join("wasm32-unknown-unknown/release/mpc_contract.wasm")
-}
-
 pub fn candidates(names: Option<Vec<AccountId>>) -> HashMap<AccountId, CandidateInfo> {
     let mut candidates: HashMap<AccountId, CandidateInfo> = HashMap::new();
     let names = names.unwrap_or_else(|| {

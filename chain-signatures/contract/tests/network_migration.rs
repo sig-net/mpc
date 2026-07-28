@@ -1,7 +1,4 @@
-pub mod common;
-
 use anyhow::Context;
-use common::contract_file_path;
 use near_primitives::serialize::from_base64;
 use near_workspaces::AccountId;
 use serde::Deserialize;
@@ -10,6 +7,10 @@ use std::collections::HashMap;
 
 const TESTNET_RPC_URL: &str = "https://rpc.testnet.fastnear.com";
 const MAINNET_RPC_URL: &str = "https://rpc.mainnet.fastnear.com";
+
+#[path = "support/sandbox.rs"]
+mod sandbox;
+use sandbox::{contract_file_path, SANDBOX_VERSION};
 
 #[derive(Deserialize)]
 struct ViewStateResponse {
@@ -76,7 +77,7 @@ async fn assert_migration(
         "{source_contract_id} has no STATE entry"
     );
 
-    let sandbox = near_workspaces::sandbox().await?;
+    let sandbox = near_workspaces::sandbox_with_version(SANDBOX_VERSION).await?;
     let contract = sandbox.dev_deploy(wasm).await?;
     sandbox
         .patch(contract.id())
