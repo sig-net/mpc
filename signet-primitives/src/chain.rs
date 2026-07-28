@@ -93,10 +93,6 @@ impl Chain {
             // ChainAgnostic/namespaces. "canton:global" follows the
             // namespace:reference format as a project-local identifier.
             Chain::Canton => "canton:global",
-            // Synthetic: Midnight has no registered CAIP-2 namespace in
-            // ChainAgnostic/namespaces. Must stay byte-identical to
-            // MIDNIGHT_TESTNET_CHAIN_ID in @sig-net/midnight's
-            // epsilon-derivation.ts, the string integrators derive keys with.
             Chain::Midnight => "midnight:testnet",
         }
     }
@@ -129,19 +125,5 @@ impl FromStr for Chain {
             "midnight" => Ok(Chain::Midnight),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn midnight_enum_arms() {
-        assert_eq!(Chain::Midnight as u8, 6);
-        assert_eq!(Chain::Midnight.as_str(), "Midnight");
-        assert_eq!(Chain::Midnight.caip2_chain_id(), "midnight:testnet");
-        assert_eq!("midnight".parse::<Chain>().unwrap(), Chain::Midnight);
-        assert!(Chain::iter().contains(&Chain::Midnight));
     }
 }

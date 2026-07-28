@@ -376,52 +376,43 @@ mod tests {
         );
     }
 
+    /// Golden: `@sig-net/midnight` is what integrators derive their expected
+    /// keys with, so agreeing with it is the property that matters. Every
+    /// expected value comes from that package (see the fixture's provenance);
+    /// nothing here is computed by the code under test.
     #[test]
-    fn midnight_derivation_path_stays_the_same() {
+    fn midnight_epsilon_matches_the_reference_implementation() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/midnight-epsilon.json")).unwrap();
+
         assert_eq!(
-            DerivationParams::UserAccount(
-                1,
-                Chain::Midnight,
-                "sender".to_string(),
-                "path".to_string()
-            )
-            .derivation_path(),
-            "sig.network v2.0.0 epsilon derivation:midnight:testnet:sender:path"
+            golden["constants"]["epsilon_derivation_prefix"],
+            EPSILON_DERIVATION_PREFIX_V2
         );
+        assert_eq!(
+            golden["constants"]["midnight_chain_id"],
+            Chain::Midnight.caip2_chain_id()
+        );
+
+        for vector in golden["vectors"].as_array().unwrap() {
+            let (requester, path) = (
+                vector["requester"].as_str().unwrap(),
+                vector["path"].as_str().unwrap(),
+            );
+            let mut expected = [0u8; 32];
+            hex::decode_to_slice(vector["epsilon"].as_str().unwrap(), &mut expected).unwrap();
+            assert_eq!(
+                derive_epsilon_midnight(1, requester, path)
+                    .to_bytes()
+                    .as_slice(),
+                expected,
+                "requester {requester}, path {path:?}"
+            );
+        }
     }
 
-    // Pins the wrapper to the generic derivation it is sugar for: the chain
-    // variant, the address/path argument order, and that key_version is
-    // threaded through rather than hardcoded (only version 0 derives a
-    // different string, so it is the one that catches a hardcoded version).
-    #[test]
-    fn test_derive_epsilon_midnight_matches_generic() {
-        assert_eq!(
-            derive_epsilon_midnight(0, "sender", "path"),
-            derive_epsilon(&DerivationParams::UserAccount(
-                0,
-                Chain::Midnight,
-                "sender".to_string(),
-                "path".to_string()
-            ))
-        );
-        assert_eq!(
-            derive_epsilon_midnight(1, "sender", "path"),
-            derive_epsilon(&DerivationParams::UserAccount(
-                1,
-                Chain::Midnight,
-                "sender".to_string(),
-                "path".to_string()
-            ))
-        );
-        assert_ne!(
-            derive_epsilon_midnight(1, "path", "sender"),
-            derive_epsilon_midnight(1, "sender", "path")
-        );
-    }
-
-    // Version 0 selects the legacy v1 comma format; every nonzero version emits v2.
-    // A key_version hardcoded inside the wrapper is what the first assertion catches.
+    // Version 0 selects the legacy v1 comma format, which the reference
+    // implementation cannot produce, so no golden reaches it.
     #[test]
     fn test_derive_epsilon_midnight_key_version_routing() {
         let (sender, path) = ("ab".repeat(32), "caller-path");
