@@ -8493,7 +8493,6 @@ dependencies = [
  "near-account-id",
  "near-primitives 0.28.0",
  "near-sdk",
- "serde_json",
  "sha3",
  "signet-crypto",
 ]
