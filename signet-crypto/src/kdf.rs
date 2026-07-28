@@ -127,6 +127,15 @@ pub fn derive_epsilon_bitcoin(key_version: KeyVersion, address: &str, path: &str
     ))
 }
 
+pub fn derive_epsilon_midnight(key_version: KeyVersion, address: &str, path: &str) -> Scalar {
+    derive_epsilon(&DerivationParams::UserAccount(
+        key_version,
+        Chain::Midnight,
+        address.to_string(),
+        path.to_string(),
+    ))
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }
@@ -364,6 +373,65 @@ mod tests {
                 "path".to_string()
             )),
             expected_canton_v1
+        );
+    }
+
+    #[test]
+    fn midnight_derivation_path_stays_the_same() {
+        assert_eq!(
+            DerivationParams::UserAccount(
+                1,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            )
+            .derivation_path(),
+            "sig.network v2.0.0 epsilon derivation:midnight:testnet:sender:path"
+        );
+    }
+
+    // Pins the wrapper to the generic derivation it is sugar for: the chain
+    // variant, the address/path argument order, and that key_version is
+    // threaded through rather than hardcoded (only version 0 derives a
+    // different string, so it is the one that catches a hardcoded version).
+    #[test]
+    fn test_derive_epsilon_midnight_matches_generic() {
+        assert_eq!(
+            derive_epsilon_midnight(0, "sender", "path"),
+            derive_epsilon(&DerivationParams::UserAccount(
+                0,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            ))
+        );
+        assert_eq!(
+            derive_epsilon_midnight(1, "sender", "path"),
+            derive_epsilon(&DerivationParams::UserAccount(
+                1,
+                Chain::Midnight,
+                "sender".to_string(),
+                "path".to_string()
+            ))
+        );
+        assert_ne!(
+            derive_epsilon_midnight(1, "path", "sender"),
+            derive_epsilon_midnight(1, "sender", "path")
+        );
+    }
+
+    // Version 0 selects the legacy v1 comma format; every nonzero version emits v2.
+    // A key_version hardcoded inside the wrapper is what the first assertion catches.
+    #[test]
+    fn test_derive_epsilon_midnight_key_version_routing() {
+        let (sender, path) = ("ab".repeat(32), "caller-path");
+        assert_ne!(
+            derive_epsilon_midnight(0, &sender, path),
+            derive_epsilon_midnight(1, &sender, path),
+        );
+        assert_eq!(
+            derive_epsilon_midnight(1, &sender, path),
+            derive_epsilon_midnight(2, &sender, path),
         );
     }
 
