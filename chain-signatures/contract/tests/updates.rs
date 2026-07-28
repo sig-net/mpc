@@ -1,5 +1,5 @@
 pub mod common;
-use common::{init_env, vote_update_till_completion, CONTRACT_FILE_PATH, INVALID_CONTRACT};
+use common::{contract_file_path, init_env, vote_update_till_completion, INVALID_CONTRACT};
 
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ pub fn dummy_contract() -> ProposeUpdateArgs {
 }
 
 pub fn current_contract() -> ProposeUpdateArgs {
-    let new_wasm = std::fs::read(CONTRACT_FILE_PATH).unwrap();
+    let new_wasm = std::fs::read(contract_file_path()).unwrap();
     ProposeUpdateArgs {
         code: Some(new_wasm),
         config: None,

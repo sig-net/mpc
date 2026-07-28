@@ -1,11 +1,13 @@
+pub mod common;
+
 use anyhow::Context;
+use common::contract_file_path;
 use near_primitives::serialize::from_base64;
 use near_workspaces::AccountId;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 
-const CONTRACT_FILE_PATH: &str = "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 const TESTNET_RPC_URL: &str = "https://rpc.testnet.fastnear.com";
 const MAINNET_RPC_URL: &str = "https://rpc.mainnet.fastnear.com";
 
@@ -102,7 +104,7 @@ async fn assert_migration(
 
 #[tokio::test]
 async fn test_migrate_deployed_network_states() -> anyhow::Result<()> {
-    let wasm = std::fs::read(CONTRACT_FILE_PATH)?;
+    let wasm = std::fs::read(contract_file_path())?;
 
     assert_migration(TESTNET_RPC_URL, "dev.sig-net.testnet".parse()?, &wasm).await?;
     assert_migration(TESTNET_RPC_URL, "v1.sig-net.testnet".parse()?, &wasm).await?;
