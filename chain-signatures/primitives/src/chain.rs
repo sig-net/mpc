@@ -65,6 +65,8 @@ impl ChainConfig for Chain {
 
     fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
+            // TODO: Midnight's response format is still under discussion and may
+            // move off Abi.
             Chain::Canton | Chain::Midnight => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
