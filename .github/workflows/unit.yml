@@ -29,7 +29,6 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
           target: wasm32-unknown-unknown
-          override: true
 
       - name: Install Node.js
         uses: actions/setup-node@v4
