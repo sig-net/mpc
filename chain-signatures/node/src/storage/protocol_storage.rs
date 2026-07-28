@@ -3,8 +3,11 @@ use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::{Arc, OnceLock};
-use std::{fmt, time::Instant};
+#[cfg(feature = "test-feature")]
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing;
 
@@ -207,6 +210,9 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
     }
 }
 
+#[cfg(feature = "test-feature")]
+type OperationDelays = Arc<std::sync::Mutex<HashMap<&'static str, Duration>>>;
+
 #[derive(Debug)]
 pub struct ProtocolStorage<A: ProtocolArtifact> {
     redis_pool: Pool,
@@ -215,6 +221,8 @@ pub struct ProtocolStorage<A: ProtocolArtifact> {
     owner_keys: String,
     account_id: AccountId,
     me: Arc<OnceLock<Participant>>,
+    #[cfg(feature = "test-feature")]
+    operation_delays: OperationDelays,
     _phantom: std::marker::PhantomData<A>,
 }
 
@@ -227,6 +235,8 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
             owner_keys: self.owner_keys.clone(),
             account_id: self.account_id.clone(),
             me: self.me.clone(),
+            #[cfg(feature = "test-feature")]
+            operation_delays: self.operation_delays.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -245,8 +255,20 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             owner_keys,
             account_id: account_id.clone(),
             me: Arc::new(OnceLock::new()),
+            #[cfg(feature = "test-feature")]
+            operation_delays: Arc::new(std::sync::Mutex::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Inject artificial latency for a specific redis operation (e.g. "take_mine",
+    /// "insert", "contains"). Shared across clones via `Arc`.
+    #[cfg(feature = "test-feature")]
+    pub fn set_operation_delay(&self, operation: &'static str, delay: Duration) {
+        self.operation_delays
+            .lock()
+            .unwrap()
+            .insert(operation, delay);
     }
 }
 
@@ -308,6 +330,19 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 tracing::warn!(?err, "failed to connect to redis");
             })
             .ok()
+    }
+
+    #[cfg(feature = "test-feature")]
+    async fn apply_operation_delay(&self, operation: &str) {
+        let delay = self
+            .operation_delays
+            .lock()
+            .unwrap()
+            .get(operation)
+            .copied();
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
     }
 
     pub async fn fetch_owned(&self) -> Result<Vec<A::Id>, StorageError> {
@@ -506,6 +541,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// persisted as a dedicated Redis set for later holder-tracking.
     /// Private: callers must use `create_slot()` + `ArtifactSlot::insert()`.
     async fn insert(&self, artifact: A, owner: Participant) -> bool {
+        #[cfg(feature = "test-feature")]
+        self.apply_operation_delay("insert").await;
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local owner_keys = KEYS[2]
@@ -566,6 +603,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn contains(&self, id: A::Id) -> bool {
+        #[cfg(feature = "test-feature")]
+        self.apply_operation_delay("contains").await;
         let Some(mut conn) = self.connect().await else {
             return false;
         };
@@ -755,6 +794,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// It is very important to NOT reuse the same artifact twice for two different
     /// protocols.
     pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
+        #[cfg(feature = "test-feature")]
+        self.apply_operation_delay("take_mine").await;
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local mine_key = KEYS[2]

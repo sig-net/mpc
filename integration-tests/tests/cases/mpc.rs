@@ -3,7 +3,7 @@ use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::CollectMessages;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixture, MpcFixtureBuilder};
 use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::Presignature;
@@ -1428,4 +1428,263 @@ fn test_truncate_per_owner_insufficient() {
     let mut data = BTreeMap::new();
     data.insert(p, BTreeMap::from([(p, vec![dummy_pair(1)])]));
     truncate_per_owner(data, 2);
+}
+
+/// Reproduces the presignature generation stall from issue #859.
+///
+/// Injects per-operation redis latency on node 0 to simulate production
+/// redis contention. In production, frequent `take_mine()` calls from the
+/// stockpile loop drive up redis latency on the affected node, which in
+/// turn slows the `contains()` checks in presig posit processing. Posits
+/// expire before accepts are delivered, wasting triples and stalling presig
+/// generation — while triple generation (no redis IO in posit processing)
+/// continues on all nodes. Once healthy nodes reach their presig target
+/// and stop proposing, node 0's presignature posit message channel clears and it recovers.
+#[test(tokio::test(flavor = "multi_thread", worker_threads = 8))]
+async fn test_presig_stall_from_slow_redis() {
+    use std::collections::{HashMap, HashSet};
+
+    type CountsByNode = Arc<std::sync::Mutex<HashMap<Participant, usize>>>;
+    type SeenIds = Arc<std::sync::Mutex<HashSet<(Participant, u64)>>>;
+
+    fn count_unique(seen: &SeenIds, counts: &CountsByNode, from: Participant, id: u64) {
+        if seen.lock().unwrap().insert((from, id)) {
+            *counts.lock().unwrap().entry(from).or_default() += 1;
+        }
+    }
+
+    fn get_count(counts: &CountsByNode, node: u32) -> usize {
+        counts
+            .lock()
+            .unwrap()
+            .get(&Participant::from(node))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Counts unique presig and triple generators started per node.
+    #[derive(Default, Clone)]
+    struct StallTracker {
+        seen_presig_gen_ids: SeenIds,
+        presig_gen_counts: CountsByNode,
+        seen_triple_gen_ids: SeenIds,
+        triple_gen_counts: CountsByNode,
+    }
+
+    impl CollectMessages for StallTracker {
+        fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
+            let (message, (_from, _to, _ts)) = msg;
+            match message {
+                Message::Presignature(m) => {
+                    count_unique(
+                        &self.seen_presig_gen_ids,
+                        &self.presig_gen_counts,
+                        m.from,
+                        m.id,
+                    );
+                }
+                Message::Triple(m) => {
+                    count_unique(
+                        &self.seen_triple_gen_ids,
+                        &self.triple_gen_counts,
+                        m.from,
+                        m.id,
+                    );
+                }
+                _ => {}
+            }
+        }
+        fn print_summary(&self) {}
+    }
+
+    struct PollSnapshot {
+        presig_stored: [usize; 3],
+        presig_stored_deltas: [usize; 3],
+        presig_gen_deltas: [usize; 3],
+        triple_gen_deltas: [usize; 3],
+    }
+
+    struct Poller {
+        network: MpcFixture,
+        presig_gen_counts: CountsByNode,
+        triple_gen_counts: CountsByNode,
+        prev_presig_stored: [usize; 3],
+        prev_presig_gens: [usize; 3],
+        prev_triple_gens: [usize; 3],
+    }
+
+    impl Poller {
+        async fn poll(&mut self) -> PollSnapshot {
+            let presig_stored = [
+                self.network.nodes[0]
+                    .presignature_storage
+                    .len_generated()
+                    .await,
+                self.network.nodes[1]
+                    .presignature_storage
+                    .len_generated()
+                    .await,
+                self.network.nodes[2]
+                    .presignature_storage
+                    .len_generated()
+                    .await,
+            ];
+            let presig_gens: [usize; 3] =
+                std::array::from_fn(|i| get_count(&self.presig_gen_counts, i as u32));
+            let triple_gens: [usize; 3] =
+                std::array::from_fn(|i| get_count(&self.triple_gen_counts, i as u32));
+
+            let presig_stored_deltas: [usize; 3] = std::array::from_fn(|i| {
+                presig_stored[i].saturating_sub(self.prev_presig_stored[i])
+            });
+            let presig_gen_deltas: [usize; 3] =
+                std::array::from_fn(|i| presig_gens[i].saturating_sub(self.prev_presig_gens[i]));
+            let triple_gen_deltas: [usize; 3] =
+                std::array::from_fn(|i| triple_gens[i].saturating_sub(self.prev_triple_gens[i]));
+
+            self.prev_presig_stored = presig_stored;
+            self.prev_presig_gens = presig_gens;
+            self.prev_triple_gens = triple_gens;
+
+            PollSnapshot {
+                presig_stored,
+                presig_stored_deltas,
+                presig_gen_deltas,
+                triple_gen_deltas,
+            }
+        }
+    }
+
+    let tracker = StallTracker::default();
+    let presig_gen_counts = Arc::clone(&tracker.presig_gen_counts);
+    let triple_gen_counts = Arc::clone(&tracker.triple_gen_counts);
+
+    let network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_node_min_triples(100)
+        .with_node_min_presignatures(50)
+        .with_message_collector(Arc::new(Mutex::new(tracker)))
+        .build()
+        .await;
+
+    // Inject per-operation redis latency on node 0 to reproduce the
+    // production feedback loop: take_mine/insert contention slows contains,
+    // which causes presig posits to expire.
+    let heavy_delay = Duration::from_millis(100);
+    let contains_delay = Duration::from_millis(50);
+    network.nodes[0]
+        .triple_storage
+        .set_operation_delay("take_mine", heavy_delay);
+    network.nodes[0]
+        .triple_storage
+        .set_operation_delay("insert", heavy_delay);
+    network.nodes[0]
+        .triple_storage
+        .set_operation_delay("contains", contains_delay);
+    network.nodes[0]
+        .presignature_storage
+        .set_operation_delay("contains", contains_delay);
+
+    network.wait_for_running().await;
+    tracing::info!("all nodes running, letting presignature generation proceed");
+
+    let poll_interval = Duration::from_secs(10);
+    let required_sustained_polls = 3u32;
+
+    let mut poller = Poller {
+        network,
+        presig_gen_counts,
+        triple_gen_counts,
+        prev_presig_stored: [0; 3],
+        prev_presig_gens: [0; 3],
+        prev_triple_gens: [0; 3],
+    };
+
+    // --- Phase 1: detect stall ---
+    // Stall invariant (must hold for N consecutive polls):
+    //
+    // 1. Node 0's stored presig count did not grow.
+    // 2. At least one healthy node's stored presig count grew.
+    // 3. All nodes started new triple generators — triple posit
+    //    processing has no redis IO, so it is unaffected.
+    let start = Instant::now();
+    let phase_timeout = Duration::from_secs(300);
+    let mut sustained_stall_polls = 0u32;
+
+    while start.elapsed() < phase_timeout {
+        tokio::time::sleep(poll_interval).await;
+        let snap = poller.poll().await;
+
+        tracing::info!(
+            elapsed_s = start.elapsed().as_secs(),
+            presig_stored = ?snap.presig_stored,
+            presig_stored_deltas = ?snap.presig_stored_deltas,
+            presig_gen_deltas = ?snap.presig_gen_deltas,
+            triple_gen_deltas = ?snap.triple_gen_deltas,
+            sustained_stall_polls,
+            "presignature generation progress"
+        );
+
+        let stall_detected = snap.presig_stored_deltas[0] == 0
+            && (snap.presig_stored_deltas[1] > 0 || snap.presig_stored_deltas[2] > 0)
+            && snap.triple_gen_deltas.iter().all(|&d| d > 0);
+
+        if stall_detected {
+            sustained_stall_polls += 1;
+            if sustained_stall_polls >= required_sustained_polls {
+                break;
+            }
+        } else {
+            sustained_stall_polls = 0;
+        }
+    }
+
+    assert!(
+        sustained_stall_polls >= required_sustained_polls,
+        "stall invariants did not hold for {required_sustained_polls} consecutive polls \
+         (got {sustained_stall_polls})"
+    );
+
+    // --- Phase 2: verify recovery ---
+    // Once healthy nodes reach min_presignatures and stop sending new presig
+    // posits, node 0's presignature posit message channel clears and it resumes generating.
+    let n0_presig_at_stall = poller.prev_presig_stored[0];
+    tracing::info!(
+        n0_presig_at_stall,
+        "stall confirmed, waiting for node 0 to recover"
+    );
+
+    let recovery_start = Instant::now();
+    let mut sustained_recovery_polls = 0u32;
+
+    while recovery_start.elapsed() < phase_timeout {
+        tokio::time::sleep(poll_interval).await;
+        let snap = poller.poll().await;
+
+        tracing::info!(
+            elapsed_s = recovery_start.elapsed().as_secs(),
+            presig_stored = ?snap.presig_stored,
+            presig_stored_deltas = ?snap.presig_stored_deltas,
+            presig_gen_deltas = ?snap.presig_gen_deltas,
+            triple_gen_deltas = ?snap.triple_gen_deltas,
+            sustained_recovery_polls,
+            "waiting for node 0 recovery"
+        );
+
+        if snap.presig_stored_deltas[0] > 0 {
+            sustained_recovery_polls += 1;
+            if sustained_recovery_polls >= required_sustained_polls {
+                break;
+            }
+        } else {
+            sustained_recovery_polls = 0;
+        }
+    }
+
+    assert!(
+        sustained_recovery_polls >= required_sustained_polls,
+        "node 0 did not sustain recovery for {required_sustained_polls} consecutive polls \
+         (got {sustained_recovery_polls}, presig count at stall: {n0_presig_at_stall})"
+    );
 }

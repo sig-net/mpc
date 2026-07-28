@@ -29,6 +29,19 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
+pub const PRESIGNATURE_POSIT_TIMEOUT: Duration =
+    Duration::from_millis(if cfg!(feature = "test-feature") {
+        3_000
+    } else {
+        10_000
+    });
+pub const PRESIGNATURE_POSIT_EXTRA_DELAY: Duration =
+    Duration::from_millis(if cfg!(feature = "test-feature") {
+        500
+    } else {
+        2_000
+    });
+
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
 /// generation messages.
@@ -734,7 +747,7 @@ impl PresignatureSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
+                    for (id, action) in self.posits.expire_and_start(self.threshold, PRESIGNATURE_POSIT_TIMEOUT, PRESIGNATURE_POSIT_EXTRA_DELAY) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
                             tracing::warn!(
                                 ?id,
