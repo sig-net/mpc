@@ -18,5 +18,3 @@ pub use config::{IndexerConfig, MidnightConfig, RpcConfig};
 pub use convert::{to_sign_request, MidnightChainCtx};
 pub use indexer::MidnightIndexer;
 pub use publisher::MidnightPublisher;
-pub use state::decode_contract_state;
-pub use tx_decode::{ClaimedCall, DecodedCall, DecodedTransaction, DecodedTransactions};

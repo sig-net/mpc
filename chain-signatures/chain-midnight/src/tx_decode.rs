@@ -9,29 +9,34 @@ use midnight_ledger_v9::structure::{
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PureGeneratorPedersen;
 
-use serde::Deserialize;
-
 /// A block's decoded `send_mn_transaction` calls.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// Nothing deserializes these on the read path; the derive exists so the golden
+/// comparison below can parse a committed expectation into the same type.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub struct DecodedTransactions {
     pub transactions: Vec<DecodedTransaction>,
     pub skipped: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub struct DecodedTransaction {
     pub index: usize,
     pub calls: Vec<DecodedCall>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub struct DecodedCall {
     pub address: String,
     pub communication_commitment: String,
     pub claimed: Vec<ClaimedCall>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub struct ClaimedCall {
     pub address: String,
     pub entry_point: String,
@@ -106,22 +111,22 @@ mod tests {
     const GOLDEN: &str =
         include_str!("../../midnight-publisher-ts/tests/fixtures/golden-block-1366.json");
 
-    /// The whole point of the spike: the native decode reproduces the sidecar's own
-    /// output for the same captured transaction bytes.
+    /// The golden was minted by an independently written decoder, so reproducing it for
+    /// the same captured transaction bytes is evidence this decode is right rather than
+    /// merely self-consistent.
     #[test]
-    fn native_transaction_decode_matches_the_sidecar_golden() {
+    fn native_transaction_decode_matches_the_committed_golden() {
         // The fixture is the node's own envelope: {"tx":{"Midnight":"<hex>"}}.
         let wrapper: serde_json::Value = serde_json::from_slice(NOTIFY_TX).unwrap();
         let blob = hex::decode(wrapper["tx"]["Midnight"].as_str().unwrap()).unwrap();
 
         let decoded = decode_transactions(&[blob]);
-        println!("SPIKE decoded = {decoded:#?}");
         assert!(decoded.skipped.is_empty(), "skipped: {:?}", decoded.skipped);
 
         let expected: DecodedTransactions = serde_json::from_str(GOLDEN).unwrap();
         assert_eq!(
             decoded, expected,
-            "native decode must match the sidecar golden"
+            "native decode must match the committed golden"
         );
     }
 }

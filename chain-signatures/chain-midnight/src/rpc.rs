@@ -565,7 +565,6 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -583,11 +582,9 @@ mod tests {
         // Probe classification against a real node: both -32602 message strings and the
         // success shape are transcribed offline, and this is the one place that checks
         // them live.
-        let archive_state = rpc
-            .probe_archive_state(config.indexer.archive_probe_window)
+        rpc.probe_archive_state(config.indexer.archive_probe_window)
             .await
             .expect("the probe must classify a live node, whichever way");
-        tracing::debug!(?archive_state, "live archive probe");
 
         let blobs = rpc
             .send_mn_transaction_bytes(&block)

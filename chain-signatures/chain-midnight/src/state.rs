@@ -1,18 +1,16 @@
-//! Native contract-state decoding, replacing the sidecar's `/decode/contract-state`.
+//! Contract-state decoding over the ledger's own deserializer.
 
 use anyhow::Context as _;
 use midnight_onchain_state::state::{ContractState, StateValue};
 use midnight_storage::DefaultDB;
 
-/// The decoded state of one contract.
-pub type Contract = ContractState<DefaultDB>;
-
 /// Decode the bytes `midnight_contractState` returns, down to the ledger root. The
 /// ledger's tag is checked by `tagged_deserialize`, so a chain that moved past this
 /// build fails here by name rather than as a parse error on good bytes.
 pub fn decode_contract_state(bytes: &[u8]) -> anyhow::Result<StateValue<DefaultDB>> {
-    let contract: Contract = midnight_serialize::tagged_deserialize(&mut &bytes[..])
-        .context("contract state did not deserialize")?;
+    let contract: ContractState<DefaultDB> =
+        midnight_serialize::tagged_deserialize(&mut &bytes[..])
+            .context("contract state did not deserialize")?;
     Ok(contract.data.get_ref().clone())
 }
 
@@ -30,9 +28,9 @@ mod tests {
     const GOLDEN_1365: &str =
         include_str!("../../midnight-publisher-ts/tests/fixtures/golden-state-singleton-1365.json");
 
-    /// The sidecar's JSON for a state tree, reproduced from the native types so the two
-    /// decoders can be compared byte for byte.
-    fn as_sidecar_json(value: &StateValue<DefaultDB>) -> String {
+    /// The JSON shape the goldens are written in, rendered from the native types so a
+    /// decode can be compared against one byte for byte.
+    fn as_golden_json(value: &StateValue<DefaultDB>) -> String {
         match value {
             StateValue::Null => "{\"kind\":\"null\"}".to_string(),
             StateValue::Cell(cell) => format!(
@@ -54,7 +52,7 @@ mod tests {
                 "{{\"kind\":\"array\",\"children\":[{}]}}",
                 children
                     .iter_deref()
-                    .map(as_sidecar_json)
+                    .map(as_golden_json)
                     .collect::<Vec<_>>()
                     .join(",")
             ),
@@ -70,11 +68,11 @@ mod tests {
                                 .map(|atom| hex::encode(&atom.0))
                                 .collect::<Vec<_>>()
                                 .join("\",\""),
-                            as_sidecar_json(value),
+                            as_golden_json(value),
                         )
                     })
                     .collect();
-                // Byte order on the joined key, matching the sidecar's own sort.
+                // Byte order on the joined key, the order the goldens are written in.
                 entries.sort_by_key(|entry| entry.0.replace("\",\"", ""));
                 format!(
                     "{{\"kind\":\"map\",\"entries\":[{}]}}",
@@ -104,19 +102,21 @@ mod tests {
         }
     }
 
-    /// The whole point of the native path: the ledger's own Rust decoder reproduces the
-    /// TypeScript sidecar's output for the same captured chain bytes, exactly.
+    /// The goldens were minted by an independently written decoder, so reproducing them
+    /// byte for byte is evidence this decode is right rather than merely self-consistent.
+    /// Only the post-notify capture carries cells; the pre-notify one is six empty maps,
+    /// so every atom and alignment comparison here rests on 1366.
     #[test]
-    fn native_decode_matches_the_sidecar_golden() {
+    fn native_decode_matches_the_committed_golden() {
         for (name, bytes, golden) in [
             ("singleton-post-state-1366", STATE_1366, GOLDEN_1366),
             ("singleton-pre-state-1365", STATE_1365, GOLDEN_1365),
         ] {
             let root = decode_contract_state(bytes).unwrap_or_else(|err| panic!("{name}: {err:#}"));
             assert_eq!(
-                as_sidecar_json(&root),
+                as_golden_json(&root),
                 golden.trim(),
-                "{name}: the native decode diverges from the sidecar's committed golden"
+                "{name}: the native decode diverges from the committed golden"
             );
         }
     }

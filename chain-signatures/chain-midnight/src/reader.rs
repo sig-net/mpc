@@ -17,7 +17,7 @@ const CHUNK_ARITY: usize = 15;
 
 /// Atoms of a record excluding its capacity-scaled vectors. The calldata `Maybe`'s
 /// three atoms count even when `is_some` is false.
-pub const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
+const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
 
 /// `sender` through `calldata.no_words`; the calldata words begin here.
 const RECORD_HEAD_ATOMS: usize = 18;
@@ -441,14 +441,14 @@ mod tests {
     use super::*;
     use crate::records::SignBidirectionalEventNotification;
     use crate::test_utils::{
-        aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_record, cell_of, key_of,
-        map_of, minimal_record, sample_record, sample_record_with_partial_access_list,
+        aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
+        key_of, map_of, minimal_record, sample_record, sample_record_with_partial_access_list,
         sample_record_with_unused_access_list, widths_from_record,
     };
     use midnight_base_crypto::fab::Alignment;
 
     fn leaf(marker: u8) -> Node {
-        cell_of(&[vec![marker]], &[1])
+        cell_from_atoms(&[vec![marker]], &[1])
     }
 
     fn marker_of(node: &Node) -> u8 {
@@ -543,7 +543,7 @@ mod tests {
         );
 
         // One atom below the boundary is refused rather than underflowing the tail.
-        let err = decode_record(&cell_of(&vec![vec![0xab]; 21], &[1u32; 21]))
+        let err = decode_record(&cell_from_atoms(&vec![vec![0xab]; 21], &[1u32; 21]))
             .expect_err("21 atoms cannot hold the fixed fields")
             .to_string();
         assert!(err.contains("21") && err.contains("22"), "err: {err}");
@@ -556,7 +556,7 @@ mod tests {
         let record = sample_record();
         let mut widths = widths_from_record(&record);
         widths[0] = 20;
-        let err = decode_record(&cell_of(&atoms_from_record(&record), &widths))
+        let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
             .expect_err("a sender declared Bytes<20> is not a signet record")
             .to_string();
         assert!(
@@ -570,7 +570,7 @@ mod tests {
         let record = sample_record();
         let mut widths = widths_from_record(&record);
         widths.pop();
-        let err = decode_record(&cell_of(&atoms_from_record(&record), &widths))
+        let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
             .expect_err("one segment per atom, or the pairing is a guess")
             .to_string();
         assert!(err.contains("alignment segments"), "err: {err}");
@@ -628,7 +628,7 @@ mod tests {
             .nth(1)
             .expect("an entry address after `to`");
         widths.swap(entry, entry + 1);
-        let err = decode_record(&cell_of(&atoms_from_record(&record), &widths))
+        let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
             .expect_err("a permuted access-list entry must not decode")
             .to_string();
         assert!(err.contains("access list address"), "err: {err}");
@@ -643,7 +643,7 @@ mod tests {
 
         let mut not_boolean = atoms_from_record(&record);
         not_boolean[15] = vec![2];
-        let err = decode_record(&cell_of(&not_boolean, &widths))
+        let err = decode_record(&cell_from_atoms(&not_boolean, &widths))
             .expect_err("a non-Boolean calldata.is_some atom must reject")
             .to_string();
         assert!(err.contains("calldata.is_some"), "err: {err}");
@@ -651,7 +651,7 @@ mod tests {
         let mut over_wide = atoms_from_record(&record);
         over_wide[0] = vec![0xab; 33];
         assert!(
-            decode_record(&cell_of(&over_wide, &widths)).is_err(),
+            decode_record(&cell_from_atoms(&over_wide, &widths)).is_err(),
             "a 33-byte sender atom must reject"
         );
     }
@@ -692,7 +692,7 @@ mod tests {
         let map = map_of(vec![
             (
                 key_of(poisoned),
-                cell_of(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+                cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
             ),
             (key_of(rid), cell_from_record(&record)),
         ]);
@@ -735,7 +735,7 @@ mod tests {
             ),
             (vec![vec![1u8], payload.to_vec()], vec![1, 64], "Bytes<128>"),
         ] {
-            let err = decode_notification(&cell_of(&atoms, &widths))
+            let err = decode_notification(&cell_from_atoms(&atoms, &widths))
                 .expect_err("only a two-atom Bytes<1>/Bytes<128> cell decodes")
                 .to_string();
             assert!(err.contains(expected), "err: {err}");
@@ -748,8 +748,9 @@ mod tests {
         payload[..32].copy_from_slice(&[0xab; 32]);
         payload[32] = 4;
 
-        let notification = decode_notification(&cell_of(&[vec![1u8], payload.to_vec()], &[1, 128]))
-            .expect("v1 notification decodes");
+        let notification =
+            decode_notification(&cell_from_atoms(&[vec![1u8], payload.to_vec()], &[1, 128]))
+                .expect("v1 notification decodes");
         let unpacked = unpack_notification_v1(&notification).expect("v1 payload unpacks");
         assert_eq!(unpacked.caller_address, [0xab; 32]);
         assert_eq!(unpacked.requests_index_field, 4);

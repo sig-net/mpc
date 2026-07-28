@@ -1127,11 +1127,7 @@ mod tests {
     /// fixtures use the values a developer running a local stack exports,
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
-        for var in [
-            "MPC_MIDNIGHT_NODE_WS_URL",
-            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
-            "MPC_MIDNIGHT_NETWORK_ID",
-        ] {
+        for var in ["MPC_MIDNIGHT_NODE_WS_URL", "MPC_MIDNIGHT_CENTRAL_ADDRESS"] {
             assert!(
                 std::env::var_os(var).is_none(),
                 "{var} is set: these tests require an unpolluted environment"
@@ -1169,8 +1165,6 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
-            "--midnight-network-id",
-            "undeployed",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1179,8 +1173,6 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
-            "--midnight-network-id",
-            "undeployed",
         ] {
             assert!(
                 out.contains(&expected.to_string()),

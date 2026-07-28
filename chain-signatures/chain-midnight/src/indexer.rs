@@ -1030,7 +1030,9 @@ mod tests {
 
     // run() over an injected ChainSource.
 
-    use crate::test_utils::{array_of, cell_from_record, cell_of, key_of, map_of, sample_record};
+    use crate::test_utils::{
+        array_of, cell_from_atoms, cell_from_record, key_of, map_of, sample_record,
+    };
     use crate::tx_decode::{ClaimedCall, DecodedCall, DecodedTransaction};
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
@@ -1092,7 +1094,7 @@ mod tests {
         payload.push(REQUESTS_FIELD);
         (
             signet_map_key(count, rid),
-            cell_of(&[vec![1u8], payload], &[1, 128]),
+            cell_from_atoms(&[vec![1u8], payload], &[1, 128]),
         )
     }
 
@@ -1301,7 +1303,6 @@ mod tests {
                 MidnightConfig {
                     node_ws_url: "ws://127.0.0.1:1".to_string(),
                     central_address: central_address(),
-                    network_id: "undeployed".to_string(),
                     rpc: Default::default(),
                     indexer: Default::default(),
                 },
@@ -1750,7 +1751,6 @@ mod tests {
             MidnightConfig {
                 node_ws_url: "ws://127.0.0.1:1".to_string(),
                 central_address: central,
-                network_id: "undeployed".to_string(),
                 rpc: Default::default(),
                 indexer: Default::default(),
             },
@@ -1961,7 +1961,10 @@ mod tests {
                 responses
                     .iter()
                     .map(|(rid, count)| {
-                        (key_of(*rid), cell_of(&[trim(&count.to_le_bytes())], &[8]))
+                        (
+                            key_of(*rid),
+                            cell_from_atoms(&[trim(&count.to_le_bytes())], &[8]),
+                        )
                     })
                     .collect(),
             ),
@@ -2267,7 +2270,6 @@ mod tests {
         let config = MidnightConfig {
             node_ws_url: String::new(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
             rpc: Default::default(),
             indexer: Default::default(),
         };

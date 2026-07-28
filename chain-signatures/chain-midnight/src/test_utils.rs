@@ -101,7 +101,7 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     widths
 }
 
-pub(crate) fn cell_of(atoms: &[Vec<u8>], widths: &[u32]) -> Node {
+pub(crate) fn cell_from_atoms(atoms: &[Vec<u8>], widths: &[u32]) -> Node {
     aligned_cell(atoms, alignment_of(widths))
 }
 
@@ -126,7 +126,7 @@ pub(crate) fn alignment_of(widths: &[u32]) -> Alignment {
 
 /// The stored cell for `record`: its trimmed atoms beside the widths it declares.
 pub(crate) fn cell_from_record(record: &SignBidirectionalRecord) -> Node {
-    cell_of(&atoms_from_record(record), &widths_from_record(record))
+    cell_from_atoms(&atoms_from_record(record), &widths_from_record(record))
 }
 
 /// A `Bytes<32>` map key, the shape both counter maps and a caller's request index use.
@@ -147,6 +147,7 @@ pub(crate) fn map_of(entries: Vec<(AlignedValue, Node)>) -> Node {
 pub(crate) fn array_of(children: Vec<Node>) -> Node {
     StateValue::Array(Array::new_from_slice(&children))
 }
+
 fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];
     out[..text.len()].copy_from_slice(text);

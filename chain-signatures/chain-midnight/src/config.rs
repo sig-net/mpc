@@ -59,8 +59,6 @@ pub struct MidnightConfig {
     pub node_ws_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
-    /// Ledger network id.
-    pub network_id: String,
     pub rpc: RpcConfig,
     pub indexer: IndexerConfig,
 }
@@ -101,7 +99,6 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
             rpc: Default::default(),
             indexer: Default::default(),
         }

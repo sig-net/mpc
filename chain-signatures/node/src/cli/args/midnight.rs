@@ -8,10 +8,7 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_NODE_WS_URL"),
-        requires_all = [
-            "midnight_central_address",
-            "midnight_network_id",
-        ]
+        requires = "midnight_central_address"
     )]
     pub midnight_node_ws_url: Option<String>,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
@@ -21,26 +18,16 @@ pub struct MidnightArgs {
         requires = "midnight_node_ws_url"
     )]
     pub midnight_central_address: Option<String>,
-    /// Ledger network id.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_NETWORK_ID"),
-        requires = "midnight_node_ws_url"
-    )]
-    pub midnight_network_id: Option<String>,
 }
 
 impl MidnightArgs {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(8);
+        let mut args = Vec::with_capacity(4);
         if let Some(v) = self.midnight_node_ws_url {
             args.extend(["--midnight-node-ws-url".to_string(), v]);
         }
         if let Some(v) = self.midnight_central_address {
             args.extend(["--midnight-central-address".to_string(), v]);
-        }
-        if let Some(v) = self.midnight_network_id {
-            args.extend(["--midnight-network-id".to_string(), v]);
         }
         args
     }
@@ -48,21 +35,18 @@ impl MidnightArgs {
     /// Validates at the config boundary, the way `EthArgs::into_config` does.
     /// Ethereum can validate by parsing into `Url`/`Address`/`PrivateKeySigner`,
     /// which make an invalid value unrepresentable; these fields are `String`,
-    /// so the boundary check is `validate()` instead. clap's `requires_all`
-    /// only guarantees the four flags arrive together, never that
-    /// `central_address` is 64 lowercase hex.
+    /// so the boundary check is `validate()` instead. clap's `requires` only
+    /// guarantees the two flags arrive together, never that `central_address`
+    /// is 64 lowercase hex.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
-        let (Some(node_ws_url), Some(central_address), Some(network_id)) = (
-            self.midnight_node_ws_url,
-            self.midnight_central_address,
-            self.midnight_network_id,
-        ) else {
+        let (Some(node_ws_url), Some(central_address)) =
+            (self.midnight_node_ws_url, self.midnight_central_address)
+        else {
             return Ok(None);
         };
         let config = MidnightConfig {
             node_ws_url,
             central_address,
-            network_id,
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -78,20 +62,17 @@ impl MidnightArgs {
                 let MidnightConfig {
                     node_ws_url,
                     central_address,
-                    network_id,
                     rpc: _,
                     indexer: _,
                 } = c;
                 MidnightArgs {
                     midnight_node_ws_url: Some(node_ws_url),
                     midnight_central_address: Some(central_address),
-                    midnight_network_id: Some(network_id),
                 }
             }
             None => MidnightArgs {
                 midnight_node_ws_url: None,
                 midnight_central_address: None,
-                midnight_network_id: None,
             },
         }
     }
@@ -105,7 +86,7 @@ mod tests {
 
     #[test]
     fn tuning_fields_do_not_survive_the_cli_round_trip() {
-        // Known limitation, pinned deliberately: only the four
+        // Known limitation, pinned deliberately: only the two
         // endpoint/identity fields have flags, so `from_config` discards the
         // tuning sub-structs and `into_config` reinstates their defaults.
         // `archive_probe_window` and `require_archive_state` therefore cannot
@@ -116,7 +97,6 @@ mod tests {
         let mut cfg = MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".into(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -135,11 +115,10 @@ mod tests {
         .unwrap()
         .into_config()
         .expect("a valid config passes the boundary check")
-        .expect("all four flagged fields are set");
+        .expect("both flagged fields are set");
 
         assert_eq!(reparsed.node_ws_url, cfg.node_ws_url);
         assert_eq!(reparsed.central_address, cfg.central_address);
-        assert_eq!(reparsed.network_id, cfg.network_id);
         assert_eq!(
             reparsed.indexer,
             IndexerConfig::default(),
@@ -158,7 +137,6 @@ mod tests {
         let cfg = MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".into(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
