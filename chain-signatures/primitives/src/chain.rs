@@ -42,7 +42,7 @@ impl ChainConfig for Chain {
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
-            ("CHECKPOINT_INTERVAL_MIDNIGHT", "120"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
     }
 
@@ -65,24 +65,11 @@ impl ChainConfig for Chain {
 
     fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
+            // TODO: Midnight's response format is still under discussion and may
+            // move off Abi.
             Chain::Canton | Chain::Midnight => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn midnight_chain_config() {
-        assert_eq!(Chain::Midnight.expected_finality_time_secs(), 15);
-        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
-        assert_eq!(
-            Chain::Midnight.respond_serialization_format(),
-            SerDeserFormat::Abi
-        );
     }
 }

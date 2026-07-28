@@ -8,13 +8,15 @@ use cait_sith::protocol::Participant;
 use crate::protocol::triple::{Triple, TripleId};
 
 use super::protocol_storage::{
-    ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolArtifact, ProtocolStorage,
+    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolArtifact,
+    ProtocolStorage,
 };
 
 pub type TripleStorage = ProtocolStorage<TriplePair>;
 pub type TriplePairSlot = ArtifactSlot<TriplePair>;
 pub type TriplesTaken = ArtifactTaken<TriplePair>;
 pub type TriplesTakenDropper = ArtifactTakenDropper<TriplePair>;
+pub type TriplesReserved = ArtifactReservation<TriplePair>;
 
 /// A pair of completed triples.
 #[derive(Debug, Serialize, Deserialize)]

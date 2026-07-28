@@ -13034,7 +13034,9 @@ name = "signet-crypto"
 version = "1.16.8"
 dependencies = [
  "getrandom 0.2.16",
+ "hex",
  "k256",
+ "serde_json",
  "sha3",
  "signet-primitives",
 ]
