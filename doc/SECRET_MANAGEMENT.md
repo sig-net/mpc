@@ -29,7 +29,8 @@ act (`expose_secret()`), never an accidental `#[derive(Debug)]` or `{:?}`.
    and no `Display`. Third-party key types whose `Debug`/`Display` print key
    material (e.g. `near_crypto::SecretKey`) must not appear in structs that
    derive `Debug`, `Display`, or `Serialize` — wrap them in `SecretBox`.
-   Manual `Debug` impls on secret-bearing structs end with
+   A redacted field always prints the literal `"<hidden>"` — one consistent
+   marker everywhere. Manual `Debug` impls on secret-bearing structs end with
    `finish_non_exhaustive()` so later-added fields are omitted by default.
 3. **Point-of-use exposure.** Unwrap (`expose_secret()`, `to_bytes()`) only to
    sign, decrypt, parse, or write to secret storage. Never store the exposed
