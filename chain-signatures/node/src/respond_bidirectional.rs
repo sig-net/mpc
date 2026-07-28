@@ -11,6 +11,22 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+/// Must byte-match `MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH` in `@sig-net/midnight`
+/// (`epsilon-derivation.ts`): integrator contracts pin their expected response
+/// key against that exact string, so a drift here silently derives a key
+/// nobody can verify against.
+pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
+
+/// The derivation path of a chain's bidirectional response key.
+fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
+    match chain {
+        Chain::Solana => Ok(SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Hydration => Ok(HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Canton => Ok(CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Midnight => Ok(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        _ => anyhow::bail!("Unsupported chain: {}", chain),
+    }
+}
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -88,12 +104,7 @@ impl CompletedTx {
         let Some(payload) = Scalar::from_bytes(message) else {
             anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = match chain {
-            Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            _ => anyhow::bail!("Unsupported chain: {}", chain),
-        };
+        let path = respond_bidirectional_path(chain)?;
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
@@ -209,5 +220,13 @@ mod tests {
         assert_eq!(respond.tx_id, tx.id);
         assert_eq!(respond.output, output);
         assert_eq!(respond.chain_ctx, chain_ctx);
+    }
+
+    #[test]
+    fn midnight_respond_path_is_the_response_key() {
+        assert_eq!(
+            respond_bidirectional_path(Chain::Midnight).unwrap(),
+            "midnight response key"
+        );
     }
 }
