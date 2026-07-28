@@ -1166,7 +1166,7 @@ mod tests {
     use crate::client::CatchupItem;
     use crate::{test_utils, IndexerConfig};
     use alloy::eips::BlockNumberOrTag;
-    use alloy::primitives::{address, b256};
+    use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::{Block, BlockId, BlockTransactions};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -1738,6 +1738,96 @@ mod tests {
 
         logs_mock.assert_async().await;
         reorg_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn live_process_reprocesses_canonical_block_when_reorged() {
+        let mut server = Server::new_async().await;
+        const BLOCK_NUMBER: u64 = 42;
+        let item = test_utils::live_block(BLOCK_NUMBER);
+        // Canonical replacement at the same height, different hash.
+        let canonical_hash =
+            b256!("abababababababababababababababababababababababababababababababab");
+
+        // A `SignatureRequested` event mined only in the canonical block.
+        let request_event = test_utils::sample_signature_requested();
+
+        // Log corresponding to the `SignatureRequested` event.
+        let log = test_utils::signature_requested_log_value(
+            Address::ZERO,
+            &request_event,
+            BLOCK_NUMBER,
+            0,
+        );
+
+        // Canonical replacement: same height, different hash, bloom-positive.
+        let bloom = test_utils::bloom_containing_address(Address::ZERO);
+        let reorg_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{BLOCK_NUMBER:x}"), false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                test_utils::block_response_with_hash_and_bloom(
+                    3,
+                    BLOCK_NUMBER,
+                    canonical_hash,
+                    &bloom,
+                )
+                .to_string(),
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        // Logs are fetched once, for the canonical replacement only
+        let logs_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getLogs".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!([log]).to_string()) // Log corresponding to the `SignatureRequested` event
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        indexer
+            .process_live_item(&events_tx, &item)
+            .await
+            .expect("reorged live block should not error");
+
+        // The sign request from the canonical replacement must be emitted
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("reorged block silently dropped: no sign request emitted");
+        let Some(ChainEvent::SignRequest {
+            request,
+            block_timestamp,
+        }) = event
+        else {
+            panic!("expected SignRequest from the canonical block, got {event:?}");
+        };
+        assert_eq!(request.args.path, request_event.path);
+        assert_eq!(request.args.key_version, request_event.keyVersion);
+        assert_eq!(request.chain, Chain::Ethereum);
+        assert_eq!(block_timestamp, Some(1));
+
+        // The block marker must also be emitted for the canonical replacement
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("no ChainEvent::Block emitted after the sign request");
+        assert!(matches!(event, Some(ChainEvent::Block(n)) if n == BLOCK_NUMBER));
+
+        reorg_mock.assert_async().await;
+        logs_mock.assert_async().await;
     }
 
     #[tokio::test]

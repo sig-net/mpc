@@ -1,8 +1,10 @@
+use crate::abi::ChainSignatures;
 use crate::client::{CatchupItem, EthereumClient};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
-use alloy::primitives::{Address, Bloom};
+use alloy::primitives::{Address, Bloom, B256, U256};
 use alloy::rpc::types::{Block, Log};
+use alloy::sol_types::SolEvent;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use std::sync::Arc;
@@ -213,6 +215,85 @@ pub fn block_response_with_bloom(request_id: u64, number: u64, bloom: &Bloom) ->
             serde_json::Value::String(bloom_hex(bloom)),
         );
     value
+}
+
+/// Like [`block_response`] but with a custom block `hash`, to simulate a
+/// reorg: the canonical replacement block at the same height `number`.
+pub fn block_response_with_hash(request_id: u64, number: u64, hash: B256) -> serde_json::Value {
+    let mut value = block_response(request_id, number);
+    value
+        .get_mut("result")
+        .expect("block_response has a result envelope")
+        .as_object_mut()
+        .expect("result is an object")
+        .insert(
+            "hash".to_string(),
+            serde_json::Value::String(format!("{hash:#x}")),
+        );
+    value
+}
+
+/// Like [`block_response_with_hash`] but also bloom-positive for `address`:
+/// a canonical replacement block carrying contract logs.
+pub fn block_response_with_hash_and_bloom(
+    request_id: u64,
+    number: u64,
+    hash: B256,
+    bloom: &Bloom,
+) -> serde_json::Value {
+    let mut value = block_response_with_hash(request_id, number, hash);
+    value
+        .get_mut("result")
+        .expect("block_response has a result envelope")
+        .as_object_mut()
+        .expect("result is an object")
+        .insert(
+            "logsBloom".to_string(),
+            serde_json::Value::String(bloom_hex(bloom)),
+        );
+    value
+}
+
+/// A sample `SignatureRequested` contract event for tests.
+pub fn sample_signature_requested() -> ChainSignatures::SignatureRequested {
+    ChainSignatures::SignatureRequested {
+        sender: Address::from([0x11; 20]),
+        payload: B256::from([0x22; 32]),
+        keyVersion: 1,
+        deposit: U256::from(1000u64),
+        chainId: U256::from(31337u64),
+        path: "m/44'/60'/0'/0/0".to_string(),
+        algo: "ecdsa".to_string(),
+        dest: String::new(),
+        params: "{}".to_string(),
+    }
+}
+
+/// An `eth_getLogs` result entry for a `SignatureRequested` `event` emitted
+/// by `contract_address` in `block_number` (topic + ABI-encoded data set).
+pub fn signature_requested_log_value(
+    contract_address: Address,
+    event: &ChainSignatures::SignatureRequested,
+    block_number: u64,
+    log_index: u64,
+) -> serde_json::Value {
+    let mut log = log_value(contract_address, block_number, log_index);
+    let log_obj = log.as_object_mut().expect("log fixture is an object");
+    log_obj.insert(
+        "topics".to_string(),
+        serde_json::json!([format!(
+            "{:#x}",
+            ChainSignatures::SignatureRequested::SIGNATURE_HASH
+        )]),
+    );
+    log_obj.insert(
+        "data".to_string(),
+        serde_json::Value::String(format!(
+            "0x{}",
+            alloy::primitives::hex::encode(event.encode_data())
+        )),
+    );
+    log
 }
 
 /// A minimal `eth_getLogs` result entry for `address` in `block_number`,
