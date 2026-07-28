@@ -42,7 +42,7 @@ impl ChainConfig for Chain {
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
-            ("CHECKPOINT_INTERVAL_MIDNIGHT", "120"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
     }
 
