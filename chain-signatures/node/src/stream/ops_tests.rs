@@ -525,6 +525,51 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 }
 
 #[tokio::test]
+async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([13u8; 32]);
+
+    // A bidirectional request with an empty `serialized_transaction`. If accepted
+    // it would sit in the backlog and later panic in `sign_and_hash_transaction`
+    // (empty RLP) when the respond event advances it to execution.
+    let event = SignBidirectionalEvent {
+        sender: [0u8; 32],
+        serialized_transaction: vec![],
+        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+        key_version: 0,
+        deposit: 0,
+        path: String::new(),
+        algo: String::new(),
+        dest: Chain::Ethereum.to_string(),
+        params: String::new(),
+        chain: Chain::Solana,
+        chain_ctx: None,
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: vec![],
+    };
+    let request = test_indexed_request(
+        sign_id,
+        Chain::Solana,
+        test_sign_args(13),
+        current_unix_timestamp(),
+        SignKind::SignBidirectional(event),
+    );
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let err = process_sign_request(request, &ctx)
+        .await
+        .expect_err("empty serialized_transaction should be rejected at ingestion");
+    assert!(err.to_string().contains("empty serialized_transaction"));
+
+    // The poison-pill request must not have entered the backlog.
+    assert!(
+        backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        "rejected request must not be stored in the backlog"
+    );
+}
+
+#[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([15u8; 32]);
