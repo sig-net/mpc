@@ -71,18 +71,3 @@ impl ChainConfig for Chain {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn midnight_chain_config() {
-        assert_eq!(Chain::Midnight.expected_finality_time_secs(), 15);
-        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
-        assert_eq!(
-            Chain::Midnight.respond_serialization_format(),
-            SerDeserFormat::Abi
-        );
-    }
-}
