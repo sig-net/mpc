@@ -152,11 +152,6 @@ async fn test_stream_handles_sign_and_respond() {
 fn build_solana_to_ethereum_bidirectional_request(
     seed: u8,
 ) -> (IndexedSignRequest, SignArgs, k256::SecretKey) {
-    use mpc_primitives::SignBidirectionalEvent as SBE;
-
-    let sign_id = SignId::new([seed; 32]);
-    let args = test_sign_args(seed);
-
     // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64); // nonce
@@ -170,9 +165,24 @@ fn build_solana_to_ethereum_bidirectional_request(
     rlp_s.append(&0u64);
     let unsigned_rlp = rlp_s.out().to_vec();
 
+    build_solana_to_ethereum_bidirectional_request_with_tx(seed, unsigned_rlp)
+}
+
+/// Like [`build_solana_to_ethereum_bidirectional_request`] but with a
+/// caller-supplied `serialized_transaction`, so tests can exercise malformed
+/// (e.g. empty) transaction bytes through the real lifecycle.
+fn build_solana_to_ethereum_bidirectional_request_with_tx(
+    seed: u8,
+    serialized_transaction: Vec<u8>,
+) -> (IndexedSignRequest, SignArgs, k256::SecretKey) {
+    use mpc_primitives::SignBidirectionalEvent as SBE;
+
+    let sign_id = SignId::new([seed; 32]);
+    let args = test_sign_args(seed);
+
     let sign_bidir = SBE {
         sender: Default::default(),
-        serialized_transaction: unsigned_rlp,
+        serialized_transaction,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: 0,
         deposit: 0,
@@ -346,6 +356,90 @@ async fn test_respond_event_advances_to_pending_execution() {
     assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
     let (watched_sign_id, _watched_tx) = watchers.values().next().unwrap();
     assert_eq!(*watched_sign_id, sign_id);
+}
+
+/// Regression / vulnerability repro: a bidirectional sign request whose
+/// `serialized_transaction` is empty panics the chain's event loop when the
+/// respond event advances it to `PendingExecution`.
+///
+/// This drives the *real* lifecycle: a Solana→Ethereum `SignBidirectional`
+/// entry sits in the backlog as `PendingPublish`, then a valid (honestly
+/// generated) `ChainEvent::Respond` arrives and is processed by
+/// `handle_chain_event` → `process_respond_event` →
+/// `advance_bidirectional_to_execution` → `sign_and_hash_transaction`. That last
+/// call hits `is_eip1559`, which indexes `unsigned_rlp[0]` with no length check,
+/// so the empty tx panics with an index-out-of-bounds.
+///
+/// Crucially, `handle_chain_event` runs *inline* in the `run_supervised` select
+/// loop, guarded only by `if let Err(..)` — which catches `anyhow::Error` but
+/// NOT panics. So the panic escapes the guard and unwinds out of
+/// `run_supervised`, which this test awaits directly (hence `#[should_panic]`).
+/// In production this permanently kills that chain's supervised indexer task.
+#[tokio::test]
+#[should_panic(expected = "index out of bounds")]
+async fn test_empty_serialized_transaction_panics_on_respond() {
+    use crate::sign_bidirectional::{PublishState, SignStatus};
+
+    let backlog = Backlog::new();
+    // Empty serialized_transaction — as an attacker (or a misconfigured client)
+    // could submit; note the Canton publish test already uses `vec![]` here.
+    let (request, args, root_sk) =
+        build_solana_to_ethereum_bidirectional_request_with_tx(7, vec![]);
+    let sign_id = request.id;
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+
+    // Pre-seed the backlog with the bidirectional entry, marked as already
+    // published, so the incoming respond event advances it toward execution.
+    backlog.insert(request).await;
+    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_sig,
+                    participants: vec![],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+
+    let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
+    let indexer = SolanaTestIndexer::new(vec![
+        Some(ChainEvent::CatchupCompleted),
+        Some(ChainEvent::Respond(sig_responded)),
+        None,
+    ]);
+
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        0,
+        Default::default(),
+    );
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, _rpc_rx) = test_rpc_channel(8);
+
+    // Panics inside handle_chain_event while processing the Respond event.
+    run_supervised(
+        indexer,
+        crate::stream::StreamContext::new(
+            backlog.clone(),
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
+        mpc_chain_integration_core::NoopChainTelemetry,
+    )
+    .await;
 }
 
 /// `process_execution_confirmed` on a watched bidirectional tx should advance the
