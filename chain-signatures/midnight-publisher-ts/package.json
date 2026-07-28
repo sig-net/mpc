@@ -3,32 +3,35 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Localhost-bound Midnight sidecar: decode contract state, decode finalized block bodies, prove and submit responses. Mechanism only, never an authority.",
+  "description": "Midnight respond publisher over a line-delimited stdio protocol: builds a serialized ledger Intent by running a respond circuit, and submits one by proving, balancing and posting it from the funding wallet. Mechanism only, never an authority.",
   "engines": {
     "node": ">=22"
   },
+  "bin": {
+    "midnight-publisher": "dist/main.js"
+  },
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/main.ts",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@midnight-ntwrk/midnight-js": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.4",
-    "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.4",
+    "@effect/platform-node": "0.107.0",
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.6",
+    "@midnight-ntwrk/compact-js-node": "2.5.5-rc.6",
+    "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
+    "@midnight-ntwrk/platform-js": "3.0.0",
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@polkadot/api": "^16.5.6",
     "@sig-net/midnight-contract": "0.11.0",
     "@sig-net/midnight-contract-deploy": "0.11.0",
+    "effect": "3.22.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@polkadot/api": "^16.5.6",
     "@types/node": "^24.0.0",
-    "effect": "3.22.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

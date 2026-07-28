@@ -1,6 +1,14 @@
+// NOT PART OF THE INTENT BUILDER, and `src/` must never import it: a test asserts
+// exactly that. Nothing under `devtools/` ships or reaches `dist/`. It is the deploy
+// path, kept because `tests/fixtures/respond-singleton-state-*.mn` has to be
+// redeployed and recaptured on every contract change and this is the only thing
+// that can do it, and quarantined because `devtools/` is the last place in this
+// package that reads a funding seed.
+//
 // Live-tier bootstrap: make the deployer wallet fee-ready and deploy a fresh
-// signet singleton. The LAST line printed is the contract address; pass it to
-// `tests/respond-live.ts`, or capture it with `... | tail -1`.
+// signet singleton. The LAST line printed is the contract address; feed it to
+// `tests/fixtures/regenerate.ts` as the state to recapture, or take it with
+// `... | tail -1`.
 //
 // Config comes from the environment with local-stack defaults, the deployer
 // from `DEPLOYER_SEED`. Dust registration is idempotent, so this runs the same

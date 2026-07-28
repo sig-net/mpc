@@ -1,10 +1,20 @@
-# The midnight publisher's offline gate: typecheck plus the full vitest suite,
-# stack-free by design (the write-path orchestration is stubbed, and the
-# request parsing under it needs nothing but the body).
+# The midnight intent builder's gate. The package is a stdio codec: one JSON
+# request line in, one serialized ledger `Intent` out. It reaches no endpoint and
+# holds no key, so typecheck and the vitest suite need no stack at all, running
+# the real circuit over checked-in fixtures.
+#
+# Then the seam: `chain-midnight`'s `IntentGen` spawns the built `dist/main.js`
+# and deserializes what it answers as the ledger's own `Intent`. Both halves are
+# unit-tested against stubs, which proves each keeps its own end of the wire and
+# nothing about the two agreeing; that test is the only place they meet, and it
+# is `#[ignore]`d in the crate, so `unit.yml`'s `cargo test` reports it as
+# ignored and this is the only place it actually runs.
+#
+# The filters cover BOTH packages, because that test exists to catch drift
+# between the two languages and so has to run when either side moves.
 #
 # The live end-to-end path (boot the dockerized stack, deploy a singleton,
-# prove/balance/submit, confirm on chain) is deliberately NOT automated here.
-# It is run on demand from `tests/respond-live.ts`, which carries the runbook.
+# balance/prove/submit, confirm on chain) is deliberately NOT automated here.
 name: midnight-publisher-ts
 
 on:
@@ -12,11 +22,13 @@ on:
     paths:
       - ".github/workflows/midnight-publisher-ts.yml"
       - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
   push:
     branches: [develop]
     paths:
       - ".github/workflows/midnight-publisher-ts.yml"
       - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
 
 jobs:
   test:
@@ -33,4 +45,41 @@ jobs:
           cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      # `dist/main.js` is what the Rust client spawns, and `tsconfig.json` sets
+      # `noEmit`, so the build config is the only thing that produces it.
+      - run: npm run build
       - run: npx vitest run
+
+      # Copied from `unit.yml`, including the version. Note that this installs
+      # 1.93.0 without making it the default (`actions-rs/toolchain` defaults
+      # `default` and `override` to false), so cargo below runs the runner's own
+      # stable, exactly as every other Rust job in this repo does.
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+
+      # `mpc-chain-midnight` resolves TLS through rustls today, so nothing below
+      # links OpenSSL; these two steps match `unit.yml` so that a dependency
+      # which later pulls native-tls builds against the system library instead
+      # of compiling OpenSSL from source in this job.
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-intent-seam
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      # From the workspace root: this job's default working directory is the
+      # publisher package, which is not a cargo package. Last, because
+      # everything above is cheaper to fail on.
+      - name: Intent seam
+        working-directory: ${{ github.workspace }}
+        run: cargo test -p mpc-chain-midnight --test intent_seam -- --ignored

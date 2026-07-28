@@ -7,7 +7,7 @@ The `.mn` files here are captured by [`regenerate.ts`](./regenerate.ts) against 
 | `singleton-pre-state-1365.mn`, `singleton-post-state-1366.mn` | the singleton's raw `contract-state[v8]` blobs either side of the notify block, read over `midnight_contractState` |
 | `notify-tx.mn` | the notify block's `midnight.sendMnTransaction` bytes, in the `{"tx":{"Midnight":"<hex>"}}` wrapper |
 | `golden-*.json` | decoder output for those bytes, frozen as regression pins and byte-compared by the `chain-midnight` tests |
-| `respond-singleton-state-37571.mn` | the write-path harness state: a singleton of the CURRENT contract build (`d7b3c45d…6391f169`, deployed via `tests/bootstrap-live.ts`) captured at the block a `tests/respond-live.ts` post landed in. Its embedded verifier keys must match `dist/managed`, so it is redeployed and recaptured on every contract change |
+| `respond-singleton-state-37571.mn` | the write-path harness state: a singleton of the CURRENT contract build (`d7b3c45d…6391f169`, deployed via `devtools/bootstrap-live.ts`) captured at the block a respond post landed in. Its embedded verifier keys must match `dist/managed`, so it is redeployed and recaptured on every contract change |
 
 Only `respond-singleton-state-37571.mn` is read by a test in this package. Everything else above is the read path's material: it is consumed by the Rust `chain-midnight` crate, which lands with the indexer, so expect no reader for it here.
 
