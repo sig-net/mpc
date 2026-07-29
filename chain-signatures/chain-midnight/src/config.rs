@@ -4,11 +4,31 @@ use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
 
 /// Timeouts and retry budget for the subxt node RPC client.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub retry: RetryConfig,
+}
+
+/// Hand-written because `RetryConfig` is not `PartialEq`. Destructured rather than
+/// field-selected so a field added upstream fails to compile here instead of being
+/// silently excluded from the comparison the CLI round-trip test depends on.
+impl PartialEq for RpcConfig {
+    fn eq(&self, other: &Self) -> bool {
+        let RetryConfig {
+            min_delay,
+            max_delay,
+            max_times,
+            jitter,
+        } = self.retry;
+        self.connect_timeout == other.connect_timeout
+            && self.request_timeout == other.request_timeout
+            && min_delay == other.retry.min_delay
+            && max_delay == other.retry.max_delay
+            && max_times == other.retry.max_times
+            && jitter == other.retry.jitter
+    }
 }
 
 impl Default for RpcConfig {
