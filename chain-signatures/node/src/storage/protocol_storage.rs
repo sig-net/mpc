@@ -145,9 +145,15 @@ impl<A: ProtocolArtifact> ArtifactReservation<A> {
         drop(self);
 
         let me = storage.me().ok()?;
-        let mut guard = storage.reserved.write().await;
-        guard.pending.remove(&id);
-        guard.using.insert(id, true);
+        // The guard must be released before `take_reserved_inner`: that function
+        // re-acquires `reserved` on its failure paths, and `RwLock` is not
+        // reentrant — holding it here would deadlock the task. Dropping it early
+        // also keeps the Redis round trip out of the critical section.
+        {
+            let mut guard = storage.reserved.write().await;
+            guard.pending.remove(&id);
+            guard.using.insert(id, true);
+        }
         storage.take_reserved_inner(id, me).await
     }
 }
@@ -847,6 +853,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Take a specifically reserved artifact from Redis. The in-memory
     /// transition from `pending` to `using` must have happened before.
+    ///
+    /// The caller must **not** hold a `reserved` guard across this call: both
+    /// failure paths below re-acquire it to roll `using` back, and `RwLock` is
+    /// not reentrant, so a held guard deadlocks the task whenever Redis fails.
     async fn take_reserved_inner(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
@@ -989,5 +999,108 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let mut holders: Vec<Participant> = members.into_iter().map(Participant::from).collect();
         holders.sort();
         holders
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deadpool_redis::Runtime;
+    use redis::{RedisResult, RedisWrite, Value};
+    use std::time::Duration;
+
+    /// Minimal artifact so these tests do not depend on cait_sith protocol types.
+    #[derive(Debug)]
+    struct FakeArtifact {
+        id: u64,
+        participants: Vec<Participant>,
+        holders: Option<Vec<Participant>>,
+    }
+
+    impl ProtocolArtifact for FakeArtifact {
+        const METRIC_LABEL: &'static str = "fake";
+        type Id = u64;
+
+        fn id(&self) -> Self::Id {
+            self.id
+        }
+
+        fn participants(&self) -> &[Participant] {
+            &self.participants
+        }
+
+        fn holders(&self) -> Option<&[Participant]> {
+            self.holders.as_deref()
+        }
+
+        fn set_holders(&mut self, holders: Vec<Participant>) {
+            self.holders = Some(holders);
+        }
+    }
+
+    impl ToRedisArgs for FakeArtifact {
+        fn write_redis_args<W>(&self, out: &mut W)
+        where
+            W: ?Sized + RedisWrite,
+        {
+            // Decimal, so this round-trips through the `FromRedisValue` impl below.
+            out.write_arg(self.id.to_string().as_bytes());
+        }
+    }
+
+    impl FromRedisValue for FakeArtifact {
+        fn from_redis_value(v: &Value) -> RedisResult<Self> {
+            Ok(Self {
+                id: u64::from_redis_value(v)?,
+                participants: Vec::new(),
+                holders: None,
+            })
+        }
+    }
+
+    /// Storage pointed at a port with nothing listening, so `connect()` always
+    /// fails and every Redis-touching call takes its error path.
+    fn unreachable_storage() -> ProtocolStorage<FakeArtifact> {
+        // Port 1 is privileged and unused: connections are refused immediately.
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1/")
+            .create_pool(Some(Runtime::Tokio1))
+            .unwrap();
+        let storage =
+            ProtocolStorage::<FakeArtifact>::new(&pool, &"node.near".parse().unwrap(), "fake");
+        storage.set_me(Participant::from(0u32));
+        storage
+    }
+
+    /// Regression test: `commit()` used to hold the `reserved` write guard across
+    /// `take_reserved_inner`, which re-acquires the same non-reentrant lock on its
+    /// failure paths. A Redis failure therefore hung the task forever, wedging every
+    /// other task waiting on `reserved`.
+    #[tokio::test]
+    async fn commit_does_not_deadlock_when_redis_is_unreachable() {
+        let storage = unreachable_storage();
+        let id = 42u64;
+        storage.reserved.write().await.pending.insert(id);
+
+        let reservation = ArtifactReservation {
+            id,
+            holders: vec![Participant::from(1u32)],
+            storage: Some(storage.clone()),
+        };
+
+        let taken = tokio::time::timeout(Duration::from_secs(5), reservation.commit())
+            .await
+            .expect("commit() deadlocked instead of returning on redis failure");
+        assert!(
+            taken.is_none(),
+            "commit() must fail when redis is unreachable"
+        );
+
+        // The lock is released and the bookkeeping is rolled back, so the ID is
+        // neither stuck pending nor leaked as in-use.
+        let state = tokio::time::timeout(Duration::from_secs(5), storage.reserved.read())
+            .await
+            .expect("reserved lock still held after commit()");
+        assert!(!state.pending.contains(&id));
+        assert!(!state.using.contains_key(&id));
     }
 }

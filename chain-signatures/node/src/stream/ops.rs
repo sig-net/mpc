@@ -19,6 +19,20 @@ pub(crate) async fn process_sign_request(
         anyhow::bail!("Unexpected sign request kind");
     }
 
+    // Reject malformed bidirectional requests at ingestion: an empty
+    // `serialized_transaction` cannot be RLP-decoded and would otherwise be
+    // stored in the backlog and only blow up later when the respond event
+    // advances it to execution (see `sign_and_hash_transaction`). Drop it here
+    // so a poison-pill request never enters the backlog.
+    if let SignKind::SignBidirectional(event) = &sign_request.kind {
+        if event.serialized_transaction.is_empty() {
+            anyhow::bail!(
+                "rejecting bidirectional sign request {:?} with empty serialized_transaction",
+                sign_request.id
+            );
+        }
+    }
+
     ctx.backlog.insert(sign_request.clone()).await;
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;

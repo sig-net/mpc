@@ -131,8 +131,8 @@ pub struct IndexerConfig {
     pub catchup_block_batch_size: u64,
     /// Capacity of the live-block channel
     pub live_block_buffer: usize,
-    /// Consecutive `get_block(Finalized)` failures tolerated before
-    /// `wait_for_finalized_block` gives up
+    /// Consecutive `get_block(Finalized)` failures after which the finalized-head
+    /// watcher escalates its retry warning (it never gives up)
     pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
@@ -172,8 +172,9 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
-    /// Emit requests without waiting for block finality. Only for dev chains
-    /// (anvil never reports finalized blocks); unsafe on live networks.
+    /// Emit requests without waiting for block finality. Only for demos and
+    /// integration tests on dev chains (anvil never reports finalized blocks
+    /// and never reorgs); must stay `false` on live networks.
     pub optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
     pub light_client: bool,
