@@ -1119,9 +1119,13 @@ impl VersionedMpcContract {
 
     #[private]
     pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
-        for chain in chains {
-            self.latest_checkpoints_mut().remove(&chain);
+        let chains: HashSet<Chain> = chains.into_iter().collect();
+        for chain in &chains {
+            self.latest_checkpoints_mut().remove(chain);
         }
+        self.checkpoint_votes_mut()
+            .votes
+            .retain(|checkpoint, _| !chains.contains(&checkpoint.chain));
     }
 }
 
@@ -1285,5 +1289,28 @@ mod tests {
             .expect("read(Checkpoints) should not rely on IterableMap::iter()");
         assert_eq!(stored.height, checkpoint.height);
         assert_eq!(stored.digest, checkpoint.digest);
+    }
+
+    #[test]
+    fn reset_checkpoint_clears_votes_for_selected_chains() {
+        let mut contract = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
+        let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
+
+        contract.insert_checkpoint(Chain::Solana, solana_checkpoint);
+        contract
+            .checkpoint_votes_mut()
+            .entry(solana_checkpoint)
+            .insert("voter.near".parse().unwrap());
+        contract
+            .checkpoint_votes_mut()
+            .entry(ethereum_checkpoint)
+            .insert("voter.near".parse().unwrap());
+
+        contract.reset_checkpoint(vec![Chain::Solana]);
+
+        assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+        assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
     }
 }
