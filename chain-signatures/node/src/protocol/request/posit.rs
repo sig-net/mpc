@@ -36,6 +36,21 @@ impl PositPhase {
                     round: peer_round,
                 } = &task_msg;
 
+                // A StaleRound reject carries the rejector's current round;
+                // remember it so our next bump catches up in one step.
+                if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) =
+                    action
+                {
+                    state.highest_seen_round = state.highest_seen_round.max(*peer_current);
+                }
+
+                // Nothing else to do with a Reject: a deliberator has sent
+                // nothing that could be rejected, and answering one would
+                // ping-pong rejects between two nodes.
+                if matches!(action, PositAction::RejectWithReason(_)) {
+                    continue;
+                }
+
                 // reject any messages with a different round than ours
                 //
                 // note: Rejecting messages of older rounds is always the right
@@ -44,19 +59,27 @@ impl PositPhase {
                 // that higher round, or else any peer could force themselves to
                 // be the proposer every time.
                 if state.round > *peer_round {
+                    tracing::info!(
+                        ?from,
+                        peer_round,
+                        my_round = state.round,
+                        "Rejecting message from older round, as deliberator",
+                    );
                     ctx.msg
                         .send(
                             ctx.governance.me,
                             *from,
                             PositMessage {
+                                // The id echoes the rejected message so the
+                                // sender knows which attempt we are answering.
                                 id: PositProtocolId::Signature(
                                     sign_id,
                                     *presignature_id,
-                                    state.round,
+                                    *peer_round,
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::StaleRound,
+                                    PositRejectReason::StaleRound(state.round),
                                 ),
                             },
                         )
@@ -243,7 +266,13 @@ impl PositPhase {
         let accepted_participants = loop {
             tokio::select! {
                 task_msg = mailbox.recv() => {
-                    let SignPositMessage { round: peer_round , ..} = task_msg;
+                    let SignPositMessage { presignature_id, round: peer_round, from, action } = task_msg;
+
+                    // A StaleRound reject carries the rejector's current round;
+                    // remember it so our next bump catches up in one step.
+                    if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) = &action {
+                        state.highest_seen_round = state.highest_seen_round.max(*peer_current);
+                    }
 
                     // Ignore messages for older rounds
                     if state.round > peer_round {
@@ -260,11 +289,14 @@ impl PositPhase {
                             my_round = state.round,
                             "Storing message for future round",
                         );
-                        state.buffer_future_posit_message(task_msg);
+                        state.buffer_future_posit_message(SignPositMessage {
+                            presignature_id,
+                            round: peer_round,
+                            from,
+                            action,
+                        });
                         continue;
                     }
-
-                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
 
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
@@ -410,10 +442,11 @@ mod tests {
     use crate::protocol::presignature::Presignature;
     use deadpool_redis::Runtime;
 
-    /// A deliberator that rejects a Propose from a *behind* proposer must stamp
-    /// the reject with its own (higher) round, not echo the sender's round.
-    /// Otherwise the behind proposer never learns it is behind and climbs one
-    /// round per attempt instead of catching up in a single `bump_round`.
+    /// A deliberator that rejects a Propose from a *behind* proposer echoes the
+    /// rejected round in the id (so the reject reaches the sender's current
+    /// conversation) and carries its own round inside `StaleRound` — otherwise
+    /// the behind proposer never learns it is behind and climbs one round per
+    /// attempt instead of catching up in a single `bump_round`.
     #[tokio::test]
     async fn reject_of_older_round_carries_rejectors_round() {
         let me = Participant::from(1);
@@ -503,11 +536,11 @@ mod tests {
         let PositProtocolId::Signature(_, _, reject_round) = posit.id else {
             panic!("expected a signature posit id");
         };
-        // The reject carries our round (5), not the sender's echoed round (2).
-        assert_eq!(reject_round, 5);
+        // The id echoes the rejected round (2); our round (5) rides in the reason.
+        assert_eq!(reject_round, 2);
         assert!(matches!(
             posit.action,
-            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(5))
         ));
     }
 }

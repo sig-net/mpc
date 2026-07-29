@@ -57,19 +57,19 @@ pub enum PositAction {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
 pub enum PositRejectReason {
-    Unknown = 0,
+    Unknown,
     /// The node is already participating in a generation, or has already
     /// finished generation.
-    AlreadyGenerating = 1,
+    AlreadyGenerating,
     /// The node cannot participate because it doesn't have the required
     /// artifact.
-    MissingArtifact = 2,
+    MissingArtifact,
     /// The posit message is invalid, usually because of bad timing leading to
     /// round / proposer mismatches.
-    InvalidRequest = 3,
-    /// The sender's round is behind the rejector's current round. The reject
-    /// carries the rejector's round so the sender can catch up in one bump.
-    StaleRound = 4,
+    InvalidRequest,
+    /// The message's round is behind the rejector's current round, carried
+    /// here so the sender can catch up in one bump.
+    StaleRound(usize),
 }
 
 impl PositAction {
