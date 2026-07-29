@@ -131,8 +131,8 @@ pub struct IndexerConfig {
     pub catchup_block_batch_size: u64,
     /// Capacity of the live-block channel
     pub live_block_buffer: usize,
-    /// Consecutive `get_block(Finalized)` failures tolerated before
-    /// `wait_for_finalized_block` gives up
+    /// Consecutive `get_block(Finalized)` failures after which the finalized-head
+    /// watcher escalates its retry warning (it never gives up)
     pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,

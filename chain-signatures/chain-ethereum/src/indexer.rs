@@ -1059,6 +1059,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
+    /// Spawn the background finalized-head watcher that maintains `finalized_head`.
+    ///
+    /// Returns a guard whose drop aborts the task, or `None` in optimistic mode
+    /// (dev chains never report a finalized head).
+    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> Option<AbortOnDrop> {
+        (!self.eth.optimistic_requests).then(|| {
+            AbortOnDrop(tokio::spawn(Self::watch_finalized_head(
+                self.client.clone(),
+                self.finalized_head.clone(),
+                self.eth.refresh_finalized_interval,
+                self.eth.indexer.max_finalized_failures,
+                self.eth.indexer.stall_rewarn_secs,
+                cancel,
+            )))
+        })
+    }
+
     /// Background task maintaining the cached finalized head (`self.finalized_head`).
     ///
     /// Polls `eth_getBlockByNumber(Finalized)` on `refresh_finalized_interval`
@@ -1142,22 +1159,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             }
         };
 
-        // Finalized-head watcher: maintains the cached head that
-        // `emit_processed_block` consults. Skipped in optimistic mode (dev chains
-        // never report a finalized head). Tied to `run()` via `AbortOnDrop` and
-        // the shared `CancellationToken`.
-        let _finalized_watcher = if !self.eth.optimistic_requests {
-            Some(AbortOnDrop(tokio::spawn(Self::watch_finalized_head(
-                self.client.clone(),
-                self.finalized_head.clone(),
-                self.eth.refresh_finalized_interval,
-                self.eth.indexer.max_finalized_failures,
-                self.eth.indexer.stall_rewarn_secs,
-                cancel.clone(),
-            ))))
-        } else {
-            None
-        };
+        let _finalized_watcher = self.spawn_finalized_head_watcher(cancel.clone());
 
         let mut catchup_iter = self.catchup_blocks(anchor_height).await;
         loop {
@@ -1832,6 +1834,39 @@ mod tests {
             .expect("should resolve once the head advances past the block");
 
         advancer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_finalized_head_advances_head_and_unblocks_waiter() {
+        let mut server = Server::new_async().await;
+
+        // The watcher polls eth_getBlockByNumber(finalized); serve a head past 50.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 100).to_string())
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .optimistic_requests(false)
+            .build()
+            .await;
+
+        let cancel = CancellationToken::new();
+        let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
+
+        indexer
+            .wait_for_finalized_block(50)
+            .await
+            .expect("watcher should advance the head past 50 and unblock the wait");
+
+        cancel.cancel();
     }
 
     #[tokio::test]
