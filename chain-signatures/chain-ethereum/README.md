@@ -72,6 +72,24 @@ RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
 ```
 
+### Reference numbers
+
+Current catchup baseline for a 100-block catchup over an already-finalized
+range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
+`REFRESH_FINALIZED_INTERVAL`):
+
+| metric | local eRPC | Alchemy (cold) |
+|---|---|---|
+| catchup wall time | 0.15 s | 1.12 s |
+| blocks/s | 668 | 89 |
+| `eth_getBlockByNumber(Finalized)` | 1 | 1 |
+| `eth_getBlockByNumber(batch)` | 100 | 100 |
+| `eth_getLogs(batch)` | 9 | 9 |
+| `batch_fetch_ms` | 132 | 1115 |
+| `process_ms` | 18 | 4 |
+
+> NOTE: Wall-clock figures are a reference snapshot (endpoint tier, latency, and load dependent), not a guarantee.
+
 ### Watchers benchmark
 
 `examples/bench_watchers.rs` drives `EthereumIndexer` over a fixed historical
