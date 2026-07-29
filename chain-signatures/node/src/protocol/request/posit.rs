@@ -274,8 +274,33 @@ impl PositPhase {
                         state.highest_seen_round = state.highest_seen_round.max(*peer_current);
                     }
 
-                    // Ignore messages for older rounds
+                    // Reject messages for older rounds so the sender learns our
+                    // round and can catch up in one bump.
                     if state.round > peer_round {
+                        // Never answer a stale Reject: a reject needs no reply,
+                        // and replying would ping-pong rejects between nodes.
+                        if matches!(action, PositAction::RejectWithReason(_)) {
+                            continue;
+                        }
+                        tracing::info!(
+                            ?from,
+                            peer_round,
+                            my_round = state.round,
+                            "Rejecting message from older round",
+                        );
+                        ctx.msg
+                            .send(
+                                ctx.governance.me,
+                                from,
+                                PositMessage {
+                                    // The id echoes the rejected message so the
+                                    // sender knows which attempt we answer.
+                                    id: PositProtocolId::Signature(sign_id, presignature_id, peer_round),
+                                    from: ctx.governance.me,
+                                    action: PositAction::RejectWithReason(PositRejectReason::StaleRound(state.round)),
+                                },
+                            )
+                            .await;
                         continue;
                     }
 
