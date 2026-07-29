@@ -560,6 +560,28 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     }
 }
 
+/// Split an Anchor `emit_cpi!` event instruction payload into its 8-byte event
+/// discriminator and the trailing borsh-encoded event bytes.
+///
+/// Returns `None` when the data should not be parsed as an event: either it
+/// lacks the 8-byte Anchor event tag, or it is too short to also contain the
+/// discriminator. The length guard is what prevents an out-of-bounds panic on
+/// malformed (e.g. attacker-crafted) instruction data — `starts_with` only
+/// guarantees the first 8 bytes, but the split needs at least 16.
+fn split_cpi_event(ix_data: &[u8]) -> Option<(&[u8], &[u8])> {
+    if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+        return None;
+    }
+    if ix_data.len() < 16 {
+        tracing::warn!(
+            len = ix_data.len(),
+            "CPI event instruction data too short; skipping"
+        );
+        return None;
+    }
+    Some((&ix_data[8..16], &ix_data[16..]))
+}
+
 // TODO: move this to an events.rs file
 // TODO: enhance to handle malformed events and prevent panic
 fn parse_cpi_events(
@@ -580,13 +602,11 @@ fn parse_cpi_events(
             return Ok(Vec::new());
         };
 
-        // Ensure this is an Anchor emit_cpi! instruction
-        if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+        // Split into the 8-byte event discriminator and trailing event bytes,
+        // skipping anything that isn't a well-formed Anchor event instruction.
+        let Some((event_discriminator, event_data)) = split_cpi_event(&ix_data) else {
             return Ok(Vec::new());
-        }
-
-        let event_discriminator = &ix_data[8..16];
-        let event_data = &ix_data[16..];
+        };
 
         let mut acc = Vec::new();
 
@@ -857,13 +877,11 @@ fn parse_cpi_respond_events(
             return Ok((Vec::new(), Vec::new()));
         };
 
-        // Ensure this is an Anchor event instruction
-        if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+        // Split into the 8-byte event discriminator and trailing event bytes,
+        // skipping anything that isn't a well-formed Anchor event instruction.
+        let Some((event_discriminator, event_data)) = split_cpi_event(&ix_data) else {
             return Ok((Vec::new(), Vec::new()));
-        }
-
-        let event_discriminator = &ix_data[8..16];
-        let event_data = &ix_data[16..];
+        };
 
         let mut respond_bdx = Vec::new();
         let mut sig_resp = Vec::new();
@@ -1092,6 +1110,34 @@ mod tests {
     use solana_transaction_status::{
         TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
     };
+
+    #[test]
+    fn split_cpi_event_handles_short_and_valid_data() {
+        let tag = anchor_lang::event::EVENT_IX_TAG_LE;
+
+        // No event tag -> not an event instruction.
+        assert!(split_cpi_event(b"not-an-event").is_none());
+
+        // Tag present but too short for the 8-byte discriminator. This is the
+        // regression case: previously `&ix_data[8..16]` panicked here.
+        for extra in 0..8usize {
+            let mut data = tag.to_vec();
+            data.extend(std::iter::repeat_n(0u8, extra));
+            assert!(
+                split_cpi_event(&data).is_none(),
+                "tag + {extra} bytes ({} total) should be skipped, not panic",
+                data.len()
+            );
+        }
+
+        // Tag + 8-byte discriminator + payload -> split correctly.
+        let mut data = tag.to_vec();
+        data.extend_from_slice(&[9u8; 8]); // discriminator
+        data.extend_from_slice(&[1, 2, 3]); // event payload
+        let (disc, payload) = split_cpi_event(&data).expect("well-formed event should split");
+        assert_eq!(disc, [9u8; 8]);
+        assert_eq!(payload, [1, 2, 3]);
+    }
 
     /// Create a test indexer with a mock state manager and a given RPC URL.
     fn test_indexer(
