@@ -5,8 +5,7 @@ The `.mn` files are raw chain data captured against the midnight-integration sta
 | file | content |
 |---|---|
 | `singleton-pre-state-1365.mn`, `singleton-post-state-1366.mn` | the singleton's raw `contract-state[v8]` blobs either side of the notify block, read over `midnight_contractState` |
-| `notify-tx.mn` | the notify block's `midnight.sendMnTransaction` bytes, in the `{"tx":{"Midnight":"<hex>"}}` wrapper |
-| `golden-*.json` | decoder output for those bytes, byte-compared by the `state` and `tx_decode` tests |
+| `golden-*.json` | decoder output for those bytes, byte-compared by the `state` tests |
 
 The goldens were produced by a TypeScript decoder written independently of this crate, so matching them is evidence the Rust decode is right rather than merely self-consistent. That decoder no longer exists: state and transactions are decoded here, against Midnight's own ledger crates.
 

@@ -1,8 +1,4 @@
 //! EVM type-2 transaction assembly and the signing payload scalar.
-//!
-//! Counts decide what is real, never vector lengths: only `no_words`,
-//! `access_list_entry_count` and each entry's `storage_key_count` reach the
-//! transaction. The stored vectors are capacity and may be longer.
 
 use alloy::consensus::{SignableTransaction as _, TxEip1559};
 use alloy::eips::eip2930::{AccessList, AccessListItem};
@@ -20,7 +16,6 @@ const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
 impl TryFrom<&EvmType2TxParams> for TxEip1559 {
     type Error = anyhow::Error;
 
-    /// The pure params-to-transaction transform.
     fn try_from(params: &EvmType2TxParams) -> anyhow::Result<Self> {
         Ok(Self {
             chain_id: params.chain_id,

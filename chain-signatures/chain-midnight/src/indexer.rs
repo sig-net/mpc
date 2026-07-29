@@ -8,7 +8,6 @@ use crate::reader::{
 };
 use crate::rpc::{is_state_unservable, BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
-use crate::tx_decode::{decode_transactions, DecodedTransactions};
 
 use midnight_base_crypto::fab::AlignedValue;
 use midnight_onchain_state::state::StateValue;
@@ -75,8 +74,6 @@ pub(crate) trait ChainSource: Send + Sync {
         address_64hex: &str,
         at_hash: &str,
     ) -> anyhow::Result<ContractState>;
-    /// The block's decoded `send_mn_transaction` calls, advisory only.
-    async fn decoded_transactions(&self, block: &BlockRef) -> anyhow::Result<DecodedTransactions>;
     /// Pushes live finalized blocks into `tx` until the underlying stream ends; the
     /// returned guard aborts the producer on drop.
     async fn spawn_block_producer(&self, tx: mpsc::Sender<BlockRef>)
@@ -127,30 +124,6 @@ impl ChainSource for LiveSource {
         }
     }
 
-    async fn decoded_transactions(&self, block: &BlockRef) -> anyhow::Result<DecodedTransactions> {
-        let blobs = self.rpc.send_mn_transaction_bytes_at(&block.hash).await?;
-        if blobs.is_empty() {
-            return Ok(DecodedTransactions {
-                transactions: Vec::new(),
-                skipped: Vec::new(),
-            });
-        }
-        let decoded = decode_transactions(&blobs);
-        if !decoded.skipped.is_empty() {
-            // Advisory, like the rest of provenance: an unreadable blob costs
-            // attribution for this block, never a request.
-            tracing::warn!(
-                height = block.number,
-                reason = "provenance-blob-skipped",
-                "could not decode {} of {} transaction blobs: {:?}",
-                decoded.skipped.len(),
-                blobs.len(),
-                decoded.skipped
-            );
-        }
-        Ok(decoded)
-    }
-
     async fn spawn_block_producer(
         &self,
         tx: mpsc::Sender<BlockRef>,
@@ -164,30 +137,6 @@ impl ChainSource for LiveSource {
             }
         })))
     }
-}
-
-/// Advisory cross-contract-call provenance: the address of the call claiming the
-/// central call's communication commitment in the same transaction.
-fn attribute_caller(txs: &DecodedTransactions, central_address: &str) -> Option<String> {
-    for tx in &txs.transactions {
-        let Some(central_call) = tx.calls.iter().find(|call| call.address == central_address)
-        else {
-            continue;
-        };
-        for call in &tx.calls {
-            if call.address == central_address {
-                continue;
-            }
-            if call
-                .claimed
-                .iter()
-                .any(|claim| claim.commitment == central_call.communication_commitment)
-            {
-                return Some(call.address.clone());
-            }
-        }
-    }
-    None
 }
 
 /// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }` recovered
@@ -349,16 +298,6 @@ where
     }
 }
 
-/// An observation from the advisory provenance join.
-fn advisory_note(reason: &'static str, height: u64, request_id: Option<[u8; 32]>, detail: &str) {
-    tracing::warn!(
-        reason,
-        height,
-        request_id = request_id.map(hex::encode),
-        "midnight provenance advisory, request still signed: {detail}"
-    );
-}
-
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// The central singleton's tree at `at_hash`, or `None` when the contract is not
     /// present there, which is ordinary during catchup from before deployment.
@@ -444,29 +383,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
         let mut requests = Vec::new();
         if !new_entries.is_empty() {
-            // Advisory attribution, once per block.
-            let attribution = match source.decoded_transactions(block).await {
-                Ok(txs) => attribute_caller(&txs, &self.config.central_address),
-                Err(err) => {
-                    degraded_read(
-                        "provenance-decode-failed",
-                        block.number,
-                        &format!("{err:#}"),
-                    );
-                    None
-                }
-            };
             let indexed_ts = unix_now();
             for entry in new_entries {
                 if let Some(request) = self
-                    .process_entry(
-                        source,
-                        entry,
-                        &block.hash,
-                        block.number,
-                        attribution.as_deref(),
-                        indexed_ts,
-                    )
+                    .process_entry(source, entry, &block.hash, block.number, indexed_ts)
                     .await?
                 {
                     requests.push(request);
@@ -487,7 +407,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         entry: &MapEntry,
         at_hash: &str,
         height: u64,
-        attribution: Option<&str>,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
         let Some((_, rid)) = signet_map_key_rid(&entry.key) else {
@@ -522,27 +441,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // Advisory, never a gate: absence and disagreement are notes and the read below
-        // proceeds regardless, which is why they go through `advisory_note`.
-        match attribution {
-            Some(address) if *address != caller_hex => {
-                advisory_note(
-                    "provenance-mismatch",
-                    height,
-                    Some(rid),
-                    &format!("decoded caller {address} vs notification {caller_hex}"),
-                );
-            }
-            None => {
-                advisory_note(
-                    "provenance-absent",
-                    height,
-                    Some(rid),
-                    "no commitment pair in this block's decoded calls",
-                );
-            }
-            _ => {}
-        }
+        // TODO: decide whether `caller_address` must be checked against the
+        // cross-contract-call initiator of the transaction that filed this notification.
+        // It is producer-supplied, so any contract can notify naming another, which
+        // triggers a signature over a record that contract filed. What that record says
+        // is already authenticated below: `resolve_verified_record` recomputes the
+        // request id and `to_sign_request` requires `sender` to equal the address the
+        // record was read from. The exposure is therefore third-party triggering, not
+        // forgery, and the open question is whether that is worth gating. Gating it
+        // means joining each notification to the central call it came from through the
+        // claimed communication commitment, which the ledger validates for uniqueness
+        // and for corresponding to a real call.
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
@@ -604,13 +513,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(reason, height, Some(rid), &detail));
             }
         };
-        match to_sign_request(
-            &record,
-            &unpacked.caller_address,
-            &self.config.central_address,
-            rid,
-            indexed_ts,
-        ) {
+        match to_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
                 // Every conversion failure is a per-record data property, so drop with
@@ -835,7 +738,6 @@ mod tests {
     use crate::test_utils::{
         array_of, cell_from_atoms, cell_from_record, key_of, map_of, sample_record,
     };
-    use crate::tx_decode::{ClaimedCall, DecodedCall, DecodedTransaction};
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
@@ -939,8 +841,6 @@ mod tests {
         /// (address, at_hash) -> decode rejection; the node served the bytes
         /// and the DECODER refused them.
         undecodable_states: HashMap<(String, String), String>,
-        /// block hash -> decoded transactions; absent means empty.
-        txs: HashMap<String, DecodedTransactions>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         /// Deterministic suspension: the read named here announces itself on `reached`
         /// and then never resolves, so a test can cancel while a walk is PROVABLY
@@ -1045,20 +945,6 @@ mod tests {
                 .get(&key)
                 .cloned()
                 .map_or(ContractState::Absent, ContractState::Tree))
-        }
-
-        async fn decoded_transactions(
-            &self,
-            block: &BlockRef,
-        ) -> anyhow::Result<DecodedTransactions> {
-            Ok(self
-                .txs
-                .get(&block.hash)
-                .cloned()
-                .unwrap_or(DecodedTransactions {
-                    transactions: Vec::new(),
-                    skipped: Vec::new(),
-                }))
         }
 
         async fn spawn_block_producer(
@@ -1240,34 +1126,6 @@ mod tests {
             ]),
         );
         source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        // Provenance PRESENT and matching for this one: a multi-call block whose
-        // commitment join names the true caller.
-        source.txs.insert(
-            hash_of(9),
-            DecodedTransactions {
-                transactions: vec![DecodedTransaction {
-                    index: 0,
-                    calls: vec![
-                        DecodedCall {
-                            address: central.clone(),
-                            communication_commitment: "cc01".to_string(),
-                            claimed: Vec::new(),
-                        },
-                        DecodedCall {
-                            address: hex::encode(CALLER),
-                            communication_commitment: "cc02".to_string(),
-                            claimed: vec![ClaimedCall {
-                                address: central.clone(),
-                                entry_point: "signBidirectional".to_string(),
-                                commitment: "cc01".to_string(),
-                            }],
-                        },
-                    ],
-                }],
-                skipped: Vec::new(),
-            },
-        );
-
         let (live_tx, live_rx) = mpsc::channel(8);
         source.live = tokio::sync::Mutex::new(Some(live_rx));
 
@@ -1645,64 +1503,6 @@ mod tests {
             err.to_string().contains("producer terminated"),
             "err: {err}"
         );
-    }
-
-    #[test]
-    fn attribute_caller_finds_committed_caller_and_rejects_decoys() {
-        // Three shapes: multi-call, the matching claim NOT first, a decoy commitment
-        // matching nothing, distinguishable values.
-        let central = central_address();
-        let txs = DecodedTransactions {
-            transactions: vec![DecodedTransaction {
-                index: 0,
-                calls: vec![
-                    DecodedCall {
-                        address: "dd".repeat(32),
-                        communication_commitment: "cc99".to_string(),
-                        claimed: vec![ClaimedCall {
-                            address: "dd".repeat(32),
-                            entry_point: "unrelated".to_string(),
-                            commitment: "feed".to_string(),
-                        }],
-                    },
-                    DecodedCall {
-                        address: central.clone(),
-                        communication_commitment: "cc01".to_string(),
-                        claimed: Vec::new(),
-                    },
-                    DecodedCall {
-                        address: "ee".repeat(32),
-                        communication_commitment: "cc02".to_string(),
-                        claimed: vec![
-                            ClaimedCall {
-                                address: "aa".repeat(32),
-                                entry_point: "other".to_string(),
-                                commitment: "beef".to_string(),
-                            },
-                            ClaimedCall {
-                                address: central.clone(),
-                                entry_point: "signBidirectional".to_string(),
-                                commitment: "cc01".to_string(),
-                            },
-                        ],
-                    },
-                ],
-            }],
-            skipped: Vec::new(),
-        };
-        assert_eq!(
-            attribute_caller(&txs, &central),
-            Some("ee".repeat(32)),
-            "the caller is the call CLAIMING the central call's commitment"
-        );
-
-        // Absent: no claim matches the central call's commitment.
-        let mut absent = txs.clone();
-        absent.transactions[0].calls[2].claimed[1].commitment = "cc77".to_string();
-        assert_eq!(attribute_caller(&absent, &central), None);
-
-        // No central call in the block at all.
-        assert_eq!(attribute_caller(&txs, &"99".repeat(32)), None);
     }
 
     #[tokio::test]

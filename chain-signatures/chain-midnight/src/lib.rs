@@ -12,9 +12,8 @@ mod state;
 #[cfg(test)]
 mod test_utils;
 mod tx;
-mod tx_decode;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig};
-pub use convert::{to_sign_request, MidnightChainCtx};
+pub use convert::to_sign_request;
 pub use indexer::MidnightIndexer;
 pub use publisher::MidnightPublisher;

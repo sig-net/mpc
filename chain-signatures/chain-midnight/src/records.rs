@@ -27,20 +27,15 @@ pub struct SignBidirectionalRecord {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-/// EIP-1559 parameters in the contract's payload order, which is the hash order and
-/// reads backwards against EVM habit: the priority fee precedes the fee cap, `to` sits
-/// sixth, and `calldata` precedes the access-list pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvmType2TxParams {
     pub chain_id: u64,
     pub nonce: u64,
-    /// Before `max_fee_per_gas`, backwards against EVM habit
     pub max_priority_fee_per_gas: u128,
     pub max_fee_per_gas: u128,
     pub gas_limit: u64,
     pub to: [u8; 20],
     pub value: u128,
-    /// Before the access-list pair, backwards against EVM habit
     pub calldata: CompactMaybe<EvmCalldata>,
     pub access_list_entry_count: u8,
     /// `Vector<maxAccessListEntries, _>`: always at capacity, unused slots zero-filled

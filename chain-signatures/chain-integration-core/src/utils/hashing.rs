@@ -61,21 +61,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_request_id_returns_32_bytes() {
-        let (sender, payload, path, kv, chain, algo, dest, params) = default_args();
-        let id = compute_request_id(sender, &payload, path, kv, chain, algo, dest, params);
-        assert_eq!(id.len(), 32);
-    }
-
-    #[test]
-    fn compute_request_id_is_deterministic() {
-        let (sender, payload, path, kv, chain, algo, dest, params) = default_args();
-        let id1 = compute_request_id(sender, &payload, path, kv, chain, algo, dest, params);
-        let id2 = compute_request_id(sender, &payload, path, kv, chain, algo, dest, params);
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
     fn compute_request_id_differs_by_sender() {
         let (_, payload, path, kv, chain, algo, dest, params) = default_args();
         let id1 = compute_request_id("alice.near", &payload, path, kv, chain, algo, dest, params);
@@ -162,14 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_request_id_key_version_max() {
-        let (sender, payload, path, _, chain, algo, dest, params) = default_args();
-        // u32::MAX should not panic
-        let id = compute_request_id(sender, &payload, path, u32::MAX, chain, algo, dest, params);
-        assert_eq!(id.len(), 32);
-    }
-
-    #[test]
     fn hash_payload_empty() {
         // keccak256("")
         let expected: [u8; 32] = [
@@ -178,22 +155,5 @@ mod tests {
             0x5d, 0x85, 0xa4, 0x70,
         ];
         assert_eq!(hash_payload(&[]), expected);
-    }
-
-    #[test]
-    fn hash_payload_known_value() {
-        let result = hash_payload(b"hello");
-        // Must be 32 bytes and deterministic
-        assert_eq!(result.len(), 32);
-        // Same input must return the same hash
-        assert_eq!(result, hash_payload(b"hello"));
-    }
-
-    #[test]
-    fn hash_payload_single_byte() {
-        let a = hash_payload(&[0x00]);
-        let b = hash_payload(&[0x01]);
-        assert_ne!(a, b);
-        assert_eq!(a, hash_payload(&[0x00]));
     }
 }

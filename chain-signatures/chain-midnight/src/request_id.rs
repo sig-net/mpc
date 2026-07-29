@@ -35,8 +35,6 @@ fn binary_repr(record: &SignBidirectionalRecord) -> Vec<u8> {
 fn push_tx_params(buf: &mut Vec<u8>, params: &EvmType2TxParams) {
     buf.extend_from_slice(&params.chain_id.to_le_bytes());
     buf.extend_from_slice(&params.nonce.to_le_bytes());
-    // Priority fee before the fee cap, `to` after the gas limit: the contract's payload
-    // order is the hash order, and it reads backwards against habit.
     buf.extend_from_slice(&params.max_priority_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.max_fee_per_gas.to_le_bytes());
     buf.extend_from_slice(&params.gas_limit.to_le_bytes());

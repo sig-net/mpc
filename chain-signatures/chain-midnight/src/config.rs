@@ -70,9 +70,9 @@ impl MidnightConfig {
              got {} characters",
             self.central_address.len()
         );
-        // Required rather than normalised: the address flows verbatim into chain_ctx
-        // and is compared against the decoder's lowercase addresses during attribution,
-        // so an uppercase value would silently never match.
+        // Required rather than normalised: the address is compared against the decoder's
+        // lowercase addresses during attribution, so an uppercase value would silently
+        // never match.
         anyhow::ensure!(
             !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
             "midnight config: central_address must be lowercase hex, the canonical form \

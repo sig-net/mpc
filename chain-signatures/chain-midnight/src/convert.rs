@@ -6,7 +6,6 @@
 //! would let a caller sign under another contract's key. The two are asserted
 //! equal.
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_primitives::{
     Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION,
@@ -20,21 +19,11 @@ const ALGO_ECDSA: u8 = 0;
 /// `MPCDestination::unused`, the only real variant (1 is reserved).
 const DEST_UNUSED: u8 = 0;
 
-/// Chain context carried through the request for the respond path: the central
-/// singleton the response must be posted to.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "borsh")]
-pub struct MidnightChainCtx {
-    /// 64-hex address of the central singleton contract, no `0x` prefix.
-    pub central_address: String,
-}
-
 /// Converts a verified record into the [`IndexedSignRequest`] the signing pipeline
 /// consumes (kind `SignBidirectional`).
 pub fn to_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
-    central_address: &str,
     request_id: [u8; 32],
     indexed_ts: u64,
 ) -> anyhow::Result<IndexedSignRequest> {
@@ -76,15 +65,6 @@ pub fn to_sign_request(
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path);
     let entropy = hash_payload(&request_id);
-    // Verbatim is canonical: `validate()` rejects non-lowercase central addresses, so
-    // one representation reaches every comparison site and no normalisation belongs
-    // here.
-    let chain_ctx = Some(
-        borsh::to_vec(&MidnightChainCtx {
-            central_address: central_address.to_string(),
-        })
-        .expect("MidnightChainCtx Borsh serialization is infallible"),
-    );
 
     Ok(IndexedSignRequest::sign_bidirectional(
         SignId::new(request_id),
@@ -110,7 +90,7 @@ pub fn to_sign_request(
             output_deserialization_schema: record.output_deserialization_schema.clone(),
             respond_serialization_schema: record.respond_serialization_schema.clone(),
             chain: Chain::Midnight,
-            chain_ctx,
+            chain_ctx: None,
         },
     ))
 }
@@ -140,10 +120,6 @@ mod tests {
     const REQUEST_ID: [u8; 32] = [0x77; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
 
-    fn central_address() -> String {
-        "12".repeat(32)
-    }
-
     fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
         let mut out = [0u8; N];
         out[..text.len()].copy_from_slice(text);
@@ -157,14 +133,8 @@ mod tests {
     #[test]
     fn to_sign_request_maps_every_event_field() {
         let record = caller_record();
-        let request = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect("the caller record converts");
+        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect("the caller record converts");
         let SignKind::SignBidirectional(event) = request.kind else {
             panic!("expected SignBidirectional kind");
         };
@@ -188,13 +158,8 @@ mod tests {
         );
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(
-            event.chain_ctx,
-            Some(
-                borsh::to_vec(&MidnightChainCtx {
-                    central_address: central_address(),
-                })
-                .expect("borsh serializes")
-            ),
+            event.chain_ctx, None,
+            "the respond target is config, so the request carries no per-chain blob"
         );
     }
 
@@ -205,15 +170,9 @@ mod tests {
         // derived key space follows the requester.
         let record = caller_record();
         let elsewhere = [0xcd; 32];
-        let err = to_sign_request(
-            &record,
-            &elsewhere,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("a sender mismatch must drop the request")
-        .to_string();
+        let err = to_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS)
+            .expect_err("a sender mismatch must drop the request")
+            .to_string();
         assert!(
             err.contains(&"ab".repeat(32)) && err.contains(&"cd".repeat(32)),
             "the drop must name both addresses, got: {err}"
@@ -226,14 +185,8 @@ mod tests {
         // derivation rather than the v2 caip2 one.
         let mut record = caller_record();
         record.key_version = 0;
-        let legacy = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect("key_version 0 is accepted");
+        let legacy = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect("key_version 0 is accepted");
         assert_eq!(
             legacy.args.epsilon,
             mpc_crypto::kdf::derive_epsilon_midnight(0, &"ab".repeat(32), "caller-path"),
@@ -242,15 +195,9 @@ mod tests {
 
         let mut record = caller_record();
         record.key_version = 2;
-        let err = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("a key_version above LATEST must be rejected")
-        .to_string();
+        let err = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect_err("a key_version above LATEST must be rejected")
+            .to_string();
         assert!(err.contains("key_version"), "err: {err}");
     }
 
@@ -285,15 +232,9 @@ mod tests {
         // through the same fail-closed rule and is named in its own error.
         let mut record = caller_record();
         record.caip2_id = [0xff; 32];
-        let err = to_sign_request(
-            &record,
-            &READ_ADDRESS,
-            &central_address(),
-            REQUEST_ID,
-            INDEXED_TS,
-        )
-        .expect_err("non-UTF-8 caip2 bytes must fail closed")
-        .to_string();
+        let err = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect_err("non-UTF-8 caip2 bytes must fail closed")
+            .to_string();
         assert!(err.contains("caip2_id"), "err: {err}");
     }
 }

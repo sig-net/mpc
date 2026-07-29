@@ -10,15 +10,11 @@ use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;
 use subxt::client::OnlineClient;
-use subxt::ext::codec::{Compact, Decode};
 use subxt::ext::subxt_rpcs::rpc_params;
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::MidnightConfig;
-
-const MIDNIGHT_PALLET: &str = "midnight";
-const SEND_MN_TRANSACTION: &str = "send_mn_transaction";
 
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 
@@ -231,63 +227,6 @@ impl MidnightRpc {
             parent_hash: hex_0x(header.parent_hash),
         })
     }
-
-    /// Every `send_mn_transaction` blob in the block named by `hash_0x`, for blocks
-    /// reached by hash rather than through the live stream.
-    pub async fn send_mn_transaction_bytes_at(
-        &self,
-        hash_0x: &str,
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
-        let bytes: [u8; 32] = hex::decode(hash_0x.trim_start_matches("0x"))
-            .context("block hash is not hex")?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("block hash is not 32 bytes"))?;
-        let block = retry_rpc!(
-            self.request_timeout,
-            self.retry,
-            "midnight_block_at_hash",
-            {
-                self.client
-                    .blocks()
-                    .at(H256::from(bytes))
-                    .await
-                    .context("failed to fetch a finalized block by hash")
-            }
-        )?;
-        self.send_mn_transaction_bytes(&FinalizedBlock { block })
-            .await
-    }
-
-    /// Every `midnight::send_mn_transaction` blob in `block`, in extrinsic order:
-    /// `args[0]` with its SCALE compact length prefix stripped.
-    pub async fn send_mn_transaction_bytes(
-        &self,
-        block: &FinalizedBlock,
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
-        let extrinsics = retry_rpc!(
-            self.request_timeout,
-            self.retry,
-            "midnight_block_extrinsics",
-            {
-                block
-                    .block
-                    .extrinsics()
-                    .await
-                    .context("failed to fetch extrinsics for a finalized midnight block")
-            }
-        )?;
-        let mut blobs = Vec::new();
-        for extrinsic in extrinsics.iter() {
-            if let Some(blob) = extract_send_mn_transaction(
-                extrinsic.pallet_name().context("extrinsic pallet name")?,
-                extrinsic.variant_name().context("extrinsic variant name")?,
-                extrinsic.field_bytes(),
-            )? {
-                blobs.push(blob);
-            }
-        }
-        Ok(blobs)
-    }
 }
 
 /// [`MidnightRpc::contract_state`] over explicit transports, so its offline tests can
@@ -334,28 +273,6 @@ async fn contract_state_over(
     })
 }
 
-/// The pure filter-and-decode step for one extrinsic: `Some(blob)` iff `(pallet,
-/// variant)` is exactly `midnight::send_mn_transaction`, where the blob is `args[0]`
-/// with the SCALE compact length prefix stripped and checked against the remainder.
-fn extract_send_mn_transaction(
-    pallet: &str,
-    variant: &str,
-    field_bytes: &[u8],
-) -> anyhow::Result<Option<Vec<u8>>> {
-    if pallet != MIDNIGHT_PALLET || variant != SEND_MN_TRANSACTION {
-        return Ok(None);
-    }
-    let mut rest = field_bytes;
-    let Compact(declared_len) = Compact::<u32>::decode(&mut rest)
-        .context("send_mn_transaction args[0] has a malformed compact length prefix")?;
-    anyhow::ensure!(
-        rest.len() as u64 == u64::from(declared_len),
-        "send_mn_transaction args[0] declares {declared_len} bytes but {} follow",
-        rest.len()
-    );
-    Ok(Some(rest.to_vec()))
-}
-
 fn spawn_runtime_updater(client: OnlineClient<SubstrateConfig>) -> AbortOnDrop {
     let updater = client.updater();
     AbortOnDrop(tokio::spawn(async move {
@@ -371,114 +288,11 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClientT};
-    use subxt::ext::codec::{Compact, Encode};
     use subxt::ext::subxt_rpcs::{Error as RawRpcError, UserError};
-
-    const TAG: &[u8] = b"midnight:transaction[v12]";
-
-    /// SCALE-encode a `Vec<u8>` call argument: compact length, then bytes.
-    fn scale_vec(payload: &[u8]) -> Vec<u8> {
-        let mut bytes = Compact(payload.len() as u32).encode();
-        bytes.extend_from_slice(payload);
-        bytes
-    }
-
-    fn tagged_blob(extra: &[u8]) -> Vec<u8> {
-        let mut blob = TAG.to_vec();
-        blob.extend_from_slice(extra);
-        blob
-    }
-
-    #[test]
-    fn extract_send_mn_transaction_filters_by_pallet_and_call() {
-        let blob = tagged_blob(&[0xaa; 7]);
-        let field_bytes = scale_vec(&blob);
-
-        let extracted =
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &field_bytes)
-                .expect("well-formed args decode")
-                .expect("matching extrinsic extracts");
-        assert_eq!(extracted, blob);
-        assert!(
-            extracted.starts_with(TAG),
-            "args[0] must lead with the ASCII transaction tag"
-        );
-
-        // The same call name under another pallet must not match, the same pallet with
-        // another call must not match, and matching is exact, never case-insensitive.
-        for (pallet, variant) in [
-            ("system", "send_mn_transaction"),
-            ("midnight", "remark"),
-            ("Midnight", "send_mn_transaction"),
-            ("midnight", "Send_mn_transaction"),
-        ] {
-            assert!(
-                extract_send_mn_transaction(pallet, variant, &field_bytes)
-                    .expect("well-formed args decode")
-                    .is_none(),
-                "{pallet}::{variant} must not match"
-            );
-        }
-    }
-
-    #[test]
-    fn extract_send_mn_transaction_strips_compact_length_prefix() {
-        // Single-byte mode, hand-built rather than codec-built so at least one raw
-        // prefix byte is pinned non-circularly: compact(5) is one byte, 5 << 2 = 0x14.
-        let mut short = vec![0x14];
-        short.extend_from_slice(&[1, 2, 3, 4, 5]);
-        assert_eq!(
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &short)
-                .unwrap()
-                .unwrap(),
-            [1, 2, 3, 4, 5],
-        );
-
-        // Two-byte mode via the codec: a 300-byte payload needs the 0b01 prefix form,
-        // so this pins that the strip is mode-aware rather than always dropping one
-        // byte.
-        let long_blob = tagged_blob(&[0xbb; 300 - TAG.len()]);
-        let field_bytes = scale_vec(&long_blob);
-        assert_eq!(
-            field_bytes.len(),
-            2 + long_blob.len(),
-            "a 300-byte payload takes the two-byte compact form"
-        );
-        assert_eq!(
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &field_bytes)
-                .unwrap()
-                .unwrap(),
-            long_blob,
-        );
-    }
-
-    #[test]
-    fn extract_send_mn_transaction_errors_on_malformed_args() {
-        // A matching extrinsic whose args do not decode must error, never be silently
-        // skipped: skipping would drop a real transaction blob.
-        assert!(
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &[]).is_err(),
-            "empty args have no compact prefix to read"
-        );
-
-        let mut lying = Compact(10u32).encode();
-        lying.extend_from_slice(&[1, 2, 3]);
-        assert!(
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &lying).is_err(),
-            "declared length exceeding the remainder must error"
-        );
-
-        let mut trailing = scale_vec(&[1, 2, 3]);
-        trailing.push(9);
-        assert!(
-            extract_send_mn_transaction("midnight", "send_mn_transaction", &trailing).is_err(),
-            "trailing bytes beyond the declared length must error"
-        );
-    }
 
     #[tokio::test]
     #[ignore = "requires a local midnight node"]
-    async fn live_finalized_subscription_extracts_transactions() {
+    async fn live_finalized_subscription_yields_a_block() {
         use futures_util::StreamExt as _;
 
         let config = crate::config::MidnightConfig {
@@ -496,17 +310,13 @@ mod tests {
             .subscribe_finalized()
             .await
             .expect("subscribe finalized");
-        let block = blocks.next().await.expect("one finalized block");
-
-        let blobs = rpc
-            .send_mn_transaction_bytes(&block)
+        let block = blocks
+            .next()
             .await
-            .expect("extrinsics fetch");
-        // An idle block is legal; when a ledger transaction is present it must lead
-        // with the version tag.
-        if let Some(first) = blobs.first() {
-            assert!(first.starts_with(TAG));
-        }
+            .expect("one finalized block")
+            .block_ref();
+        assert!(block.number > 0);
+        assert_ne!(block.hash, block.parent_hash);
     }
 
     // Contract-state reads over an in-process JSON-RPC stub.
