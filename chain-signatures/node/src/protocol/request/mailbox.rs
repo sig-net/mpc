@@ -1,7 +1,6 @@
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::PresignatureId;
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,17 +15,11 @@ pub(crate) struct SignPositMessage {
     pub action: PositAction,
 }
 
-/// Mailbox holding the latest posit message per sending participant.
+/// Mailbox holding the latest posit message per sending participant — a
+/// sender's newest message supersedes its previous one.
 ///
-/// A message for round N from sender P replaces any earlier message from P.
-///
-/// Only a single message per round and sender buffered. This is enough because:
-///
-/// - When we are proposer for a round, only Reject or Accept will be sent to us.
-/// - When we are deliberator, we can only receive `Propose` or `Start` messages
-///   here. But we can't get a `Start` message for a round that we haven't already
-///   responded to a `Propose` message. Therefore, one message per round is all we
-///   need to buffer.
+/// Deliberately round-agnostic: arrival order decides, never rounds (which can
+/// legitimately go down after a reset). Round classification is the task's job.
 pub(crate) struct PositMailbox {
     // using std Mutex here, do not hold across .await
     messages: std::sync::Mutex<HashMap<Participant, SignPositMessage>>,
@@ -41,37 +34,12 @@ impl PositMailbox {
         })
     }
 
-    /// Buffer `msg` in its sender's slot, overwriting when its round is `>=` the
-    /// buffered one, then wake one consumer.
+    /// Store `msg` in its sender's slot — last arrived wins — then wake one
+    /// consumer.
     pub(crate) fn push(&self, msg: SignPositMessage) {
-        let SignPositMessage {
-            from,
-            round: new_round,
-            ..
-        } = msg;
-        let mut guard = self.messages.lock().unwrap();
-        let mut inserted = false;
-        match guard.entry(from) {
-            Entry::Occupied(mut occupied_entry) => {
-                let SignPositMessage {
-                    round: existing, ..
-                } = occupied_entry.get();
-
-                if new_round >= *existing {
-                    occupied_entry.insert(msg);
-                    inserted = true;
-                }
-            }
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(msg);
-                inserted = true;
-            }
-        }
-        drop(guard);
+        self.messages.lock().unwrap().insert(msg.from, msg);
         // Wake up potential work consumers. (after releasing the lock)
-        if inserted {
-            self.notify.notify_one();
-        }
+        self.notify.notify_one();
     }
 
     fn try_recv(&self) -> Option<SignPositMessage> {
@@ -90,5 +58,59 @@ impl PositMailbox {
             }
             notified.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn posit(from: u32, round: usize, action: PositAction) -> SignPositMessage {
+        SignPositMessage {
+            presignature_id: 0,
+            round,
+            from: Participant::from(from),
+            action,
+        }
+    }
+
+    /// One slot per sender, last arrived wins — regardless of rounds. A lower
+    /// round can legitimately arrive after a higher one (peers restart at
+    /// round 0 after a governance change) and must not be silenced; judging
+    /// rounds is the task's job.
+    #[test]
+    fn one_slot_per_sender_last_arrived_wins() {
+        let mailbox = PositMailbox::new();
+        mailbox.push(posit(1, 5, PositAction::Propose));
+        mailbox.push(posit(1, 5, PositAction::Accept));
+        mailbox.push(posit(1, 0, PositAction::Propose));
+        mailbox.push(posit(2, 3, PositAction::Accept));
+
+        let mut got = vec![
+            mailbox.try_recv().expect("sender 1"),
+            mailbox.try_recv().expect("sender 2"),
+        ];
+        got.sort_by_key(|msg| u32::from(msg.from));
+        assert!(matches!(got[0].action, PositAction::Propose));
+        assert_eq!(got[0].round, 0, "round 0 must replace the round-5 slot");
+        assert_eq!(got[1].round, 3);
+        assert!(mailbox.try_recv().is_none());
+    }
+
+    #[tokio::test]
+    async fn recv_wakes_on_push() {
+        let mailbox = PositMailbox::new();
+        let consumer = {
+            let mailbox = Arc::clone(&mailbox);
+            tokio::spawn(async move { mailbox.recv().await })
+        };
+        tokio::task::yield_now().await;
+        mailbox.push(posit(3, 1, PositAction::Accept));
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), consumer)
+            .await
+            .expect("recv should wake on push")
+            .unwrap();
+        assert_eq!(got.from, Participant::from(3));
     }
 }
