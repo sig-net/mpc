@@ -25,14 +25,11 @@ impl PreviousDevnet {
             pending_requests,
             proposed_updates,
             config,
-            latest_checkpoints,
+            mut latest_checkpoints,
         } = self;
 
-        let mut latest_checkpoint_digests = IterableMap::new(StorageKey::LatestCheckpointDigests);
         for chain in Chain::iter() {
-            if let Some(checkpoint) = latest_checkpoints.get(&chain) {
-                latest_checkpoint_digests.insert(chain, checkpoint.checkpoint);
-            }
+            latest_checkpoints.remove(&chain);
         }
 
         MpcContract {
@@ -40,7 +37,7 @@ impl PreviousDevnet {
             pending_requests,
             proposed_updates,
             config,
-            latest_checkpoints: latest_checkpoint_digests,
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         }
     }
