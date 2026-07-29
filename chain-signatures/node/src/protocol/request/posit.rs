@@ -23,11 +23,7 @@ impl PositPhase {
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
-                // Prioritize buffered messages for the current round.
-                let task_msg = match state.take_buffered_posit_message() {
-                    Some(buffered) => buffered,
-                    None => mailbox.recv().await,
-                };
+                let task_msg = mailbox.recv().await;
 
                 let SignPositMessage {
                     presignature_id,
@@ -51,13 +47,8 @@ impl PositPhase {
                     continue;
                 }
 
-                // reject any messages with a different round than ours
-                //
-                // note: Rejecting messages of older rounds is always the right
-                // choice. But for newer messages, we could buffer them and try
-                // that round later. What we must not do is immediately jump to
-                // that higher round, or else any peer could force themselves to
-                // be the proposer every time.
+                // Reject messages from older rounds so the sender learns our
+                // round and can catch up in one bump.
                 if state.round > *peer_round {
                     tracing::info!(
                         ?from,
@@ -87,17 +78,16 @@ impl PositPhase {
                     continue;
                 }
 
-                // Message can't be processed now but is crucial to make progress later.
-                // Note that we must first try and finish the current round and
-                // not immediately jump to that higher round. Otherwise, any peer
-                // could force themselves to be the proposer every time.
+                // A future round means we are behind; remember it for the next
+                // bump but finish the current round first — jumping right away
+                // would let any peer force themselves to be the proposer.
                 if state.round < *peer_round {
                     tracing::info!(
                         peer_round,
                         my_round = state.round,
-                        "Storing message for future round, as deliberator",
+                        "Dropping message from future round, as deliberator",
                     );
-                    state.buffer_future_posit_message(task_msg);
+                    state.highest_seen_round = state.highest_seen_round.max(*peer_round);
                     continue;
                 }
 
@@ -304,22 +294,17 @@ impl PositPhase {
                         continue;
                     }
 
-                    // Message can't be processed now but is crucial to make progress later.
-                    // Note that we must first try and finish the current round and
-                    // not immediately jump to that higher round. Otherwise, any peer
-                    // could force themselves to be the proposer every time.
+                    // A future round means we are behind; remember it for the
+                    // next bump but finish the current round first — jumping
+                    // right away would let any peer force themselves to be the
+                    // proposer.
                     if state.round < peer_round {
                         tracing::info!(
                             peer_round,
                             my_round = state.round,
-                            "Storing message for future round",
+                            "Dropping message from future round",
                         );
-                        state.buffer_future_posit_message(SignPositMessage {
-                            presignature_id,
-                            round: peer_round,
-                            from,
-                            action,
-                        });
+                        state.highest_seen_round = state.highest_seen_round.max(peer_round);
                         continue;
                     }
 

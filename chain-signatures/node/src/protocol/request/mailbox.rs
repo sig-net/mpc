@@ -86,7 +86,7 @@ mod tests {
         mailbox.push(posit(1, 0, PositAction::Propose));
         mailbox.push(posit(2, 3, PositAction::Accept));
 
-        let mut got = vec![
+        let mut got = [
             mailbox.try_recv().expect("sender 1"),
             mailbox.try_recv().expect("sender 2"),
         ];
