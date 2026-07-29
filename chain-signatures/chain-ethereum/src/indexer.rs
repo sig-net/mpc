@@ -1073,6 +1073,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         })
     }
 
+    // TODO: Currently if this dies silently we have to wait 35 min for the stream supervisor to restart it. Implement faster failure detection and restart.
     /// Background task maintaining the cached finalized head (`self.finalized_head`).
     ///
     /// Polls `eth_getBlockByNumber(Finalized)` on `refresh_finalized_interval`
