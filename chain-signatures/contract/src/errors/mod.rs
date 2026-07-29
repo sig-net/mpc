@@ -35,6 +35,8 @@ pub enum JoinError {
     JoinAlreadyParticipant,
     #[error("Account to revoke is not in the candidate set.")]
     RevokeNotCandidate,
+    #[error("Candidate URL is too long.")]
+    UrlTooLong,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
