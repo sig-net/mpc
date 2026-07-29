@@ -246,9 +246,9 @@ impl EthereumClient {
         }
     }
 
-    pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
+    pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         let max_attempts = self.rpc.retry.max_times;
-        let res = retry_rpc_gated!(
+        retry_rpc_gated!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -265,22 +265,7 @@ impl EthereumClient {
                     EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
                 }
             }
-        );
-
-        match res {
-            Ok(Some(block)) => Some(block),
-            Ok(None) => {
-                tracing::warn!(client = self.client_name(), "Block {block_id:?} not found");
-                None
-            }
-            Err(err) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    "get_block failed for {block_id:?}: {err:#}"
-                );
-                None
-            }
-        }
+        )
     }
 
     pub async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<MaybeBlock> {
@@ -464,10 +449,11 @@ impl EthereumClient {
         )
     }
 
-    pub async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Latest))
-            .await
-            .map(|block| block.header.number)
+    pub async fn get_latest_block_number(&self) -> anyhow::Result<Option<u64>> {
+        Ok(self
+            .get_block(BlockId::Number(BlockNumberOrTag::Latest))
+            .await?
+            .map(|block| block.header.number))
     }
 
     pub fn clamp_oldest_supported(
@@ -809,7 +795,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(99)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_some());
         assert_eq!(block.unwrap().header.number, 99);
@@ -829,7 +816,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(1)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_none());
     }
@@ -857,7 +845,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(7)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_some());
     }
@@ -879,7 +868,7 @@ mod tests {
             .get_block(BlockId::Number(BlockNumberOrTag::Number(8)))
             .await;
 
-        assert!(block.is_none());
+        assert!(block.is_err());
     }
 
     #[tokio::test]
@@ -899,7 +888,7 @@ mod tests {
             .get_block(BlockId::Number(BlockNumberOrTag::Number(9)))
             .await;
 
-        assert!(block.is_none());
+        assert!(block.is_err());
     }
 
     #[tokio::test]
