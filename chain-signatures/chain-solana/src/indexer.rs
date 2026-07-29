@@ -548,24 +548,15 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     telemetry: T,
 ) {
     let mut anchor_tx = Some(anchor_tx);
-    loop {
-        // TODO: if solana ever fails and needs to retry, we actually need to do catchup
-        // again. This requires potentially complicating the coordination we have on the
-        // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
-        let result = subscribe_to_program_events(
-            program_id,
-            &client,
-            live_tx.clone(),
-            &mut anchor_tx,
-            telemetry.clone(),
-        )
-        .await;
-
-        if let Err(err) = result {
-            tracing::warn!("Live solana subscription failed: {:?}", err);
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    // Deliberately does not resubscribe in-place: blocks produced while the
+    // websocket was down would be silently skipped. Returning drops `live_tx`,
+    // which ends `forward_live_events` and fails `run()`, so the supervisor
+    // restarts the indexer — resolving a fresh anchor and catching up
+    // `[persisted_block, anchor)` before live events resume.
+    if let Err(err) =
+        subscribe_to_program_events(program_id, &client, live_tx, &mut anchor_tx, telemetry).await
+    {
+        tracing::warn!("Live solana subscription failed: {:?}", err);
     }
 }
 
