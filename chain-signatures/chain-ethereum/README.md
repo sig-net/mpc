@@ -32,8 +32,8 @@ config, not constructed by hand.
 | `network`                 | `NETWORK`           | no        | default `sepolia` |
 | `consensus_rpc_http_url`  | —                   | helios     | CL RPC for the light-client backend |
 | `helios_data_dir`         | —                   | helios     | where Helios stores its synced state |
-| `refresh_finalized_interval` | —                | no        | blocks between finalized-head polls |
-| `optimistic_requests`     | `OPTIMISTIC`        | no        | default on; set `0` to disable optimistic requests and exercise per-block `wait_for_finalized_block` polling |
+| `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
+| `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
 | `light_client`            | —                   | no        | set `true` to select the Helios backend (`helios` feature required) |
 
 ## Benchmarking catchup
@@ -97,7 +97,7 @@ cargo run --example bench_watchers --features bench
 | `END`            | yes       | exclusive end of the range |
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
 | `NETWORK`        | no        | default `sepolia` |
-| `OPTIMISTIC`     | no        | `1` (default) enables optimistic requests; `0` exercises finality polling |
+| `OPTIMISTIC`     | no        | `0` (default, production) waits for finality via the watcher; `1` enables the demo/soft-tip path |
 | `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `50`) |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
