@@ -15,6 +15,13 @@ const NEAR_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Maximum number of retry attempts for NEAR governance calls (vote, join)
 const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointVoteOutcome {
+    Submitted { threshold_reached: bool },
+    Behind,
+    Conflicting,
+}
+
 /// NEAR [`Governance`] client.
 ///
 /// Owns the RPC connection and signer used to submit MPC governance transactions
@@ -62,14 +69,12 @@ impl NearGovernanceClient {
 
     /// Submit a checkpoint vote.
     ///
-    /// Returns `Some(threshold_reached)` for a successful contract call. Returns
-    /// `None` when the contract rejects the checkpoint because it is behind the
-    /// chain's latest checkpoint; that outcome is already resolved and should
-    /// not be retried.
+    /// Returns a terminal outcome for successful, behind, or conflicting
+    /// checkpoints. Contract-level checkpoint rejections are not retried.
     pub async fn vote_checkpoint(
         &self,
         checkpoint: &ConsensusCheckpointDigest,
-    ) -> anyhow::Result<Option<bool>> {
+    ) -> anyhow::Result<CheckpointVoteOutcome> {
         let transaction = self
             .client
             .call(&self.signer, &self.contract_id, "vote_checkpoint")
@@ -86,7 +91,14 @@ impl NearGovernanceClient {
                     .to_string()
                     .contains(&CheckpointError::CheckpointBehind.to_string()) =>
             {
-                return Ok(None);
+                return Ok(CheckpointVoteOutcome::Behind);
+            }
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::ConflictingCheckpoint.to_string()) =>
+            {
+                return Ok(CheckpointVoteOutcome::Conflicting);
             }
             Err(err) => {
                 tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
@@ -95,13 +107,22 @@ impl NearGovernanceClient {
         };
 
         match transaction.into_result() {
-            Ok(transaction) => Ok(Some(transaction.json()?)),
+            Ok(transaction) => Ok(CheckpointVoteOutcome::Submitted {
+                threshold_reached: transaction.json()?,
+            }),
             Err(err)
                 if err
                     .to_string()
                     .contains(&CheckpointError::CheckpointBehind.to_string()) =>
             {
-                Ok(None)
+                Ok(CheckpointVoteOutcome::Behind)
+            }
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::ConflictingCheckpoint.to_string()) =>
+            {
+                Ok(CheckpointVoteOutcome::Conflicting)
             }
             Err(err) => Err(err.into()),
         }

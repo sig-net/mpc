@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 // TODO: move clients elsewhere
 pub use hydration::HydrationClient;
-pub use near_governance::NearGovernanceClient;
+pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -671,17 +671,19 @@ async fn execute_vote_checkpoint(
     );
 
     match result {
-        Ok(Some(reached)) => {
-            tracing::info!(
-                ?checkpoint,
-                threshold_reached = reached,
-                "checkpoint vote submitted"
-            );
+        Ok(CheckpointVoteOutcome::Submitted { threshold_reached }) => {
+            tracing::info!(?checkpoint, threshold_reached, "checkpoint vote submitted");
         }
-        Ok(None) => {
+        Ok(CheckpointVoteOutcome::Behind) => {
             tracing::info!(
                 ?checkpoint,
                 "checkpoint vote ignored because checkpoint is behind the latest checkpoint"
+            );
+        }
+        Ok(CheckpointVoteOutcome::Conflicting) => {
+            tracing::warn!(
+                ?checkpoint,
+                "checkpoint vote ignored because a conflicting checkpoint is finalized"
             );
         }
         Err(err) => {
