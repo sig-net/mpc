@@ -14,9 +14,11 @@
 //! - `START` (optional) — inclusive start of the range. If omitted, only
 //!   the single block `END - 1` is processed.
 //! - `NETWORK` (optional, default `sepolia`).
-//! - `OPTIMISTIC` (optional, default `1`) — set to `0` to disable
-//!   optimistic requests and exercise the per-block `wait_for_finalized_block`
-//!   poll path (mostly useful for measuring finality polling overhead).
+//! - `OPTIMISTIC` (optional, default `0`) — production (non-optimistic) path by
+//!   default; the finalized-head watcher drives finality. Set to `1` for the
+//!   demo/soft-tip path (no finality wait).
+//! - `REFRESH_FINALIZED_INTERVAL` (optional, default `10000` ms) — cadence of
+//!   the finalized-head watcher in OPTIMISTIC=0 mode.
 //!
 //! # Usage
 //!
