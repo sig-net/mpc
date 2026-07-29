@@ -1,6 +1,6 @@
+use super::mailbox::PositMailbox;
 use super::state::SignState;
 use super::task::{GeneratingPhase, SignPhase};
-use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 /// Posit phase — see [`super::task::SignPhase::Posit`].
@@ -16,7 +16,7 @@ impl PositPhase {
     async fn wait_for_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
@@ -26,10 +26,10 @@ impl PositPhase {
                 // Prioritize buffered messages for the current round.
                 let task_msg = match state.take_buffered_posit_message() {
                     Some(buffered) => buffered,
-                    None => posit_queue.recv().await,
+                    None => mailbox.recv().await,
                 };
 
-                let SignTaskMessage::PositMessage {
+                let SignPositMessage {
                     presignature_id,
                     from,
                     action,
@@ -185,7 +185,7 @@ impl PositPhase {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
     ) -> SignPhase {
         let proposer = self.proposer;
         let active = self.active.clone();
@@ -213,8 +213,7 @@ impl PositPhase {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_for_propose(ctx, state, posit_queue, proposer).await
-            {
+            presignature_id = match Self::wait_for_propose(ctx, state, mailbox, proposer).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
@@ -243,8 +242,8 @@ impl PositPhase {
 
         let accepted_participants = loop {
             tokio::select! {
-                task_msg = posit_queue.recv() => {
-                    let SignTaskMessage::PositMessage { round: peer_round , ..} = task_msg;
+                task_msg = mailbox.recv() => {
+                    let SignPositMessage { round: peer_round , ..} = task_msg;
 
                     // Ignore messages for older rounds
                     if state.round > peer_round {
@@ -265,7 +264,7 @@ impl PositPhase {
                         continue;
                     }
 
-                    let SignTaskMessage::PositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
+                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
 
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
@@ -478,8 +477,8 @@ mod tests {
         state.round = 5;
         state.budget.reset(Duration::from_millis(200));
 
-        let posit_queue = SignPositWorkQueue::new();
-        posit_queue.push(SignTaskMessage::PositMessage {
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
             presignature_id: 42,
             round: 2,
             from: proposer,
@@ -488,8 +487,7 @@ mod tests {
 
         // Behind-proposer Propose is rejected; the call then times out waiting
         // for a valid one and reorganizes.
-        let phase =
-            PositPhase::wait_for_propose(&mut ctx, &mut state, &posit_queue, proposer).await;
+        let phase = PositPhase::wait_for_propose(&mut ctx, &mut state, &mailbox, proposer).await;
         assert!(matches!(phase, Err(SignPhase::Organizing(_))));
 
         let sent = outbox
