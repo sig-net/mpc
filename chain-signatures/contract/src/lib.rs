@@ -1097,6 +1097,12 @@ impl VersionedMpcContract {
         }
     }
 
+    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
+        match self {
+            Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+        }
+    }
+
     fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
         match self {
             Self::V0(mpc_contract) => {
@@ -1108,6 +1114,13 @@ impl VersionedMpcContract {
     fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.checkpoint_votes,
+        }
+    }
+
+    #[private]
+    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
+        for chain in chains {
+            self.latest_checkpoints_mut().remove(&chain);
         }
     }
 }
