@@ -793,9 +793,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         // Reorg hash-check: only for blocks not covered by the finalized head.
-        // After the finality wait above the head covers this block, so this only
-        // runs in optimistic (dev) mode where the wait is bypassed and the head
-        // is not maintained.
         if *self.finalized_head.borrow() < block_number {
             let Some(block) = self
                 .client
@@ -1079,10 +1076,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Background task maintaining the cached finalized head (`self.finalized_head`).
     ///
     /// Polls `eth_getBlockByNumber(Finalized)` on `refresh_finalized_interval`
-    /// and publishes advances over the `watch` channel so emitters consult one
-    /// cached head instead of each polling independently. Retries forever: a
-    /// persistently failing or stalled `finalized` tag does not kill the task —
-    /// stall warnings keep firing and the stream supervisor watchdog remains the
+    /// and publishes advances over the `watch` channel.
+    ///
+    /// Retries forever, the stream supervisor watchdog remains the
     /// escape hatch.
     async fn watch_finalized_head(
         client: Arc<EthereumClient>,
