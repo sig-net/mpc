@@ -22,7 +22,7 @@ use mpc_primitives::{
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -66,6 +66,9 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     contract_address: Address,
     /// The block number of the latest finalized block at the time catchup started. Used to determine which blocks are finalized during catchup.
     catchup_finalized_head: AtomicU64,
+    /// Cached finalized head maintained by `watch_finalized_head`, consulted by
+    /// `emit_processed_block` so each block need not poll finality independently.
+    finalized_head: watch::Sender<u64>,
     /// Watcher nonce-gate scheduling state (first-appearance checks + retries).
     watcher_gate: Mutex<WatcherGateState>,
 }
@@ -100,6 +103,75 @@ enum BackfillOutcome {
     Observed { event: Option<ChainEvent> },
 }
 
+// TODO: Probably can be reused elsewhere, double check and put in a common place
+/// Sleeps for `dur`, returning early if `cancel` fires first. Returns `true`
+/// if the sleep was interrupted by cancellation.
+async fn sleep_or_cancel(cancel: &CancellationToken, dur: Duration) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => true,
+        _ = sleep(dur) => false,
+    }
+}
+
+/// Tracks finalized-head advancement for stall detection, emitting the
+/// advance / backwards / stalled warnings.
+struct FinalizedHeadStall {
+    last_final: Option<u64>,
+    last_advanced_at: Instant,
+    last_stall_warn_at: Instant,
+    warn_after_secs: u64,
+    rewarn_every_secs: u64,
+}
+
+impl FinalizedHeadStall {
+    fn new(warn_after_secs: u64, rewarn_every_secs: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            last_final: None,
+            last_advanced_at: now,
+            last_stall_warn_at: now,
+            warn_after_secs,
+            rewarn_every_secs,
+        }
+    }
+
+    /// Record a finalized-head sample, emitting advance/stall warnings as needed.
+    fn observe(&mut self, new_final: u64) {
+        if self.last_final.is_none_or(|n| new_final > n) {
+            self.last_advanced_at = Instant::now();
+            tracing::debug!(new_final, prev = self.last_final, "finalized head advanced");
+        }
+
+        match self.last_final.replace(new_final) {
+            Some(prev) if new_final < prev => {
+                tracing::warn!(new_final, prev, "finalized block number went backwards");
+            }
+            Some(prev) if prev == new_final => self.warn_if_stalled(new_final),
+            _ => {}
+        }
+    }
+
+    fn warn_if_stalled(&mut self, new_final: u64) {
+        let now = Instant::now();
+        let stalled_for = now.duration_since(self.last_advanced_at).as_secs();
+        if stalled_for < self.warn_after_secs {
+            return;
+        }
+        if now.duration_since(self.last_stall_warn_at).as_secs() < self.rewarn_every_secs {
+            return;
+        }
+        tracing::warn!(
+            new_final,
+            stalled_for,
+            warn_after_secs = self.warn_after_secs,
+            "ethereum finalized head has not advanced; \
+             blocks above it will not be emitted until finality catches up. \
+             If this persists the stream watchdog will restart the pipeline"
+        );
+        self.last_stall_warn_at = now;
+    }
+}
+
 impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Delay between retries of transient RPC failures
     const RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -115,6 +187,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             client,
             contract_address,
             catchup_finalized_head: AtomicU64::new(0),
+            finalized_head: watch::channel(0).0,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         })
     }
@@ -136,6 +209,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             client,
             contract_address,
             catchup_finalized_head: AtomicU64::new(0),
+            finalized_head: watch::channel(0).0,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         }
     }
@@ -1096,6 +1170,65 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             sleep(retry_interval).await;
         }
     }
+
+    /// Background task maintaining the cached finalized head (`self.finalized_head`).
+    ///
+    /// Polls `eth_getBlockByNumber(Finalized)` on `refresh_finalized_interval`
+    /// and publishes advances over the `watch` channel so emitters consult one
+    /// cached head instead of each polling independently. Retries forever: a
+    /// persistently failing or stalled `finalized` tag does not kill the task —
+    /// stall warnings keep firing and the stream supervisor watchdog remains the
+    /// escape hatch.
+    async fn watch_finalized_head(
+        client: Arc<EthereumClient>,
+        head: watch::Sender<u64>,
+        refresh_interval_ms: u64,
+        max_failures: u32,
+        stall_rewarn_secs: u64,
+        cancel: CancellationToken,
+    ) {
+        let interval = Duration::from_millis(refresh_interval_ms);
+        let mut stall = FinalizedHeadStall::new(
+            Chain::Ethereum.expected_finality_time_secs(),
+            stall_rewarn_secs,
+        );
+        let mut failures = 0u32;
+
+        tracing::info!("ethereum finalized-head watcher started");
+
+        loop {
+            match client
+                .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
+                .await
+            {
+                Some(block) => {
+                    failures = 0;
+                    let new_final = block.header.number;
+                    stall.observe(new_final);
+                    head.send_if_modified(|cur| {
+                        if new_final > *cur {
+                            *cur = new_final;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                }
+                None => {
+                    failures = failures.saturating_add(1);
+                    tracing::warn!(
+                        failures,
+                        max_failures,
+                        "ethereum get_block(Finalized) returned no block; watcher keeps retrying"
+                    );
+                }
+            }
+
+            if sleep_or_cancel(&cancel, interval).await {
+                return;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1119,6 +1252,23 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 _ = cancel.cancelled() => return Ok(()),
                 _ = sleep(Self::RETRY_DELAY) => {}
             }
+        };
+
+        // Finalized-head watcher: maintains the cached head that
+        // `emit_processed_block` consults. Skipped in optimistic mode (dev chains
+        // never report a finalized head). Tied to `run()` via `AbortOnDrop` and
+        // the shared `CancellationToken`.
+        let _finalized_watcher = if !self.eth.optimistic_requests {
+            Some(AbortOnDrop(tokio::spawn(Self::watch_finalized_head(
+                self.client.clone(),
+                self.finalized_head.clone(),
+                self.eth.refresh_finalized_interval,
+                self.eth.indexer.max_finalized_failures,
+                self.eth.indexer.stall_rewarn_secs,
+                cancel.clone(),
+            ))))
+        } else {
+            None
         };
 
         let mut catchup_iter = self.catchup_blocks(anchor_height).await;
