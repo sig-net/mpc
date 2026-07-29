@@ -246,6 +246,8 @@ impl EthereumClient {
         }
     }
 
+    /// Retrieves a block by its ID. Returns `Ok(Some(Block))` if the block is found,
+    /// `Ok(None)` if the block is not found, or an error if the request fails.
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         let max_attempts = self.rpc.retry.max_times;
         retry_rpc_gated!(
