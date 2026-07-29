@@ -20,7 +20,6 @@ use mpc_primitives::{
     IndexedSignRequest, SignId,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration, Instant};
@@ -64,8 +63,6 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     telemetry: T,
     client: Arc<EthereumClient>,
     contract_address: Address,
-    /// The block number of the latest finalized block at the time catchup started. Used to determine which blocks are finalized during catchup.
-    catchup_finalized_head: AtomicU64,
     /// Cached finalized head maintained by `watch_finalized_head`, consulted by
     /// `emit_processed_block` so each block need not poll finality independently.
     finalized_head: watch::Sender<u64>,
@@ -186,7 +183,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             telemetry,
             client,
             contract_address,
-            catchup_finalized_head: AtomicU64::new(0),
             finalized_head: watch::channel(0).0,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         })
@@ -208,7 +204,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             telemetry,
             client,
             contract_address,
-            catchup_finalized_head: AtomicU64::new(0),
             finalized_head: watch::channel(0).0,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         }
@@ -273,29 +268,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Process the block and emit relevant ChainEvents from the block.
-    ///
-    /// `is_finalized` indicates the block was already finalized at the time
-    /// it was fetched, so it cannot reorg and `emit_processed_block` can skip
-    /// the per-block re-fetch + reorg hash check (one `eth_getBlockByNumber`
-    /// per block).
-    ///
-    /// For catchup, this is depth-gated against the finalized head sampled once
-    /// at catchup start (`catchup_range`)
-    ///
-    /// For the live path, `is_finalized` is always `false`
     async fn process_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         block: &Block,
         relevant_logs: &[Log],
-        is_finalized: bool,
     ) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
         self.telemetry.block_indexed(block.header.number);
 
         let processed = self.parse_block(block, relevant_logs).await?;
-        self.emit_processed_block(events_tx, processed, is_finalized)
-            .await?;
+        self.emit_processed_block(events_tx, processed).await?;
 
         Ok(())
     }
@@ -790,9 +773,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Emits the processed block in-order once we reach finality for it.
-    ///
-    /// `is_finalized` blocks skip the per-block re-fetch + reorg hash check
-    /// (see `process_block`).
     async fn emit_processed_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -804,7 +784,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             respond_logs,
             execution_events,
         }: BlockAndRequests,
-        is_finalized: bool,
     ) -> anyhow::Result<()> {
         // Optimistic mode is for demos/integration tests only: dev chains
         // never report finality (so the wait would hang) and never reorg
@@ -813,8 +792,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             self.wait_for_finalized_block(block_number).await?;
         }
 
-        // If the block is not finalized, re-fetch it and check that the hash matches
-        if !is_finalized {
+        // Reorg hash-check: only for blocks not covered by the finalized head.
+        // After the finality wait above the head covers this block, so this only
+        // runs in optimistic (dev) mode where the wait is bypassed and the head
+        // is not maintained.
+        if *self.finalized_head.borrow() < block_number {
             let Some(block) = self
                 .client
                 .as_ref()
@@ -948,26 +930,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             self.eth.indexer.catchup_block_batch_size,
         );
 
-        // Sample the finalized head once at catchup start, so that blocks at or below it can skip the per-block re-fetch + reorg hash check.
-        if let Some(finalized_block) = self
-            .client
-            .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
-            .await
-        {
-            self.catchup_finalized_head
-                .store(finalized_block.header.number, Ordering::Relaxed);
-            tracing::info!(
-                finalized_head = finalized_block.header.number,
-                catchup_start,
-                anchor_height,
-                "sampled finalized head for catchup reorg-check gating"
-            );
-        } else {
-            tracing::warn!(
-                "could not sample finalized head for catchup; keeping reorg check for all blocks"
-            );
-        }
-
         // Convert the async state machine into a Stream
         let stream = stream::unfold(catchup_iter, |mut state| async move {
             let item = state.next().await;
@@ -1030,11 +992,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         #[cfg(feature = "bench")]
         let start_process = std::time::Instant::now();
 
-        // Determine if the block is finalized based on the sampled finalized head at catchup start
-        let f0 = self.catchup_finalized_head.load(Ordering::Relaxed);
-        let is_finalized = block.header.number <= f0;
-        self.process_block(events_tx, block, logs, is_finalized)
-            .await?;
+        self.process_block(events_tx, block, logs).await?;
 
         #[cfg(feature = "bench")]
         {
@@ -1075,8 +1033,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             }
         };
 
-        // Live blocks are not yet finalized, so keep the reorg hash check
-        self.process_block(events_tx, block, logs, false).await?;
+        self.process_block(events_tx, block, logs).await?;
         Ok(())
     }
 
@@ -1345,7 +1302,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Ensure blocks are considered finalized to avoid reorg-check refetches in process_catchup
-        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -1406,7 +1363,7 @@ mod tests {
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
-        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -1476,7 +1433,7 @@ mod tests {
         let (events_tx, mut events_rx) = chain_event_channel();
 
         // Ensure block is considered finalized to avoid the reorg-check refetch
-        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(100);
 
         let item = CatchupItem::Missing(BlockId::Number(BlockNumberOrTag::Number(block_number)));
         indexer
@@ -1524,7 +1481,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Ensure block is considered finalized to avoid the reorg-check refetch
-        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -1654,7 +1611,7 @@ mod tests {
         let (events_tx, mut events_rx) = chain_event_channel();
         // Block 42 was finalized at fetch time (head sampled at 100), so the
         // re-fetch + reorg check is skipped.
-        indexer.catchup_finalized_head.store(100, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(100);
 
         indexer
             .process_catchup_item(&events_tx, &item)
@@ -1700,7 +1657,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Finalized head sampled at 10 → block 42 is unfinalized at fetch time.
-        indexer.catchup_finalized_head.store(10, Ordering::Relaxed);
+        indexer.finalized_head.send_replace(10);
 
         indexer
             .process_catchup_item(&events_tx, &item)
