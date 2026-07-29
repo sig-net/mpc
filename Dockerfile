@@ -14,6 +14,8 @@ ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
 COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
+COPY signet-primitives/ ./signet-primitives
+COPY signet-crypto/ ./signet-crypto
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
