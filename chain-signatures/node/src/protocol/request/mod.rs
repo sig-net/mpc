@@ -44,7 +44,8 @@ pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
-/// Maximum timeout budget for organizing and posit phases (shorter under test for speed).
+/// Timeout budget for the organizing and posit phases of round 0 (shorter under
+/// test for speed). Later rounds follow [`round_timeout`], which may exceed this.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     5
 } else {
@@ -63,18 +64,49 @@ const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
     .saturating_mul(2)
     .saturating_add(Duration::from_secs(1));
 
-/// Added to floor per round, so a request that keeps failing gets more time
-const ROUND_TIMEOUT_STEP: Duration = Duration::from_secs(1);
+/// Per-round growth factor, as a 23/20 ratio.
+///
+/// Multiplicative rather than additive. Nodes that index a request at different
+/// times enter the same round at different moments, and can only transact while
+/// both are inside it — so a round has to grow past that skew before the request
+/// can settle. An additive step overshoots the skew by one step however long it
+/// has been growing, leaving a window too short to complete a round; a ratio
+/// overshoots by a fraction of the skew, so the window scales with the problem.
+///
+/// Any ratio above 1 eventually crosses the skew, so the value is chosen for
+/// what it costs the other case: rotating past dead proposers wants rounds to
+/// stay short. At 23/20 a round only doubles after five rotations, so rotating
+/// past a run of dead proposers stays cheap for as long as it plausibly needs to.
+const ROUND_TIMEOUT_GROWTH_NUM: u32 = 23;
+const ROUND_TIMEOUT_GROWTH_DEN: u32 = 20;
+
+/// Longest a round may be. High enough that any plausible indexing skew is
+/// crossed, low enough that a wedged request keeps rotating visibly instead of
+/// disappearing into a multi-hour round.
+const ROUND_TIMEOUT_CEILING: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
+    30
+} else {
+    600
+});
 
 /// Timeout for round `r`: round 0 gets [`ORGANIZE_POSIT_TIMEOUT`], later rounds
-/// start at [`ROUND_TIMEOUT_FLOOR`] and grow linearly back up to it. Depends
-/// only on `r`, so peers that agree on the round agree on the deadline.
+/// start at [`ROUND_TIMEOUT_FLOOR`] and grow geometrically to
+/// [`ROUND_TIMEOUT_CEILING`]. Depends only on `r`, so peers that agree on the
+/// round agree on the deadline.
 fn round_timeout(round: usize) -> Duration {
     if round == 0 {
         return ORGANIZE_POSIT_TIMEOUT;
     }
-    let steps = u32::try_from(round - 1).unwrap_or(u32::MAX);
-    (ROUND_TIMEOUT_FLOOR + ROUND_TIMEOUT_STEP * steps).min(ORGANIZE_POSIT_TIMEOUT)
+    // Saturates at the ceiling within ~16 iterations, which bounds the loop:
+    // `round` derives from `highest_seen_round`, so a peer can make it huge.
+    let mut timeout = ROUND_TIMEOUT_FLOOR;
+    for _ in 1..round {
+        if timeout >= ROUND_TIMEOUT_CEILING {
+            return ROUND_TIMEOUT_CEILING;
+        }
+        timeout = timeout * ROUND_TIMEOUT_GROWTH_NUM / ROUND_TIMEOUT_GROWTH_DEN;
+    }
+    timeout.min(ROUND_TIMEOUT_CEILING)
 }
 
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
@@ -660,11 +692,33 @@ mod tests {
         // otherwise the schedule buys nothing.
         assert!(round_timeout(1) < round_timeout(0));
 
-        // A request that keeps failing gets back to the full round-0 budget
-        // rather than retrying forever on short rounds.
-        assert_eq!(round_timeout(64), ORGANIZE_POSIT_TIMEOUT);
+        // Growth is monotonic, so a request that keeps failing keeps getting
+        // more time rather than retrying forever on equally short rounds.
+        for r in 1..64usize {
+            assert!(
+                round_timeout(r + 1) >= round_timeout(r),
+                "round {r} is longer than round {}",
+                r + 1
+            );
+        }
 
-        // `round` derives from a peer-supplied value, so it may be arbitrary.
-        assert_eq!(round_timeout(usize::MAX), ORGANIZE_POSIT_TIMEOUT);
+        // Rounds must grow past a late node's indexing skew, or the two never
+        // overlap: both advance at the same rate, so a fixed ceiling below the
+        // skew leaves them permanently offset. Growth must also clear the skew
+        // by enough to complete a round, not merely exceed it.
+        let skew = 4 * ORGANIZE_POSIT_TIMEOUT;
+        let crossing = (1..1024usize)
+            .find(|&r| round_timeout(r) > skew)
+            .expect("schedule must grow past the skew");
+        assert!(
+            round_timeout(crossing) - skew > min_viable,
+            "round {crossing} clears the skew by too little to settle in"
+        );
+
+        // A wedged request keeps rotating rather than vanishing into an
+        // unbounded round. `round` derives from a peer-supplied value, so it
+        // may be arbitrary.
+        assert_eq!(round_timeout(1024), ROUND_TIMEOUT_CEILING);
+        assert_eq!(round_timeout(usize::MAX), ROUND_TIMEOUT_CEILING);
     }
 }
