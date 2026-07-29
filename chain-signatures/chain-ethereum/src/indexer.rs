@@ -1080,94 +1080,25 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Blocks until the specified block number has been finalized on the Ethereum chain.
+    /// Blocks until the cached finalized head (`self.finalized_head`, maintained
+    /// by `watch_finalized_head`) covers `block_number`.
     async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
-        let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
-        let max_finalized_failures = self.eth.indexer.max_finalized_failures;
-        let mut last_final_block_number: Option<BlockNumber> = None;
-        let mut consecutive_failures = 0u32;
+        // Fast path: the cached head already covers this block.
+        if *self.finalized_head.borrow() >= block_number {
+            return Ok(());
+        }
 
-        // Warn if the finalized block number has not advanced for this long
-        let stall_warn_secs = Chain::Ethereum.expected_finality_time_secs();
-        // Re-warn on this heartbeat interval if the finalized block number has not advanced
-        let stall_rewarn_secs = self.eth.indexer.stall_rewarn_secs;
-        let mut last_advanced_at = Instant::now();
-        let mut last_stall_warn_at = Instant::now();
-
+        // Slow path: wait for the watcher to publish an advance
+        let mut rx = self.finalized_head.subscribe();
         loop {
-            let Some(finalized_block) = self
-                .client
-                .as_ref()
-                .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
-                .await
-            else {
-                consecutive_failures += 1;
-                if consecutive_failures >= max_finalized_failures {
-                    // Propagate error to the outer ChainIndexer loop to catch it,
-                    // sleep for RETRY_DELAY, and attempt the entire block process again.
-                    anyhow::bail!(
-                        "get_block(Finalized) failed {max_finalized_failures} times consecutively; aborting wait"
-                    );
-                }
-                tracing::warn!(
-                    block_number,
-                    "finalized ethereum block not found (failure {consecutive_failures}/{max_finalized_failures}); retrying"
-                );
-                sleep(retry_interval).await;
-                continue;
-            };
-
-            consecutive_failures = 0;
-            let new_final_block_number = finalized_block.header.number;
-            let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
-
-            if prev_final_block_number.is_none_or(|n| new_final_block_number > n) {
-                last_advanced_at = Instant::now();
-                tracing::debug!(
-                    new_final_block_number,
-                    prev_final_block_number,
-                    "New finalized block number"
-                );
-            }
-
-            if let Some(prev_final_block_number) = prev_final_block_number {
-                if new_final_block_number < prev_final_block_number {
-                    tracing::warn!(
-                        new_final_block_number,
-                        prev_final_block_number,
-                        "new finalized block number overflowed range of u64 and has wrapped around!"
-                    );
-                }
-
-                if new_final_block_number == prev_final_block_number {
-                    // Warn if the finalized block number has not advanced for `stall_warn_secs`
-                    let now = Instant::now();
-                    let secs_since_advance = now.duration_since(last_advanced_at).as_secs();
-                    if secs_since_advance >= stall_warn_secs
-                        && now.duration_since(last_stall_warn_at).as_secs() >= stall_rewarn_secs
-                    {
-                        tracing::warn!(
-                            block_number,
-                            new_final_block_number,
-                            secs_since_advance,
-                            stall_warn_secs,
-                            "finalized ethereum head has not advanced; \
-                             block will not be emitted until finality catches up. \
-                             If this persists the stream watchdog will restart the pipeline"
-                        );
-                        last_stall_warn_at = now;
-                    }
-                    tracing::debug!(new_final_block_number, "no new finalized block");
-                }
-            }
-
-            // If the finalized block number has advanced past the block we're waiting for,
-            // we can proceed with emitting it.
-            if new_final_block_number >= block_number {
+            if *rx.borrow_and_update() >= block_number {
                 return Ok(());
-            };
-
-            sleep(retry_interval).await;
+            }
+            if rx.changed().await.is_err() {
+                anyhow::bail!(
+                    "finalized-head watcher terminated before block {block_number} finalized"
+                );
+            }
         }
     }
 
@@ -1317,7 +1248,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use crate::client::CatchupItem;
-    use crate::{test_utils, IndexerConfig};
+    use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256};
     use alloy::rpc::types::{Block, BlockId, BlockTransactions};
@@ -1894,36 +1825,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_for_finalized_block_fails_after_budget_exhaustion() {
+    async fn wait_for_finalized_block_skips_rpc_when_head_covers_block() {
         let mut server = Server::new_async().await;
 
-        // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
-        // Should be called max_finalized_failures times
+        // The cached head covers the block, so no eth_getBlockByNumber(Finalized)
+        // should be issued at all.
         server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "eth_getBlockByNumber",
                 "params": ["finalized", false]
             })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::missing_block_response(1).to_string())
-            .expect(IndexerConfig::default().max_finalized_failures as usize)
+            .expect(0)
             .create_async()
             .await;
 
         let indexer = test_utils::TestIndexerBuilder::new(server.url())
             .optimistic_requests(false)
-            .refresh_finalized_interval(1)
             .build()
             .await;
 
-        let err = indexer
-            .wait_for_finalized_block(100)
-            .await
-            .expect_err("should fail after budget exhaustion");
+        indexer.finalized_head.send_replace(100);
 
-        assert!(err.to_string().contains("failed 20 times consecutively"));
+        indexer
+            .wait_for_finalized_block(42)
+            .await
+            .expect("head covers block; should return without an RPC");
+    }
+
+    #[tokio::test]
+    async fn wait_for_finalized_block_resolves_when_head_advances() {
+        let server = Server::new_async().await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .optimistic_requests(false)
+            .build()
+            .await;
+
+        // Head starts at 0; the wait must block until the head advances past 50.
+        let head = indexer.finalized_head.clone();
+        let advancer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            head.send_replace(100);
+        });
+
+        indexer
+            .wait_for_finalized_block(50)
+            .await
+            .expect("should resolve once the head advances past the block");
+
+        advancer.await.unwrap();
     }
 
     #[tokio::test]
