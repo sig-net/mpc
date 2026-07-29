@@ -197,6 +197,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
+                            ctx.rpc.abort_checkpoints(chain).await;
                             break Exit::Restart;
                         }
                         RegressionOutcome::Aligned => {}
@@ -214,12 +215,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 }
             }
         };
-
-        // On requiring restart of the supervisor, we should abort all RPC tasks where
-        // we are trying to vote the checkpoints into
-        if matches!(exit, Exit::Restart) {
-            ctx.rpc.abort_checkpoints(chain).await;
-        }
 
         if !run_finished {
             cancel.cancel();
