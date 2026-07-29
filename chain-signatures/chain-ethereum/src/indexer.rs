@@ -732,6 +732,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }: BlockAndRequests,
         is_finalized: bool,
     ) -> anyhow::Result<()> {
+        // Optimistic mode is for demos/integration tests only: dev chains
+        // never report finality (so the wait would hang) and never reorg
+        // (so skipping the wait cannot emit stale events there).
         if !self.eth.optimistic_requests {
             self.wait_for_finalized_block(block_number).await?;
         }

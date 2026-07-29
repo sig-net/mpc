@@ -172,8 +172,9 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
-    /// Emit requests without waiting for block finality. Only for dev chains
-    /// (anvil never reports finalized blocks); unsafe on live networks.
+    /// Emit requests without waiting for block finality. Only for demos and
+    /// integration tests on dev chains (anvil never reports finalized blocks
+    /// and never reorgs); must stay `false` on live networks.
     pub optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
     pub light_client: bool,
