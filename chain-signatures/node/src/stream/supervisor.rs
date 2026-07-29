@@ -8,7 +8,7 @@ use crate::backlog::Backlog;
 use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -198,6 +198,11 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                     match result {
                         RegressionOutcome::Recovery => {
                             ctx.rpc.abort_checkpoints(chain).await;
+                            if let Err(err) =
+                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
+                            {
+                                tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
+                            }
                             break Exit::Restart;
                         }
                         RegressionOutcome::Aligned => {}
@@ -519,7 +524,7 @@ mod tests {
             attempts: attempts.clone(),
             first_cancel: first_cancel.clone(),
         };
-        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
         let (ctx, cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog, sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
@@ -543,6 +548,12 @@ mod tests {
                 .await
                 .expect("regression should abort RPC work immediately"),
             Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), sign_rx.recv())
+                .await
+                .expect("regression should abort sign tasks immediately"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
         ));
         first_cancel.notified().await;
         // Unblock the restart's consensus alignment (no peers serve the digest).

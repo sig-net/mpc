@@ -317,6 +317,22 @@ impl SignatureSpawner {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
+            SignCommand::AbortChain(chain) => {
+                tracing::warn!(
+                    ?chain,
+                    "aborting all in-flight signature tasks on chain regression"
+                );
+                let to_abort: Vec<SignId> = self
+                    .requests
+                    .iter()
+                    .filter(|(_, entry)| entry.request.chain == chain)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for sign_id in to_abort {
+                    self.retire_task(sign_id, "chain aborted");
+                    self.tasks.abort(sign_id);
+                }
+            }
             SignCommand::Request(request) => {
                 let sign_id = request.id;
 
@@ -489,7 +505,7 @@ mod tests {
     use deadpool_redis::Runtime;
 
     #[tokio::test]
-    async fn test_completion_dead_ids_lifecycle() {
+    async fn test_abort_chain_dead_ids_lifecycle() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -551,8 +567,8 @@ mod tests {
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 2: Completion → queue removed, request dropped, marked dead
-        spawner.handle_sign(&governance, SignCommand::Completion(sign_id), &cfg);
+        // Step 2: Abort chain → queue removed, request dropped, marked dead
+        spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_posit_queues_contains(&sign_id));
         assert!(!spawner.test_requests_contains(&sign_id));
