@@ -928,29 +928,23 @@ mod tests {
     struct DummyGov;
 
     impl Governance for DummyGov {
-        fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
-            async move { Ok(()) }
+        async fn propose_join(&self) -> anyhow::Result<()> {
+            Ok(())
         }
 
-        fn vote_reshared(
-            &self,
-            _epoch: u64,
-        ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
-            async move { Ok(false) }
+        async fn vote_reshared(&self, _epoch: u64) -> anyhow::Result<bool> {
+            Ok(false)
         }
 
-        fn vote_public_key(
+        async fn vote_public_key(
             &self,
             _public_key: &near_crypto::PublicKey,
-        ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
-            async move { Ok(false) }
+        ) -> anyhow::Result<bool> {
+            Ok(false)
         }
 
-        fn vote_threshold(
-            &self,
-            _new_threshold: usize,
-        ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
-            async move { Ok(false) }
+        async fn vote_threshold(&self, _new_threshold: usize) -> anyhow::Result<bool> {
+            Ok(false)
         }
     }
 

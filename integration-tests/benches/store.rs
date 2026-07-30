@@ -117,6 +117,7 @@ fn env() -> (Runtime, SyncEnv) {
                 candidates: Default::default(),
                 join_votes: Default::default(),
                 leave_votes: Default::default(),
+                threshold_votes: Default::default(),
                 threshold,
             }),
         );
