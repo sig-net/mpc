@@ -330,7 +330,11 @@ async fn test_threshold_change_via_mpc_governance() {
     const NEW_THRESHOLD: usize = 3;
 
     let network = MpcFixtureBuilder::default()
-        .only_generate_signatures()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_preshared_presignatures()
+        .with_node_min_triples(1)
+        .with_node_min_presignatures(1)
         .build()
         .await;
 
@@ -402,7 +406,22 @@ async fn test_threshold_change_via_mpc_governance() {
         new_threshold, NEW_THRESHOLD,
         "running state must adopt the reshared threshold"
     );
-
+    // Sign a request end-to-end to prove the network still produces valid
+    // signatures after the threshold-change resharing.
+    network
+        .assert_presignatures(1, Duration::from_secs(60))
+        .await;
+    let request = sign_request(88);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
+    assert_eq!(actions.len(), 1);
+    assert!(actions
+        .iter()
+        .next()
+        .unwrap()
+        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
