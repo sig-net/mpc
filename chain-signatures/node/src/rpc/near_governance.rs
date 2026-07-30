@@ -1,6 +1,8 @@
 use crate::protocol::Governance;
+use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
+use mpc_primitives::ConsensusCheckpointDigest;
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -12,6 +14,13 @@ use url::Url;
 const NEAR_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Maximum number of retry attempts for NEAR governance calls (vote, join)
 const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointVoteOutcome {
+    Submitted { threshold_reached: bool },
+    Behind,
+    Conflicting,
+}
 
 /// NEAR [`Governance`] client.
 ///
@@ -56,6 +65,67 @@ impl NearGovernanceClient {
             .await?
             .json()?;
         Ok(views)
+    }
+
+    /// Submit a checkpoint vote.
+    ///
+    /// Returns a terminal outcome for successful, behind, or conflicting
+    /// checkpoints. Contract-level checkpoint rejections are not retried.
+    pub async fn vote_checkpoint(
+        &self,
+        checkpoint: &ConsensusCheckpointDigest,
+    ) -> anyhow::Result<CheckpointVoteOutcome> {
+        let transaction = self
+            .client
+            .call(&self.signer, &self.contract_id, "vote_checkpoint")
+            .args_json(json!({ "checkpoint": checkpoint }))
+            .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
+            .transact()
+            .await;
+
+        let transaction = match transaction {
+            Ok(transaction) => transaction,
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::CheckpointBehind.to_string()) =>
+            {
+                return Ok(CheckpointVoteOutcome::Behind);
+            }
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::ConflictingCheckpoint.to_string()) =>
+            {
+                return Ok(CheckpointVoteOutcome::Conflicting);
+            }
+            Err(err) => {
+                tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
+                return Err(err.into());
+            }
+        };
+
+        match transaction.into_result() {
+            Ok(transaction) => Ok(CheckpointVoteOutcome::Submitted {
+                threshold_reached: transaction.json()?,
+            }),
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::CheckpointBehind.to_string()) =>
+            {
+                Ok(CheckpointVoteOutcome::Behind)
+            }
+            Err(err)
+                if err
+                    .to_string()
+                    .contains(&CheckpointError::ConflictingCheckpoint.to_string()) =>
+            {
+                Ok(CheckpointVoteOutcome::Conflicting)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 }
 

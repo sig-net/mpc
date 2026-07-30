@@ -1,5 +1,6 @@
 pub mod config;
 pub mod errors;
+mod migration;
 pub mod primitives;
 pub mod state;
 pub mod update;
@@ -12,8 +13,8 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon_checkpoint, derive_epsilon_near, derive_key, kdf::check_ec_signature,
-    near_public_key_to_affine_point, ScalarExt as _,
+    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    ScalarExt as _,
 };
 use mpc_primitives::ConsensusCheckpointDigest;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
@@ -25,8 +26,8 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes, Read,
-    SignPoll, SignRequest, SignedCheckpoint, StorageKey, View, Votes, YieldIndex,
+    CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
+    PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
@@ -81,7 +82,8 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, SignedCheckpoint>,
+    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    checkpoint_votes: CheckpointVotes,
 }
 
 impl MpcContract {
@@ -122,7 +124,8 @@ impl MpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
         }
     }
 }
@@ -712,7 +715,7 @@ impl VersionedMpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
-        checkpoints: Option<BTreeMap<Chain, SignedCheckpoint>>,
+        checkpoints: Option<BTreeMap<Chain, ConsensusCheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
@@ -729,7 +732,7 @@ impl VersionedMpcContract {
             return Err(InitError::ThresholdTooHigh.into());
         }
 
-        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpoints);
+        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
         if let Some(checkpoints) = checkpoints {
             for (chain, checkpoint) in checkpoints {
                 latest_checkpoints.insert(chain, checkpoint);
@@ -750,6 +753,7 @@ impl VersionedMpcContract {
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
             latest_checkpoints,
+            checkpoint_votes: CheckpointVotes::new(),
         }))
     }
 
@@ -763,64 +767,9 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        #[derive(BorshDeserialize)]
-        struct OldMpcContract {
-            protocol_state: ProtocolContractState,
-            pending_requests: IterableMap<SignId, PendingRequest>,
-            proposed_updates: ProposedUpdates,
-            config: Config,
-        }
-
-        #[derive(BorshDeserialize)]
-        enum VersionedOldMpcContract {
-            V0(OldMpcContract),
-        }
-
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
-
-        // 1. Try deserializing into the current VersionedMpcContract (idempotent path)
-        if let Ok(new_contract) = VersionedMpcContract::try_from_slice(&state_bytes) {
-            log!("No migration needed: already deserialized into current VersionedMpcContract");
-            return Ok(new_contract);
-        }
-
-        // 2. Try deserializing as VersionedOldMpcContract
-        if let Ok(VersionedOldMpcContract::V0(old_contract)) =
-            VersionedOldMpcContract::try_from_slice(&state_bytes)
-        {
-            log!("Migrating from VersionedOldMpcContract to VersionedMpcContract");
-            let new_contract = MpcContract {
-                protocol_state: old_contract.protocol_state,
-                pending_requests: old_contract.pending_requests,
-                proposed_updates: old_contract.proposed_updates,
-                config: old_contract.config,
-                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-            };
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        // 3. Try deserializing as OldMpcContract directly (older unversioned state)
-        if let Ok(old_contract) = OldMpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating from OldMpcContract directly to VersionedMpcContract");
-            let new_contract = MpcContract {
-                protocol_state: old_contract.protocol_state,
-                pending_requests: old_contract.pending_requests,
-                proposed_updates: old_contract.proposed_updates,
-                config: old_contract.config,
-                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-            };
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        // 4. Try deserializing as current MpcContract directly (just in case)
-        if let Ok(new_contract) = MpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating from MpcContract directly to VersionedMpcContract");
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        Err(InvalidState::ContractStateIsMissing
-            .message("Failed to deserialize state into any known contract format"))
+        migration::migrate(&state_bytes)
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -835,8 +784,8 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&SignedCheckpoint> {
-        self.checkpoints().get(&chain)
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
+        self.latest_checkpoints().get(&chain)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -849,9 +798,7 @@ impl VersionedMpcContract {
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
                         .into_iter()
-                        .filter_map(|chain| {
-                            self.checkpoints().get(&chain).map(|cp| (chain, cp.clone()))
-                        })
+                        .filter_map(|chain| self.latest_checkpoint(chain).map(|cp| (chain, *cp)))
                         .collect(),
                 ),
             };
@@ -861,52 +808,97 @@ impl VersionedMpcContract {
         views
     }
 
+    /// Vote for a checkpoint digest.
+    ///
+    /// Checkpoints are ordered by `(chain, height)`. The latest checkpoint is
+    /// advanced only after votes from at least the protocol threshold of
+    /// participants have been collected.
+    ///
+    /// The submitted checkpoint is handled as follows:
+    ///
+    /// - If the contract already has a checkpoint at a greater height, the
+    ///   request is rejected with [`CheckpointError::CheckpointBehind`]. No
+    ///   vote is recorded or removed.
+    /// - If the contract already has a checkpoint at the same height with the
+    ///   same digest, the request is an idempotent no-op. No vote is recorded
+    ///   or removed.
+    /// - If the contract already has a checkpoint at the same height with a
+    ///   different digest, the request is rejected as conflicting.
+    /// - If the submitted height is greater than the current checkpoint, the
+    ///   caller votes for the submitted digest. Competing digests at the same
+    ///   unfinalized height may retain overlapping voters.
+    /// - If the resulting vote count is below the threshold, the vote remains
+    ///   stored and the latest checkpoint is unchanged.
+    /// - If the resulting vote count reaches the threshold, the submitted
+    ///   checkpoint becomes the latest checkpoint. Votes for that chain at
+    ///   this height or any lower height are removed; votes for higher heights
+    ///   are retained.
+    ///
+    /// The return value is `Ok(true)` when the submitted checkpoint is already
+    /// settled at the same height or becomes settled during this call. It is
+    /// `Ok(false)` when the vote was recorded but more votes are still
+    /// required.
+    ///
+    /// Returns an error if the protocol is not running, the caller is not an
+    /// eligible participant, the submitted checkpoint is behind the latest
+    /// checkpoint, or the caller submits a different digest for an already
+    /// finalized height.
     #[handle_result]
-    pub fn respond_checkpoint(
+    pub fn vote_checkpoint(
         &mut self,
         checkpoint: ConsensusCheckpointDigest,
-        signature: Signature,
-    ) -> Result<(), Error> {
-        let protocol_state = self.state();
-        if !matches!(protocol_state, ProtocolContractState::Running(_)) {
-            return Err(InvalidState::ProtocolStateNotRunning.into());
-        }
+    ) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        let threshold = match self.state() {
+            ProtocolContractState::Running(state) => state.threshold,
+            _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
+        };
 
-        let root_pk = near_public_key_to_affine_point(self.public_key()?);
-        let epsilon = derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
-        let expected_public_key = derive_key(root_pk, epsilon);
-        if check_ec_signature(
-            &expected_public_key,
-            &signature.big_r,
-            &signature.s,
-            checkpoint.sign_payload_scalar(),
-            signature.recovery_id,
-        )
-        .is_err()
-        {
-            return Err(CheckpointError::InvalidSignature.into());
-        }
-
-        if let Some(existing) = self.checkpoints().get(&checkpoint.chain) {
-            if existing.checkpoint.height > checkpoint.height {
-                return Ok(());
+        if let Some(existing) = self.latest_checkpoint(checkpoint.chain) {
+            if existing.height > checkpoint.height {
+                // checkpoint is behind, reject.
+                return Err(CheckpointError::CheckpointBehind.into());
             }
-
-            if existing.checkpoint.height == checkpoint.height
-                && existing.checkpoint.digest != checkpoint.digest
-            {
+            if existing.height == checkpoint.height {
+                if existing.digest == checkpoint.digest {
+                    // checkpoint is already settled, no-op.
+                    return Ok(true);
+                }
                 return Err(CheckpointError::ConflictingCheckpoint.into());
             }
         }
 
-        self.update_checkpoint(vec![(
-            checkpoint.chain,
-            SignedCheckpoint {
-                checkpoint,
-                signature,
-            },
-        )]);
-        Ok(())
+        let vote_count = {
+            let checkpoint_votes = self.checkpoint_votes_mut();
+            let voters = checkpoint_votes.entry(checkpoint);
+            voters.insert(voter);
+            voters.len()
+        };
+
+        if vote_count < threshold {
+            return Ok(false);
+        }
+        self.insert_checkpoint(checkpoint.chain, checkpoint);
+
+        // Remove stale votes where candidate checkpoint is less than or equal to
+        // this voted in consensus checkpoint.
+        self.checkpoint_votes_mut().votes.retain(|candidate, _| {
+            candidate.chain != checkpoint.chain || candidate.height > checkpoint.height
+        });
+        Ok(true)
+    }
+
+    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
+        let votes = match self {
+            Self::V0(mpc_contract) => &mpc_contract.checkpoint_votes,
+        };
+
+        votes
+            .votes
+            .iter()
+            .filter(|(checkpoint, _)| checkpoint.chain == chain)
+            .map(|(checkpoint, voters)| (*checkpoint, voters.len()))
+            .collect()
     }
 
     pub fn system_load(&self) -> u32 {
@@ -1043,7 +1035,7 @@ impl VersionedMpcContract {
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
         match self {
-            Self::V0(ref mut mpc_contract) => &mut mpc_contract.protocol_state,
+            Self::V0(mpc_contract) => &mut mpc_contract.protocol_state,
         }
     }
 
@@ -1055,7 +1047,7 @@ impl VersionedMpcContract {
 
     fn lock_request(&mut self, id: SignId, payload: Scalar, epsilon: Scalar) {
         match self {
-            Self::V0(ref mut mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
+            Self::V0(mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
         }
     }
 
@@ -1127,30 +1119,41 @@ impl VersionedMpcContract {
         Ok(voter)
     }
 
-    fn checkpoints(&self) -> &IterableMap<Chain, SignedCheckpoint> {
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
         }
     }
 
-    fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
+    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
         }
     }
 
-    #[private]
-    pub fn update_checkpoint(&mut self, checkpoints: Vec<(Chain, SignedCheckpoint)>) {
-        for (chain, signed_checkpoint) in checkpoints {
-            self.mutable_checkpoints().insert(chain, signed_checkpoint);
+    fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
+        match self {
+            Self::V0(mpc_contract) => {
+                mpc_contract.latest_checkpoints.insert(chain, checkpoint);
+            }
+        }
+    }
+
+    fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
+        match self {
+            Self::V0(mpc_contract) => &mut mpc_contract.checkpoint_votes,
         }
     }
 
     #[private]
     pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
-        for chain in chains {
-            self.mutable_checkpoints().remove(&chain);
+        let chains: HashSet<Chain> = chains.into_iter().collect();
+        for chain in &chains {
+            self.latest_checkpoints_mut().remove(chain);
         }
+        self.checkpoint_votes_mut()
+            .votes
+            .retain(|checkpoint, _| !chains.contains(&checkpoint.chain));
     }
 }
 
@@ -1162,7 +1165,7 @@ mod tests {
     use near_sdk::testing_env;
 
     #[derive(BorshSerialize)]
-    struct OldMpcContractTest {
+    struct OldMpcContract {
         protocol_state: ProtocolContractState,
         pending_requests: IterableMap<SignId, PendingRequest>,
         proposed_updates: ProposedUpdates,
@@ -1170,8 +1173,8 @@ mod tests {
     }
 
     #[derive(BorshSerialize)]
-    enum VersionedOldMpcContractTest {
-        V0(OldMpcContractTest),
+    enum VersionedOldMpcContract {
+        V0(OldMpcContract),
     }
 
     #[derive(BorshSerialize)]
@@ -1181,21 +1184,24 @@ mod tests {
     }
 
     // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
-    // `LatestCheckpoints` is split into a vector of iterable keys under
+    // `LatestCheckpointDigests` is split into a vector of iterable keys under
     // `<prefix>v` and a lookup map under `<prefix>m`.
     fn latest_checkpoints_map_prefix() -> Vec<u8> {
         let mut prefix = Vec::new();
-        StorageKey::LatestCheckpoints
+        StorageKey::LatestCheckpointDigests
             .serialize(&mut prefix)
             .unwrap();
         [prefix.as_slice(), b"m"].concat()
     }
 
     // Seed only the lookup-map entry and intentionally do not seed the vector
-    // key entry. This reproduces the observed devnet state where
+    // key entry. This reproduces the observed deployed state where
     // `latest_checkpoint(chain)` works because it uses `.get()`, while
     // `IterableMap::iter()` returns no checkpoints.
-    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: SignedCheckpoint) {
+    fn seed_checkpoint_lookup_without_iterable_key(
+        chain: Chain,
+        checkpoint: ConsensusCheckpointDigest,
+    ) {
         let mut key_bytes = latest_checkpoints_map_prefix();
         chain.serialize(&mut key_bytes).unwrap();
         let storage_key = env::sha256_array(&key_bytes);
@@ -1216,13 +1222,13 @@ mod tests {
         testing_env!(context);
 
         // 1. Serialize and write the OLD contract state to storage
-        let old_contract = OldMpcContractTest {
+        let old_contract = OldMpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
         };
-        let versioned_old = VersionedOldMpcContractTest::V0(old_contract);
+        let versioned_old = VersionedOldMpcContract::V0(old_contract);
         let old_bytes = borsh::to_vec(&versioned_old).unwrap();
         env::storage_write(b"STATE", &old_bytes);
 
@@ -1271,16 +1277,7 @@ mod tests {
         testing_env!(context);
 
         let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
-        let signed_checkpoint = SignedCheckpoint {
-            checkpoint,
-            signature: Signature {
-                big_r: k256::AffinePoint::GENERATOR,
-                s: Scalar::ONE,
-                recovery_id: 0,
-            },
-        };
-
-        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, signed_checkpoint.clone());
+        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, checkpoint);
 
         // Construct a contract whose `latest_checkpoints` map points at the
         // seeded storage. The map itself has an empty iterable key vector.
@@ -1289,7 +1286,8 @@ mod tests {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
         });
 
         // Prove the test setup matches production: direct lookup sees the
@@ -1299,7 +1297,7 @@ mod tests {
             "direct checkpoint lookup should reproduce production .get() behavior"
         );
         assert!(
-            contract.checkpoints().iter().next().is_none(),
+            contract.latest_checkpoints().iter().next().is_none(),
             "test setup should reproduce the broken iterable index"
         );
 
@@ -1317,7 +1315,30 @@ mod tests {
         let stored = checkpoints
             .get(&Chain::Solana)
             .expect("read(Checkpoints) should not rely on IterableMap::iter()");
-        assert_eq!(stored.checkpoint.height, checkpoint.height);
-        assert_eq!(stored.checkpoint.digest, checkpoint.digest);
+        assert_eq!(stored.height, checkpoint.height);
+        assert_eq!(stored.digest, checkpoint.digest);
+    }
+
+    #[test]
+    fn reset_checkpoint_clears_votes_for_selected_chains() {
+        let mut contract = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
+        let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
+
+        contract.insert_checkpoint(Chain::Solana, solana_checkpoint);
+        contract
+            .checkpoint_votes_mut()
+            .entry(solana_checkpoint)
+            .insert("voter.near".parse().unwrap());
+        contract
+            .checkpoint_votes_mut()
+            .entry(ethereum_checkpoint)
+            .insert("voter.near".parse().unwrap());
+
+        contract.reset_checkpoint(vec![Chain::Solana]);
+
+        assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+        assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
     }
 }

@@ -19,7 +19,7 @@ use crate::util::{JoinMap, TimeoutBudget};
 use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId, SignKind};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -133,11 +133,8 @@ impl SignatureSpawner {
         let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0)
-            && !matches!(request.kind, SignKind::Checkpoint(_))
-        {
-            let is_proposer = Arc::clone(&is_proposer);
+        let is_proposer = Arc::clone(&is_proposer);
+        if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
                 let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
@@ -320,7 +317,23 @@ impl SignatureSpawner {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
+            SignCommand::AbortChain(chain) => {
+                tracing::warn!(
+                    ?chain,
+                    "aborting all in-flight signature tasks on chain regression"
+                );
+                let to_abort: Vec<SignId> = self
+                    .requests
+                    .iter()
+                    .filter(|(_, entry)| entry.request.chain == chain)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for sign_id in to_abort {
+                    self.retire_task(sign_id, "chain aborted");
+                    self.tasks.abort(sign_id);
+                }
+            }
+            SignCommand::Request(request) => {
                 let sign_id = request.id;
 
                 // Skip requests we already track. Use the request map rather than
@@ -340,22 +353,6 @@ impl SignatureSpawner {
                 );
 
                 self.add_request(governance, request, cfg.clone());
-            }
-            SignCommand::AbortChain(chain) => {
-                tracing::warn!(
-                    ?chain,
-                    "aborting all in-flight signature tasks on chain regression"
-                );
-                let to_abort: Vec<SignId> = self
-                    .requests
-                    .iter()
-                    .filter(|(_, entry)| entry.request.chain == chain)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for sign_id in to_abort {
-                    self.retire_task(sign_id, "chain aborted");
-                    self.tasks.abort(sign_id);
-                }
             }
         }
 
@@ -429,7 +426,6 @@ impl SignatureSpawner {
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
         self.tasks.contains_key(&sign_id)
     }
-
     fn test_requests_contains(&self, sign_id: &SignId) -> bool {
         self.requests.contains_key(sign_id)
     }
@@ -507,6 +503,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn test_abort_chain_dead_ids_lifecycle() {
@@ -564,6 +561,33 @@ mod tests {
         };
         let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
 
+        let probe_id = SignId::new([43u8; 32]);
+        let probe_request = IndexedSignRequest::sign(
+            probe_id,
+            request.args.clone(),
+            Chain::Solana,
+            request.unix_timestamp_indexed,
+        );
+        let dropped = Arc::new(Notify::new());
+        struct DropProbe(Arc<Notify>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let probe = DropProbe(Arc::clone(&dropped));
+        spawner.requests.insert(
+            probe_id,
+            SignEntry {
+                request: probe_request,
+                is_proposer: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        spawner.tasks.spawn(probe_id, async move {
+            let _probe = probe;
+            std::future::pending::<Result<(), SignError>>().await
+        });
+
         // Step 1: Spawn → queue created, request retained, not dead
         spawner.add_request(&governance, request.clone(), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
@@ -573,6 +597,9 @@ mod tests {
 
         // Step 2: Abort chain → queue removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("aborting a chain should cancel its sign tasks");
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_posit_queues_contains(&sign_id));
         assert!(!spawner.test_requests_contains(&sign_id));

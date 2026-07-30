@@ -565,6 +565,12 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             assert_eq!(action.signature, signature);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }
+        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            panic!("unexpected checkpoint vote: {checkpoint:?}");
+        }
+        RpcAction::AbortCheckpoints(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
+        }
     }
 
     run_handle.abort();

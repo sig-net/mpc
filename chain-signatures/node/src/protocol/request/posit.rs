@@ -410,6 +410,7 @@ mod tests {
     use crate::protocol::message::Message;
     use crate::protocol::presignature::Presignature;
     use deadpool_redis::Runtime;
+    use mpc_primitives::SignKind;
 
     /// A deliberator that rejects a Propose from a *behind* proposer must stamp
     /// the reject with its own (higher) round, not echo the sender's round.

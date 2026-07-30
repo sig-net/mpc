@@ -607,6 +607,12 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, signature);
         }
+        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            panic!("unexpected checkpoint vote: {checkpoint:?}");
+        }
+        RpcAction::AbortCheckpoints(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
+        }
     }
 
     run_handle.abort();

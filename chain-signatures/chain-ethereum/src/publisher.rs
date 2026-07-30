@@ -71,7 +71,6 @@ impl EthClient {
         let contract = ChainSignatures::new(eth.contract_address, provider);
 
         let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
-
         let client = Self {
             contract,
             batch_tx,
