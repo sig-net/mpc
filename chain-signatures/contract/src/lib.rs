@@ -57,6 +57,9 @@ const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
 // Maximum number of concurrent requests
 const MAX_CONCURRENT_REQUESTS: u32 = 128;
 
+/// Maximum accepted byte length for a candidate node URL.
+pub const MAX_JOIN_URL_LEN: usize = 2048;
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum VersionedMpcContract {
@@ -303,6 +306,14 @@ impl VersionedMpcContract {
         cipher_pk: primitives::hpke::PublicKey,
         sign_pk: PublicKey,
     ) -> Result<(), Error> {
+        let url_len = url.len();
+        if url_len > MAX_JOIN_URL_LEN {
+            return Err(JoinError::UrlTooLong.message(format!(
+                "Provided {}, maximum {}",
+                url_len, MAX_JOIN_URL_LEN,
+            )));
+        }
+
         log!(
             "join: signer={}, url={}, cipher_pk={:?}, sign_pk={:?}",
             env::signer_account_id(),
