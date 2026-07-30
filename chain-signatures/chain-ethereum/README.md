@@ -76,7 +76,20 @@ cargo run --example bench_catchup --features bench
 
 Current catchup baseline for a 100-block catchup over an already-finalized
 range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
-`REFRESH_FINALIZED_INTERVAL`):
+`REFRESH_FINALIZED_INTERVAL`).
+
+#### Provider cost
+
+> NOTE: Using Alchemy CU scheme, but per-request method weights are similar across providers, so these are a reasonable cost estimates in general
+
+| method | calls | compute CU | throughput CU |
+|---|---|---|---|
+| `eth_getBlockByNumber(Finalized)` | 1 | 20 | 20 |
+| `eth_getBlockByNumber(batch)` | 100 | 2000 | 2000 |
+| `eth_getLogs(batch)` | 9 | 540 | 540 |
+| **total (100 blocks)** | **110** | **2560** | **2560** |
+
+#### Speed (reference snapshot)
 
 | metric | local eRPC | Alchemy (cold) |
 |---|---|---|
@@ -88,7 +101,8 @@ range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
 | `batch_fetch_ms` | 132 | 1115 |
 | `process_ms` | 18 | 4 |
 
-> NOTE: Wall-clock figures are a reference snapshot (endpoint tier, latency, and load dependent), not a guarantee.
+> NOTE: Wall-clock figures are a reference snapshot (endpoint tier, latency, and
+> load dependent), not a guarantee.
 
 ### Watchers benchmark
 
