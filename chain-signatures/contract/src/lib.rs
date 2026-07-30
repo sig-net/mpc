@@ -63,6 +63,9 @@ pub const MAX_JOIN_URL_LEN: usize = 2048;
 /// Fixed anti-spam deposit required to join as a candidate.
 pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
+/// Maximum number of candidate applications retained at a time.
+pub const MAX_CANDIDATES: usize = 10;
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum VersionedMpcContract {
@@ -113,9 +116,13 @@ impl MpcContract {
         candidates: BTreeMap<AccountId, CandidateInfo>,
         config: Option<Config>,
     ) -> Self {
+        let mut candidate_queue = Candidates::new();
+        for (account_id, candidate_info) in candidates {
+            candidate_queue.insert(account_id, candidate_info);
+        }
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: Candidates { candidates },
+                candidates: candidate_queue,
                 threshold,
                 pk_votes: PkVotes::new(),
             }),
@@ -338,6 +345,7 @@ impl VersionedMpcContract {
             ProtocolContractState::Running(RunningContractState {
                 participants,
                 ref mut candidates,
+                join_votes,
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
@@ -347,6 +355,13 @@ impl VersionedMpcContract {
                 if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
                     if diff > NearToken::from_yoctonear(0) {
                         Promise::new(signer_account_id.clone()).transfer(diff);
+                    }
+                }
+                if !candidates.contains_key(&signer_account_id)
+                    && candidates.len() >= MAX_CANDIDATES
+                {
+                    if let Some(oldest_candidate) = candidates.pop_front() {
+                        join_votes.remove(&oldest_candidate.account_id);
                     }
                 }
                 candidates.insert(
