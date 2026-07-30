@@ -8,8 +8,9 @@ use crate::sign_bidirectional::SignStatus;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
-    make_test_stream_context_with_generator_pk, respond_event, test_bidirectional_tx,
-    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
+    make_test_stream_context_with_generator_pk, make_test_stream_context_with_rpc, respond_event,
+    test_bidirectional_tx, test_canton_sign_bidirectional_request, test_indexed_request,
+    test_sign_args,
 };
 use crate::util::current_unix_timestamp;
 
@@ -522,6 +523,51 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
+}
+
+#[tokio::test]
+async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([13u8; 32]);
+
+    // A bidirectional request with an empty `serialized_transaction`. If accepted
+    // it would sit in the backlog and later panic in `sign_and_hash_transaction`
+    // (empty RLP) when the respond event advances it to execution.
+    let event = SignBidirectionalEvent {
+        sender: [0u8; 32],
+        serialized_transaction: vec![],
+        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+        key_version: 0,
+        deposit: 0,
+        path: String::new(),
+        algo: String::new(),
+        dest: Chain::Ethereum.to_string(),
+        params: String::new(),
+        chain: Chain::Solana,
+        chain_ctx: None,
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: vec![],
+    };
+    let request = test_indexed_request(
+        sign_id,
+        Chain::Solana,
+        test_sign_args(13),
+        current_unix_timestamp(),
+        SignKind::SignBidirectional(event),
+    );
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let err = process_sign_request(request, &ctx)
+        .await
+        .expect_err("empty serialized_transaction should be rejected at ingestion");
+    assert!(err.to_string().contains("empty serialized_transaction"));
+
+    // The poison-pill request must not have entered the backlog.
+    assert!(
+        backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        "rejected request must not be stored in the backlog"
+    );
 }
 
 #[tokio::test]
@@ -1140,4 +1186,39 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );
+}
+
+#[tokio::test]
+async fn live_block_votes_for_checkpoint() {
+    let chain = Chain::Ethereum;
+    let backlog = Backlog::new();
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let telemetry = NoopChainTelemetry;
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog,
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let interval = chain.checkpoint_interval().unwrap();
+
+    process_block_event(chain, interval, &ctx, &telemetry)
+        .await
+        .unwrap();
+
+    let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .expect("checkpoint vote should be queued")
+        .expect("rpc channel should remain open");
+    match action {
+        crate::rpc::RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            assert_eq!(checkpoint.chain, chain);
+            assert_eq!(checkpoint.height, interval);
+        }
+        _ => panic!("unexpected rpc action"),
+    }
+
+    assert!(timeout(Duration::from_millis(100), sign_rx.recv())
+        .await
+        .is_err());
 }

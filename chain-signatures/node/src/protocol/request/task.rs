@@ -1,10 +1,10 @@
 //! Per-request driver: the `SignPhase` state machine and the `SignTask` that owns it.
 
+use super::mailbox::PositMailbox;
 use super::metrics::PhaseDurations;
 use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
-use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 /// Generating phase — see [`SignPhase::Generating`].
@@ -35,12 +35,12 @@ impl SignPhase {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
     ) -> SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
-            SignPhase::Posit(phase) => phase.advance(ctx, state, posit_queue).await,
-            SignPhase::Generating(phase) => phase.advance(ctx, state, posit_queue).await,
+            SignPhase::Posit(phase) => phase.advance(ctx, state, mailbox).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, mailbox).await,
             SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
@@ -51,7 +51,7 @@ impl GeneratingPhase {
         &mut self,
         ctx: &SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
     ) -> SignPhase {
         // We successfully committed to generating; future rounds should be unrestricted.
         state.pause_proposing_until = None;
@@ -108,7 +108,7 @@ impl GeneratingPhase {
         let result = loop {
             tokio::select! {
                 result = &mut generation => break result,
-                task_msg = posit_queue.recv() => {
+                task_msg = mailbox.recv() => {
                     Self::reject_late_propose(ctx, task_msg).await;
                 }
             }
@@ -122,8 +122,8 @@ impl GeneratingPhase {
 
     /// Reject a `Propose` that arrives while we are already generating; drop
     /// stale Accept/Reject/Start messages.
-    async fn reject_late_propose(ctx: &SignTask, task_msg: SignTaskMessage) {
-        let SignTaskMessage::PositMessage {
+    async fn reject_late_propose(ctx: &SignTask, task_msg: SignPositMessage) {
+        let SignPositMessage {
             presignature_id,
             round,
             from,
@@ -173,7 +173,7 @@ impl SignTask {
         mut self,
         request: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
-        posit_queue: Arc<SignPositWorkQueue>,
+        mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
@@ -193,7 +193,7 @@ impl SignTask {
                 SignPhase::Complete(_) => None,
             };
 
-            let new_phase = phase.advance(&mut self, &mut state, &posit_queue).await;
+            let new_phase = phase.advance(&mut self, &mut state, &mailbox).await;
             if let Some(step) = current_phase_step {
                 durations.add(step, phase_start.elapsed());
                 if matches!(&new_phase, SignPhase::Organizing(_)) {

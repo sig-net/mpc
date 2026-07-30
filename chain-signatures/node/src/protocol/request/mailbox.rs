@@ -8,17 +8,15 @@ use std::sync::Arc;
 use cait_sith::protocol::Participant;
 use tokio::sync::Notify;
 
-/// Posit messages routed to a running signature task.
-pub(crate) enum SignTaskMessage {
-    PositMessage {
-        presignature_id: PresignatureId,
-        round: usize,
-        from: Participant,
-        action: PositAction,
-    },
+/// A posit message routed to a signature task.
+pub(crate) struct SignPositMessage {
+    pub presignature_id: PresignatureId,
+    pub round: usize,
+    pub from: Participant,
+    pub action: PositAction,
 }
 
-/// Work queue for posit messages, keyed by sending participant.
+/// Mailbox holding the latest posit message per sending participant.
 ///
 /// A message for round N from sender P replaces any earlier message from P.
 ///
@@ -29,13 +27,13 @@ pub(crate) enum SignTaskMessage {
 ///   here. But we can't get a `Start` message for a round that we haven't already
 ///   responded to a `Propose` message. Therefore, one message per round is all we
 ///   need to buffer.
-pub(crate) struct SignPositWorkQueue {
+pub(crate) struct PositMailbox {
     // using std Mutex here, do not hold across .await
-    messages: std::sync::Mutex<HashMap<Participant, SignTaskMessage>>,
+    messages: std::sync::Mutex<HashMap<Participant, SignPositMessage>>,
     notify: Notify,
 }
 
-impl SignPositWorkQueue {
+impl PositMailbox {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             messages: std::sync::Mutex::new(HashMap::new()),
@@ -45,8 +43,8 @@ impl SignPositWorkQueue {
 
     /// Buffer `msg` in its sender's slot, overwriting when its round is `>=` the
     /// buffered one, then wake one consumer.
-    pub(crate) fn push(&self, msg: SignTaskMessage) {
-        let SignTaskMessage::PositMessage {
+    pub(crate) fn push(&self, msg: SignPositMessage) {
+        let SignPositMessage {
             from,
             round: new_round,
             ..
@@ -55,7 +53,7 @@ impl SignPositWorkQueue {
         let mut inserted = false;
         match guard.entry(from) {
             Entry::Occupied(mut occupied_entry) => {
-                let SignTaskMessage::PositMessage {
+                let SignPositMessage {
                     round: existing, ..
                 } = occupied_entry.get();
 
@@ -76,14 +74,14 @@ impl SignPositWorkQueue {
         }
     }
 
-    fn try_recv(&self) -> Option<SignTaskMessage> {
+    fn try_recv(&self) -> Option<SignPositMessage> {
         let mut guard = self.messages.lock().unwrap();
         let key = guard.keys().next().copied()?;
         guard.remove(&key)
     }
 
     /// Wait for the next available posit message.
-    pub(crate) async fn recv(&self) -> SignTaskMessage {
+    pub(crate) async fn recv(&self) -> SignPositMessage {
         loop {
             // Register for wakeup BEFORE checking to avoid races with a push.
             let notified = self.notify.notified();

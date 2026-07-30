@@ -18,7 +18,7 @@ near view dev.sig-net.testnet experimental_signature_deposit
 
 near call dev.sig-net.testnet respond '{"request":{"epsilon":{"scalar":"72DB59A313FA266B1C3B40F20325C9023DDC564E7790363BCC2AE76580339648"},"payload_hash":{"scalar":"05FCB4470106774DCC5A3C7689FD2917C15AB81B6FA44960843E6389780A5364"}},"response":{"big_r":{"affine_point":"02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C"},"recovery_id":0,"s":{"scalar":"20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6"}}}' --accountId alexkushnir.testnet --gas 300000000000000
 
-near call dev.sig-net.testnet join '{"cipher_pk":[59,105,187,93,147,173,85,119,242,237,171,117,87,221,135,181,28,120,239,58,50,198,137,77,219,16,151,195,93,140,92,88],"sign_pk":"ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae","url":"http://localhost:3030"}' --accountId alexkushnir.testnet --gas 300000000000000
+near call dev.sig-net.testnet join '{"cipher_pk":[59,105,187,93,147,173,85,119,242,237,171,117,87,221,135,181,28,120,239,58,50,198,137,77,219,16,151,195,93,140,92,88],"sign_pk":"ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae","url":"http://localhost:3030"}' --accountId alexkushnir.testnet --gas 300000000000000 --deposit 1
 
 near call dev.sig-net.testnet vote_join '{"candidate":"alexkushnir.testnet"}' --accountId alexkushnir.testnet --gas 300000000000000
 

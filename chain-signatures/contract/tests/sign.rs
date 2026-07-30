@@ -1,15 +1,10 @@
 pub mod common;
 use common::{candidates, create_response, init, init_env, sign_and_validate};
 
-use digest::Digest as _;
-use k256::elliptic_curve::point::DecompressPoint as _;
-use k256::elliptic_curve::subtle::Choice;
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, SignedCheckpoint, View};
-use mpc_crypto::kdf;
+use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
 use mpc_primitives::ConsensusCheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
-use signature::DigestSigner as _;
 use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
 use std::collections::HashMap;
@@ -357,190 +352,119 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_contract_checkpoint_verification() -> anyhow::Result<()> {
-    let (_, contract, _, sk) = init_env().await;
-
-    let checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 100, [42u8; 32]);
-
-    // 1. Sign using the correct derived key (with height)
-    let epsilon = kdf::derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
-    let derived_sk = kdf::derive_secret_key(&sk, epsilon);
-    let derived_pk = kdf::derive_key(sk.public_key().into(), epsilon);
-
-    let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
-    let digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
-        checkpoint.sign_payload_bytes(),
-    );
-    let (signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
-        signing_key.try_sign_digest(digest).unwrap();
-    let s = signature.s();
-    let (r_bytes, _) = signature.split_bytes();
-    let big_r = k256::AffinePoint::decompress(&r_bytes, Choice::from(0)).unwrap();
-    let s: k256::Scalar = *s.as_ref();
-    let recovery_id =
-        if kdf::check_ec_signature(&derived_pk, &big_r, &s, checkpoint.sign_payload_scalar(), 0)
-            .is_ok()
-        {
-            0
-        } else {
-            1
-        };
-
-    let valid_signature = Signature {
-        big_r,
-        s,
-        recovery_id,
-    };
-
-    // 2. Call respond_checkpoint, which should succeed
-    let respond = contract
-        .call("respond_checkpoint")
-        .args_json(serde_json::json!({
-            "checkpoint": checkpoint,
-            "signature": valid_signature,
-        }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(
-        respond.is_success(),
-        "respond_checkpoint failed: {:?}",
-        respond
-    );
-
-    // 3. Verify against root key signature (which should fail now)
-    let root_signing_key = k256::ecdsa::SigningKey::from(&sk);
-    let root_digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
-        checkpoint.sign_payload_bytes(),
-    );
-    let (root_signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
-        root_signing_key.try_sign_digest(root_digest).unwrap();
-    let root_s = root_signature.s();
-    let (root_r_bytes, _) = root_signature.split_bytes();
-    let root_big_r = k256::AffinePoint::decompress(&root_r_bytes, Choice::from(0)).unwrap();
-    let root_s_scalar: k256::Scalar = *root_s.as_ref();
-    let root_pk_affine = sk.public_key().into();
-    let root_recovery_id = if kdf::check_ec_signature(
-        &root_pk_affine,
-        &root_big_r,
-        &root_s_scalar,
-        checkpoint.sign_payload_scalar(),
-        0,
-    )
-    .is_ok()
-    {
-        0
-    } else {
-        1
-    };
-
-    let root_key_signature = Signature {
-        big_r: root_big_r,
-        s: root_s_scalar,
-        recovery_id: root_recovery_id,
-    };
-
-    let respond_root_key = contract
-        .call("respond_checkpoint")
-        .args_json(serde_json::json!({
-            "checkpoint": checkpoint,
-            "signature": root_key_signature,
-        }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(
-        respond_root_key.is_failure(),
-        "respond_checkpoint with root key signature should have failed"
-    );
-
-    Ok(())
-}
-
-/// Verifies that checkpoints written via `respond_checkpoint` are readable
-/// through the external `read` view endpoint. The lower-level regression test
-/// in `src/lib.rs` covers the broken storage shape where `.get()` works but
-/// iterable keys are missing.
-#[tokio::test]
-async fn test_checkpoint_read_after_respond() -> anyhow::Result<()> {
-    let (_, contract, _, sk) = init_env().await;
-
+async fn test_checkpoint_voting() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
     let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
 
-    let epsilon = kdf::derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
-    let derived_sk = kdf::derive_secret_key(&sk, epsilon);
-    let derived_pk = mpc_crypto::derive_key(sk.public_key().into(), epsilon);
-
-    let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
-    let digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
-        checkpoint.sign_payload_bytes(),
-    );
-    let (signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
-        signing_key.try_sign_digest(digest).unwrap();
-    let s = signature.s();
-    let (r_bytes, _) = signature.split_bytes();
-    let big_r = k256::AffinePoint::decompress(&r_bytes, Choice::from(0)).unwrap();
-    let s: k256::Scalar = *s.as_ref();
-    let recovery_id =
-        if kdf::check_ec_signature(&derived_pk, &big_r, &s, checkpoint.sign_payload_scalar(), 0)
-            .is_ok()
-        {
-            0
-        } else {
-            1
-        };
-
-    let valid_signature = Signature {
-        big_r,
-        s,
-        recovery_id,
-    };
-
-    // Write checkpoint in one transaction.
-    let respond = contract
-        .call("respond_checkpoint")
-        .args_json(serde_json::json!({
-            "checkpoint": checkpoint,
-            "signature": valid_signature,
-        }))
+    let first_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
         .max_gas()
         .transact()
         .await?;
-    assert!(
-        respond.is_success(),
-        "respond_checkpoint failed: {respond:?}"
-    );
+    assert!(first_vote.is_success());
+    assert!(!first_vote.json::<bool>()?);
 
-    // Read checkpoints back via the `read` view in a separate transaction.
-    // This is the same path that `update_contract_data` uses in the node.
+    let duplicate_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(duplicate_vote.is_success());
+    assert!(!duplicate_vote.json::<bool>()?);
+
+    let second_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_vote.is_success());
+    assert!(second_vote.json::<bool>()?);
+
     let views: Vec<View> = contract
         .view("read")
         .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
         .await?
         .json()?;
-
-    let checkpoints: HashMap<Chain, SignedCheckpoint> = views
+    let checkpoints: HashMap<Chain, ConsensusCheckpointDigest> = views
         .into_iter()
-        .find_map(|v| match v {
-            View::Checkpoints(cp) => Some(cp),
+        .find_map(|view| match view {
+            View::Checkpoints(checkpoints) => Some(checkpoints),
             _ => None,
         })
         .expect("read should return a Checkpoints view");
+    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
 
-    let stored = checkpoints
-        .get(&Chain::Solana)
-        .expect("Solana checkpoint must be present after respond_checkpoint");
-    assert_eq!(stored.checkpoint.height, 120);
-    assert_eq!(stored.checkpoint.digest, checkpoint.digest);
-
-    // Also verify the per-chain view path.
-    let latest: Option<SignedCheckpoint> = contract
+    let latest: Option<ConsensusCheckpointDigest> = contract
         .view("latest_checkpoint")
         .args_json(serde_json::json!({ "chain": Chain::Solana }))
         .await?
         .json()?;
-    let latest = latest.expect("latest_checkpoint should return the checkpoint");
-    assert_eq!(latest.checkpoint.height, 120);
+    assert_eq!(latest, Some(checkpoint));
+
+    let competing_a = ConsensusCheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
+    let competing_b = ConsensusCheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
+    let first_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_a }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(first_competing_vote.is_success());
+    assert!(!first_competing_vote.json::<bool>()?);
+
+    let second_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_competing_vote.is_success());
+    assert!(!second_competing_vote.json::<bool>()?);
+
+    let finalize_competing_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(finalize_competing_vote.is_success());
+    assert!(finalize_competing_vote.json::<bool>()?);
+
+    let stale = ConsensusCheckpointDigest::new(Chain::Solana, 119, [9u8; 32]);
+    let stale_vote = accounts[2]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": stale }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(stale_vote.is_failure());
+    let stale_error = stale_vote
+        .into_result()
+        .expect_err("a behind checkpoint should be rejected");
+    assert!(stale_error
+        .to_string()
+        .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
+
+    let conflicting = ConsensusCheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
+    let conflict = accounts[2]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": conflicting }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(conflict.is_failure());
+
+    let outsider = worker.dev_create_account().await?;
+    let unauthorized = outsider
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(unauthorized.is_failure());
 
     Ok(())
 }

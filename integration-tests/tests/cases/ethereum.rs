@@ -430,8 +430,9 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(
-        active_checkpoint_after_restart, recovered_checkpoint_after_restart,
-        "restarted node should converge to the same checkpoint as the active node via consensus"
+        active_checkpoint_after_restart.digest(),
+        recovered_checkpoint_after_restart.digest(),
+        "restarted node should converge to the same checkpoint digest as the active node"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
@@ -532,7 +533,7 @@ async fn wait_matching_node_checkpoints(
                 continue;
             }
 
-            if left_checkpoint == right_checkpoint {
+            if left_checkpoint.digest() == right_checkpoint.digest() {
                 return Ok((left_checkpoint, right_checkpoint));
             }
         }
