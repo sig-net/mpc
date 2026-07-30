@@ -483,7 +483,8 @@ impl VersionedMpcContract {
                 ..
             }) => {
                 let participants_len = participants.len();
-                if new_threshold < 1 || new_threshold > participants_len {
+                let min_threshold = compute_threshold(participants_len);
+                if new_threshold < min_threshold || new_threshold > participants_len {
                     return Err(VoteError::ThresholdOutOfRange.into());
                 }
                 if new_threshold == *threshold {

@@ -706,10 +706,10 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     // Threshold is initially 2 for 3 participants, so a single vote for
-    // new_threshold=1 is not enough to trigger resharing.
+    // new_threshold=3 is not enough to trigger resharing.
     let execution = accounts[0]
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -721,7 +721,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     match state {
         mpc_contract::ProtocolContractState::Running(running) => {
             assert_eq!(
-                running.threshold_votes.votes.get(&1).map(|s| s.len()),
+                running.threshold_votes.votes.get(&3).map(|s| s.len()),
                 Some(1),
                 "vote should be recorded under the proposed threshold"
             );
@@ -732,7 +732,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     // A duplicate vote from the same voter does not double-count.
     let execution = accounts[0]
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -742,7 +742,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     // A second distinct voter triggers resharing.
     let execution = accounts[1]
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -753,7 +753,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     let bob_account = worker.dev_create_account().await?;
     let execution = bob_account
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(
@@ -787,6 +787,17 @@ async fn test_vote_threshold_validation() -> anyhow::Result<()> {
         "threshold above participant count must be rejected"
     );
 
+    // new_threshold < compute_threshold(3) (2) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold below compute_threshold must be rejected"
+    );
+
     // new_threshold == 0 is rejected.
     let execution = accounts[0]
         .call(contract.id(), "vote_threshold")
@@ -802,11 +813,11 @@ async fn test_vote_threshold_validation() -> anyhow::Result<()> {
 async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
     let (_, contract, accounts, _) = init_env().await;
 
-    // Lower the threshold from 2 -> 1. Three participants, current
+    // Raise the threshold from 2 -> 3. Three participants, current
     // threshold is 2, so 2 votes are required.
     let execution = accounts[0]
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -816,7 +827,7 @@ async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
     // Second vote for the same threshold triggers resharing.
     let execution = accounts[1]
         .call(contract.id(), "vote_threshold")
-        .args_json(json!({ "new_threshold": 1 }))
+        .args_json(json!({ "new_threshold": 3 }))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -835,16 +846,14 @@ async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
             assert_eq!(r.old_participants.participants.len(), 3);
             assert_eq!(r.threshold, 2, "old threshold must stay put");
             assert_eq!(
-                r.new_threshold, 1,
+                r.new_threshold, 3,
                 "new threshold must match the proposed value"
             );
         }
         other => panic!("expected resharing state, got {}", other.name()),
     }
 
-    // Completion is gated by the *old* threshold (2); the second old
-    // participant's vote finishes resharing even though the new threshold is 1
-    // (which would otherwise only require one signer).
+    // Completion is gated by the *old* threshold (2).
     for (i, voter) in accounts.iter().enumerate().take(2) {
         let execution = voter
             .call(contract.id(), "vote_reshared")
@@ -860,7 +869,7 @@ async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
         contract.view("state").await.unwrap().json().unwrap();
     match state {
         mpc_contract::ProtocolContractState::Running(r) => {
-            assert_eq!(r.threshold, 1, "running state adopts the new threshold");
+            assert_eq!(r.threshold, 3, "running state adopts the new threshold");
             assert_eq!(r.epoch, 1, "epoch must bump after resharing");
             assert_eq!(r.participants.participants.len(), 3);
         }
