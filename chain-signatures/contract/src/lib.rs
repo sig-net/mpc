@@ -60,6 +60,9 @@ const MAX_CONCURRENT_REQUESTS: u32 = 128;
 /// Maximum accepted byte length for a candidate node URL.
 pub const MAX_JOIN_URL_LEN: usize = 2048;
 
+/// Fixed anti-spam deposit required to join as a candidate.
+pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum VersionedMpcContract {
@@ -299,6 +302,7 @@ impl VersionedMpcContract {
         Ok(())
     }
 
+    #[payable]
     #[handle_result]
     pub fn join(
         &mut self,
@@ -311,6 +315,14 @@ impl VersionedMpcContract {
             return Err(JoinError::UrlTooLong.message(format!(
                 "Provided {}, maximum {}",
                 url_len, MAX_JOIN_URL_LEN,
+            )));
+        }
+        let deposit = env::attached_deposit();
+        if deposit < REQUIRED_JOIN_DEPOSIT {
+            return Err(InvalidParameters::InsufficientDeposit.message(format!(
+                "Attached {}, Required {}",
+                deposit.as_yoctonear(),
+                REQUIRED_JOIN_DEPOSIT.as_yoctonear(),
             )));
         }
 
@@ -331,6 +343,11 @@ impl VersionedMpcContract {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
                     return Err(JoinError::JoinAlreadyParticipant.into());
+                }
+                if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
+                    if diff > NearToken::from_yoctonear(0) {
+                        Promise::new(signer_account_id.clone()).transfer(diff);
+                    }
                 }
                 candidates.insert(
                     signer_account_id.clone(),

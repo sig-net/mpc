@@ -70,6 +70,7 @@ impl Governance for NearGovernanceClient {
                     "cipher_pk": self.cipher_pk.to_bytes(),
                     "sign_pk": self.sign_pk,
                 }))
+                .deposit(mpc_contract::REQUIRED_JOIN_DEPOSIT)
                 .max_gas()
                 .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
                 .transact()
