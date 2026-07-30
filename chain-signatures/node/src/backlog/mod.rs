@@ -884,7 +884,6 @@ impl BacklogEntry {
                 .map(|tx| tx.target_chain)
                 .or_else(|| event.target_chain().ok()),
             SignKind::RespondBidirectional(_) => None,
-            SignKind::Checkpoint(_) => None,
         }
     }
 
@@ -911,7 +910,6 @@ impl BacklogEntry {
                 "BidirectionalRespondPending"
             }
             (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
-            (SignKind::Checkpoint(_), _) => "Checkpoint",
         }
     }
 }

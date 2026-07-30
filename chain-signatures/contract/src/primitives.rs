@@ -20,13 +20,7 @@ pub enum StorageKey {
     PendingRequests,
     ProposedUpdatesEntries,
     LatestCheckpoints,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct SignedCheckpoint {
-    pub checkpoint: ConsensusCheckpointDigest,
-    pub signature: Signature,
+    LatestCheckpointDigests,
 }
 
 #[derive(
@@ -55,7 +49,7 @@ pub enum Read {
 pub enum View {
     State(ProtocolContractState),
     Config(Config),
-    Checkpoints(HashMap<Chain, SignedCheckpoint>),
+    Checkpoints(HashMap<Chain, ConsensusCheckpointDigest>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume
@@ -398,7 +392,7 @@ pub enum SignPoll {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct CheckpointVotes {
-    pub votes: HashMap<Checkpoint, HashSet<AccountId>>,
+    pub votes: HashMap<ConsensusCheckpointDigest, HashSet<AccountId>>,
 }
 
 impl Default for CheckpointVotes {
@@ -414,11 +408,11 @@ impl CheckpointVotes {
         }
     }
 
-    pub fn entry(&mut self, checkpoint: Checkpoint) -> &mut HashSet<AccountId> {
+    pub fn entry(&mut self, checkpoint: ConsensusCheckpointDigest) -> &mut HashSet<AccountId> {
         self.votes.entry(checkpoint).or_default()
     }
 
-    pub fn get(&self, checkpoint: &Checkpoint) -> Option<&HashSet<AccountId>> {
+    pub fn get(&self, checkpoint: &ConsensusCheckpointDigest) -> Option<&HashSet<AccountId>> {
         self.votes.get(checkpoint)
     }
 

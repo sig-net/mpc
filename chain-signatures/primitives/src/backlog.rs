@@ -117,7 +117,6 @@ impl ConsensusCheckpointDigest {
             digest,
         }
     }
-
     pub fn sign_payload_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(1 + std::mem::size_of::<u64>() + 32);
         bytes.extend_from_slice(&self.chain.to_bytes());

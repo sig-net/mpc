@@ -80,7 +80,7 @@ pub fn join_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000"
+        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000 --deposit 1"
     ))
 }
 

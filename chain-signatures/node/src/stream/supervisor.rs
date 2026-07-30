@@ -8,7 +8,7 @@ use crate::backlog::Backlog;
 use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -140,7 +140,17 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
     let mut load_local = true;
     loop {
-        recover_backlog(chain, load_local, &mut ctx, threshold, &my_account_id).await;
+        recover_backlog(
+            chain,
+            load_local,
+            &ctx.backlog,
+            &mut ctx.checkpoints_rx,
+            &mut ctx.mesh_state,
+            &ctx.node_client,
+            threshold,
+            &my_account_id,
+        )
+        .await;
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -187,6 +197,12 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
+                            ctx.rpc.abort_checkpoints(chain).await;
+                            if let Err(err) =
+                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
+                            {
+                                tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
+                            }
                             break Exit::Restart;
                         }
                         RegressionOutcome::Aligned => {}
@@ -228,6 +244,7 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::MeshState;
+    use crate::rpc::RpcAction;
     use crate::stream::test_utils::make_test_stream_context;
 
     use k256::ProjectivePoint;
@@ -244,6 +261,7 @@ mod tests {
         StreamContext,
         watch::Sender<Option<CheckpointDigest>>,
         watch::Sender<MeshState>,
+        mpsc::Receiver<RpcAction>,
     ) {
         // threshold 0 so `recover_backlog` doesn't block on the empty mesh.
         make_test_stream_context(
@@ -446,7 +464,7 @@ mod tests {
     async fn dispatches_events_and_shuts_down_when_run_exits() {
         let backlog = Backlog::new();
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx) = test_ctx(backlog.clone(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -475,7 +493,7 @@ mod tests {
             first_cancel: first_cancel.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -506,8 +524,8 @@ mod tests {
             attempts: attempts.clone(),
             first_cancel: first_cancel.clone(),
         };
-        let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, cp_tx, _mesh_tx) = test_ctx(backlog, sign_tx);
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog, sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
@@ -525,6 +543,18 @@ mod tests {
                 digest: [0xab; 32],
             }))
             .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
+                .await
+                .expect("regression should abort RPC work immediately"),
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), sign_rx.recv())
+                .await
+                .expect("regression should abort sign tasks immediately"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
+        ));
         first_cancel.notified().await;
         // Unblock the restart's consensus alignment (no peers serve the digest).
         cp_tx.send(None).unwrap();
@@ -566,7 +596,7 @@ mod tests {
             attempts: attempts.clone(),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx) = test_ctx(Backlog::new(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -594,7 +624,7 @@ mod tests {
             first_cancel: Arc::new(Notify::new()),
         };
         let (sign_tx, _sign_rx) = mpsc::channel(8);
-        let (ctx, _cp_tx, _mesh_tx) = test_ctx(backlog.clone(), sign_tx);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
 
         let task = tokio::spawn(run_supervised_with_watchdog(
             indexer,
