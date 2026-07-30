@@ -361,7 +361,7 @@ pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ThresholdVotes {
     /// Maps each proposed new threshold to the set of participants that have
     /// voted for it. Multiple thresholds can be voted on in parallel; the first

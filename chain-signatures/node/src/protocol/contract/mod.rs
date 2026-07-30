@@ -48,7 +48,7 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
             candidates: value.candidates.into(),
             join_votes: value.join_votes.into(),
             leave_votes: value.leave_votes.into(),
-            threshold_votes: value.threshold_votes.into(),
+            threshold_votes: value.threshold_votes,
         }
     }
 }
