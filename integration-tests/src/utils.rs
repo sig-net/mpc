@@ -123,9 +123,9 @@ pub async fn vote_leave(
     Ok(())
 }
 
-/// Send `vote_new_threshold` for every participant and verify the contract
+/// Send `vote_threshold` for every participant and verify the contract
 /// transitions into resharing with the new threshold.
-pub async fn vote_new_threshold(
+pub async fn vote_threshold(
     accounts: &[&Account],
     mpc_contract: &AccountId,
     new_threshold: u64,
@@ -137,7 +137,7 @@ pub async fn vote_new_threshold(
             new_threshold
         );
         account
-            .call(mpc_contract, "vote_new_threshold")
+            .call(mpc_contract, "vote_threshold")
             .args_json(serde_json::json!({
                 "new_threshold": new_threshold
             }))
@@ -157,7 +157,7 @@ pub async fn vote_new_threshold(
 
         if !outcome.failures().is_empty() {
             errs.push(anyhow::anyhow!(
-                "contract(vote_new_threshold) failure: {:?}",
+                "contract(vote_threshold) failure: {:?}",
                 outcome.failures()
             ))
         } else {
@@ -166,13 +166,13 @@ pub async fn vote_new_threshold(
     }
 
     if !errs.is_empty() {
-        let err = format!("failed to vote_new_threshold: {errs:#?}");
+        let err = format!("failed to vote_threshold: {errs:#?}");
         tracing::warn!(err);
         anyhow::bail!(err);
     }
 
     if !started_resharing {
-        let err = "failed to vote_new_threshold: network did not start resharing";
+        let err = "failed to vote_threshold: network did not start resharing";
         tracing::warn!(err);
         anyhow::bail!(err);
     }
