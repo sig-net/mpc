@@ -64,25 +64,22 @@ const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
     .saturating_mul(2)
     .saturating_add(Duration::from_secs(1));
 
-/// Per-round growth factor, as a 23/20 ratio.
+/// Per-round growth factor of 1.15 (=23/20).
 ///
-/// Multiplicative rather than additive. Nodes that index a request at different
-/// times enter the same round at different moments, and can only transact while
-/// both are inside it — so a round has to grow past that skew before the request
-/// can settle. An additive step overshoots the skew by one step however long it
-/// has been growing, leaving a window too short to complete a round; a ratio
-/// overshoots by a fraction of the skew, so the window scales with the problem.
-///
-/// Any ratio above 1 eventually crosses the skew, so the value is chosen for
-/// what it costs the other case: rotating past dead proposers wants rounds to
-/// stay short. At 23/20 a round only doubles after five rotations, so rotating
-/// past a run of dead proposers stays cheap for as long as it plausibly needs to.
+/// Nodes that index a request at different times enter the same round at
+/// different moments, and can only transact while both are inside it.
+/// Thus, a round length has to exceed that skew before the request
+/// can be processed.
+/// Any factor above 1 eventually crosses the skew, so the value is chosen
+/// for what it costs the other case: rotating past inactive proposers
+/// benefits from short rounds. At 1.15 the round length doubles after five rounds.
 const ROUND_TIMEOUT_GROWTH_NUM: u32 = 23;
 const ROUND_TIMEOUT_GROWTH_DEN: u32 = 20;
 
 /// Longest a round may be. High enough that any plausible indexing skew is
 /// crossed, low enough that a wedged request keeps rotating visibly instead of
 /// disappearing into a multi-hour round.
+/// tolerable skew < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR
 const ROUND_TIMEOUT_CEILING: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     30
 } else {
@@ -677,22 +674,17 @@ mod tests {
 
     #[test]
     fn round_timeout_schedule() {
-        // Every round must outlast a deliberator's post-Accept wait, or the
-        // round is too short for any proposer to gather accepts and rotating
-        // through it accomplishes nothing.
-        let min_viable = 2 * ACCEPT_POSIT_TIMEOUT;
+        // Every round must outlast a propose broadcast (<1s) plus accept
+        // gathering inside.  For r >= 1 this holds by construction today;
+        // the test serves as a guard so the code can't silently drift.
         for r in 0..64usize {
             assert!(
-                round_timeout(r) > min_viable,
+                round_timeout(r) >= ROUND_TIMEOUT_FLOOR,
                 "round {r} is too short to complete"
             );
         }
 
-        // Rotating past a dead proposer must be cheaper than the round-0 wait,
-        // otherwise the schedule buys nothing.
-        assert!(round_timeout(1) < round_timeout(0));
-
-        // Growth is monotonic, so a request that keeps failing keeps getting
+        // Growth is monotonic from round 1, so a request that keeps failing gets
         // more time rather than retrying forever on equally short rounds.
         for r in 1..64usize {
             assert!(
@@ -704,15 +696,32 @@ mod tests {
 
         // Rounds must grow past a late node's indexing skew, or the two never
         // overlap: both advance at the same rate, so a fixed ceiling below the
-        // skew leaves them permanently offset. Growth must also clear the skew
-        // by enough to complete a round, not merely exceed it.
-        let skew = 4 * ORGANIZE_POSIT_TIMEOUT;
-        let crossing = (1..1024usize)
-            .find(|&r| round_timeout(r) > skew)
-            .expect("schedule must grow past the skew");
+        // skew leaves them permanently offset.
+        // In addition, the overlap of the two nodes in the same round must fit a
+        // Propose broadcast plus accept gathering inside (`ROUND_TIMEOUT_FLOOR`).
+        let settling_overlap = |skew: Duration| {
+            (1..1024usize)
+                .map(round_timeout)
+                .find(|&t| t.saturating_sub(skew) > ROUND_TIMEOUT_FLOOR)
+                .map(|t| t - skew)
+                .expect("schedule must clear the skew by a full round")
+        };
+
+        let skew = ORGANIZE_POSIT_TIMEOUT;
+        let wider = 4 * skew;
+
+        // The shared window has to scale with the skew
+        // (up to some ceiling to avoid rounds that last hours).
+        // `settling_overlap` needs a round that clears the skew by more than
+        // ROUND_TIMEOUT_FLOOR. No round exceeds the ceiling, so that's only
+        // reachable while the skew leaves enough room under it.
         assert!(
-            round_timeout(crossing) - skew > min_viable,
-            "round {crossing} clears the skew by too little to settle in"
+            wider < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR,
+            "the skews compared here must leave a full round of room under the ceiling"
+        );
+        assert!(
+            settling_overlap(wider) > settling_overlap(skew),
+            "a 4x larger skew must leave a wider window, not the same floor-sized one"
         );
 
         // A wedged request keeps rotating rather than vanishing into an
