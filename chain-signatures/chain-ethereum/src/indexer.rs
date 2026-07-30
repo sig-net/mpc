@@ -224,22 +224,41 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
         loop {
             interval.tick().await;
-            let Some(latest_block_number) = client.get_latest_block_number().await else {
-                continue;
+
+            // Fetch the latest block number
+            let latest_block_number = match client.get_latest_block_number().await {
+                Ok(Some(number)) => number,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(?err, "ethereum latest block fetch failed");
+                    continue;
+                }
             };
 
+            // Fetch blocks in order until we reach the latest block number
             while current_block_number <= latest_block_number {
-                let Some(block) = client
+                let block = match client
                     .get_block(BlockId::Number(BlockNumberOrTag::Number(
                         current_block_number,
                     )))
                     .await
-                else {
-                    tracing::warn!(
-                        current_block_number,
-                        "ethereum live block not yet available"
-                    );
-                    break;
+                {
+                    Ok(Some(block)) => block,
+                    Ok(None) => {
+                        tracing::warn!(
+                            current_block_number,
+                            "ethereum live block not yet available"
+                        );
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            current_block_number,
+                            "ethereum live block fetch failed"
+                        );
+                        break;
+                    }
                 };
 
                 if let Err(err) = live_blocks.send(MaybeBlock::Block(block)).await {
@@ -794,14 +813,14 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
         // Reorg hash-check: only for blocks not covered by the finalized head.
         if *self.finalized_head.borrow() < block_number {
-            let Some(block) = self
+            let block = self
                 .client
                 .as_ref()
                 .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
-                .await
-            else {
-                anyhow::bail!("ethereum block {block_number} not found during emission");
-            };
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("ethereum block {block_number} not found during emission")
+                })?;
 
             if block.header.hash != block_hash {
                 // The block was reorged after `process_block` produced this payload.
@@ -961,11 +980,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 let start = std::time::Instant::now();
 
                 // Refetch the block, then bloom-gate a single-block `eth_getLogs`.
-                let Some(block) = self.client.get_block(*block_id).await else {
-                    anyhow::bail!(
+                let block = self.client.get_block(*block_id).await?.ok_or_else(|| {
+                    anyhow::anyhow!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
-                };
+                })?;
                 let l = self.fetch_block_logs(&block).await?;
 
                 #[cfg(feature = "bench")]
@@ -1019,13 +1038,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             }
             CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
             CatchupItem::Missing(block_id) => {
-                let Some(b) = self.client.get_block(*block_id).await else {
-                    anyhow::bail!(
-                        "ethereum live stream yielded missing block {block_id:?} and refetch failed"
-                    )
-                };
-                _logs = self.fetch_block_logs(&b).await?;
-                _block = b;
+                let block = self
+                    .client
+                    .get_block(*block_id)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ethereum live stream yielded missing block {block_id:?} and refetch failed"
+                        )
+                    })?;
+                _logs = self.fetch_block_logs(&block).await?;
+                _block = block;
                 (&_block, _logs.as_slice())
             }
         };
@@ -1103,7 +1126,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
                 .await
             {
-                Some(block) => {
+                Ok(Some(block)) => {
                     failures = 0;
                     let new_final = block.header.number;
                     stall.observe(new_final);
@@ -1116,12 +1139,18 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                         }
                     });
                 }
-                None => {
+                Ok(None) => {
+                    tracing::warn!(
+                        "ethereum get_block(Finalized) returned no block; watcher keeps retrying"
+                    );
+                }
+                Err(err) => {
                     failures = failures.saturating_add(1);
                     tracing::warn!(
+                        ?err,
                         failures,
                         max_failures,
-                        "ethereum get_block(Finalized) returned no block; watcher keeps retrying"
+                        "ethereum get_block(Finalized) failed; watcher keeps retrying"
                     );
                 }
             }
@@ -1147,8 +1176,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            if let Some(latest) = self.client.get_latest_block_number().await {
-                break latest.saturating_add(1);
+            match self.client.get_latest_block_number().await {
+                Ok(Some(latest)) => break latest.saturating_add(1),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(?err, "ethereum latest block fetch failed");
+                }
             }
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -1557,7 +1590,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_catchup_block_returns_error_when_refetch_fails() {
+    async fn missing_catchup_block_returns_error_when_refetch_returns_null() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        let err = indexer
+            .process_catchup_item(
+                &events_tx,
+                &CatchupItem::Missing(BlockId::Number(BlockNumberOrTag::Number(12))),
+            )
+            .await
+            .expect_err("missing catchup block should fail when refetch returns no block");
+
+        assert!(events_rx.try_recv().is_err());
+        assert!(err.to_string().contains("still unavailable after refetch"));
+    }
+
+    #[tokio::test]
+    async fn missing_catchup_block_propagates_error_when_refetch_rpc_fails() {
         let indexer = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
             .client_url("http://127.0.0.1:1")
             .rpc_urls("", "http://127.0.0.1:1")
@@ -1571,10 +1633,11 @@ mod tests {
                 &CatchupItem::Missing(BlockId::Number(BlockNumberOrTag::Number(12))),
             )
             .await
-            .expect_err("missing catchup block should fail when refetch cannot recover it");
+            .expect_err("missing catchup block should fail when refetch RPC fails");
 
         assert!(events_rx.try_recv().is_err());
-        assert!(err.to_string().contains("still unavailable after refetch"));
+        // The underlying RPC error propagates
+        assert!(err.to_string().contains("error sending request"));
     }
 
     #[tokio::test]
