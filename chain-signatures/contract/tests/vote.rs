@@ -64,7 +64,6 @@ async fn test_join() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_join_requires_deposit() -> anyhow::Result<()> {
     let (worker, contract, _, _) = init_env().await;
-
     let alice = worker.dev_create_account().await?;
 
     let execution = alice
@@ -84,13 +83,13 @@ async fn test_join_requires_deposit() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_join_rejects_oversized_url() -> anyhow::Result<()> {
     let (worker, contract, _, _) = init_env().await;
-
     let alice = worker.dev_create_account().await?;
-    let oversized_url = "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1);
+
+    // Deposit is attached so the call can only fail on the url length check.
     let execution = alice
         .call(contract.id(), "join")
         .args_json(json!({
-            "url": oversized_url,
+            "url": "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1),
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
