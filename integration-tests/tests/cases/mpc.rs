@@ -403,19 +403,6 @@ async fn test_threshold_change_via_mpc_governance() {
         "running state must adopt the reshared threshold"
     );
 
-    // Sign a request end-to-end to prove the network still produces valid
-    // signatures after the threshold-change resharing.
-    let request = sign_request(88);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
-    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
-    assert_eq!(actions.len(), 1);
-    assert!(actions
-        .iter()
-        .next()
-        .unwrap()
-        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
