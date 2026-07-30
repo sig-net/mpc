@@ -3,7 +3,7 @@ use mpc_keys::hpke;
 use near_primitives::{borsh::BorshDeserialize, types::AccountId};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     hash::Hash,
     str::FromStr,
 };
@@ -80,12 +80,12 @@ impl From<Candidates> for Participants {
                 .candidates
                 .into_iter()
                 .enumerate()
-                .map(|(participant_id, (account_id, candidate_info))| {
+                .map(|(participant_id, candidate_info)| {
                     (
                         Participant::from(participant_id as ParticipantId),
                         ParticipantInfo {
                             id: participant_id as ParticipantId,
-                            account_id,
+                            account_id: candidate_info.account_id,
                             url: candidate_info.url,
                             cipher_pk: candidate_info.cipher_pk,
                             sign_pk: candidate_info.sign_pk,
@@ -235,28 +235,34 @@ pub struct CandidateInfo {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Candidates {
-    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+    pub candidates: VecDeque<CandidateInfo>,
 }
 
 impl Candidates {
     pub fn get(&self, id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(id)
+        self.candidates
+            .iter()
+            .find(|candidate| &candidate.account_id == id)
     }
 
     pub fn contains_key(&self, id: &AccountId) -> bool {
-        self.candidates.contains_key(id)
+        self.get(id).is_some()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &AccountId> {
-        self.candidates.keys()
+        self.candidates
+            .iter()
+            .map(|candidate| &candidate.account_id)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
-        self.candidates.iter()
+        self.candidates
+            .iter()
+            .map(|candidate| (&candidate.account_id, candidate))
     }
 
     pub fn find_candidate(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(account_id)
+        self.get(account_id)
     }
 }
 
@@ -266,20 +272,12 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
             candidates: contract_candidates
                 .candidates
                 .into_iter()
-                .map(|(account_id, candidate_info)| {
-                    (
-                        AccountId::from_str(account_id.as_ref()).unwrap(),
-                        CandidateInfo {
-                            account_id: AccountId::from_str(candidate_info.account_id.as_ref())
-                                .unwrap(),
-                            url: candidate_info.url,
-                            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
-                            sign_pk: BorshDeserialize::try_from_slice(
-                                candidate_info.sign_pk.as_bytes(),
-                            )
-                            .unwrap(),
-                        },
-                    )
+                .map(|candidate_info| CandidateInfo {
+                    account_id: AccountId::from_str(candidate_info.account_id.as_ref()).unwrap(),
+                    url: candidate_info.url,
+                    cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
+                    sign_pk: BorshDeserialize::try_from_slice(candidate_info.sign_pk.as_bytes())
+                        .unwrap(),
                 })
                 .collect(),
         }

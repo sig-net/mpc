@@ -134,6 +134,80 @@ async fn test_join_refunds_excess_deposit() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_join_caps_candidates_and_removes_oldest() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+    let root = worker.root_account()?;
+    let mut candidate_ids = Vec::new();
+
+    for i in 0..mpc_contract::MAX_CANDIDATES {
+        let candidate = root
+            .create_subaccount(&format!("candidate-{i:02}"))
+            .initial_balance(NearToken::from_near(2))
+            .transact()
+            .await?
+            .into_result()?;
+        candidate_ids.push(candidate.id().clone());
+
+        let execution = candidate
+            .call(contract.id(), "join")
+            .args_json(json!({
+                "url": "127.0.0.1",
+                "cipher_pk": vec![1u8; 32],
+                "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+            }))
+            .deposit(NearToken::from_near(1))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let oldest_candidate = candidate_ids[0].clone();
+    let execution = accounts[0]
+        .call(contract.id(), "vote_join")
+        .args_json(json!({
+            "candidate": oldest_candidate,
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let newest_candidate = root
+        .create_subaccount("candidate-10")
+        .initial_balance(NearToken::from_near(2))
+        .transact()
+        .await?
+        .into_result()?;
+    let execution = newest_candidate
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .deposit(NearToken::from_near(1))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert_eq!(r.candidates.len(), mpc_contract::MAX_CANDIDATES);
+            assert!(!r.candidates.contains_key(&candidate_ids[0]));
+            assert!(!r.join_votes.contains_key(&candidate_ids[0]));
+            for candidate_id in &candidate_ids[1..] {
+                assert!(r.candidates.contains_key(candidate_id));
+            }
+            assert!(r.candidates.contains_key(newest_candidate.id()));
+        }
+        _ => panic!("should be in running state"),
+    };
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_remove_candidacy() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 

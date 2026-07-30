@@ -8,7 +8,7 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
 use signet_primitives::{borsh_scalar, SignId, Signature};
-use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map, BTreeMap, HashMap, HashSet, VecDeque};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -241,7 +241,7 @@ impl IntoIterator for Participants {
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct Candidates {
-    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+    pub candidates: VecDeque<CandidateInfo>,
 }
 
 impl Default for Candidates {
@@ -253,32 +253,44 @@ impl Default for Candidates {
 impl Candidates {
     pub fn new() -> Self {
         Candidates {
-            candidates: BTreeMap::new(),
+            candidates: VecDeque::new(),
         }
     }
 
     pub fn contains_key(&self, account_id: &AccountId) -> bool {
-        self.candidates.contains_key(account_id)
+        self.candidates
+            .iter()
+            .any(|candidate| &candidate.account_id == account_id)
     }
 
-    pub fn insert(&mut self, account_id: AccountId, candidate: CandidateInfo) {
-        self.candidates.insert(account_id, candidate);
+    pub fn insert(&mut self, account_id: AccountId, mut candidate: CandidateInfo) {
+        candidate.account_id = account_id.clone();
+        if let Some(existing) = self
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.account_id == account_id)
+        {
+            *existing = candidate;
+        } else {
+            self.candidates.push_back(candidate);
+        }
     }
 
     pub fn remove(&mut self, account_id: &AccountId) {
-        self.candidates.remove(account_id);
+        self.candidates
+            .retain(|candidate| &candidate.account_id != account_id);
     }
 
     pub fn get(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(account_id)
+        self.candidates
+            .iter()
+            .find(|candidate| &candidate.account_id == account_id)
     }
 
-    pub fn iter(&self) -> btree_map::Iter<'_, AccountId, CandidateInfo> {
-        self.candidates.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, CandidateInfo> {
-        self.candidates.iter_mut()
+    pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
+        self.candidates
+            .iter()
+            .map(|candidate| (&candidate.account_id, candidate))
     }
 
     pub fn len(&self) -> usize {
@@ -288,32 +300,39 @@ impl Candidates {
     pub fn is_empty(&self) -> bool {
         self.candidates.is_empty()
     }
+
+    pub fn pop_front(&mut self) -> Option<CandidateInfo> {
+        self.candidates.pop_front()
+    }
 }
 
 impl<'a> IntoIterator for &'a Candidates {
     type Item = (&'a AccountId, &'a CandidateInfo);
-    type IntoIter = btree_map::Iter<'a, AccountId, CandidateInfo>;
+    type IntoIter = std::iter::Map<
+        std::collections::vec_deque::Iter<'a, CandidateInfo>,
+        fn(&'a CandidateInfo) -> (&'a AccountId, &'a CandidateInfo),
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut Candidates {
-    type Item = (&'a AccountId, &'a mut CandidateInfo);
-    type IntoIter = btree_map::IterMut<'a, AccountId, CandidateInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter_mut()
+        fn as_pair(candidate: &CandidateInfo) -> (&AccountId, &CandidateInfo) {
+            (&candidate.account_id, candidate)
+        }
+        self.candidates.iter().map(as_pair)
     }
 }
 
 impl IntoIterator for Candidates {
     type Item = (AccountId, CandidateInfo);
-    type IntoIter = btree_map::IntoIter<AccountId, CandidateInfo>;
+    type IntoIter = std::iter::Map<
+        std::collections::vec_deque::IntoIter<CandidateInfo>,
+        fn(CandidateInfo) -> (AccountId, CandidateInfo),
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.candidates.into_iter()
+        fn into_pair(candidate: CandidateInfo) -> (AccountId, CandidateInfo) {
+            (candidate.account_id.clone(), candidate)
+        }
+        self.candidates.into_iter().map(into_pair)
     }
 }
 
