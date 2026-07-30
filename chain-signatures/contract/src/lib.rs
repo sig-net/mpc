@@ -33,6 +33,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
+use crate::primitives::ThresholdVotes;
+use crate::state::OldProtocolContractState;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
@@ -458,6 +460,59 @@ impl VersionedMpcContract {
         }
     }
 
+    /// Vote to change the running threshold without otherwise modifying the
+    /// participant set. Multiple competing thresholds can be voted on in
+    /// parallel; the first to reach the current `threshold` triggers a
+    /// resharing whose `new_threshold` is the proposed value.
+    #[handle_result]
+    pub fn vote_new_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
+        log!(
+            "vote_new_threshold: signer={}, new_threshold={}",
+            env::signer_account_id(),
+            new_threshold
+        );
+        let voter = self.voter()?;
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                epoch,
+                participants,
+                threshold,
+                public_key,
+                threshold_votes,
+                ..
+            }) => {
+                let participants_len = participants.len();
+                if new_threshold < 1 || new_threshold > participants_len {
+                    return Err(VoteError::ThresholdOutOfRange.into());
+                }
+                if new_threshold == *threshold {
+                    return Err(VoteError::ThresholdUnchanged.into());
+                }
+                let voted = threshold_votes.entry(new_threshold);
+                voted.insert(voter);
+                if voted.len() >= *threshold {
+                    // Same participants, different threshold; the resharing
+                    // protocol re-shares the key with a new threshold.
+                    *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
+                        old_epoch: *epoch,
+                        old_participants: participants.clone(),
+                        threshold: *threshold,
+                        new_threshold,
+                        new_participants: participants.clone(),
+                        public_key: public_key.clone(),
+                        finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
     #[handle_result]
     pub fn vote_pk(&mut self, public_key: PublicKey) -> Result<bool, Error> {
         log!(
@@ -484,6 +539,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -530,6 +586,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -571,6 +628,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -717,6 +775,7 @@ impl VersionedMpcContract {
                 candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
@@ -748,6 +807,20 @@ impl VersionedMpcContract {
             V0(OldMpcContract),
         }
 
+        #[derive(BorshDeserialize)]
+        struct OlderMpcContract {
+            protocol_state: OldProtocolContractState,
+            pending_requests: IterableMap<SignId, PendingRequest>,
+            proposed_updates: ProposedUpdates,
+            config: Config,
+            latest_checkpoints: IterableMap<Chain, SignedCheckpoint>,
+        }
+
+        #[derive(BorshDeserialize)]
+        enum VersionedOlderMpcContract {
+            V0(OlderMpcContract),
+        }
+
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
 
@@ -757,7 +830,49 @@ impl VersionedMpcContract {
             return Ok(new_contract);
         }
 
-        // 2. Try deserializing as VersionedOldMpcContract
+        // 2. Try deserializing as VersionedOlderMpcContract (state from the
+        //    previous deployment that has latest_checkpoints but does not yet
+        //    have threshold_votes on RunningContractState). RunningContractState
+        //    is upgraded to the new shape with an empty threshold_votes map so
+        //    the deserialization succeeds and contract execution can continue.
+        if let Ok(VersionedOlderMpcContract::V0(older_contract)) =
+            VersionedOlderMpcContract::try_from_slice(&state_bytes)
+        {
+            log!(
+                "Migrating from VersionedOlderMpcContract (pre-threshold_votes) to VersionedMpcContract"
+            );
+            let upgraded_protocol_state = match older_contract.protocol_state {
+                OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+                OldProtocolContractState::Initializing(state) => {
+                    ProtocolContractState::Initializing(state)
+                }
+                OldProtocolContractState::Running(state) => {
+                    ProtocolContractState::Running(RunningContractState {
+                        epoch: state.epoch,
+                        participants: state.participants,
+                        threshold: state.threshold,
+                        public_key: state.public_key,
+                        candidates: state.candidates,
+                        join_votes: state.join_votes,
+                        leave_votes: state.leave_votes,
+                        threshold_votes: ThresholdVotes::new(),
+                    })
+                }
+                OldProtocolContractState::Resharing(state) => {
+                    ProtocolContractState::Resharing(state)
+                }
+            };
+            let new_contract = MpcContract {
+                protocol_state: upgraded_protocol_state,
+                pending_requests: older_contract.pending_requests,
+                proposed_updates: older_contract.proposed_updates,
+                config: older_contract.config,
+                latest_checkpoints: older_contract.latest_checkpoints,
+            };
+            return Ok(VersionedMpcContract::V0(new_contract));
+        }
+
+        // 3. Try deserializing as VersionedOldMpcContract
         if let Ok(VersionedOldMpcContract::V0(old_contract)) =
             VersionedOldMpcContract::try_from_slice(&state_bytes)
         {

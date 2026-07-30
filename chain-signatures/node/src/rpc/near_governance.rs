@@ -130,4 +130,33 @@ impl Governance for NearGovernanceClient {
             Ok(result)
         }
     }
+
+    fn vote_new_threshold(
+        &self,
+        new_threshold: usize,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
+        tracing::info!(
+            new_threshold,
+            signer_id = %self.signer.account_id,
+            "voting for new threshold"
+        );
+        async move {
+            let result = self
+                .client
+                .call(&self.signer, &self.contract_id, "vote_new_threshold")
+                .args_json(json!({
+                    "new_threshold": new_threshold
+                }))
+                .max_gas()
+                .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
+                .transact()
+                .await
+                .inspect_err(|err| {
+                    tracing::warn!(%err, "failed to vote for new threshold");
+                })?
+                .json()?;
+
+            Ok(result)
+        }
+    }
 }

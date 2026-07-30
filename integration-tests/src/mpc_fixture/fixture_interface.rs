@@ -4,6 +4,7 @@
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
 use crate::mpc_fixture::mock_chain::MockChain;
+use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
@@ -12,7 +13,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
-use mpc_node::protocol::{MessageChannel, ProtocolState};
+use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
@@ -32,6 +33,7 @@ pub struct MpcFixture {
 
 pub struct MpcFixtureNode {
     pub me: Participant,
+    pub account_id: AccountId,
     pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
@@ -84,6 +86,53 @@ impl MpcFixture {
             .send(Some(ProtocolState::Resharing(resharing)));
     }
 
+    /// Drive [`MockGovernance::vote_new_threshold`] from every node and wait
+    /// for the contract state to flip into `Resharing`.
+    ///
+    /// This exercises the same governance path a production node would take:
+    /// each node's [`MockGovernance`] inserts its vote into the running
+    /// state's `threshold_votes`, and the first call to cross the running
+    /// threshold transitions the contract into `Resharing`. Subsequent calls
+    /// from the remaining nodes see the resharing state and no-op gracefully.
+    pub async fn vote_new_threshold(&self, new_threshold: usize) -> anyhow::Result<()> {
+        let vote_futures = self.nodes.iter().map(|node| {
+            let account_id = node.account_id.clone();
+            let tx = self.shared_contract_state.clone();
+            async move {
+                let gov = MockGovernance {
+                    me: account_id,
+                    protocol_state_tx: tx,
+                };
+                gov.vote_new_threshold(new_threshold).await
+            }
+        });
+
+        // Collect every error and whether any node flipped the state.
+        let mut started = false;
+        let mut errs = Vec::new();
+        for result in futures::future::join_all(vote_futures).await {
+            match result {
+                Ok(true) => started = true,
+                Ok(false) => {}
+                Err(err) => errs.push(err),
+            }
+        }
+
+        if !errs.is_empty() {
+            let formatted = format!("{errs:#?}");
+            tracing::warn!(err = %formatted, "vote_new_threshold surfaced errors");
+            anyhow::bail!("vote_new_threshold errors: {formatted}");
+        }
+
+        if !started {
+            anyhow::bail!(
+                "vote_new_threshold: no node observed the running->resharing transition"
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn complete_resharing(&self) {
         let Some(ProtocolState::Resharing(resharing)) = self.shared_contract_state.borrow().clone()
         else {
@@ -93,11 +142,16 @@ impl MpcFixture {
         let running = mpc_node::protocol::contract::RunningContractState {
             epoch: resharing.old_epoch + 1,
             participants: resharing.new_participants.clone(),
-            threshold: resharing.threshold,
+            // Match the contract's `vote_reshared` behavior: the running
+            // threshold becomes the freshly reshared `new_threshold`, not the
+            // old `threshold`. This matters for tests where resharing changes
+            // the threshold.
+            threshold: resharing.new_threshold,
             public_key: resharing.public_key,
             candidates: Default::default(),
             join_votes: Default::default(),
             leave_votes: Default::default(),
+            threshold_votes: Default::default(),
         };
         let _ = self
             .shared_contract_state

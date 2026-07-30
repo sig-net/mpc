@@ -700,3 +700,172 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    // Threshold is initially 2 for 3 participants, so a single vote for
+    // new_threshold=1 is not enough to trigger resharing.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "a single vote must not start resharing");
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.votes.get(&1).map(|s| s.len()),
+                Some(1),
+                "vote should be recorded under the proposed threshold"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    // A duplicate vote from the same voter does not double-count.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "duplicate vote must not start resharing");
+
+    // A second distinct voter triggers resharing.
+    let execution = accounts[1]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(pass, "second distinct voter must trigger resharing");
+
+    // Non-participants are rejected.
+    let bob_account = worker.dev_create_account().await?;
+    let execution = bob_account
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "non-participants must not be able to vote"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_new_threshold_validation() -> anyhow::Result<()> {
+    let (_, contract, accounts, _) = init_env().await;
+
+    // new_threshold == current threshold (2) is rejected as a no-op.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 2 }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure(), "no-op threshold must be rejected");
+
+    // new_threshold > participants.len() (3) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 4 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold above participant count must be rejected"
+    );
+
+    // new_threshold == 0 is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 0 }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure(), "zero threshold must be rejected");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_new_threshold_triggers_resharing() -> anyhow::Result<()> {
+    let (_, contract, accounts, _) = init_env().await;
+
+    // Lower the threshold from 2 -> 1. Three participants, current
+    // threshold is 2, so 2 votes are required.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass);
+
+    // Second vote for the same threshold triggers resharing.
+    let execution = accounts[1]
+        .call(contract.id(), "vote_new_threshold")
+        .args_json(json!({ "new_threshold": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(pass, "second vote should trigger resharing");
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Resharing(r) => {
+            // Same participant set, just a new threshold.
+            assert_eq!(
+                r.old_participants.participants,
+                r.new_participants.participants
+            );
+            assert_eq!(r.old_participants.participants.len(), 3);
+            assert_eq!(r.threshold, 2, "old threshold must stay put");
+            assert_eq!(
+                r.new_threshold, 1,
+                "new threshold must match the proposed value"
+            );
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    // Completion is gated by the *old* threshold (2); the second old
+    // participant's vote finishes resharing even though the new threshold is 1
+    // (which would otherwise only require one signer).
+    for (i, voter) in accounts.iter().enumerate().take(2) {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(pass, i == 1, "reshare must finish on the 2nd vote");
+    }
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert_eq!(r.threshold, 1, "running state adopts the new threshold");
+            assert_eq!(r.epoch, 1, "epoch must bump after resharing");
+            assert_eq!(r.participants.participants.len(), 3);
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}

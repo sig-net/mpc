@@ -8,6 +8,43 @@ use std::{
     str::FromStr,
 };
 
+use mpc_contract::primitives::ThresholdVotes as ContractThresholdVotes;
+
+/// Mirror of [`mpc_contract::primitives::ThresholdVotes`] used by the node so
+/// the running-state struct can carry pending threshold-change votes.
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ThresholdVotes {
+    pub votes: BTreeMap<usize, HashSet<AccountId>>,
+}
+
+impl ThresholdVotes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<ContractThresholdVotes> for ThresholdVotes {
+    fn from(contract_votes: ContractThresholdVotes) -> Self {
+        ThresholdVotes {
+            votes: contract_votes
+                .votes
+                .into_iter()
+                .map(|(threshold, participants)| {
+                    (
+                        threshold,
+                        participants
+                            .into_iter()
+                            .map(|acc_id: near_sdk::AccountId| {
+                                AccountId::from_str(acc_id.as_ref()).unwrap()
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 type ParticipantId = u32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

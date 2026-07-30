@@ -123,6 +123,63 @@ pub async fn vote_leave(
     Ok(())
 }
 
+/// Send `vote_new_threshold` for every participant and verify the contract
+/// transitions into resharing with the new threshold.
+pub async fn vote_new_threshold(
+    accounts: &[&Account],
+    mpc_contract: &AccountId,
+    new_threshold: u64,
+) -> anyhow::Result<()> {
+    let vote_futures = accounts.iter().map(|account| {
+        tracing::info!(
+            "{} voting for new threshold {}",
+            account.id(),
+            new_threshold
+        );
+        account
+            .call(mpc_contract, "vote_new_threshold")
+            .args_json(serde_json::json!({
+                "new_threshold": new_threshold
+            }))
+            .transact()
+    });
+
+    let mut started_resharing = false;
+    let mut errs = Vec::new();
+    for result in futures::future::join_all(vote_futures).await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                errs.push(anyhow::anyhow!("workspaces/rpc failed: {err:?}"));
+                continue;
+            }
+        };
+
+        if !outcome.failures().is_empty() {
+            errs.push(anyhow::anyhow!(
+                "contract(vote_new_threshold) failure: {:?}",
+                outcome.failures()
+            ))
+        } else {
+            started_resharing = started_resharing || outcome.json::<bool>().unwrap_or(false);
+        }
+    }
+
+    if !errs.is_empty() {
+        let err = format!("failed to vote_new_threshold: {errs:#?}");
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    if !started_resharing {
+        let err = "failed to vote_new_threshold: network did not start resharing";
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    Ok(())
+}
+
 pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
 where
     Uri: TryFrom<U>,

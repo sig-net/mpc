@@ -361,6 +361,14 @@ pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct ThresholdVotes {
+    /// Maps each proposed new threshold to the set of participants that have
+    /// voted for it. Multiple thresholds can be voted on in parallel; the first
+    /// to reach the running threshold triggers a resharing.
+    pub votes: BTreeMap<usize, HashSet<AccountId>>,
+}
+
 impl Default for PkVotes {
     fn default() -> Self {
         Self::new()
@@ -376,6 +384,32 @@ impl PkVotes {
 
     pub fn entry(&mut self, public_key: PublicKey) -> &mut HashSet<AccountId> {
         self.votes.entry(public_key).or_default()
+    }
+}
+
+impl Default for ThresholdVotes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThresholdVotes {
+    pub fn new() -> Self {
+        ThresholdVotes {
+            votes: BTreeMap::new(),
+        }
+    }
+
+    pub fn entry(&mut self, threshold: usize) -> &mut HashSet<AccountId> {
+        self.votes.entry(threshold).or_default()
+    }
+
+    pub fn get(&self, threshold: usize) -> Option<&HashSet<AccountId>> {
+        self.votes.get(&threshold)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
     }
 }
 

@@ -157,6 +157,7 @@ impl ContractStateWatcher {
                 join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
+                threshold_votes: Default::default(),
             }),
         )
     }
@@ -598,6 +599,7 @@ mod tests {
             join_votes,
             leave_votes: Default::default(),
             threshold: 1,
+            threshold_votes: Default::default(),
         };
 
         // Vote churn: state changed, governance content did not.
@@ -684,6 +686,7 @@ mod tests {
             join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(initial))).unwrap();
 
@@ -717,6 +720,7 @@ mod tests {
             join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 

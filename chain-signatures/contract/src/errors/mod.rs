@@ -59,6 +59,10 @@ pub enum VoteError {
     JoinNotCandidate,
     #[error("Number of participants cannot go below threshold.")]
     ParticipantsBelowThreshold,
+    #[error("Proposed new threshold must be between 1 and the number of participants.")]
+    ThresholdOutOfRange,
+    #[error("Proposed new threshold is the same as the current threshold.")]
+    ThresholdUnchanged,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
