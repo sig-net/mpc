@@ -76,7 +76,7 @@ pub trait Governance {
         public_key: &near_crypto::PublicKey,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 
-    fn vote_new_threshold(
+    fn vote_threshold(
         &self,
         new_threshold: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;

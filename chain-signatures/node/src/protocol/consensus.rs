@@ -946,7 +946,7 @@ mod tests {
             async move { Ok(false) }
         }
 
-        fn vote_new_threshold(
+        fn vote_threshold(
             &self,
             _new_threshold: usize,
         ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {

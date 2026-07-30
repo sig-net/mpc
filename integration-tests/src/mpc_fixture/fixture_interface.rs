@@ -94,7 +94,7 @@ impl MpcFixture {
     /// state's `threshold_votes`, and the first call to cross the running
     /// threshold transitions the contract into `Resharing`. Subsequent calls
     /// from the remaining nodes see the resharing state and no-op gracefully.
-    pub async fn vote_new_threshold(&self, new_threshold: usize) -> anyhow::Result<()> {
+    pub async fn vote_threshold(&self, new_threshold: usize) -> anyhow::Result<()> {
         let vote_futures = self.nodes.iter().map(|node| {
             let account_id = node.account_id.clone();
             let tx = self.shared_contract_state.clone();
@@ -103,7 +103,7 @@ impl MpcFixture {
                     me: account_id,
                     protocol_state_tx: tx,
                 };
-                gov.vote_new_threshold(new_threshold).await
+                gov.vote_threshold(new_threshold).await
             }
         });
 
@@ -120,14 +120,12 @@ impl MpcFixture {
 
         if !errs.is_empty() {
             let formatted = format!("{errs:#?}");
-            tracing::warn!(err = %formatted, "vote_new_threshold surfaced errors");
-            anyhow::bail!("vote_new_threshold errors: {formatted}");
+            tracing::warn!(err = %formatted, "vote_threshold surfaced errors");
+            anyhow::bail!("vote_threshold errors: {formatted}");
         }
 
         if !started {
-            anyhow::bail!(
-                "vote_new_threshold: no node observed the running->resharing transition"
-            );
+            anyhow::bail!("vote_threshold: no node observed the running->resharing transition");
         }
 
         Ok(())

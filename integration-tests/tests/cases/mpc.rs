@@ -344,16 +344,16 @@ async fn test_threshold_change_via_mpc_governance() {
     };
     assert_eq!(initial_threshold, 2, "fixture default threshold");
 
-    // Drive every node's MockGovernance.vote_new_threshold concurrently.
+    // Drive every node's MockGovernance.vote_threshold concurrently.
     // Only the first vote that crosses the running threshold flips the
     // contract into Resharing; the rest see Resharing and gracefully no-op.
     tokio::time::timeout(
         Duration::from_secs(5),
-        network.vote_new_threshold(NEW_THRESHOLD),
+        network.vote_threshold(NEW_THRESHOLD),
     )
     .await
-    .expect("vote_new_threshold helper should finish")
-    .expect("vote_new_threshold should succeed");
+    .expect("vote_threshold helper should finish")
+    .expect("vote_threshold should succeed");
 
     // The shared contract state must now be Resharing.
     let resharing_threshold = match network.shared_contract_state.borrow().clone() {
@@ -412,11 +412,13 @@ async fn test_threshold_change_via_mpc_governance() {
     for node in &network.nodes {
         node.sign_tx.send(request.clone()).await.unwrap();
     }
-    let actions = network
-        .assert_actions(1, Duration::from_secs(30))
-        .await;
+    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
     assert_eq!(actions.len(), 1);
-    assert!(actions.iter().next().unwrap().contains("RpcAction::Publish"));
+    assert!(actions
+        .iter()
+        .next()
+        .unwrap()
+        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system

@@ -78,8 +78,8 @@ impl Governance for MockGovernance {
         Ok(result)
     }
 
-    async fn vote_new_threshold(&self, new_threshold: usize) -> anyhow::Result<bool> {
-        tracing::debug!(me = ?self.me, new_threshold, "vote_new_threshold");
+    async fn vote_threshold(&self, new_threshold: usize) -> anyhow::Result<bool> {
+        tracing::debug!(me = ?self.me, new_threshold, "vote_threshold");
         let mut result = false;
         self.protocol_state_tx.send_if_modified(|protocol_state| {
             let modified = match protocol_state {
@@ -98,17 +98,16 @@ impl Governance for MockGovernance {
                         let old_threshold = state.threshold;
                         // Threshold-change resharing keeps the participant
                         // set unchanged; only `new_threshold` differs.
-                        let resharing =
-                            mpc_node::protocol::contract::ResharingContractState {
-                                old_epoch: epoch,
-                                old_participants: participants.clone(),
-                                new_participants: participants,
-                                threshold: old_threshold,
-                                new_threshold,
-                                public_key,
-                                finished_votes: Default::default(),
-                                cancel_votes: Default::default(),
-                            };
+                        let resharing = mpc_node::protocol::contract::ResharingContractState {
+                            old_epoch: epoch,
+                            old_participants: participants.clone(),
+                            new_participants: participants,
+                            threshold: old_threshold,
+                            new_threshold,
+                            public_key,
+                            finished_votes: Default::default(),
+                            cancel_votes: Default::default(),
+                        };
                         *protocol_state = Some(ProtocolState::Resharing(resharing));
                         result = true;
                         true
@@ -120,14 +119,14 @@ impl Governance for MockGovernance {
                     tracing::debug!(
                         me = ?self.me,
                         ?other,
-                        "vote_new_threshold: contract not in Running state, no-op"
+                        "vote_threshold: contract not in Running state, no-op"
                     );
                     false
                 }
                 None => {
                     tracing::debug!(
                         me = ?self.me,
-                        "vote_new_threshold: no contract state, no-op"
+                        "vote_threshold: no contract state, no-op"
                     );
                     false
                 }

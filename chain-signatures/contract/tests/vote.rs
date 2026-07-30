@@ -702,13 +702,13 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
+async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     // Threshold is initially 2 for 3 participants, so a single vote for
     // new_threshold=1 is not enough to trigger resharing.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;
@@ -731,7 +731,7 @@ async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
 
     // A duplicate vote from the same voter does not double-count.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;
@@ -741,7 +741,7 @@ async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
 
     // A second distinct voter triggers resharing.
     let execution = accounts[1]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;
@@ -752,7 +752,7 @@ async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
     // Non-participants are rejected.
     let bob_account = worker.dev_create_account().await?;
     let execution = bob_account
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;
@@ -765,12 +765,12 @@ async fn test_vote_new_threshold_votes_accumulate() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_vote_new_threshold_validation() -> anyhow::Result<()> {
+async fn test_vote_threshold_validation() -> anyhow::Result<()> {
     let (_, contract, accounts, _) = init_env().await;
 
     // new_threshold == current threshold (2) is rejected as a no-op.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 2 }))
         .transact()
         .await?;
@@ -778,7 +778,7 @@ async fn test_vote_new_threshold_validation() -> anyhow::Result<()> {
 
     // new_threshold > participants.len() (3) is rejected.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 4 }))
         .transact()
         .await?;
@@ -789,7 +789,7 @@ async fn test_vote_new_threshold_validation() -> anyhow::Result<()> {
 
     // new_threshold == 0 is rejected.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 0 }))
         .transact()
         .await?;
@@ -799,13 +799,13 @@ async fn test_vote_new_threshold_validation() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_vote_new_threshold_triggers_resharing() -> anyhow::Result<()> {
+async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
     let (_, contract, accounts, _) = init_env().await;
 
     // Lower the threshold from 2 -> 1. Three participants, current
     // threshold is 2, so 2 votes are required.
     let execution = accounts[0]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;
@@ -815,7 +815,7 @@ async fn test_vote_new_threshold_triggers_resharing() -> anyhow::Result<()> {
 
     // Second vote for the same threshold triggers resharing.
     let execution = accounts[1]
-        .call(contract.id(), "vote_new_threshold")
+        .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 1 }))
         .transact()
         .await?;

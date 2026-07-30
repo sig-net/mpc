@@ -131,7 +131,7 @@ impl Governance for NearGovernanceClient {
         }
     }
 
-    fn vote_new_threshold(
+    fn vote_threshold(
         &self,
         new_threshold: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
@@ -143,7 +143,7 @@ impl Governance for NearGovernanceClient {
         async move {
             let result = self
                 .client
-                .call(&self.signer, &self.contract_id, "vote_new_threshold")
+                .call(&self.signer, &self.contract_id, "vote_threshold")
                 .args_json(json!({
                     "new_threshold": new_threshold
                 }))

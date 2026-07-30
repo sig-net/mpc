@@ -465,9 +465,9 @@ impl VersionedMpcContract {
     /// parallel; the first to reach the current `threshold` triggers a
     /// resharing whose `new_threshold` is the proposed value.
     #[handle_result]
-    pub fn vote_new_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
+    pub fn vote_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
         log!(
-            "vote_new_threshold: signer={}, new_threshold={}",
+            "vote_threshold: signer={}, new_threshold={}",
             env::signer_account_id(),
             new_threshold
         );
