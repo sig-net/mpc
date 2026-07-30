@@ -483,12 +483,12 @@ impl VersionedMpcContract {
                 ..
             }) => {
                 let participants_len = participants.len();
+                if new_threshold == *threshold {
+                    return Err(VoteError::ThresholdUnchanged.into());
+                }
                 let min_threshold = compute_threshold(participants_len);
                 if new_threshold < min_threshold || new_threshold > participants_len {
                     return Err(VoteError::ThresholdOutOfRange.into());
-                }
-                if new_threshold == *threshold {
-                    return Err(VoteError::ThresholdUnchanged.into());
                 }
                 let voted = threshold_votes.entry(new_threshold);
                 voted.insert(voter);
