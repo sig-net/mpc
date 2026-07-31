@@ -1364,6 +1364,42 @@ mod tests {
         assert!(dropped.is_none());
     }
 
+    /// What `captured_entry_decodes_resolves_and_converts` does not cover: the
+    /// parent-diff over the real pre/post states finds exactly the one new entry, and
+    /// the emitted epsilon matches the derivation the TS reference pins for the
+    /// deployed caller.
+    #[tokio::test]
+    async fn process_block_diffs_the_captured_states() {
+        let pre = decode_contract_state(include_bytes!("../fixtures/singleton-pre-state-63.mn"))
+            .expect("the pre-notify singleton capture decodes");
+        let post = decode_contract_state(CAPTURED_SINGLETON_POST)
+            .expect("the post-notify singleton capture decodes");
+        let caller =
+            decode_contract_state(CAPTURED_CALLER_POST).expect("the caller capture decodes");
+
+        let central = central_address();
+        let mut source = FixtureSource::default();
+        source.set_state(&central, CAPTURED_HEIGHT - 1, pre);
+        source.set_state(&central, CAPTURED_HEIGHT, post);
+        source.set_state(&hex::encode(captured_caller()), CAPTURED_HEIGHT, caller);
+        let indexer = direct_indexer().await;
+        let mut cache = None;
+        let requests = indexer
+            .process_block(&source, &mut cache, &block_ref(CAPTURED_HEIGHT))
+            .await
+            .expect("the captured block processes");
+        let [request] = requests.as_slice() else {
+            panic!("exactly one captured request, got {}", requests.len())
+        };
+        assert_eq!(request.id, SignId::new(captured_rid()));
+        let path_hex = "63616c6c65722d70617468000000000000000000000000000000000000000000";
+        assert_eq!(
+            request.args.epsilon,
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &hex::encode(captured_caller()), path_hex),
+            "epsilon derives from the deployed caller and the contract's own path"
+        );
+    }
+
     #[tokio::test]
     async fn process_entry_drops_a_caller_read_that_exhausts_retries() {
         // The transport budget is the only retry a caller read gets: `caller_address`

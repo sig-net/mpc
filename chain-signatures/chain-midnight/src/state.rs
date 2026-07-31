@@ -19,10 +19,12 @@ mod tests {
     use super::*;
     use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
 
-    const STATE_1366: &[u8] = include_bytes!("../fixtures/singleton-post-state-1366.mn");
-    const GOLDEN_1366: &str = include_str!("../fixtures/golden-state-singleton-1366.json");
-    const STATE_1365: &[u8] = include_bytes!("../fixtures/singleton-pre-state-1365.mn");
-    const GOLDEN_1365: &str = include_str!("../fixtures/golden-state-singleton-1365.json");
+    const STATE_64: &[u8] = include_bytes!("../fixtures/singleton-post-state-64.mn");
+    const GOLDEN_64: &str = include_str!("../fixtures/golden-state-singleton-64.json");
+    const STATE_63: &[u8] = include_bytes!("../fixtures/singleton-pre-state-63.mn");
+    const GOLDEN_63: &str = include_str!("../fixtures/golden-state-singleton-63.json");
+    const CALLER_STATE_64: &[u8] = include_bytes!("../fixtures/caller-post-state-64.mn");
+    const GOLDEN_CALLER_64: &str = include_str!("../fixtures/golden-state-caller-64.json");
 
     /// The JSON shape the goldens are written in, rendered from the native types so a
     /// decode can be compared against one byte for byte.
@@ -98,15 +100,20 @@ mod tests {
         }
     }
 
-    /// The goldens were minted by an independently written decoder, so reproducing them
-    /// byte for byte is evidence this decode is right rather than merely self-consistent.
-    /// Only the post-notify capture carries cells; the pre-notify one is six empty maps,
-    /// so every atom and alignment comparison here rests on 1366.
+    /// The goldens are minted by this crate's own decoder at capture time, so the byte
+    /// comparison is a regression pin against decoder or ledger-crate changes, not
+    /// independent evidence the decode is right. That evidence lives in the indexer's
+    /// capture-backed test, which checks the decoded notification and record against
+    /// values fixed outside this crate. The pre-notify singleton is six empty maps;
+    /// the post-notify one carries the notification and counter cells, and the caller
+    /// capture carries a full request record, so those two do the atom and alignment
+    /// work here.
     #[test]
     fn native_decode_matches_the_committed_golden() {
         for (name, bytes, golden) in [
-            ("singleton-post-state-1366", STATE_1366, GOLDEN_1366),
-            ("singleton-pre-state-1365", STATE_1365, GOLDEN_1365),
+            ("singleton-post-state-64", STATE_64, GOLDEN_64),
+            ("singleton-pre-state-63", STATE_63, GOLDEN_63),
+            ("caller-post-state-64", CALLER_STATE_64, GOLDEN_CALLER_64),
         ] {
             let root = decode_contract_state(bytes).unwrap_or_else(|err| panic!("{name}: {err:#}"));
             assert_eq!(
