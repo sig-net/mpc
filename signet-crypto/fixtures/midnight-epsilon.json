@@ -2,35 +2,35 @@
   "provenance": {
     "package": "@sig-net/midnight@0.14.0",
     "source": "src/epsilon-derivation.ts",
-    "function": "deriveEpsilon(requester, path, chainId = MIDNIGHT_TESTNET_CHAIN_ID)",
+    "function": "deriveEpsilon(requester, path, \"midnight:mainnet\")",
     "encoding": "the returned bigint as lowercase hex, left-padded to 64 chars",
     "regenerate": "re-run that function against the package version above; never hand-edit a value to green a failing test"
   },
   "constants": {
     "epsilon_derivation_prefix": "sig.network v2.0.0 epsilon derivation",
-    "midnight_chain_id": "midnight:testnet",
+    "midnight_chain_id": "midnight:mainnet",
     "respond_bidirectional_path": "midnight response key"
   },
   "vectors": [
     {
       "requester": "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48",
       "path": "vault",
-      "epsilon": "40ae832f35ccadbc371efd8c0504917ba1f33ef7065b4b6abaa03b79314789eb"
+      "epsilon": "3c6fb4087edbc9e2cbea5e949a3a6dee2a143aecea25c079e1db314ece1319b1"
     },
     {
       "requester": "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48",
       "path": "midnight response key",
-      "epsilon": "38c96d6ab124f8615024c91b9683a8520777550af9a9497addc499fa56b65325"
+      "epsilon": "e4748f4561c2a6090cf9f70ed68f26b81d637bf38bc832371d33b4823c0ccafa"
     },
     {
       "requester": "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48",
       "path": "",
-      "epsilon": "ac320f6c3381cee03e2ef988e714c92431010408f631519c37d47152106c528e"
+      "epsilon": "d9763868f45b3e9c7da74a4410abe07af53a792e1dcc9881f9d788c0cff15898"
     },
     {
       "requester": "0000000000000000000000000000000000000000000000000000000000000000",
       "path": "a:b:c",
-      "epsilon": "500e375d0754d137e3504ac69d411a430806f947c59fe19383b19ea2942dade5"
+      "epsilon": "3d7d62f5c521828a861cbe7dab3ab7ac86707b73abf84711b986e724f534d974"
     }
   ]
 }

@@ -78,7 +78,7 @@ impl Chain {
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
             Chain::Canton => "canton:global",
-            Chain::Midnight => "midnight:testnet",
+            Chain::Midnight => "midnight:mainnet",
         }
     }
 
@@ -93,7 +93,11 @@ impl Chain {
             // ChainAgnostic/namespaces. "canton:global" follows the
             // namespace:reference format as a project-local identifier.
             Chain::Canton => "canton:global",
-            Chain::Midnight => "midnight:testnet",
+            // No `midnight` namespace is registered in ChainAgnostic/namespaces:
+            // MIP-0008 proposes one but is Draft with the reference format still
+            // open. Must stay byte-identical to the chain-id constant in
+            // `@sig-net/midnight`, which integrators derive expected keys with.
+            Chain::Midnight => "midnight:mainnet",
         }
     }
 
