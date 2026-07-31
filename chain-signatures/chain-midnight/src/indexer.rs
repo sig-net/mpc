@@ -163,52 +163,6 @@ pub(crate) struct MapEntry {
     pub value: Node,
 }
 
-/// The entries of a central-tree field that must be a map, or `None` when the field
-/// could not be read at all.
-fn central_map_entries(
-    tree: &Node,
-    field: u8,
-    field_name: &'static str,
-    height: u64,
-) -> Option<Vec<MapEntry>> {
-    // The central singleton is flat, so a field number is a depth-1 path.
-    match signet_field_node_by_path(tree, &[field]) {
-        Ok(StateValue::Map(entries)) => Some(
-            entries
-                .iter()
-                .map(|entry| {
-                    let (key, value) = &*entry;
-                    MapEntry {
-                        key: (**key).clone(),
-                        value: (**value).clone(),
-                    }
-                })
-                .collect(),
-        ),
-        Ok(_) => {
-            degraded_read(
-                "central-field-not-a-map",
-                height,
-                &format!(
-                    "central field {field} ({field_name}) is not a map; wrong central address \
-                     or schema drift"
-                ),
-            );
-            None
-        }
-        Err(err) => {
-            degraded_read(
-                "central-field-walk",
-                height,
-                &format!("central field {field} ({field_name}): {err:#}"),
-            );
-            None
-        }
-    }
-}
-
-// The reporting contract.
-
 /// One drop, one WARN, one distinct reason label.
 fn drop_entry(
     reason: &'static str,
@@ -223,11 +177,6 @@ fn drop_entry(
         "midnight entry dropped: {detail}"
     );
     None
-}
-
-/// A field or block read that degraded.
-fn degraded_read(reason: &'static str, height: u64, detail: &str) {
-    tracing::warn!(reason, height, "midnight read degraded: {detail}");
 }
 
 /// Names the one failure a retry never clears, so the restart it triggers is not
@@ -323,68 +272,57 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// Field-1 entries of an already-fetched central tree, or `None` when the field
-    /// could not be read.
-    fn notification_entries(tree: &Node, height: u64) -> Option<Vec<MapEntry>> {
-        central_map_entries(
-            tree,
-            NOTIFICATION_MAP_FIELD,
-            "signBidirectionalEventNotificationMap",
-            height,
-        )
+    /// Field-1 entries of an already-fetched central tree. The field's position and
+    /// its map shape are fixed by our own singleton, so a failure here is
+    /// binary-vs-contract drift (or a wrong central address): it halts indexing loudly
+    /// rather than dropping every request while the checkpoint advances.
+    fn notification_entries(tree: &Node) -> anyhow::Result<Vec<MapEntry>> {
+        let node = signet_field_node_by_path(tree, &[NOTIFICATION_MAP_FIELD])
+            .context("central signBidirectionalEventNotificationMap field")?;
+        let StateValue::Map(entries) = node else {
+            anyhow::bail!(
+                "central field {NOTIFICATION_MAP_FIELD} (signBidirectionalEventNotificationMap) \
+                 is not a map"
+            );
+        };
+        Ok(entries
+            .iter()
+            .map(|entry| {
+                let (key, value) = &*entry;
+                MapEntry {
+                    key: (**key).clone(),
+                    value: (**value).clone(),
+                }
+            })
+            .collect())
     }
 
-    /// Per-block processing, shared by catchup and live.
+    /// Per-block processing, shared by catchup and live: diff the notification map
+    /// against the parent block's, evaluate the new entries.
     async fn process_block<C: ChainSource>(
         &self,
         source: &C,
         cache: &mut Option<(String, Vec<MapEntry>)>,
         block: &BlockRef,
     ) -> anyhow::Result<Vec<IndexedSignRequest>> {
-        // `None` means the map could not be read.
-        let read_entries: Option<Vec<MapEntry>> =
-            match self.central_tree(source, &block.hash).await? {
-                Some(tree) => Self::notification_entries(&tree, block.number),
-                // Central not yet deployed at this block: an ordinary empty block,
-                // common during catchup from before deployment.
-                None => Some(Vec::new()),
-            };
-        let entries: &[MapEntry] = read_entries.as_deref().unwrap_or_default();
-
-        // `None` is "could not read the parent", not "the parent had no entries", and
-        // is the one state the diff below must refuse to subtract.
-        let parent_entries: Option<Vec<MapEntry>> = match cache.take() {
-            Some((hash, entries)) if hash == block.parent_hash => Some(entries),
+        // An absent central is ordinary during catchup from before deployment.
+        let entries: Vec<MapEntry> = match self.central_tree(source, &block.hash).await? {
+            Some(tree) => Self::notification_entries(&tree)?,
+            None => Vec::new(),
+        };
+        let parent_entries: Vec<MapEntry> = match cache.take() {
+            Some((hash, entries)) if hash == block.parent_hash => entries,
             _ => match self.central_tree(source, &block.parent_hash).await? {
-                Some(tree) => Self::notification_entries(&tree, block.number.saturating_sub(1)),
-                None => Some(Vec::new()),
+                Some(tree) => Self::notification_entries(&tree)?,
+                None => Vec::new(),
             },
         };
-        let new_entries: Vec<&MapEntry> = match &parent_entries {
-            Some(parent) => {
-                let parent_keys: HashSet<&AlignedValue> =
-                    parent.iter().map(|entry| &entry.key).collect();
-                entries
-                    .iter()
-                    .filter(|entry| !parent_keys.contains(&entry.key))
-                    .collect()
-            }
-            // No diff is possible, so this block emits nothing, giving up only the
-            // entries filed at this exact height.
-            None => {
-                degraded_read(
-                    "parent-notification-map-unreadable",
-                    block.number,
-                    &format!(
-                        "cannot diff against the parent, so this block emits nothing and the {} \
-                         entries visible here are not evaluated; any filed at exactly this \
-                         height are given up. The next block diffs against this one",
-                        entries.len()
-                    ),
-                );
-                Vec::new()
-            }
-        };
+        let parent_keys: HashSet<&AlignedValue> =
+            parent_entries.iter().map(|entry| &entry.key).collect();
+        let new_entries: Vec<&MapEntry> = entries
+            .iter()
+            .filter(|entry| !parent_keys.contains(&entry.key))
+            .collect();
 
         let mut requests = Vec::new();
         if !new_entries.is_empty() {
@@ -399,13 +337,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
         }
 
-        // Only a map that was actually read becomes the next block's parent.
-        *cache = read_entries.map(|entries| (block.hash.clone(), entries));
+        *cache = Some((block.hash.clone(), entries));
         Ok(requests)
     }
 
     /// One notification entry: decode and unpack it, read the caller's ledger at
     /// `at_hash`, gate through `resolve_verified_record`, convert.
+    ///
+    /// `Err` is reserved for our own schema drift: the singleton's circuits fix the
+    /// map-key and value shapes and assert `version == 1`, so callers cannot produce
+    /// those failures, and dropping them would silently lose every request while the
+    /// checkpoint advances. Everything caller-attributable is a counted drop.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -415,29 +357,24 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
         let Some(rid) = signet_map_key_rid(&entry.key) else {
-            return Ok(drop_entry(
-                "malformed-map-key",
-                height,
-                None,
-                &format!("{} atoms in a SignetMapKey", entry.key.value.0.len()),
-            ));
+            anyhow::bail!(
+                "central map key with {} atoms is not a SignetMapKey",
+                entry.key.value.0.len()
+            );
         };
-        let notification = match decode_notification(&entry.value) {
-            Ok(notification) => notification,
-            Err(err) => {
-                return Ok(drop_entry(
-                    "notification-undecodable",
-                    height,
-                    Some(rid),
-                    &format!("{err:#}"),
-                ));
-            }
-        };
+        let notification =
+            decode_notification(&entry.value).context("central notification value")?;
+        anyhow::ensure!(
+            notification.version == 1,
+            "notification version {}: this binary understands only version 1",
+            notification.version
+        );
         let unpacked = match unpack_notification_v1(&notification) {
             Ok(unpacked) => unpacked,
+            // Depth and path are caller-supplied payload bytes, not circuit-enforced.
             Err(err) => {
                 return Ok(drop_entry(
-                    "notification-version",
+                    "notification-payload",
                     height,
                     Some(rid),
                     &format!("{err:#}"),
@@ -460,13 +397,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
-        let caller_tree = match source
-            .contract_state_tree(&caller_hex, at_hash)
-            .await
-            .map_err(|err| note_unservable(err, height))?
-        {
-            ContractState::Tree(tree) => tree,
-            ContractState::Absent => {
+        let caller_tree = match source.contract_state_tree(&caller_hex, at_hash).await {
+            Ok(ContractState::Tree(tree)) => tree,
+            Ok(ContractState::Absent) => {
                 return Ok(drop_entry(
                     "caller-contract-absent",
                     height,
@@ -474,11 +407,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &caller_hex,
                 ));
             }
-            // The caller's own bytes, refused by the decoder: a per-entry data property
-            // like the rest.
-            ContractState::Undecodable(err) => {
+            Ok(ContractState::Undecodable(err)) => {
                 return Ok(drop_entry(
                     "caller-state-undecodable",
+                    height,
+                    Some(rid),
+                    &format!("{caller_hex}: {err:#}"),
+                ));
+            }
+            // The transport already spent its retry budget, and block-level retries
+            // cannot be bounded per entry, so escalating would let one caller whose
+            // state cannot be served (`caller_address` is producer-supplied) halt the
+            // chain. Charged to the entry instead, the unservable answer included.
+            Err(err) => {
+                return Ok(drop_entry(
+                    "caller-state-unreadable",
                     height,
                     Some(rid),
                     &format!("{caller_hex}: {err:#}"),
@@ -611,12 +554,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// Emits a block's requests, then its Block event, then records telemetry.
     ///
     /// The Block event is the whole progress report: the node advances the persisted
-    /// height in `process_block_event` after CONSUMING it, and only once caught up.
-    /// Writing the height here instead would claim blocks whose requests are still
-    /// queued, and a supervised restart allocates a fresh event channel and drops
-    /// whatever the old one still held, so those requests would be neither delivered
-    /// nor re-walked. Leaving the height to the consumer is what makes a restart
-    /// self-healing, and is what every other chain does.
+    /// height only after CONSUMING it, which is what makes a supervised restart
+    /// self-healing. Delivery is therefore at-least-once (blocks past the last
+    /// consumed checkpoint re-emit on restart); dedup is by SignId downstream, never
+    /// here.
     async fn emit_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -1198,75 +1139,135 @@ mod tests {
         drop(live_tx);
     }
 
-    #[tokio::test]
-    async fn process_block_emits_nothing_on_unreadable_parent_map() {
-        let (record, rid) = caller_record_and_rid();
-        let (other_record, other_rid) = named_record_and_rid(11);
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        // Block 8's central state is present but field 1 is not a map, so the
-        // notification map there cannot be read: a shape TRANSITION, since block 9's is
-        // readable.
-        source.set_state(&central, 8, array_of(vec![StateValue::Null; 6]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        // Block 10 adds a second notification on top of block 9's.
-        source.set_state(
-            &central,
-            10,
-            central_state(vec![
-                notification_entry(1, &rid),
-                notification_entry(1, &other_rid),
-            ]),
-        );
-        source.set_state(
-            &hex::encode(CALLER),
-            10,
-            array_of(vec![
-                StateValue::Null,
-                StateValue::Null,
-                StateValue::Null,
-                StateValue::Null,
-                map_of(vec![
-                    (key_of(rid), cell_from_record(&record)),
-                    (key_of(other_rid), cell_from_record(&other_record)),
-                ]),
-            ]),
-        );
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        // Block 9 emits its Block event and NO request: progress is still reported,
-        // which is what keeps this out of a restart loop.
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        // Block 10 diffs against block 9, which WAS readable, so exactly the one
-        // genuinely new entry emits.
-        live_tx.send(block_ref(10)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, other_rid);
-        assert_block(&harness.next_event().await, 10);
-        harness.cancel_and_join().await;
-        drop(live_tx);
+    /// An indexer plus a `cache` slot for driving `process_block`/`process_entry`
+    /// directly: the drift classification is about return values, not event flows.
+    async fn direct_indexer() -> TestIndexer {
+        MidnightIndexer::new(
+            MidnightConfig {
+                node_ws_url: "ws://127.0.0.1:1".to_string(),
+                central_address: central_address(),
+                rpc: Default::default(),
+                indexer: Default::default(),
+            },
+            MockStateManager::new(),
+            NoopChainTelemetry,
+        )
+        .await
+        .expect("indexer constructs")
     }
 
     #[tokio::test]
-    async fn catchup_retries_a_transient_read_instead_of_degrading() {
-        // A node hiccup costs a retry, not a supervised restart.
-        // Block 8 is where the fault lands, so it is block 8's OWN emission that proves
-        // the retry: degrading instead would abandon the range and emit only the
-        // anchor, skipping 8 entirely.
+    async fn process_block_errors_on_central_schema_drift() {
+        // Field 1 not being a map cannot come from a caller: it is drift or a wrong
+        // central address, and must halt loudly rather than drop requests forever.
+        let central = central_address();
+        let mut source = FixtureSource::default();
+        source.set_state(&central, 8, central_state(vec![]));
+        source.set_state(&central, 9, array_of(vec![StateValue::Null; 6]));
+
+        let indexer = direct_indexer().await;
+        let mut cache = None;
+        let err = indexer
+            .process_block(&source, &mut cache, &block_ref(9))
+            .await
+            .expect_err("a non-map central field must error, never degrade")
+            .to_string();
+        assert!(err.contains("is not a map"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn process_entry_errors_on_singleton_shapes_and_drops_caller_data() {
+        // The singleton's circuits fix the key shape, the value shape and version, so
+        // those failures are drift (Err); the payload's depth byte is caller data (drop).
+        let (_record, rid) = caller_record_and_rid();
+        let source = FixtureSource::default();
+        let indexer = direct_indexer().await;
+
+        let one_atom_key = MapEntry {
+            key: AlignedValue::from([0x11; 32]),
+            value: notification_entry(1, &rid).1,
+        };
+        let err = indexer
+            .process_entry(&source, &one_atom_key, &hash_of(9), 9, 0)
+            .await
+            .expect_err("a non-SignetMapKey key is drift")
+            .to_string();
+        assert!(err.contains("SignetMapKey"), "err: {err}");
+
+        let three_atom_value = MapEntry {
+            key: signet_map_key(1, &rid),
+            value: cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+        };
+        let err = indexer
+            .process_entry(&source, &three_atom_value, &hash_of(9), 9, 0)
+            .await
+            .expect_err("a malformed notification cell is drift")
+            .to_string();
+        assert!(err.contains("notification"), "err: {err}");
+
+        let mut payload = CALLER.to_vec();
+        payload.extend([1u8, REQUESTS_FIELD]);
+        let version_two = MapEntry {
+            key: signet_map_key(1, &rid),
+            value: cell_from_atoms(&[vec![2u8], payload], &[1, 128]),
+        };
+        let err = indexer
+            .process_entry(&source, &version_two, &hash_of(9), 9, 0)
+            .await
+            .expect_err("the singleton asserts version 1 in circuit, so 2 is drift")
+            .to_string();
+        assert!(err.contains("version 2"), "err: {err}");
+
+        // Depth 0 is caller-writable payload: a drop, and never an abort.
+        let mut zero_depth = CALLER.to_vec();
+        zero_depth.push(0);
+        let bad_depth = MapEntry {
+            key: signet_map_key(1, &rid),
+            value: cell_from_atoms(&[vec![1u8], zero_depth], &[1, 128]),
+        };
+        let dropped = indexer
+            .process_entry(&source, &bad_depth, &hash_of(9), 9, 0)
+            .await
+            .expect("caller-supplied depth must not abort the block");
+        assert!(dropped.is_none());
+    }
+
+    #[tokio::test]
+    async fn process_entry_drops_a_caller_read_that_exhausts_retries() {
+        // The transport budget is the only retry a caller read gets: `caller_address`
+        // is producer-supplied, so escalating to block-level retries would let one
+        // unservable caller halt the chain. Both persistent-error shapes drop.
+        let (_record, rid) = caller_record_and_rid();
+        let indexer = direct_indexer().await;
+        let entry = MapEntry {
+            key: signet_map_key(1, &rid),
+            value: notification_entry(1, &rid).1,
+        };
+
+        let mut source = FixtureSource::default();
+        source.state_errors.insert(
+            (hex::encode(CALLER), hash_of(9)),
+            "contract state read failed: connection reset by peer".to_string(),
+        );
+        let dropped = indexer
+            .process_entry(&source, &entry, &hash_of(9), 9, 0)
+            .await
+            .expect("a dead caller read is charged to the entry");
+        assert!(dropped.is_none());
+
+        let mut source = FixtureSource::default();
+        source.set_unservable(&hex::encode(CALLER), 9);
+        let dropped = indexer
+            .process_entry(&source, &entry, &hash_of(9), 9, 0)
+            .await
+            .expect("an unservable caller read drops rather than restarting the run");
+        assert!(dropped.is_none());
+    }
+
+    #[tokio::test]
+    async fn catchup_retries_a_transient_central_read() {
+        // A node hiccup costs a retry, not a supervised restart: block 8's OWN
+        // emission proves the faulted read was re-attempted.
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1288,9 +1289,9 @@ mod tests {
             central_state(vec![notification_entry(1, &rid)]),
         );
         source.set_state(&hex::encode(CALLER), 8, caller_state(&record, &rid));
-        // A transport fault on the caller read, not the pruning signature: that one has
+        // A transport fault on the central read, not the pruning signature.
         source.set_transient_error(
-            &hex::encode(CALLER),
+            &central,
             8,
             1,
             "contract state read failed: connection reset by peer",
@@ -1310,11 +1311,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_retries_a_transient_read_instead_of_restarting() {
-        // The live loop has no degraded fallback, so a failure there ends `run()` and
-        // costs a supervised restart: backlog recovery, a
-        // re-anchor and a re-queue. A hiccup must cost a retry instead, and the request
-        // the failing read was carrying still arrives.
+    async fn live_retries_a_transient_central_read() {
+        // A hiccup in the live loop must cost a retry, not a supervised restart, and
+        // the request the failing read was carrying still arrives.
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1331,7 +1330,7 @@ mod tests {
         );
         source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
         source.set_transient_error(
-            &hex::encode(CALLER),
+            &central,
             9,
             1,
             "contract state read failed: connection reset by peer",
