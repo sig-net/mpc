@@ -30,10 +30,6 @@ pub use signet_crypto::{
     DerivationParams, EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
 };
 
-pub fn derive_epsilon_checkpoint(chain: Chain, height: u64) -> Scalar {
-    derive_epsilon(&DerivationParams::ConsensusCheckpoint(chain, height))
-}
-
 pub fn derive_epsilon_near(key_version: KeyVersion, account_id: &AccountId, path: &str) -> Scalar {
     derive_epsilon(&DerivationParams::UserAccount(
         key_version,

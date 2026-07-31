@@ -19,7 +19,7 @@ use crate::util::{JoinMap, TimeoutBudget};
 use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId, SignKind};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -32,17 +32,17 @@ use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 mod limiter;
+mod mailbox;
 mod metrics;
 mod organize;
 mod posit;
 mod state;
 mod task;
-mod work_queue;
 
 use limiter::SignLimiter;
 use task::SignTask;
 
-pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
+pub(crate) use mailbox::{PositMailbox, SignPositMessage};
 
 /// How many rounds ahead the organizing phase searches for an active proposer.
 const PROPOSER_SEARCH_WINDOW: usize = 512;
@@ -62,7 +62,7 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
-/// so that late-arriving peer posit messages do not re-create orphan queues.
+/// so that late-arriving peer posit messages do not re-create orphan mailboxes.
 const MAX_DEAD_IDS: usize = 4096;
 
 /// A retained in-flight request. `is_proposer` is shared with the current
@@ -73,7 +73,7 @@ struct SignEntry {
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
-/// `sign_id`, plus the posit queues, delayed-response watchers, and dedup state
+/// `sign_id`, plus the posit mailboxes, delayed-response watchers, and dedup state
 /// that outlive individual tasks. (TODO: needs refactoring)
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
@@ -81,14 +81,14 @@ pub struct SignatureSpawner {
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
-    /// Per-sign posit queues; also buffer messages that arrive before their
+    /// Per-sign posit mailboxes; also buffer messages that arrive before their
     /// task spawns.
-    posit_queues: HashMap<SignId, Arc<SignPositWorkQueue>>,
+    posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
     /// Watchers that increment the delayed metric when response time exceeds expected.
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
-    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan queues.
+    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
     /// Caps concurrent sign-task progress so requests don't flood the system's compute.
@@ -133,11 +133,8 @@ impl SignatureSpawner {
         let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0)
-            && !matches!(request.kind, SignKind::Checkpoint(_))
-        {
-            let is_proposer = Arc::clone(&is_proposer);
+        let is_proposer = Arc::clone(&is_proposer);
+        if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
                 let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
@@ -181,12 +178,12 @@ impl SignatureSpawner {
             .map(|entry| Arc::clone(&entry.is_proposer))
             .expect("sign request entry must exist when spawning its task");
 
-        // Take (or create) the posit queue; it may already hold messages
+        // Take (or create) the posit mailbox; it may already hold messages
         // that arrived before this task spawned.
-        let posit_queue = Arc::clone(
-            self.posit_queues
+        let mailbox = Arc::clone(
+            self.posit_mailboxes
                 .entry(sign_id)
-                .or_insert_with(SignPositWorkQueue::new),
+                .or_insert_with(PositMailbox::new),
         );
 
         let task = SignTask {
@@ -203,14 +200,12 @@ impl SignatureSpawner {
         };
 
         // Spawn the async task with organizing loop
-        self.tasks.spawn(
-            sign_id,
-            task.run(request, self.mesh_state.clone(), posit_queue),
-        );
+        self.tasks
+            .spawn(sign_id, task.run(request, self.mesh_state.clone(), mailbox));
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
-    /// have aborted previous incarnations. Not a retirement: queues,
+    /// have aborted previous incarnations. Not a retirement: mailboxes,
     /// watchers, and dedup state survive.
     fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
         let requests: Vec<IndexedSignRequest> = self
@@ -237,14 +232,14 @@ impl SignatureSpawner {
         action: PositAction,
     ) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
-        // to prevent re-creating orphan queues.
+        // to prevent re-creating orphan mailboxes.
         if self.dead_ids.contains(&sign_id) {
             return;
         }
-        self.posit_queues
+        self.posit_mailboxes
             .entry(sign_id)
-            .or_insert_with(SignPositWorkQueue::new)
-            .push(SignTaskMessage::PositMessage {
+            .or_insert_with(PositMailbox::new)
+            .push(SignPositMessage {
                 presignature_id,
                 round,
                 from,
@@ -285,7 +280,7 @@ impl SignatureSpawner {
     }
 
     /// Record a sign ID as dead so that late-arriving peer posits are dropped
-    /// instead of recreating an orphan queue. Automatically LRU-evicts the
+    /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
     fn mark_dead(&mut self, sign_id: SignId) {
         self.dead_ids.put(sign_id, ());
@@ -301,12 +296,12 @@ impl SignatureSpawner {
         }
     }
 
-    /// Common teardown when a sign task ends: forget the id, drop its queue and
+    /// Common teardown when a sign task ends: forget the id, drop its mailbox and
     /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
     fn retire_task(&mut self, sign_id: SignId, reason: &str) {
         self.mark_dead(sign_id);
         self.requests.remove(&sign_id);
-        self.posit_queues.remove(&sign_id);
+        self.posit_mailboxes.remove(&sign_id);
         self.abort_delayed_watcher(sign_id, reason);
     }
 
@@ -319,27 +314,6 @@ impl SignatureSpawner {
         match sign {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
-            }
-            SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
-                let sign_id = request.id;
-
-                // Skip requests we already track. Use the request map rather than
-                // the queue map, which may already hold buffered messages (e.g. a
-                // Propose arriving before the indexer notifies us), and rather than
-                // the task map, which is empty while requests are held for governance.
-                if self.requests.contains_key(&sign_id) {
-                    tracing::info!(?sign_id, "skipping duplicate sign request");
-                    return;
-                }
-
-                record_request_latency_since(
-                    request.chain,
-                    SignRequestStep::AwaitingGeneration,
-                    "ok",
-                    request.unix_timestamp_indexed,
-                );
-
-                self.add_request(governance, request, cfg.clone());
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -356,6 +330,27 @@ impl SignatureSpawner {
                     self.retire_task(sign_id, "chain aborted");
                     self.tasks.abort(sign_id);
                 }
+            }
+            SignCommand::Request(request) => {
+                let sign_id = request.id;
+
+                // Skip requests we already track. Use the request map rather than
+                // the mailbox map, which may already hold buffered messages (e.g. a
+                // Propose arriving before the indexer notifies us), and rather than
+                // the task map, which is empty while requests are held for governance.
+                if self.requests.contains_key(&sign_id) {
+                    tracing::info!(?sign_id, "skipping duplicate sign request");
+                    return;
+                }
+
+                record_request_latency_since(
+                    request.chain,
+                    SignRequestStep::AwaitingGeneration,
+                    "ok",
+                    request.unix_timestamp_indexed,
+                );
+
+                self.add_request(governance, request, cfg.clone());
             }
         }
 
@@ -422,14 +417,13 @@ impl SignatureSpawner {
         self.dead_ids.contains(sign_id)
     }
 
-    fn test_posit_queues_contains(&self, sign_id: &SignId) -> bool {
-        self.posit_queues.contains_key(sign_id)
+    fn test_posit_mailboxes_contains(&self, sign_id: &SignId) -> bool {
+        self.posit_mailboxes.contains_key(sign_id)
     }
 
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
         self.tasks.contains_key(&sign_id)
     }
-
     fn test_requests_contains(&self, sign_id: &SignId) -> bool {
         self.requests.contains_key(sign_id)
     }
@@ -462,7 +456,7 @@ impl SignatureSpawnerTask {
         let spawner = SignatureSpawner {
             contract,
             tasks: JoinMap::new(),
-            posit_queues: HashMap::new(),
+            posit_mailboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
@@ -507,6 +501,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn test_abort_chain_dead_ids_lifecycle() {
@@ -541,7 +536,7 @@ mod tests {
             contract,
             presignatures,
             tasks: JoinMap::new(),
-            posit_queues: HashMap::new(),
+            posit_mailboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
@@ -564,39 +559,69 @@ mod tests {
         };
         let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
 
-        // Step 1: Spawn → queue created, request retained, not dead
+        let probe_id = SignId::new([43u8; 32]);
+        let probe_request = IndexedSignRequest::sign(
+            probe_id,
+            request.args.clone(),
+            Chain::Solana,
+            request.unix_timestamp_indexed,
+        );
+        let dropped = Arc::new(Notify::new());
+        struct DropProbe(Arc<Notify>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let probe = DropProbe(Arc::clone(&dropped));
+        spawner.requests.insert(
+            probe_id,
+            SignEntry {
+                request: probe_request,
+                is_proposer: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        spawner.tasks.spawn(probe_id, async move {
+            let _probe = probe;
+            std::future::pending::<Result<(), SignError>>().await
+        });
+
+        // Step 1: Spawn → mailbox created, request retained, not dead
         spawner.add_request(&governance, request.clone(), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 2: Abort chain → queue removed, request dropped, marked dead
+        // Step 2: Abort chain → mailbox removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("aborting a chain should cancel its sign tasks");
         assert!(!spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_posit_queues_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 3: Late posit → dropped (dead_id check), queue NOT recreated
+        // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
         spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
-        assert!(!spawner.test_posit_queues_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
         spawner.add_request(&governance, request, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 5: Posit after re-spawn → accepted, queue re-created
+        // Step 5: Posit after re-spawn → accepted, mailbox re-created
         spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 6: Governance respawn → task swapped in place, nothing retired.
         spawner.tasks.abort_all();
         spawner.spawn_tasks(&governance, &cfg);
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
     }
 }

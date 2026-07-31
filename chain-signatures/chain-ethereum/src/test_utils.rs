@@ -109,12 +109,6 @@ impl TestIndexerBuilder {
         self
     }
 
-    /// Override `eth.refresh_finalized_interval`
-    pub fn refresh_finalized_interval(mut self, ms: u64) -> Self {
-        self.eth.refresh_finalized_interval = ms;
-        self
-    }
-
     /// Build the indexer.
     pub async fn build(self) -> EthereumIndexer<MockStateManager, NoopChainTelemetry> {
         let client = Arc::new(create_test_ethereum_client(&self.server_url).await);

@@ -134,6 +134,7 @@ pub fn make_test_stream_context(
     StreamContext,
     watch::Sender<Option<CheckpointDigest>>,
     watch::Sender<MeshState>,
+    mpsc::Receiver<RpcAction>,
 ) {
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _tx) =
@@ -141,7 +142,7 @@ pub fn make_test_stream_context(
     let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (cp_tx, cp_rx) = watch::channel(None);
     let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
+    let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
         sign_tx,
@@ -152,7 +153,33 @@ pub fn make_test_stream_context(
         cp_rx,
     );
     ctx.caught_up = caught_up;
-    (ctx, cp_tx, mesh_tx)
+    (ctx, cp_tx, mesh_tx, rpc_rx)
+}
+
+pub fn make_test_stream_context_with_rpc(
+    backlog: Backlog,
+    sign_tx: mpsc::Sender<SignCommand>,
+    caught_up: bool,
+    root_pk: AffinePoint,
+) -> (StreamContext, mpsc::Receiver<RpcAction>) {
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, rpc_rx) = test_rpc_channel(8);
+    let mut ctx = StreamContext::new(
+        backlog,
+        sign_tx,
+        rpc,
+        contract_watcher,
+        mesh_rx,
+        node_client,
+        cp_rx,
+    );
+    ctx.caught_up = caught_up;
+    (ctx, rpc_rx)
 }
 
 /// Convenience wrapper for tests that don't need the watch senders and use the
@@ -162,7 +189,7 @@ pub fn make_test_stream_context_with_generator_pk(
     sign_tx: mpsc::Sender<SignCommand>,
     caught_up: bool,
 ) -> StreamContext {
-    let (ctx, _, _) = make_test_stream_context(
+    let (ctx, _, _, _) = make_test_stream_context(
         backlog,
         sign_tx,
         caught_up,

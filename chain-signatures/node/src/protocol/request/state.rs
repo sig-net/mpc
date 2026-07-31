@@ -20,7 +20,7 @@ pub struct SignState {
     ///
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
     /// be cleared when `highest_seen_round` changes. One slot per sender.
-    pub buffered_messages: HashMap<Participant, SignTaskMessage>,
+    pub buffered_messages: HashMap<Participant, SignPositMessage>,
     /// When Some, another group is already generating this signature.
     /// The timestamp is when proposing can be resumed.
     pub pause_proposing_until: Option<std::time::Instant>,
@@ -68,8 +68,8 @@ impl SignState {
     }
 
     /// Buffer a posit message for a future round until that round is reached.
-    pub fn buffer_future_posit_message(&mut self, msg: SignTaskMessage) {
-        let SignTaskMessage::PositMessage {
+    pub fn buffer_future_posit_message(&mut self, msg: SignPositMessage) {
+        let SignPositMessage {
             round: peer_round,
             from,
             ..
@@ -87,7 +87,7 @@ impl SignState {
     }
 
     /// Take a buffered message to process, if one exists for the current round.
-    pub fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
+    pub fn take_buffered_posit_message(&mut self) -> Option<SignPositMessage> {
         if self.highest_seen_round == self.round {
             let key = self.buffered_messages.keys().next().copied()?;
             self.buffered_messages.remove(&key)
