@@ -22,8 +22,8 @@ use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
-    PromiseError, PublicKey,
+    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PublicKey,
 };
 use primitives::{
     CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
@@ -65,8 +65,8 @@ pub const MAX_JOIN_URL_LEN: usize = 2048;
 /// Fixed anti-spam deposit required to join as a candidate.
 pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
-#[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[near(contract_state)]
+#[derive(Debug)]
 pub enum VersionedMpcContract {
     V0(MpcContract),
 }
@@ -132,7 +132,7 @@ impl MpcContract {
 }
 
 // User contract API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
@@ -258,7 +258,7 @@ impl VersionedMpcContract {
 }
 
 // Node API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
@@ -302,7 +302,7 @@ impl VersionedMpcContract {
             return Err(RespondError::InvalidSignature.into());
         }
 
-        env::promise_yield_resume(&index.data_id, &serde_json::to_vec(&signature).unwrap());
+        env::promise_yield_resume(&index.data_id, serde_json::to_vec(&signature).unwrap());
         Ok(())
     }
 
@@ -350,7 +350,9 @@ impl VersionedMpcContract {
                 }
                 if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
                     if diff > NearToken::from_yoctonear(0) {
-                        Promise::new(signer_account_id.clone()).transfer(diff);
+                        Promise::new(signer_account_id.clone())
+                            .transfer(diff)
+                            .detach();
                     }
                 }
                 candidates.insert(
@@ -704,7 +706,7 @@ impl VersionedMpcContract {
         // Refund the difference if the propser attached more than required.
         if let Some(diff) = attached.checked_sub(required) {
             if diff > NearToken::from_yoctonear(0) {
-                Promise::new(proposer).transfer(diff);
+                Promise::new(proposer).transfer(diff).detach();
             }
         }
 
@@ -743,7 +745,7 @@ impl VersionedMpcContract {
 }
 
 // Contract developer helper API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     #[init]
@@ -992,7 +994,7 @@ impl VersionedMpcContract {
     pub fn sign_helper(&mut self, request: InternalSignRequest) {
         let yield_promise = env::promise_yield_create(
             "clear_state_on_finish",
-            &serde_json::to_vec(&(&request,)).unwrap(),
+            serde_json::to_vec(&(&request,)).unwrap(),
             CLEAR_STATE_ON_FINISH_CALL_GAS,
             GasWeight(0),
             DATA_ID_REGISTER,
@@ -1016,7 +1018,7 @@ impl VersionedMpcContract {
             yield_promise,
             env::current_account_id(),
             "return_signature_on_finish",
-            &[],
+            [],
             NearToken::from_near(0),
             RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
         );
@@ -1044,7 +1046,7 @@ impl VersionedMpcContract {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
-        Promise::new(to).transfer(amount);
+        Promise::new(to).transfer(amount).detach();
     }
 
     fn refund_on_success(request: &InternalSignRequest) {
@@ -1054,7 +1056,7 @@ impl VersionedMpcContract {
             if diff > NearToken::from_yoctonear(0) {
                 let to = request.requester.clone();
                 log!("refund more than required deposit {diff} to {to}");
-                Promise::new(to).transfer(diff);
+                Promise::new(to).transfer(diff).detach();
             }
         }
     }

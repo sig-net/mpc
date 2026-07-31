@@ -1043,7 +1043,11 @@ mod tests {
             "rpc-cancellation-test",
         );
         let signer =
-            near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone());
+            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
+            {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
         let contract_id: AccountId = "contract.testnet".parse().unwrap();
