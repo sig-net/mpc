@@ -58,7 +58,6 @@ pub struct TestIndexerBuilder {
     server_url: String,
     pub eth: EthConfig,
     pub state_manager: MockStateManager,
-    optimistic_requests: bool,
 }
 
 impl TestIndexerBuilder {
@@ -83,7 +82,6 @@ impl TestIndexerBuilder {
                 indexer: Default::default(),
             },
             state_manager: MockStateManager::new(),
-            optimistic_requests: true,
         }
     }
 
@@ -101,13 +99,6 @@ impl TestIndexerBuilder {
     pub fn rpc_urls(mut self, consensus: impl Into<String>, execution: impl Into<String>) -> Self {
         self.eth.consensus_rpc_http_url = consensus.into();
         self.eth.execution_rpc_http_url = execution.into().parse().unwrap();
-        self
-    }
-
-    /// Override `eth.optimistic_requests`
-    pub fn optimistic_requests(mut self, v: bool) -> Self {
-        self.optimistic_requests = v;
-        self.eth.optimistic_requests = v;
         self
     }
 

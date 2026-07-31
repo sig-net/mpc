@@ -1,4 +1,6 @@
 use crate::client::EthereumClient;
+#[cfg(test)]
+use crate::config::IndexerConfig;
 use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::BlockId;
@@ -88,6 +90,19 @@ impl FinalizedHeadTracker {
             refresh_interval: Duration::from_millis(eth.refresh_finalized_interval),
             max_failures: eth.indexer.max_finalized_failures,
             stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
+        }
+    }
+
+    /// Construct a finalized-head tracker for unit tests, with a short refresh interval and no optimistic mode.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        let indexer = IndexerConfig::default();
+        Self {
+            head: watch::channel(0).0,
+            optimistic: false,
+            refresh_interval: Duration::from_millis(100),
+            max_failures: indexer.max_finalized_failures,
+            stall_rewarn_secs: indexer.stall_rewarn_secs,
         }
     }
 
@@ -221,9 +236,7 @@ mod tests {
     async fn wait_for_returns_when_head_covers_block() {
         // wait_for only reads the cached head; a covering head returns without
         // any RPC (no client is involved).
-        let builder =
-            test_utils::TestIndexerBuilder::new("http://localhost:1").optimistic_requests(false);
-        let tracker = FinalizedHeadTracker::new(&builder.eth);
+        let tracker = FinalizedHeadTracker::new_for_test();
         tracker.set_head(100);
 
         tracker
@@ -234,9 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_resolves_when_head_advances() {
-        let builder =
-            test_utils::TestIndexerBuilder::new("http://localhost:1").optimistic_requests(false);
-        let tracker = FinalizedHeadTracker::new(&builder.eth);
+        let tracker = FinalizedHeadTracker::new_for_test();
 
         // Head starts at 0; the wait must block until the head advances past 50.
         let head = tracker.clone();
@@ -271,8 +282,7 @@ mod tests {
             .await;
 
         let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let builder = test_utils::TestIndexerBuilder::new(server.url()).optimistic_requests(false);
-        let tracker = FinalizedHeadTracker::new(&builder.eth);
+        let tracker = FinalizedHeadTracker::new_for_test();
 
         let cancel = CancellationToken::new();
         let _watcher = tracker.spawn_watcher(client, cancel.clone());
