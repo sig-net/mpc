@@ -28,3 +28,28 @@ impl CancellationTokenExt for CancellationToken {
         }
     }
 }
+
+/// Retries `process` with `delay` backoff until it returns `Ok(())` or `cancel`
+/// fires. Each failure is logged at WARN with `label` identifying the operation.
+pub async fn retry_until_ok<F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    label: &str,
+    process: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = process() => match result {
+                Ok(()) => return,
+                Err(err) => tracing::warn!(?err, "{label} failed; retrying"),
+            },
+        }
+        if cancel.cancelled_within(delay).await {
+            return;
+        }
+    }
+}

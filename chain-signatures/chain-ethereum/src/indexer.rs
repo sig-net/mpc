@@ -12,7 +12,7 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream, StreamExt};
-use mpc_chain_integration_core::utils::task::{AbortOnDrop, CancellationTokenExt};
+use mpc_chain_integration_core::utils::task::{retry_until_ok, AbortOnDrop, CancellationTokenExt};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, IndexedSignRequest};
 use std::sync::{Arc, Mutex};
@@ -384,58 +384,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Retries `process_catchup_item` with `RETRY_DELAY` backoff until it
-    /// succeeds or `cancel` fires.
-    async fn process_catchup_retrying(
-        &self,
-        events_tx: &mpsc::Sender<ChainEvent>,
-        item: &CatchupItem,
-        cancel: &CancellationToken,
-    ) {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = self.process_catchup_item(events_tx, item) => {
-                    match result {
-                        Ok(()) => return,
-                        Err(err) => {
-                            tracing::warn!(?err, "ethereum catchup block processing failed; retrying");
-                        }
-                    }
-                }
-            }
-            if cancel.cancelled_within(Self::RETRY_DELAY).await {
-                return;
-            }
-        }
-    }
-
-    /// Retries `process_live_item` with `RETRY_DELAY` backoff until it
-    /// succeeds or `cancel` fires.
-    async fn process_live_retrying(
-        &self,
-        events_tx: &mpsc::Sender<ChainEvent>,
-        item: &CatchupItem,
-        cancel: &CancellationToken,
-    ) {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = self.process_live_item(events_tx, item) => {
-                    match result {
-                        Ok(()) => return,
-                        Err(err) => {
-                            tracing::warn!(?err, "ethereum live block processing failed; retrying");
-                        }
-                    }
-                }
-            }
-            if cancel.cancelled_within(Self::RETRY_DELAY).await {
-                return;
-            }
-        }
-    }
-
     /// Catchup blocks in `[processed + 1, anchor_height)` fetched in batches.
     /// Samples the finalized head once at catchup start, so blocks at or below
     /// it can skip the per-block re-fetch + reorg hash check.
@@ -719,8 +667,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 item = catchup_iter.next() => item,
             };
             let Some(item) = item else { break };
-            self.process_catchup_retrying(&events_tx, &item, &cancel)
-                .await;
+            retry_until_ok(
+                &cancel,
+                Self::RETRY_DELAY,
+                "ethereum catchup block processing",
+                || async { self.process_catchup_item(&events_tx, &item).await },
+            )
+            .await;
         }
 
         events_tx
@@ -750,7 +703,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 MaybeBlock::Block(block) => CatchupItem::LiveBlock(block),
                 MaybeBlock::Missing(id) => CatchupItem::Missing(id),
             };
-            self.process_live_retrying(&events_tx, &item, &cancel).await;
+            retry_until_ok(
+                &cancel,
+                Self::RETRY_DELAY,
+                "ethereum live block processing",
+                || async { self.process_live_item(&events_tx, &item).await },
+            )
+            .await;
         }
     }
 }
