@@ -21,7 +21,7 @@ const DEST_UNUSED: u8 = 0;
 
 /// Converts a verified record into the [`IndexedSignRequest`] the signing pipeline
 /// consumes (kind `SignBidirectional`).
-pub fn to_sign_request(
+pub fn generate_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
     request_id: [u8; 32],
@@ -138,9 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn to_sign_request_maps_every_event_field() {
+    fn generate_sign_request_maps_every_event_field() {
         let record = caller_record();
-        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect("the caller record converts");
         let SignKind::SignBidirectional(event) = request.kind else {
             panic!("expected SignBidirectional kind");
@@ -175,13 +175,13 @@ mod tests {
     }
 
     #[test]
-    fn to_sign_request_rejects_read_address_mismatch() {
+    fn generate_sign_request_rejects_read_address_mismatch() {
         // The security gate: a record whose `sender` differs from the address it was
         // read from must be dropped, because `sender` is caller-controlled and the
         // derived key space follows the requester.
         let record = caller_record();
         let elsewhere = [0xcd; 32];
-        let err = to_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS)
             .expect_err("a sender mismatch must drop the request")
             .to_string();
         assert!(
@@ -191,12 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn to_sign_request_routes_and_bounds_key_versions() {
+    fn generate_sign_request_routes_and_bounds_key_versions() {
         // Version 0 is accepted, matching Canton, and routes through the legacy
         // derivation rather than the v2 caip2 one.
         let mut record = caller_record();
         record.key_version = 0;
-        let legacy = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let legacy = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect("key_version 0 is accepted");
         assert_eq!(
             legacy.args.epsilon,
@@ -210,25 +210,25 @@ mod tests {
 
         let mut record = caller_record();
         record.key_version = 2;
-        let err = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect_err("a key_version above LATEST must be rejected")
             .to_string();
         assert!(err.contains("key_version"), "err: {err}");
     }
 
     #[test]
-    fn to_sign_request_hex_encodes_opaque_paths() {
+    fn generate_sign_request_hex_encodes_opaque_paths() {
         // A raw commitment hash is the common path; it must convert, not drop.
         let mut record = caller_record();
         record.path = [0xff; 32];
-        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect("opaque path bytes convert");
         assert_eq!(request.args.path, "ff".repeat(32));
 
         // No trimming: an all-NUL path is 64 zeros, distinct from any trimmed twin.
         let mut record = caller_record();
         record.path = [0u8; 32];
-        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect("all-NUL path converts");
         assert_eq!(request.args.path, "00".repeat(32));
     }
@@ -248,10 +248,10 @@ mod tests {
     }
 
     #[test]
-    fn to_sign_request_requires_blank_params() {
+    fn generate_sign_request_requires_blank_params() {
         let mut record = caller_record();
         record.params[0] = 1;
-        let err = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
             .expect_err("params is reserved: non-blank bytes must fail closed")
             .to_string();
         assert!(err.contains("params"), "err: {err}");

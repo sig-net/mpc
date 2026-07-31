@@ -1,7 +1,7 @@
 //! Catchup from the persisted checkpoint, then the live finalized loop.
 
 use crate::config::MidnightConfig;
-use crate::convert::to_sign_request;
+use crate::convert::generate_sign_request;
 use crate::reader::{
     decode_notification, resolve_verified_record, signet_field_node_by_path,
     unpack_notification_v1, Node, Resolved,
@@ -180,17 +180,16 @@ fn drop_entry(
 }
 
 /// Names the one failure a retry never clears, so the restart it triggers is not
-/// mistaken for a transport blip. The indexer requires a node that still holds the
-/// state it is asking for; recovering from a node that does not is future work.
+/// mistaken for a transport blip. Callers hand in errors [`retry_until_cancelled`]
+/// already classified as unservable; recovering from a node that dropped the state is
+/// future work.
 fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
-    if is_state_unservable(&err) {
-        tracing::warn!(
-            reason = "state-unservable-restart",
-            height,
-            "midnight node cannot serve state at this height; restarting to re-anchor at the \
-             finalized head. Requests filed in the skipped range are given up"
-        );
-    }
+    tracing::warn!(
+        reason = "state-unservable-restart",
+        height,
+        "midnight node cannot serve state at this height; restarting to re-anchor at the \
+         finalized head. Requests filed in the skipped range are given up"
+    );
     err
 }
 
@@ -345,9 +344,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// `at_hash`, gate through `resolve_verified_record`, convert.
     ///
     /// `Err` is reserved for our own schema drift: the singleton's circuits fix the
-    /// map-key and value shapes and assert `version == 1`, so callers cannot produce
-    /// those failures, and dropping them would silently lose every request while the
-    /// checkpoint advances. Everything caller-attributable is a counted drop.
+    /// map-key shape and the notification's shape and version, so callers cannot
+    /// produce those failures, and dropping them would silently lose every request
+    /// while the checkpoint advances. Everything caller-attributable is a counted drop,
+    /// classified purely by which stage failed: `decode_notification` covers the
+    /// circuit-enforced half, `unpack_notification_v1` the caller-supplied payload.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -364,11 +365,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let notification =
             decode_notification(&entry.value).context("central notification value")?;
-        anyhow::ensure!(
-            notification.version == 1,
-            "notification version {}: this binary understands only version 1",
-            notification.version
-        );
         let unpacked = match unpack_notification_v1(&notification) {
             Ok(unpacked) => unpacked,
             // Depth and path are caller-supplied payload bytes, not circuit-enforced.
@@ -388,7 +384,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // It is producer-supplied, so any contract can notify naming another, which
         // triggers a signature over a record that contract filed. What that record says
         // is already authenticated below: `resolve_verified_record` recomputes the
-        // request id and `to_sign_request` requires `sender` to equal the address the
+        // request id and `generate_sign_request` requires `sender` to equal the address the
         // record was read from. The exposure is therefore third-party triggering, not
         // forgery, and the open question is whether that is worth gating. Gating it
         // means joining each notification to the central call it came from through the
@@ -460,7 +456,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(reason, height, Some(rid), &detail));
             }
         };
-        match to_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
+        match generate_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
                 // Every conversion failure is a per-record data property, so drop with
@@ -1156,6 +1152,140 @@ mod tests {
         .expect("indexer constructs")
     }
 
+    // ---- The committed capture (fixtures/README.md) ----------------------------
+
+    /// Raw `midnight_contractState` bytes from the capture chain at its notify block.
+    const CAPTURED_SINGLETON_POST: &[u8] = include_bytes!("../fixtures/singleton-post-state-64.mn");
+    const CAPTURED_CALLER_POST: &[u8] = include_bytes!("../fixtures/caller-post-state-64.mn");
+    const CAPTURED_HEIGHT: u64 = 64;
+
+    fn hex32(hex64: &str) -> [u8; 32] {
+        <[u8; 32]>::try_from(hex::decode(hex64).expect("hex")).expect("32 bytes")
+    }
+
+    /// The capture chain's deployed test caller.
+    fn captured_caller() -> [u8; 32] {
+        hex32("34f8406321f607763d3176d07f486db807d05d7c5103f2550850119d353a2987")
+    }
+
+    /// The request id the capture's submit filed.
+    fn captured_rid() -> [u8; 32] {
+        hex32("aadca83b95a932a675a6298ac3b4fa2ac092ecc19e4aef8001a496cf2ace84d7")
+    }
+
+    fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
+        let mut out = [0u8; N];
+        out[..text.len()].copy_from_slice(text);
+        out
+    }
+
+    /// The record the capture's `submitSignatureRequest(evmNonce: 0, keyVersion: 1)`
+    /// files, rebuilt from the caller contract's own constants
+    /// (test-caller-contract.compact), never from anything this crate decoded.
+    fn captured_record() -> crate::records::SignBidirectionalRecord {
+        use crate::records::{
+            CompactMaybe, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
+        };
+        SignBidirectionalRecord {
+            sender: captured_caller(),
+            request_nonce: 0,
+            key_version: 1,
+            path: ascii_padded(b"caller-path"),
+            algo: 0,
+            dest: 0,
+            params: [0u8; 64],
+            tx_param_type: 0,
+            tx_params: EvmType2TxParams {
+                chain_id: 31337,
+                nonce: 0,
+                max_priority_fee_per_gas: 1_000_000_000,
+                max_fee_per_gas: 30_000_000_000,
+                gas_limit: 100_000,
+                to: ascii_padded(b"signet-caller-e2e-to"),
+                value: 0,
+                calldata: CompactMaybe {
+                    is_some: true,
+                    value: EvmCalldata {
+                        selector: [0xca, 0x11, 0xab, 0x1e],
+                        no_words: 1,
+                        words: vec![ascii_padded(b"signet-caller:fixed-word")],
+                    },
+                },
+                access_list_entry_count: 0,
+                access_list: Vec::new(),
+            },
+            caip2_id: ascii_padded(b"eip155:31337"),
+            output_deserialization_schema: br#"[{"name":"success","type":"bool"}]"#.to_vec(),
+            respond_serialization_schema: br#"[{"name":"success","type":"bool"}]"#.to_vec(),
+        }
+    }
+
+    /// The other tests in this module build their cells with the same width tables the
+    /// decoder checks, so they cannot catch both sides being wrong about the actual
+    /// contract. This one runs the entry pipeline over bytes the contract toolchain
+    /// produced, and every expectation is fixed outside this crate: the deployed
+    /// caller's address, the ledger path its source pins ([4] at depth 1), and the
+    /// record fields its submit circuit hardcodes.
+    #[tokio::test]
+    async fn captured_entry_decodes_resolves_and_converts() {
+        let central = crate::state::decode_contract_state(CAPTURED_SINGLETON_POST)
+            .expect("the captured singleton state decodes");
+        let entries =
+            TestIndexer::notification_entries(&central).expect("field 1 is the notification map");
+        assert_eq!(entries.len(), 1, "the capture holds exactly one notify");
+        let entry = &entries[0];
+        assert_eq!(
+            signet_map_key_rid(&entry.key),
+            Some(captured_rid()),
+            "the registry keys the notification by the filed request id"
+        );
+
+        let notification =
+            decode_notification(&entry.value).expect("the stored notification cell decodes");
+        let unpacked = unpack_notification_v1(&notification).expect("the V1 payload unpacks");
+        assert_eq!(unpacked.caller_address, captured_caller());
+        assert_eq!(
+            unpacked.requests_path,
+            vec![REQUESTS_FIELD],
+            "the payload carries the caller's contract-info path"
+        );
+
+        let caller_tree = crate::state::decode_contract_state(CAPTURED_CALLER_POST)
+            .expect("the captured caller state decodes");
+        let field = signet_field_node_by_path(&caller_tree, &unpacked.requests_path)
+            .expect("the carried path walks the captured ledger");
+        let Resolved::Found(record) = resolve_verified_record(field, captured_rid()) else {
+            panic!("the captured record must resolve, request-id recompute included");
+        };
+        assert_eq!(*record, captured_record());
+
+        // The production entry pipeline over the same bytes, conversion included.
+        let indexer = direct_indexer().await;
+        let mut source = FixtureSource::default();
+        source.set_state(
+            &hex::encode(captured_caller()),
+            CAPTURED_HEIGHT,
+            caller_tree,
+        );
+        let request = indexer
+            .process_entry(
+                &source,
+                entry,
+                &hash_of(CAPTURED_HEIGHT),
+                CAPTURED_HEIGHT,
+                0,
+            )
+            .await
+            .expect("nothing in the capture is drift")
+            .expect("the captured entry must produce a request");
+        assert_eq!(request.id, SignId::new(captured_rid()));
+        assert_eq!(request.args.key_version, 1);
+        assert_eq!(
+            request.args.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
+            "the full 32 path bytes as lowercase hex"
+        );
+    }
+
     #[tokio::test]
     async fn process_block_errors_on_central_schema_drift() {
         // Field 1 not being a map cannot come from a caller: it is drift or a wrong
@@ -1211,11 +1341,13 @@ mod tests {
             key: signet_map_key(1, &rid),
             value: cell_from_atoms(&[vec![2u8], payload], &[1, 128]),
         };
-        let err = indexer
-            .process_entry(&source, &version_two, &hash_of(9), 9, 0)
-            .await
-            .expect_err("the singleton asserts version 1 in circuit, so 2 is drift")
-            .to_string();
+        let err = format!(
+            "{:#}",
+            indexer
+                .process_entry(&source, &version_two, &hash_of(9), 9, 0)
+                .await
+                .expect_err("the singleton asserts version 1 in circuit, so 2 is drift")
+        );
         assert!(err.contains("version 2"), "err: {err}");
 
         // Depth 0 is caller-writable payload: a drop, and never an abort.

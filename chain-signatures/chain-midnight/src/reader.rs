@@ -150,7 +150,7 @@ fn evm_type2_capacities(widths: &[u32]) -> anyhow::Result<EvmType2Capacities> {
 
 /// Reject a foreign `tx_param_type` before capacity recovery, which is evmType2
 /// specific: a future param type must fail by name here, not as capacity arithmetic.
-fn ensure_evm_type2(cell: &AlignedValue) -> anyhow::Result<()> {
+fn ensure_evm_type2_param_type(cell: &AlignedValue) -> anyhow::Result<()> {
     let atom = cell
         .value
         .0
@@ -169,9 +169,9 @@ fn ensure_evm_type2(cell: &AlignedValue) -> anyhow::Result<()> {
 /// are not a signet record's.
 pub fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
     let cell = cell_of(node, "request record")?;
-    ensure_evm_type2(cell)?;
+    ensure_evm_type2_param_type(cell)?;
     let widths = declared_widths(cell, "request record")?;
-    decode_at(cell, &widths, &evm_type2_capacities(&widths)?)
+    decode_sign_bidirectional(cell, &widths, &evm_type2_capacities(&widths)?)
 }
 
 /// The recompute-and-drop gate. The decode never sees `request_id`, so this comparison
@@ -224,7 +224,10 @@ pub enum Resolved {
     },
 }
 
-/// Decode the two-atom notification cell: version, then the 128-byte payload.
+/// Decode the two-atom notification cell: version, then the 128-byte payload. Every
+/// property here is circuit-enforced, the version included (`signBidirectional`
+/// asserts `version == 1`), so a failure is schema drift or a future singleton this
+/// build does not understand, never caller data.
 pub fn decode_notification(node: &Node) -> anyhow::Result<SignBidirectionalEventNotification> {
     let cell = cell_of(node, "notification")?;
     let widths = declared_widths(cell, "notification")?;
@@ -238,10 +241,16 @@ pub fn decode_notification(node: &Node) -> anyhow::Result<SignBidirectionalEvent
         widths: &widths,
         pos: 0,
     };
-    Ok(SignBidirectionalEventNotification {
+    let notification = SignBidirectionalEventNotification {
         version: uint::<u8>(cursor, 1, "notification version")?,
         payload: bytes_n::<128>(cursor, "notification payload")?,
-    })
+    };
+    anyhow::ensure!(
+        notification.version == 1,
+        "notification version {} is not supported (this decoder understands version 1)",
+        notification.version
+    );
+    Ok(notification)
 }
 
 /// Maximum ledger-tree path depth the V1 payload carries, matching the
@@ -261,16 +270,16 @@ pub struct NotificationV1 {
     pub requests_path: Vec<u8>,
 }
 
-/// Fails closed on an unrecognised version: a future payload layout adds a branch here
-/// rather than silently misinterpreting bytes under the V1 offsets. Also fails closed on
-/// a depth of zero or one past [`MAX_LEDGER_PATH_DEPTH`], the width the circuit packs.
+/// Unpack the caller-supplied payload bytes, so a failure here is a per-entry data
+/// fault: fails closed on a depth of zero or one past [`MAX_LEDGER_PATH_DEPTH`], the
+/// width the circuit packs. The version is [`decode_notification`]'s to check, which is
+/// the only producer of the input type.
 pub fn unpack_notification_v1(
     notification: &SignBidirectionalEventNotification,
 ) -> anyhow::Result<NotificationV1> {
-    anyhow::ensure!(
-        notification.version == 1,
-        "notification version {} is not supported (this decoder understands version 1)",
-        notification.version
+    debug_assert_eq!(
+        notification.version, 1,
+        "unpack_notification_v1 reached without decode_notification's version gate"
     );
     let mut caller_address = [0u8; 32];
     caller_address.copy_from_slice(&notification.payload[..32]);
@@ -361,7 +370,7 @@ fn bounded_enum(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<u
     Ok(value)
 }
 
-fn decode_at(
+fn decode_sign_bidirectional(
     cell: &AlignedValue,
     widths: &[u32],
     capacities: &EvmType2Capacities,
@@ -384,7 +393,8 @@ fn decode_at(
         algo: bounded_enum(cursor, "algo")?,
         dest: bounded_enum(cursor, "dest")?,
         params: bytes_n::<64>(cursor, "params")?,
-        tx_param_type: bounded_enum(cursor, "tx_param_type")?,
+        // Width-checked only: `ensure_evm_type2_param_type` already pinned the value.
+        tx_param_type: uint::<u8>(cursor, 1, "tx_param_type")?,
         tx_params: decode_tx_params(cursor, capacities)?,
         caip2_id: bytes_n::<32>(cursor, "caip2_id")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
@@ -741,8 +751,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_notification_rejects_any_other_shape() {
-        // Bytes<1> then Bytes<128>, and nothing else.
+    fn decode_notification_rejects_any_other_shape_or_version() {
+        // Bytes<1> then Bytes<128> carrying version 1, and nothing else.
         let mut payload = [0u8; 128];
         payload[..32].copy_from_slice(&[0xab; 32]);
         for (atoms, widths, expected) in [
@@ -753,9 +763,12 @@ mod tests {
                 "expected 2",
             ),
             (vec![vec![1u8], payload.to_vec()], vec![1, 64], "Bytes<128>"),
+            // The circuit asserts version 1, so any other is drift and fails closed
+            // here rather than being misread under the V1 offsets.
+            (vec![vec![2u8], payload.to_vec()], vec![1, 128], "version 2"),
         ] {
             let err = decode_notification(&cell_from_atoms(&atoms, &widths))
-                .expect_err("only a two-atom Bytes<1>/Bytes<128> cell decodes")
+                .expect_err("only a two-atom version-1 notification decodes")
                 .to_string();
             assert!(err.contains(expected), "err: {err}");
         }
@@ -778,16 +791,6 @@ mod tests {
         let unpacked = unpack_notification_v1(&notification).expect("v1 payload unpacks");
         assert_eq!(unpacked.caller_address, [0xab; 32]);
         assert_eq!(unpacked.requests_path, vec![1, 14]);
-
-        // A future version fails closed.
-        let future = SignBidirectionalEventNotification {
-            version: 2,
-            payload,
-        };
-        let err = unpack_notification_v1(&future)
-            .expect_err("future versions must fail closed")
-            .to_string();
-        assert!(err.contains("version 2"), "err: {err}");
 
         // A depth of zero or one past the packed width fails closed.
         for bad_depth in [0u8, MAX_LEDGER_PATH_DEPTH + 1] {

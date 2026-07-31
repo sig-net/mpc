@@ -169,7 +169,7 @@ impl MidnightRpc {
         address_64hex: &str,
         at_block_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        contract_state_over(
+        contract_state_with(
             &self.rpc,
             self.request_timeout,
             self.retry,
@@ -229,7 +229,7 @@ impl MidnightRpc {
 /// [`MidnightRpc::contract_state`] over explicit transports, so its offline tests can
 /// run it without an `OnlineClient`, whose construction fetches metadata and therefore
 /// needs a whole node.
-async fn contract_state_over(
+async fn contract_state_with(
     rpc: &RpcClient,
     request_timeout: Duration,
     retry: RetryConfig,
@@ -432,7 +432,7 @@ mod tests {
             vec![Canned(-32602, NOT_PRESENT_MSG)],
         )]);
         let rpc = RpcClient::new(node.clone());
-        let absent = contract_state_over(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
+        let absent = contract_state_with(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
             .await
             .expect("contract-not-present is an answer, not a failure");
         assert_eq!(absent, None);
@@ -443,7 +443,7 @@ mod tests {
             vec![Canned(-32602, UNSERVABLE_MSG)],
         )]);
         let rpc = RpcClient::new(node.clone());
-        let err = contract_state_over(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
+        let err = contract_state_with(&rpc, READ_TIMEOUT, attempts(2), ADDRESS, AT_HASH)
             .await
             .expect_err("a pruned or unknown hash is a failure");
         assert!(is_state_unservable(&err), "{err:#}");

@@ -14,6 +14,6 @@ mod test_utils;
 mod tx;
 
 pub use config::{IndexerConfig, MidnightConfig, RpcConfig};
-pub use convert::to_sign_request;
+pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
 pub use publisher::MidnightPublisher;
