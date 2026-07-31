@@ -461,8 +461,9 @@ impl VersionedMpcContract {
     }
 
     /// Vote to change the running threshold without otherwise modifying the
-    /// participant set. Multiple competing thresholds can be voted on in
-    /// parallel; the first to reach the current `threshold` triggers a
+    /// participant set. Each participant backs at most one proposed threshold
+    /// at a time (casting a new vote removes any prior vote). The first
+    /// proposed threshold to reach the current `threshold` triggers a
     /// resharing whose `new_threshold` is the proposed value.
     #[handle_result]
     pub fn vote_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
@@ -487,12 +488,11 @@ impl VersionedMpcContract {
                     return Err(VoteError::ThresholdUnchanged.into());
                 }
                 let min_threshold = compute_threshold(participants_len);
-                if new_threshold < min_threshold || new_threshold > participants_len {
+                let max_threshold = participants_len.saturating_sub(1);
+                if new_threshold < min_threshold || new_threshold > max_threshold {
                     return Err(VoteError::ThresholdOutOfRange.into());
                 }
-                let voted = threshold_votes.entry(new_threshold);
-                voted.insert(voter);
-                if voted.len() >= *threshold {
+                if threshold_votes.vote(new_threshold, voter) >= *threshold {
                     // Same participants, different threshold; the resharing
                     // protocol re-shares the key with a new threshold.
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {

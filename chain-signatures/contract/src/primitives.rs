@@ -400,8 +400,18 @@ impl ThresholdVotes {
         }
     }
 
-    pub fn entry(&mut self, threshold: usize) -> &mut HashSet<AccountId> {
-        self.votes.entry(threshold).or_default()
+    /// Record `voter`'s support for `threshold`, dropping any vote they had
+    /// previously cast for a different threshold, and return the resulting
+    /// number of voters backing `threshold`. A participant backs at most one
+    /// proposed threshold at a time.
+    pub fn vote(&mut self, threshold: usize, voter: AccountId) -> usize {
+        for voters in self.votes.values_mut() {
+            voters.remove(&voter);
+        }
+        self.votes.retain(|_, voters| !voters.is_empty());
+        let voters = self.votes.entry(threshold).or_default();
+        voters.insert(voter);
+        voters.len()
     }
 
     pub fn get(&self, threshold: usize) -> Option<&HashSet<AccountId>> {

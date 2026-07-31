@@ -84,14 +84,10 @@ impl Governance for MockGovernance {
         self.protocol_state_tx.send_if_modified(|protocol_state| {
             let modified = match protocol_state {
                 Some(ProtocolState::Running(ref mut state)) => {
-                    let entry = state
-                        .threshold_votes
-                        .votes
-                        .entry(new_threshold)
-                        .or_default();
-                    let entry_modified = entry.insert(self.me.clone());
+                    let votes_for_threshold =
+                        state.threshold_votes.vote(new_threshold, self.me.clone());
 
-                    if entry.len() >= state.threshold {
+                    if votes_for_threshold >= state.threshold {
                         let participants = state.participants.clone();
                         let public_key = state.public_key;
                         let epoch = state.epoch;
@@ -112,7 +108,9 @@ impl Governance for MockGovernance {
                         result = true;
                         true
                     } else {
-                        entry_modified
+                        // `vote()` always modifies state (removing prior
+                        // votes and recording the new one).
+                        true
                     }
                 }
                 Some(other) => {
