@@ -11,7 +11,7 @@ use crate::records::{CompactMaybe, EvmCalldata, EvmType2TxParams, SignBidirectio
 
 /// `TxParamType::evmType2`, the only decomposition the contract defines (the other
 /// discriminant is reserved).
-const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
+pub(crate) const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
 
 impl TryFrom<&EvmType2TxParams> for TxEip1559 {
     type Error = anyhow::Error;

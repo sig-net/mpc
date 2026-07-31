@@ -9,44 +9,39 @@ use crate::records::{
     SignBidirectionalEventNotification, SignBidirectionalRecord,
 };
 use crate::request_id::compute_request_id;
+use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 
-/// Atoms of a record excluding its capacity-scaled vectors. The calldata `Maybe`'s
-/// three atoms count even when `is_some` is false.
-const REQUEST_FIXED_VALUE_ATOMS: usize = 22;
+/// Atoms of an evmType2 record excluding its capacity-scaled vectors. The calldata
+/// `Maybe`'s three atoms count even when `is_some` is false.
+const EVM_TYPE2_FIXED_ATOMS: usize = 22;
 
 /// `sender` through `calldata.no_words`; the calldata words begin here.
-const RECORD_HEAD_ATOMS: usize = 18;
+const EVM_TYPE2_HEAD_ATOMS: usize = 18;
 
 /// `caip2_id` and the two schemas.
-const RECORD_TAIL_ATOMS: usize = 3;
+const EVM_TYPE2_TAIL_ATOMS: usize = 3;
+
+/// `tx_param_type`'s fixed position: eighth field of `SignBidirectionalEvent`.
+const TX_PARAM_TYPE_ATOM: usize = 7;
 
 pub type Node = StateValue<DefaultDB>;
 
-/// Follow a resolved ledger-tree path to its node in the state tree.
-///
-/// The path is the value compactc records for a field in the caller's own
-/// `contract-info.json` (`"index"`), carried in the notification: a
-/// single-element path (`[4]`) for a flat contract's field, a longer one
-/// (`[1, 14]`) once a contract declares more than 15 fields and the compiler
-/// stores them in a chunk tree. This walks the path node for node, exactly as
-/// the generated `ledger()` accessor does, and never inspects array widths or
-/// re-derives the chunk structure, so no field whose own value is an array can
-/// be mistaken for a compiler chunk.
+/// Follow a resolved ledger-tree path to its node, exactly as the generated `ledger()`
+/// accessor does. The path is what compactc records for the field in the caller's own
+/// `contract-info.json` (`"index"`): `[4]` for a flat contract, `[1, 14]` once the
+/// compiler chunks past 15 fields. Nothing here re-derives the chunk structure.
 pub fn signet_field_node_by_path<'a>(root: &'a Node, path: &[u8]) -> anyhow::Result<&'a Node> {
     anyhow::ensure!(!path.is_empty(), "ledger field path is empty");
     let mut node = root;
     for (level, &index) in path.iter().enumerate() {
         let StateValue::Array(children) = node else {
-            // A one-field contract stores its field as the bare (non-array)
-            // root, addressable only as the whole state at a final [0]; the
-            // compiled accessor reads it the same way.
+            // A one-field contract stores its field as the bare root, addressable only
+            // as the whole state at a final [0].
             if index == 0 && level == path.len() - 1 {
                 return Ok(node);
             }
             anyhow::bail!("ledger field path {path:?} steps into a non-array at level {level}");
         };
-        // `Array::get` is the ledger storage type's own indexed accessor, the read-side
-        // equivalent of the `asArray()[i]` step the generated `ledger()` accessor emits.
         node = children.get(usize::from(index)).ok_or_else(|| {
             anyhow::anyhow!(
                 "ledger field path {path:?} index {index} out of range at level {level}"
@@ -88,32 +83,35 @@ fn cell_of<'a>(node: &'a Node, what: &str) -> anyhow::Result<&'a AlignedValue> {
     Ok(cell)
 }
 
-struct Capacities {
-    words: usize,
-    entries: usize,
-    keys: usize,
+struct EvmType2Capacities {
+    max_calldata_words: usize,
+    max_access_list_entries: usize,
+    max_storage_keys_per_entry: usize,
 }
 
-/// Each scaled vector's capacity, read off the declared widths. The tail is taken from
-/// the end because `caip2_id` and a storage key are both `Bytes<32>`.
-fn capacities(widths: &[u32]) -> anyhow::Result<Capacities> {
+/// Recover the sizing parameters the caller's contract was compiled with
+/// (`#maxCalldataWords`, `#maxAccessListEntries`, `#maxStorageKeysPerEntry`) from the
+/// declared widths alone. The tail anchors from the end: calldata words, storage keys
+/// and `caip2_id` are all `Bytes<32>`, so no forward scan can find the boundaries.
+fn evm_type2_capacities(widths: &[u32]) -> anyhow::Result<EvmType2Capacities> {
     anyhow::ensure!(
-        widths.len() >= REQUEST_FIXED_VALUE_ATOMS,
-        "request record has {} value atoms, fewer than the {REQUEST_FIXED_VALUE_ATOMS} its \
+        widths.len() >= EVM_TYPE2_FIXED_ATOMS,
+        "request record has {} value atoms, fewer than the {EVM_TYPE2_FIXED_ATOMS} its \
          fixed fields need",
         widths.len()
     );
-    let tail = widths.len() - RECORD_TAIL_ATOMS;
+    let tail = widths.len() - EVM_TYPE2_TAIL_ATOMS;
 
-    let mut index = RECORD_HEAD_ATOMS;
+    let mut index = EVM_TYPE2_HEAD_ATOMS;
     while index < tail && widths[index] == 32 {
         index += 1;
     }
-    let words = index - RECORD_HEAD_ATOMS;
+    let max_calldata_words = index - EVM_TYPE2_HEAD_ATOMS;
 
     anyhow::ensure!(
         index < tail && widths[index] == 1,
-        "expected the Bytes<1> access-list entry count after {words} calldata words, found {}",
+        "expected the Bytes<1> access-list entry count after {max_calldata_words} calldata \
+         words, found {}",
         widths
             .get(index)
             .map_or("the record's tail".to_string(), |w| format!("Bytes<{w}>"))
@@ -121,8 +119,8 @@ fn capacities(widths: &[u32]) -> anyhow::Result<Capacities> {
     index += 1;
 
     let region = &widths[index..tail];
-    let entries = region.iter().filter(|width| **width == 20).count();
-    let keys = if entries == 0 {
+    let max_access_list_entries = region.iter().filter(|width| **width == 20).count();
+    let max_storage_keys_per_entry = if max_access_list_entries == 0 {
         anyhow::ensure!(
             region.is_empty(),
             "the access-list region holds {} atoms but declares no Bytes<20> entry address",
@@ -131,30 +129,49 @@ fn capacities(widths: &[u32]) -> anyhow::Result<Capacities> {
         0
     } else {
         anyhow::ensure!(
-            region.len().is_multiple_of(entries),
-            "the access-list region's {} atoms do not divide evenly across {entries} entries",
+            region.len().is_multiple_of(max_access_list_entries),
+            "the access-list region's {} atoms do not divide evenly across \
+             {max_access_list_entries} entries",
             region.len()
         );
-        let per_entry = region.len() / entries;
+        let per_entry = region.len() / max_access_list_entries;
         anyhow::ensure!(
             per_entry >= 2,
             "each access-list entry needs at least an address and a key count, got {per_entry} atoms"
         );
         per_entry - 2
     };
-    Ok(Capacities {
-        words,
-        entries,
-        keys,
+    Ok(EvmType2Capacities {
+        max_calldata_words,
+        max_access_list_entries,
+        max_storage_keys_per_entry,
     })
+}
+
+/// Reject a foreign `tx_param_type` before capacity recovery, which is evmType2
+/// specific: a future param type must fail by name here, not as capacity arithmetic.
+fn ensure_evm_type2(cell: &AlignedValue) -> anyhow::Result<()> {
+    let atom = cell
+        .value
+        .0
+        .get(TX_PARAM_TYPE_ATOM)
+        .ok_or_else(|| anyhow::anyhow!("request record ends before tx_param_type"))?;
+    let tx_param_type =
+        u8::try_from(atom).map_err(|err| anyhow::anyhow!("tx_param_type: {err}"))?;
+    anyhow::ensure!(
+        tx_param_type == TX_PARAM_TYPE_EVM_TYPE2,
+        "unsupported tx_param_type {tx_param_type}: this decoder understands evmType2 (0)"
+    );
+    Ok(())
 }
 
 /// Decode a stored request record in one pass, refusing a cell whose declared widths
 /// are not a signet record's.
 pub fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
     let cell = cell_of(node, "request record")?;
+    ensure_evm_type2(cell)?;
     let widths = declared_widths(cell, "request record")?;
-    decode_at(cell, &widths, &capacities(&widths)?)
+    decode_at(cell, &widths, &evm_type2_capacities(&widths)?)
 }
 
 /// The recompute-and-drop gate. The decode never sees `request_id`, so this comparison
@@ -347,13 +364,18 @@ fn bounded_enum(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<u
 fn decode_at(
     cell: &AlignedValue,
     widths: &[u32],
-    capacities: &Capacities,
+    capacities: &EvmType2Capacities,
 ) -> anyhow::Result<SignBidirectionalRecord> {
     let cursor = &mut AtomCursor {
         atoms: &cell.value.0,
         widths,
         pos: 0,
     };
+    // Field order mirrors, field for field, `SignBidirectionalEvent` in signet-midnight's
+    // Signet.compact: each call consumes the next atom, so a reorder between same-width
+    // neighbours (chain_id/nonce, the two fees, algo/dest) decodes cleanly and surfaces
+    // only as an rid-mismatch drop on every record, which reads like caller fault.
+    // `decode_tx_params` likewise mirrors `EvmType2TxParams`.
     let record = SignBidirectionalRecord {
         sender: bytes_n::<32>(cursor, "sender")?,
         request_nonce: uint::<u64>(cursor, 8, "request_nonce")?,
@@ -380,11 +402,11 @@ fn decode_at(
 
 fn decode_tx_params(
     cursor: &mut AtomCursor,
-    &Capacities {
-        words,
-        entries,
-        keys,
-    }: &Capacities,
+    &EvmType2Capacities {
+        max_calldata_words,
+        max_access_list_entries,
+        max_storage_keys_per_entry,
+    }: &EvmType2Capacities,
 ) -> anyhow::Result<EvmType2TxParams> {
     let chain_id = uint::<u64>(cursor, 8, "chain_id")?;
     let nonce = uint::<u64>(cursor, 8, "nonce")?;
@@ -399,18 +421,18 @@ fn decode_tx_params(
     let is_some = boolean(cursor, "calldata.is_some")?;
     let selector = bytes_n::<4>(cursor, "calldata.selector")?;
     let no_words = uint::<u16>(cursor, 2, "calldata.no_words")?;
-    let mut word_slots = Vec::with_capacity(words);
-    for _ in 0..words {
+    let mut word_slots = Vec::with_capacity(max_calldata_words);
+    for _ in 0..max_calldata_words {
         word_slots.push(bytes_n::<32>(cursor, "calldata word")?);
     }
 
     let access_list_entry_count = uint::<u8>(cursor, 1, "access_list_entry_count")?;
-    let mut access_list = Vec::with_capacity(entries);
-    for _ in 0..entries {
+    let mut access_list = Vec::with_capacity(max_access_list_entries);
+    for _ in 0..max_access_list_entries {
         let address = bytes_n::<20>(cursor, "access list address")?;
         let storage_key_count = uint::<u8>(cursor, 1, "storage_key_count")?;
-        let mut storage_keys = Vec::with_capacity(keys);
-        for _ in 0..keys {
+        let mut storage_keys = Vec::with_capacity(max_storage_keys_per_entry);
+        for _ in 0..max_storage_keys_per_entry {
             storage_keys.push(bytes_n::<32>(cursor, "storage key")?);
         }
         access_list.push(EvmAccessListEntry {
@@ -523,14 +545,27 @@ mod tests {
 
         assert_eq!(
             widths_from_record(&minimal_record()).len(),
-            REQUEST_FIXED_VALUE_ATOMS
+            EVM_TYPE2_FIXED_ATOMS
         );
 
         // One atom below the boundary is refused rather than underflowing the tail.
-        let err = decode_record(&cell_from_atoms(&vec![vec![0xab]; 21], &[1u32; 21]))
+        // Atom 7 is zeroed so the tx_param_type gate passes and the count check fires.
+        let mut atoms = vec![vec![0xab]; 21];
+        atoms[TX_PARAM_TYPE_ATOM] = Vec::new();
+        let err = decode_record(&cell_from_atoms(&atoms, &[1u32; 21]))
             .expect_err("21 atoms cannot hold the fixed fields")
             .to_string();
         assert!(err.contains("21") && err.contains("22"), "err: {err}");
+    }
+
+    #[test]
+    fn decode_record_rejects_a_foreign_tx_param_type_by_name() {
+        let mut record = sample_record();
+        record.tx_param_type = 1;
+        let err = decode_record(&cell_from_record(&record))
+            .expect_err("a reserved tx_param_type must fail by name, not as capacity arithmetic")
+            .to_string();
+        assert!(err.contains("tx_param_type 1"), "err: {err}");
     }
 
     #[test]
