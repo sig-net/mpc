@@ -3,8 +3,8 @@
 use crate::config::MidnightConfig;
 use crate::convert::to_sign_request;
 use crate::reader::{
-    decode_notification, resolve_verified_record, signet_field_node, unpack_notification_v1, Node,
-    Resolved,
+    decode_notification, resolve_verified_record, signet_field_node_by_path,
+    unpack_notification_v1, Node, Resolved,
 };
 use crate::rpc::{is_state_unservable, BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
@@ -131,7 +131,7 @@ impl ChainSource for LiveSource {
         let mut stream = self.rpc.subscribe_finalized().await?;
         Ok(AbortOnDrop(tokio::spawn(async move {
             while let Some(block) = stream.next().await {
-                if tx.send(block.block_ref()).await.is_err() {
+                if tx.send(block).await.is_err() {
                     return;
                 }
             }
@@ -139,17 +139,14 @@ impl ChainSource for LiveSource {
     }
 }
 
-/// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }` recovered
-/// from its atom-preserving wire key: two trimmed atoms, the count folded little-endian
-/// and the rid re-padded.
-fn signet_map_key_rid(key: &AlignedValue) -> Option<(u64, [u8; 32])> {
+/// The request id of a composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`
+/// wire key: two trimmed atoms, the count checked as a `Uint<64>` and the rid re-padded.
+fn signet_map_key_rid(key: &AlignedValue) -> Option<[u8; 32]> {
     let [count, rid] = key.value.0.as_slice() else {
         return None;
     };
-    Some((
-        u64::try_from(count).ok()?,
-        <[u8; 32]>::try_from(rid.clone()).ok()?,
-    ))
+    u64::try_from(count).ok()?;
+    <[u8; 32]>::try_from(rid.clone()).ok()
 }
 
 fn unix_now() -> u64 {
@@ -174,7 +171,8 @@ fn central_map_entries(
     field_name: &'static str,
     height: u64,
 ) -> Option<Vec<MapEntry>> {
-    match signet_field_node(tree, usize::from(field)) {
+    // The central singleton is flat, so a field number is a depth-1 path.
+    match signet_field_node_by_path(tree, &[field]) {
         Ok(StateValue::Map(entries)) => Some(
             entries
                 .iter()
@@ -245,6 +243,13 @@ fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
         );
     }
     err
+}
+
+/// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
+/// mid-flight, which every caller answers by returning `Ok(())`.
+enum Indexed {
+    Done,
+    Cancelled,
 }
 
 /// The outcome of an operation run under [`retry_until_cancelled`].
@@ -344,7 +349,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 // common during catchup from before deployment.
                 None => Some(Vec::new()),
             };
-        let entries = read_entries.clone().unwrap_or_default();
+        let entries: &[MapEntry] = read_entries.as_deref().unwrap_or_default();
 
         // `None` is "could not read the parent", not "the parent had no entries", and
         // is the one state the diff below must refuse to subtract.
@@ -409,7 +414,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         height: u64,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
-        let Some((_, rid)) = signet_map_key_rid(&entry.key) else {
+        let Some(rid) = signet_map_key_rid(&entry.key) else {
             return Ok(drop_entry(
                 "malformed-map-key",
                 height,
@@ -480,20 +485,19 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 ));
             }
         };
-        let field =
-            match signet_field_node(&caller_tree, usize::from(unpacked.requests_index_field)) {
-                Ok(field) => field,
-                Err(err) => {
-                    // Producer-supplied data, so an out-of-range walk is a per-entry
-                    // drop rather than an abort.
-                    return Ok(drop_entry(
-                        "requests-field-walk",
-                        height,
-                        Some(rid),
-                        &format!("{err:#}"),
-                    ));
-                }
-            };
+        let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
+            Ok(field) => field,
+            Err(err) => {
+                // Producer-supplied data, so an out-of-range walk is a per-entry
+                // drop rather than an abort.
+                return Ok(drop_entry(
+                    "requests-field-walk",
+                    height,
+                    Some(rid),
+                    &format!("{err:#}"),
+                ));
+            }
+        };
         // The resolver reports nothing and hands back the reason, so this is the only
         // place a resolution is logged.
         let record = match resolve_verified_record(field, rid) {
@@ -556,6 +560,51 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 _ = cancel.cancelled() => return Retried::Cancelled,
                 _ = tokio::time::sleep(RETRY_DELAY) => {}
             }
+        }
+    }
+
+    /// One catchup or gap height: resolve the number to its finalized block, then
+    /// [`index_block`](Self::index_block).
+    async fn index_height<C: ChainSource>(
+        &self,
+        source: &C,
+        cache: &mut Option<(String, Vec<MapEntry>)>,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        number: u64,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Indexed> {
+        let block =
+            match retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
+                .await
+            {
+                Retried::Done(block) => block,
+                Retried::Cancelled => return Ok(Indexed::Cancelled),
+                Retried::Unservable(err) => return Err(note_unservable(err, number)),
+            };
+        self.index_block(source, cache, events_tx, &block, cancel)
+            .await
+    }
+
+    /// Processes and emits one block under the retry policy, surfacing the pruning
+    /// signature as the error that restarts the run.
+    async fn index_block<C: ChainSource>(
+        &self,
+        source: &C,
+        cache: &mut Option<(String, Vec<MapEntry>)>,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        block: &BlockRef,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Indexed> {
+        match self
+            .process_block_retrying(source, cache, block, cancel)
+            .await
+        {
+            Retried::Done(requests) => {
+                self.emit_block(events_tx, block, requests).await?;
+                Ok(Indexed::Done)
+            }
+            Retried::Cancelled => Ok(Indexed::Cancelled),
+            Retried::Unservable(err) => Err(note_unservable(err, block.number)),
         }
     }
 
@@ -631,25 +680,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             last_processed = anchor.number;
         } else {
             for number in (checkpoint + 1)..=anchor.number {
-                let block = match retry_until_cancelled("block lookup", number, &cancel, || {
-                    source.block_at(number)
-                })
-                .await
-                {
-                    Retried::Done(block) => block,
-                    Retried::Cancelled => return Ok(()),
-                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                };
                 match self
-                    .process_block_retrying(source, &mut cache, &block, &cancel)
-                    .await
+                    .index_height(source, &mut cache, &events_tx, number, &cancel)
+                    .await?
                 {
-                    Retried::Done(requests) => {
-                        self.emit_block(&events_tx, &block, requests).await?;
-                        last_processed = number;
-                    }
-                    Retried::Cancelled => return Ok(()),
-                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
+                    Indexed::Done => last_processed = number,
+                    Indexed::Cancelled => return Ok(()),
                 }
             }
         }
@@ -677,35 +713,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             // Close any finality gap so a lagging subscription cannot skip
             // notifications; each height processes exactly like catchup.
             for number in (last_processed + 1)..block.number {
-                let gap = match retry_until_cancelled("block lookup", number, &cancel, || {
-                    source.block_at(number)
-                })
-                .await
+                match self
+                    .index_height(source, &mut cache, &events_tx, number, &cancel)
+                    .await?
                 {
-                    Retried::Done(gap) => gap,
-                    Retried::Cancelled => return Ok(()),
-                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                };
-                let requests = match self
-                    .process_block_retrying(source, &mut cache, &gap, &cancel)
-                    .await
-                {
-                    Retried::Done(requests) => requests,
-                    Retried::Cancelled => return Ok(()),
-                    Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                };
-                self.emit_block(&events_tx, &gap, requests).await?;
+                    Indexed::Done => {}
+                    Indexed::Cancelled => return Ok(()),
+                }
             }
-            let requests = match self
-                .process_block_retrying(source, &mut cache, &block, &cancel)
-                .await
+            match self
+                .index_block(source, &mut cache, &events_tx, &block, &cancel)
+                .await?
             {
-                Retried::Done(requests) => requests,
-                Retried::Cancelled => return Ok(()),
-                Retried::Unservable(err) => return Err(note_unservable(err, block.number)),
-            };
-            self.emit_block(&events_tx, &block, requests).await?;
-            last_processed = block.number;
+                Indexed::Done => last_processed = block.number,
+                Indexed::Cancelled => return Ok(()),
+            }
         }
     }
 }
@@ -792,10 +814,12 @@ mod tests {
         }
     }
 
-    /// One notification-map entry: V1 payload naming CALLER and REQUESTS_FIELD.
+    /// One notification-map entry: V1 payload naming CALLER and the depth-1 path
+    /// `[REQUESTS_FIELD]` (this caller is flat).
     fn notification_entry(count: u8, rid: &[u8; 32]) -> (AlignedValue, Node) {
         let mut payload = CALLER.to_vec();
-        payload.push(REQUESTS_FIELD);
+        payload.push(1); // requests_path_depth
+        payload.push(REQUESTS_FIELD); // path[0]
         (
             signet_map_key(count, rid),
             cell_from_atoms(&[vec![1u8], payload], &[1, 128]),

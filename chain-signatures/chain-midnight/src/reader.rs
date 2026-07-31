@@ -1,4 +1,4 @@
-//! Chunk-tree walk and record decode over the ledger's own `StateValue`.
+//! Ledger-tree path walk and record decode over the ledger's own `StateValue`.
 
 use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, ValueAtom};
 use midnight_onchain_state::state::StateValue;
@@ -9,11 +9,6 @@ use crate::records::{
     SignBidirectionalEventNotification, SignBidirectionalRecord,
 };
 use crate::request_id::compute_request_id;
-
-/// compactc chunk arity: past this many ledger fields the compiler stores fields in a
-/// depth-uniform tree of arity-15 chunks, filled remainder FIRST, so every chunk on the
-/// rightmost spine is full.
-const CHUNK_ARITY: usize = 15;
 
 /// Atoms of a record excluding its capacity-scaled vectors. The calldata `Maybe`'s
 /// three atoms count even when `is_some` is false.
@@ -27,42 +22,38 @@ const RECORD_TAIL_ATOMS: usize = 3;
 
 pub type Node = StateValue<DefaultDB>;
 
-/// Resolve a flat ledger field index to its node in the state tree.
-pub fn signet_field_node(root: &Node, flat_index: usize) -> anyhow::Result<&Node> {
-    let StateValue::Array(children) = root else {
-        if flat_index == 0 {
-            return Ok(root);
-        }
-        anyhow::bail!("field index {flat_index} out of range: root is a leaf");
-    };
-
-    let mut chunk_levels = 0usize;
-    let mut spine = children.iter_deref().last();
-    while let Some(StateValue::Array(kids)) = spine {
-        if kids.len() != CHUNK_ARITY {
-            break;
-        }
-        chunk_levels += 1;
-        spine = kids.iter_deref().last();
+/// Follow a resolved ledger-tree path to its node in the state tree.
+///
+/// The path is the value compactc records for a field in the caller's own
+/// `contract-info.json` (`"index"`), carried in the notification: a
+/// single-element path (`[4]`) for a flat contract's field, a longer one
+/// (`[1, 14]`) once a contract declares more than 15 fields and the compiler
+/// stores them in a chunk tree. This walks the path node for node, exactly as
+/// the generated `ledger()` accessor does, and never inspects array widths or
+/// re-derives the chunk structure, so no field whose own value is an array can
+/// be mistaken for a compiler chunk.
+pub fn signet_field_node_by_path<'a>(root: &'a Node, path: &[u8]) -> anyhow::Result<&'a Node> {
+    anyhow::ensure!(!path.is_empty(), "ledger field path is empty");
+    let mut node = root;
+    for (level, &index) in path.iter().enumerate() {
+        let StateValue::Array(children) = node else {
+            // A one-field contract stores its field as the bare (non-array)
+            // root, addressable only as the whole state at a final [0]; the
+            // compiled accessor reads it the same way.
+            if index == 0 && level == path.len() - 1 {
+                return Ok(node);
+            }
+            anyhow::bail!("ledger field path {path:?} steps into a non-array at level {level}");
+        };
+        // `Array::get` is the ledger storage type's own indexed accessor, the read-side
+        // equivalent of the `asArray()[i]` step the generated `ledger()` accessor emits.
+        node = children.get(usize::from(index)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "ledger field path {path:?} index {index} out of range at level {level}"
+            )
+        })?;
     }
-
-    let mut fields: Vec<&Node> = children.iter_deref().collect();
-    for _ in 0..chunk_levels {
-        fields = fields
-            .iter()
-            .flat_map(|chunk| match chunk {
-                StateValue::Array(children) => children.iter_deref().collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect();
-    }
-
-    fields.get(flat_index).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "field index {flat_index} out of range: {} fields after flattening {chunk_levels} chunk levels",
-            fields.len()
-        )
-    })
+    Ok(node)
 }
 
 /// The declared width of each atom. Signet declares only `Bytes` atoms, so a widthless
@@ -236,18 +227,26 @@ pub fn decode_notification(node: &Node) -> anyhow::Result<SignBidirectionalEvent
     })
 }
 
+/// Maximum ledger-tree path depth the V1 payload carries, matching the
+/// `Vector<4, Uint<8>>` the contract's `constructSignBidirectionalEventNotificationV1`
+/// circuit packs. Depth 1 addresses up to 15 fields, depth 4 up to 15^4.
+const MAX_LEDGER_PATH_DEPTH: u8 = 4;
+
 /// The V1 notification payload, unpacked per its fixed offsets: `caller_address(32) ||
-/// requests_index_field(1) || zeros(95)`.
+/// requests_path_depth(1) || requests_path(4) || zeros(91)`, where only the first
+/// `requests_path_depth` path bytes are meaningful.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationV1 {
     pub caller_address: [u8; 32],
-    /// The ledger field position of the caller's request index: a per-integrator value
-    /// the notification carries, never assumed.
-    pub requests_index_field: u8,
+    /// The resolved ledger-tree path of the caller's request index, as compactc records
+    /// it in the caller's `contract-info.json`: a per-integrator value the notification
+    /// carries, never assumed. Trimmed to its declared depth.
+    pub requests_path: Vec<u8>,
 }
 
 /// Fails closed on an unrecognised version: a future payload layout adds a branch here
-/// rather than silently misinterpreting bytes under the V1 offsets.
+/// rather than silently misinterpreting bytes under the V1 offsets. Also fails closed on
+/// a depth of zero or one past [`MAX_LEDGER_PATH_DEPTH`], the width the circuit packs.
 pub fn unpack_notification_v1(
     notification: &SignBidirectionalEventNotification,
 ) -> anyhow::Result<NotificationV1> {
@@ -258,9 +257,15 @@ pub fn unpack_notification_v1(
     );
     let mut caller_address = [0u8; 32];
     caller_address.copy_from_slice(&notification.payload[..32]);
+    let depth = notification.payload[32];
+    anyhow::ensure!(
+        (1..=MAX_LEDGER_PATH_DEPTH).contains(&depth),
+        "notification requests_path_depth {depth} is out of range (expected 1 to {MAX_LEDGER_PATH_DEPTH})"
+    );
+    let requests_path = notification.payload[33..33 + usize::from(depth)].to_vec();
     Ok(NotificationV1 {
         caller_address,
-        requests_index_field: notification.payload[32],
+        requests_path,
     })
 }
 
@@ -459,67 +464,46 @@ mod tests {
     }
 
     #[test]
-    fn signet_field_node_flattens_chunk_shapes() {
-        // Flat: fields are the root's children.
-        let direct = array_of((0..5).map(leaf).collect());
-        for index in 0..5u8 {
-            assert_eq!(
-                marker_of(signet_field_node(&direct, index.into()).unwrap()),
-                index
-            );
-        }
-        assert!(signet_field_node(&direct, 5).is_err());
-
-        // 16 fields chunk to [1, 15], remainder FIRST.
-        let sixteen = array_of(vec![
-            array_of(vec![leaf(0)]),
-            array_of((1..16).map(leaf).collect()),
+    fn signet_field_node_by_path_threads_levels_and_maps_edges() {
+        // Over the ledger's own `Array::get`, this function adds only a path
+        // loop, an empty-path guard, leaf/non-array handling, and mapping a
+        // missing index to our error. Only that glue is tested here; that
+        // `Array::get` indexes correctly at any position or depth is the ledger
+        // library's to test, not ours.
+        let nested = array_of(vec![
+            array_of(vec![leaf(0), leaf(1)]),
+            array_of(vec![leaf(2), leaf(3)]),
         ]);
-        for index in [0usize, 1, 5, 15] {
-            assert_eq!(
-                marker_of(signet_field_node(&sixteen, index).unwrap()),
-                index as u8
-            );
-        }
 
-        // 27 fields chunk to [12, 15].
-        let twenty_seven = array_of(vec![
-            array_of((0..12).map(leaf).collect()),
-            array_of((12..27).map(leaf).collect()),
-        ]);
-        for index in [0usize, 11, 12, 26] {
-            assert_eq!(
-                marker_of(signet_field_node(&twenty_seven, index).unwrap()),
-                index as u8
-            );
-        }
-        assert!(signet_field_node(&twenty_seven, 27).is_err());
+        // The loop threads `node` through each level to the addressed leaf.
+        assert_eq!(
+            marker_of(signet_field_node_by_path(&nested, &[1, 0]).unwrap()),
+            2
+        );
 
-        // Two chunk levels: the 226-field shape, one level deeper.
-        let two_level = array_of(vec![
-            array_of(vec![array_of(vec![leaf(0)])]),
-            array_of(
-                (0..15)
-                    .map(|chunk| {
-                        array_of((0..15).map(|i| leaf((1 + chunk * 15 + i) as u8)).collect())
-                    })
-                    .collect(),
-            ),
-        ]);
-        for index in [0usize, 1, 15, 16, 225] {
-            assert_eq!(
-                marker_of(signet_field_node(&two_level, index).unwrap()),
-                index as u8
-            );
-        }
-
-        // A leaf root is field 0 and nothing else.
-        let single = leaf(9);
-        assert_eq!(marker_of(signet_field_node(&single, 0).unwrap()), 9);
-        assert!(signet_field_node(&single, 1)
+        // A missing index at any level becomes our error rather than a panic.
+        assert!(signet_field_node_by_path(&nested, &[1, 9])
             .unwrap_err()
             .to_string()
-            .contains("leaf"));
+            .contains("out of range"));
+
+        // An empty path resolves nothing.
+        assert!(signet_field_node_by_path(&nested, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("empty"));
+
+        // A leaf (non-array) node is addressable only as the whole state at a
+        // final [0]; any other step into it is refused.
+        let single = leaf(9);
+        assert_eq!(
+            marker_of(signet_field_node_by_path(&single, &[0]).unwrap()),
+            9
+        );
+        assert!(signet_field_node_by_path(&single, &[1])
+            .unwrap_err()
+            .to_string()
+            .contains("non-array"));
     }
 
     #[test]
@@ -743,18 +727,24 @@ mod tests {
     }
 
     #[test]
-    fn unpack_notification_v1_rejects_other_versions() {
+    fn unpack_notification_v1_decodes_path_and_fails_closed() {
+        // A depth-2 path [1, 14], with a non-zero byte past the depth to prove
+        // the decode trims to the declared depth rather than reading padding.
         let mut payload = [0u8; 128];
         payload[..32].copy_from_slice(&[0xab; 32]);
-        payload[32] = 4;
+        payload[32] = 2; // requests_path_depth
+        payload[33] = 1; // path[0]
+        payload[34] = 14; // path[1]
+        payload[35] = 99; // past the depth: must not appear in requests_path
 
         let notification =
             decode_notification(&cell_from_atoms(&[vec![1u8], payload.to_vec()], &[1, 128]))
                 .expect("v1 notification decodes");
         let unpacked = unpack_notification_v1(&notification).expect("v1 payload unpacks");
         assert_eq!(unpacked.caller_address, [0xab; 32]);
-        assert_eq!(unpacked.requests_index_field, 4);
+        assert_eq!(unpacked.requests_path, vec![1, 14]);
 
+        // A future version fails closed.
         let future = SignBidirectionalEventNotification {
             version: 2,
             payload,
@@ -763,5 +753,20 @@ mod tests {
             .expect_err("future versions must fail closed")
             .to_string();
         assert!(err.contains("version 2"), "err: {err}");
+
+        // A depth of zero or one past the packed width fails closed.
+        for bad_depth in [0u8, MAX_LEDGER_PATH_DEPTH + 1] {
+            let mut p = [0u8; 128];
+            p[..32].copy_from_slice(&[0xab; 32]);
+            p[32] = bad_depth;
+            let bad = SignBidirectionalEventNotification {
+                version: 1,
+                payload: p,
+            };
+            let err = unpack_notification_v1(&bad)
+                .expect_err("an out-of-range depth must fail closed")
+                .to_string();
+            assert!(err.contains("requests_path_depth"), "err: {err}");
+        }
     }
 }

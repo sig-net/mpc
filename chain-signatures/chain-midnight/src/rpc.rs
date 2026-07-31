@@ -22,21 +22,6 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 pub(crate) const STATE_UNSERVABLE_MSG: &str =
     "midnight node cannot serve contract state at that block (pruned or unknown hash)";
 
-/// A finalized block, wrapping the subxt handle so extrinsics can be fetched lazily.
-pub struct FinalizedBlock {
-    block: subxt::blocks::Block<SubstrateConfig, OnlineClient<SubstrateConfig>>,
-}
-
-impl FinalizedBlock {
-    pub fn block_ref(&self) -> BlockRef {
-        BlockRef {
-            number: u64::from(self.block.number()),
-            hash: hex_0x(self.block.hash()),
-            parent_hash: hex_0x(self.block.header().parent_hash),
-        }
-    }
-}
-
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
 /// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
 /// them.
@@ -45,6 +30,18 @@ pub struct BlockRef {
     pub number: u64,
     pub hash: String,
     pub parent_hash: String,
+}
+
+impl BlockRef {
+    fn from_block(
+        block: &subxt::blocks::Block<SubstrateConfig, OnlineClient<SubstrateConfig>>,
+    ) -> Self {
+        Self {
+            number: u64::from(block.number()),
+            hash: hex_0x(block.hash()),
+            parent_hash: hex_0x(block.header().parent_hash),
+        }
+    }
 }
 
 fn hex_0x(hash: H256) -> String {
@@ -106,7 +103,7 @@ impl MidnightRpc {
     /// Stream of finalized blocks.
     pub async fn subscribe_finalized(
         &self,
-    ) -> anyhow::Result<impl Stream<Item = FinalizedBlock> + Send + Unpin + 'static> {
+    ) -> anyhow::Result<impl Stream<Item = BlockRef> + Send + Unpin + 'static> {
         let sub = tokio::time::timeout(
             self.connect_timeout,
             self.client.blocks().subscribe_finalized(),
@@ -124,7 +121,7 @@ impl MidnightRpc {
                     tokio::select! {
                         maybe = sub.next() => match maybe {
                             Some(Ok(block)) => {
-                                return Some((FinalizedBlock { block }, (sub, Instant::now())));
+                                return Some((BlockRef::from_block(&block), (sub, Instant::now())));
                             }
                             Some(Err(err)) => {
                                 tracing::warn!("midnight block stream failed: {err}; ending stream");
@@ -310,11 +307,7 @@ mod tests {
             .subscribe_finalized()
             .await
             .expect("subscribe finalized");
-        let block = blocks
-            .next()
-            .await
-            .expect("one finalized block")
-            .block_ref();
+        let block = blocks.next().await.expect("one finalized block");
         assert!(block.number > 0);
         assert_ne!(block.hash, block.parent_hash);
     }

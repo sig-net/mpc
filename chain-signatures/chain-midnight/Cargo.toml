@@ -9,7 +9,6 @@ alloy.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-borsh.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
@@ -17,8 +16,6 @@ midnight-base-crypto.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
-midnight-transient-crypto.workspace = true
-midnight-ledger-v9.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
@@ -30,9 +27,3 @@ subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-
-# The read path builds its decoded types directly; serde is only how the tests
-# parse a committed golden back into them.
-[dev-dependencies]
-serde.workspace = true
-serde_json.workspace = true
