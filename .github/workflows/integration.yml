@@ -70,6 +70,12 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
       - name: Build integration test artifacts
         run: ./setup.sh
         env:
@@ -166,6 +172,15 @@ jobs:
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

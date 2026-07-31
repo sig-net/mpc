@@ -23,9 +23,7 @@ use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
-/// Protocol 84 is where the runtime starts accepting the bulk-memory and reference-types
-/// opcodes rustc emits past 1.81, and 2.12.0 is the first sandbox release carrying it.
-/// near-workspaces defaults to an older one, which rejects the contract at deploy time.
+
 pub fn candidates(names: Option<Vec<AccountId>>) -> HashMap<AccountId, CandidateInfo> {
     let mut candidates: HashMap<AccountId, CandidateInfo> = HashMap::new();
     let names = names.unwrap_or_else(|| {
