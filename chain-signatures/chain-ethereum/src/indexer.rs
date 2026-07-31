@@ -1,9 +1,8 @@
 use crate::abi::ChainSignatures;
-use crate::client::{
-    block_may_contain_logs, BlockNumber, CatchupItem, CatchupIter, EthereumClient, MaybeBlock,
-};
+use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient, MaybeBlock};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
+use crate::finalized_head::FinalizedHeadTracker;
 use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
@@ -14,10 +13,10 @@ use async_trait::async_trait;
 use futures_util::{stream, Stream, StreamExt};
 use mpc_chain_integration_core::utils::task::{retry_until_ok, AbortOnDrop, CancellationTokenExt};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
-use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, IndexedSignRequest};
+use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch};
-use tokio::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct BlockAndRequests {
@@ -58,70 +57,11 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     telemetry: T,
     client: Arc<EthereumClient>,
     contract_address: Address,
-    /// Cached finalized head maintained by `watch_finalized_head`, consulted by
+    /// Cached finalized head, maintained by a background watcher and consulted by
     /// `emit_processed_block` so each block need not poll finality independently.
-    finalized_head: watch::Sender<u64>,
+    finalized_head: FinalizedHeadTracker,
     /// Watcher nonce-gate scheduling state (first-appearance checks + retries).
     watcher_gate: Mutex<WatcherGateState>,
-}
-
-/// Tracks finalized-head advancement for stall detection, emitting the
-/// advance / backwards / stalled warnings.
-struct FinalizedHeadStall {
-    last_final: Option<u64>,
-    last_advanced_at: Instant,
-    last_stall_warn_at: Instant,
-    warn_after_secs: u64,
-    rewarn_every_secs: u64,
-}
-
-impl FinalizedHeadStall {
-    fn new(warn_after_secs: u64, rewarn_every_secs: u64) -> Self {
-        let now = Instant::now();
-        Self {
-            last_final: None,
-            last_advanced_at: now,
-            last_stall_warn_at: now,
-            warn_after_secs,
-            rewarn_every_secs,
-        }
-    }
-
-    /// Record a finalized-head sample, emitting advance/stall warnings as needed.
-    fn observe(&mut self, new_final: u64) {
-        if self.last_final.is_none_or(|n| new_final > n) {
-            self.last_advanced_at = Instant::now();
-            tracing::debug!(new_final, prev = self.last_final, "finalized head advanced");
-        }
-
-        match self.last_final.replace(new_final) {
-            Some(prev) if new_final < prev => {
-                tracing::warn!(new_final, prev, "finalized block number went backwards");
-            }
-            Some(prev) if prev == new_final => self.warn_if_stalled(new_final),
-            _ => {}
-        }
-    }
-
-    fn warn_if_stalled(&mut self, new_final: u64) {
-        let now = Instant::now();
-        let stalled_for = now.duration_since(self.last_advanced_at).as_secs();
-        if stalled_for < self.warn_after_secs {
-            return;
-        }
-        if now.duration_since(self.last_stall_warn_at).as_secs() < self.rewarn_every_secs {
-            return;
-        }
-        tracing::warn!(
-            new_final,
-            stalled_for,
-            warn_after_secs = self.warn_after_secs,
-            "ethereum finalized head has not advanced; \
-             blocks above it will not be emitted until finality catches up. \
-             If this persists the stream watchdog will restart the pipeline"
-        );
-        self.last_stall_warn_at = now;
-    }
 }
 
 impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
@@ -132,13 +72,14 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
         let contract_address = eth.contract_address;
 
+        let finalized_head = FinalizedHeadTracker::new(&eth);
         Ok(Self {
             eth,
             state_manager,
             telemetry,
             client,
             contract_address,
-            finalized_head: watch::channel(0).0,
+            finalized_head,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         })
     }
@@ -153,15 +94,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         client: Arc<EthereumClient>,
         contract_address: Address,
     ) -> Self {
+        let finalized_head = FinalizedHeadTracker::new(&eth);
         Self {
             eth,
             state_manager,
             telemetry,
             client,
             contract_address,
-            finalized_head: watch::channel(0).0,
+            finalized_head,
             watcher_gate: Mutex::new(WatcherGateState::default()),
         }
+    }
+
+    /// Spawn the background finalized-head watcher. Returns a guard whose drop
+    /// aborts the task, or `None` in optimistic mode (dev chains never report a
+    /// finalized head).
+    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> Option<AbortOnDrop> {
+        self.finalized_head
+            .spawn_watcher(self.client.clone(), cancel)
     }
 
     async fn index_live_blocks(
@@ -328,15 +278,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             execution_events,
         }: BlockAndRequests,
     ) -> anyhow::Result<()> {
-        // Optimistic mode is for demos/integration tests only: dev chains
-        // never report finality (so the wait would hang) and never reorg
-        // (so skipping the wait cannot emit stale events there).
-        if !self.eth.optimistic_requests {
-            self.wait_for_finalized_block(block_number).await?;
-        }
+        // Wait for the finalized head to reach this block number before emitting events.)
+        self.finalized_head.wait_for(block_number).await?;
 
         // Reorg hash-check: only for blocks not covered by the finalized head.
-        if *self.finalized_head.borrow() < block_number {
+        if self.finalized_head.current() < block_number {
             let block = self
                 .client
                 .as_ref()
@@ -526,110 +472,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         self.process_block(events_tx, block, logs).await?;
         Ok(())
     }
-
-    /// Blocks until the cached finalized head (`self.finalized_head`, maintained
-    /// by `watch_finalized_head`) covers `block_number`.
-    async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
-        // Fast path: the cached head already covers this block.
-        if *self.finalized_head.borrow() >= block_number {
-            return Ok(());
-        }
-
-        // Slow path: wait for the watcher to publish an advance
-        let mut rx = self.finalized_head.subscribe();
-        loop {
-            if *rx.borrow_and_update() >= block_number {
-                return Ok(());
-            }
-            if rx.changed().await.is_err() {
-                anyhow::bail!(
-                    "finalized-head watcher terminated before block {block_number} finalized"
-                );
-            }
-        }
-    }
-
-    /// Spawn the background finalized-head watcher that maintains `finalized_head`.
-    ///
-    /// Returns a guard whose drop aborts the task, or `None` in optimistic mode
-    /// (dev chains never report a finalized head).
-    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> Option<AbortOnDrop> {
-        (!self.eth.optimistic_requests).then(|| {
-            AbortOnDrop(tokio::spawn(Self::watch_finalized_head(
-                self.client.clone(),
-                self.finalized_head.clone(),
-                self.eth.refresh_finalized_interval,
-                self.eth.indexer.max_finalized_failures,
-                self.eth.indexer.stall_rewarn_secs,
-                cancel,
-            )))
-        })
-    }
-
-    // TODO: Currently if this dies silently we have to wait 35 min for the stream supervisor to restart it. Implement faster failure detection and restart.
-    /// Background task maintaining the cached finalized head (`self.finalized_head`).
-    ///
-    /// Polls `eth_getBlockByNumber(Finalized)` on `refresh_finalized_interval`
-    /// and publishes advances over the `watch` channel.
-    ///
-    /// Retries forever, the stream supervisor watchdog remains the
-    /// escape hatch.
-    async fn watch_finalized_head(
-        client: Arc<EthereumClient>,
-        head: watch::Sender<u64>,
-        refresh_interval_ms: u64,
-        max_failures: u32,
-        stall_rewarn_secs: u64,
-        cancel: CancellationToken,
-    ) {
-        let interval = Duration::from_millis(refresh_interval_ms);
-        let mut stall = FinalizedHeadStall::new(
-            Chain::Ethereum.expected_finality_time_secs(),
-            stall_rewarn_secs,
-        );
-        let mut failures = 0u32;
-
-        tracing::info!("ethereum finalized-head watcher started");
-
-        loop {
-            match client
-                .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
-                .await
-            {
-                Ok(Some(block)) => {
-                    failures = 0;
-                    let new_final = block.header.number;
-                    stall.observe(new_final);
-                    head.send_if_modified(|cur| {
-                        if new_final > *cur {
-                            *cur = new_final;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        "ethereum get_block(Finalized) returned no block; watcher keeps retrying"
-                    );
-                }
-                Err(err) => {
-                    failures = failures.saturating_add(1);
-                    tracing::warn!(
-                        ?err,
-                        failures,
-                        max_failures,
-                        "ethereum get_block(Finalized) failed; watcher keeps retrying"
-                    );
-                }
-            }
-
-            if cancel.cancelled_within(interval).await {
-                return;
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -658,7 +500,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             }
         };
 
-        let _finalized_watcher = self.spawn_finalized_head_watcher(cancel.clone());
+        // Spawn the finalized head watcher.
+        let _finalized_watcher = self
+            .finalized_head
+            .spawn_watcher(self.client.clone(), cancel.clone());
 
         let mut catchup_iter = self.catchup_blocks(anchor_height).await;
         loop {
@@ -810,7 +655,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Ensure blocks are considered finalized to avoid reorg-check refetches in process_catchup
-        indexer.finalized_head.send_replace(100);
+        indexer.finalized_head.set_head(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -871,7 +716,7 @@ mod tests {
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
-        indexer.finalized_head.send_replace(100);
+        indexer.finalized_head.set_head(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -941,7 +786,7 @@ mod tests {
         let (events_tx, mut events_rx) = chain_event_channel();
 
         // Ensure block is considered finalized to avoid the reorg-check refetch
-        indexer.finalized_head.send_replace(100);
+        indexer.finalized_head.set_head(100);
 
         let item = CatchupItem::Missing(BlockId::Number(BlockNumberOrTag::Number(block_number)));
         indexer
@@ -989,7 +834,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Ensure block is considered finalized to avoid the reorg-check refetch
-        indexer.finalized_head.send_replace(100);
+        indexer.finalized_head.set_head(100);
 
         let mut iter = crate::client::CatchupIter::new(
             indexer.client.clone(),
@@ -1142,14 +987,14 @@ mod tests {
             .create_async()
             .await;
 
-        // Optimistic mode (default) so `wait_for_finalized_block` is skipped.
+        // Optimistic mode (default) so the finalized-head wait is skipped.
         let indexer = test_utils::TestIndexerBuilder::new(server.url())
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Block 42 was finalized at fetch time (head sampled at 100), so the
         // re-fetch + reorg check is skipped.
-        indexer.finalized_head.send_replace(100);
+        indexer.finalized_head.set_head(100);
 
         indexer
             .process_catchup_item(&events_tx, &item)
@@ -1195,7 +1040,7 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
         // Finalized head sampled at 10 → block 42 is unfinalized at fetch time.
-        indexer.finalized_head.send_replace(10);
+        indexer.finalized_head.set_head(10);
 
         indexer
             .process_catchup_item(&events_tx, &item)
@@ -1317,92 +1162,6 @@ mod tests {
 
         logs_mock.assert_async().await;
         reorg_mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn wait_for_finalized_block_skips_rpc_when_head_covers_block() {
-        let mut server = Server::new_async().await;
-
-        // The cached head covers the block, so no eth_getBlockByNumber(Finalized)
-        // should be issued at all.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["finalized", false]
-            })))
-            .expect(0)
-            .create_async()
-            .await;
-
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .optimistic_requests(false)
-            .build()
-            .await;
-
-        indexer.finalized_head.send_replace(100);
-
-        indexer
-            .wait_for_finalized_block(42)
-            .await
-            .expect("head covers block; should return without an RPC");
-    }
-
-    #[tokio::test]
-    async fn wait_for_finalized_block_resolves_when_head_advances() {
-        let server = Server::new_async().await;
-
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .optimistic_requests(false)
-            .build()
-            .await;
-
-        // Head starts at 0; the wait must block until the head advances past 50.
-        let head = indexer.finalized_head.clone();
-        let advancer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            head.send_replace(100);
-        });
-
-        indexer
-            .wait_for_finalized_block(50)
-            .await
-            .expect("should resolve once the head advances past the block");
-
-        advancer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn watch_finalized_head_advances_head_and_unblocks_waiter() {
-        let mut server = Server::new_async().await;
-
-        // The watcher polls eth_getBlockByNumber(finalized); serve a head past 50.
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["finalized", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::block_response(1, 100).to_string())
-            .create_async()
-            .await;
-
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .optimistic_requests(false)
-            .build()
-            .await;
-
-        let cancel = CancellationToken::new();
-        let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
-
-        indexer
-            .wait_for_finalized_block(50)
-            .await
-            .expect("watcher should advance the head past 50 and unblock the wait");
-
-        cancel.cancel();
     }
 
     /// JSON-RPC response for a single `eth_getBlockByNumber` request, echoing
