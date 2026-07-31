@@ -6,6 +6,7 @@ pub mod bench;
 mod client;
 mod config;
 mod event_parsing;
+mod execution_watcher;
 mod indexer;
 mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
