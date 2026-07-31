@@ -463,8 +463,9 @@ impl VersionedMpcContract {
     /// Vote to change the running threshold without otherwise modifying the
     /// participant set. Each participant backs at most one proposed threshold
     /// at a time (casting a new vote removes any prior vote). The first
-    /// proposed threshold to reach the current `threshold` triggers a
-    /// resharing whose `new_threshold` is the proposed value.
+    /// proposed threshold to reach the current `threshold` triggers a resharing
+    /// whose `new_threshold` is the proposed value. Voting for the same
+    /// threshold as the current one in the network will remove a prior vote.
     #[handle_result]
     pub fn vote_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
         log!(
@@ -485,7 +486,8 @@ impl VersionedMpcContract {
             }) => {
                 let participants_len = participants.len();
                 if new_threshold == *threshold {
-                    return Err(VoteError::ThresholdUnchanged.into());
+                    threshold_votes.remove_vote(&voter);
+                    return Ok(false);
                 }
                 let min_threshold = compute_threshold(participants_len);
                 let max_threshold = participants_len.saturating_sub(1);

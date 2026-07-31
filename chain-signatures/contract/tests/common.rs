@@ -146,8 +146,7 @@ pub async fn init_env_with_participant_count(
         let account = worker.dev_create_account().await.unwrap();
         accounts.push(account);
     }
-    let candidate_map =
-        candidates(Some(accounts.iter().map(|a| a.id().clone()).collect()));
+    let candidate_map = candidates(Some(accounts.iter().map(|a| a.id().clone()).collect()));
 
     let participants_map = candidate_map
         .into_iter()

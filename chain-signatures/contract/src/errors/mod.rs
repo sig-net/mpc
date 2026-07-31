@@ -63,8 +63,6 @@ pub enum VoteError {
         "Proposed new threshold must be between compute_threshold and the number of participants."
     )]
     ThresholdOutOfRange,
-    #[error("Proposed new threshold is the same as the current threshold.")]
-    ThresholdUnchanged,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

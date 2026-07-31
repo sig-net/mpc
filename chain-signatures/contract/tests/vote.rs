@@ -707,8 +707,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     // We use `init_env_with_participant_count` here because the default
     // 3-participant setup has no room for a threshold change (min=2, max=2,
     // current=2).
-    let (worker, contract, accounts, _sk) =
-        common::init_env_with_participant_count(7, 5).await;
+    let (worker, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
 
     // A single vote for new_threshold=6 is not enough to trigger resharing
     // (threshold is 5).
@@ -781,8 +780,7 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
     // 10 participants, threshold 7 — valid alternatives: 8, 9.
-    let (_, contract, accounts, _sk) =
-        common::init_env_with_participant_count(10, 7).await;
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 7).await;
 
     // Vote for threshold 8.
     let execution = accounts[0]
@@ -838,21 +836,66 @@ async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 6).await;
+
+    // Vote for threshold 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+        assert_eq!(
+            running.threshold_votes.votes.get(&8).map(|s| s.len()),
+            Some(1)
+        );
+    } else {
+        panic!("expected running state");
+    }
+
+    // Voting for current threshold (6) removes the vote for 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+        assert!(
+            running.threshold_votes.votes.get(&8).is_none(),
+            "vote for threshold 8 must be removed after voting for current threshold"
+        );
+    } else {
+        panic!("expected running state");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_vote_threshold_validation() -> anyhow::Result<()> {
     // Use the configurable helper here — the default 3-participant setup has
-    // no room for a threshold change (min=2, max=2, current=2), so the only
-    // possible error is ThresholdUnchanged.  We need enough participants for
-    // the full range of validation errors to be reachable.
-    let (_, contract, accounts, _sk) =
-        common::init_env_with_participant_count(7, 5).await;
+    // no room for a threshold change (min=2, max=2, current=2).
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
 
-    // new_threshold == current threshold (5) is rejected as a no-op.
+    // new_threshold == current threshold (5) succeeds and removes existing vote.
     let execution = accounts[0]
         .call(contract.id(), "vote_threshold")
         .args_json(json!({ "new_threshold": 5 }))
         .transact()
         .await?;
-    assert!(execution.is_failure(), "no-op threshold must be rejected");
+    assert!(
+        execution.is_success(),
+        "voting current threshold should succeed"
+    );
 
     // new_threshold > participants.len() (7) is rejected.
     let execution = accounts[0]
@@ -901,8 +944,7 @@ async fn test_vote_threshold_validation() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
     // 7 participants, threshold 5 ─ valid changes are to 6.
-    let (_, contract, accounts, _sk) =
-        common::init_env_with_participant_count(7, 5).await;
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
 
     // Raise the threshold from 5 → 6. Current threshold is 5, so 5 votes
     // are required.

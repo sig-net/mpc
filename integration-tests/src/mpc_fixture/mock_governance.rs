@@ -84,6 +84,10 @@ impl Governance for MockGovernance {
         self.protocol_state_tx.send_if_modified(|protocol_state| {
             let modified = match protocol_state {
                 Some(ProtocolState::Running(ref mut state)) => {
+                    if new_threshold == state.threshold {
+                        state.threshold_votes.remove_vote(&self.me);
+                        return true;
+                    }
                     let votes_for_threshold =
                         state.threshold_votes.vote(new_threshold, self.me.clone());
 
