@@ -52,9 +52,16 @@ pub fn to_sign_request(
         reserved => anyhow::bail!("unsupported dest {reserved}: only unused (0) is real"),
     };
 
-    let path = render_padded_ascii(&record.path, "path")?;
+    // The contract declares path as 32 opaque bytes (a raw commitment is the common
+    // case), so the rendering must accept any of them: full-width lowercase hex, never
+    // trimmed, or `0xab..00` and `0xab..` would derive the same key.
+    let path = hex::encode(record.path);
     let caip2_id = render_padded_ascii(&record.caip2_id, "caip2_id")?;
-    let params = render_padded_ascii(&record.params, "params")?;
+    anyhow::ensure!(
+        record.params == [0u8; 64],
+        "params is reserved and must be blank, got {}",
+        hex::encode(record.params)
+    );
 
     // Only via the gated path: `serialized_transaction` routes through `to_unsigned_tx`
     // and inherits its gates.
@@ -86,7 +93,7 @@ pub fn to_sign_request(
             path,
             algo,
             dest,
-            params,
+            params: String::new(),
             output_deserialization_schema: record.output_deserialization_schema.clone(),
             respond_serialization_schema: record.respond_serialization_schema.clone(),
             chain: Chain::Midnight,
@@ -95,8 +102,8 @@ pub fn to_sign_request(
     ))
 }
 
-/// The `pad(N, "text")` convention every string-ish record field uses: trailing NULs
-/// are padding and are trimmed, and what remains must be UTF-8 with no interior NULs.
+/// The `pad(N, "text")` convention `caip2_id` uses: trailing NULs are padding and are
+/// trimmed, and what remains must be UTF-8 with no interior NULs.
 fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
     let trimmed_len = bytes.len() - bytes.iter().rev().take_while(|byte| **byte == 0).count();
     let trimmed = &bytes[..trimmed_len];
@@ -147,7 +154,10 @@ mod tests {
         assert_eq!(event.caip2_id, "eip155:31337");
         assert_eq!(event.key_version, 1);
         assert_eq!(event.deposit, 0, "Midnight V1 has no payment");
-        assert_eq!(event.path, "caller-path");
+        assert_eq!(
+            event.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
+            "the full 32 path bytes as lowercase hex, padding included"
+        );
         assert_eq!(
             event.output_deserialization_schema,
             record.output_deserialization_schema
@@ -156,6 +166,7 @@ mod tests {
             event.respond_serialization_schema,
             record.respond_serialization_schema
         );
+        assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(
             event.chain_ctx, None,
@@ -189,7 +200,11 @@ mod tests {
             .expect("key_version 0 is accepted");
         assert_eq!(
             legacy.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(0, &"ab".repeat(32), "caller-path"),
+            mpc_crypto::kdf::derive_epsilon_midnight(
+                0,
+                &"ab".repeat(32),
+                &hex::encode(record.path)
+            ),
             "version 0 must route through the legacy derivation"
         );
 
@@ -202,39 +217,43 @@ mod tests {
     }
 
     #[test]
-    fn render_padded_ascii_rejects_non_utf8_path() {
-        // NUL-trimmed ASCII, never lossy and never a hex fallback.
-        assert_eq!(
-            render_padded_ascii(&ascii_padded::<32>(b"caller-path"), "path")
-                .expect("ascii renders"),
-            "caller-path"
-        );
-        // The oracle's empty-path vector derives with "", so all-NUL is legal.
-        assert_eq!(
-            render_padded_ascii(&[0u8; 32], "path").expect("empty renders"),
-            ""
-        );
+    fn to_sign_request_hex_encodes_opaque_paths() {
+        // A raw commitment hash is the common path; it must convert, not drop.
+        let mut record = caller_record();
+        record.path = [0xff; 32];
+        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect("opaque path bytes convert");
+        assert_eq!(request.args.path, "ff".repeat(32));
 
-        let err = render_padded_ascii(&[0xff; 32], "path")
-            .expect_err("non-UTF-8 path bytes must fail closed")
-            .to_string();
-        assert!(err.contains("path"), "err: {err}");
-
-        let err = render_padded_ascii(&ascii_padded::<32>(b"a\0b"), "path")
-            .expect_err("an interior NUL must fail closed")
-            .to_string();
-        assert!(err.contains("interior NUL"), "err: {err}");
+        // No trimming: an all-NUL path is 64 zeros, distinct from any trimmed twin.
+        let mut record = caller_record();
+        record.path = [0u8; 32];
+        let request = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect("all-NUL path converts");
+        assert_eq!(request.args.path, "00".repeat(32));
     }
 
     #[test]
-    fn render_padded_ascii_rejects_every_malformed_field() {
-        // caip2_id follows the same pad(N, "text") convention as path, so it renders
-        // through the same fail-closed rule and is named in its own error.
+    fn render_padded_ascii_gates_caip2() {
+        assert_eq!(
+            render_padded_ascii(&ascii_padded::<32>(b"eip155:1"), "caip2_id").expect("renders"),
+            "eip155:1"
+        );
+        for bytes in [[0xff; 32], ascii_padded::<32>(b"a\0b")] {
+            let err = render_padded_ascii(&bytes, "caip2_id")
+                .expect_err("malformed caip2 bytes must fail closed")
+                .to_string();
+            assert!(err.contains("caip2_id"), "err: {err}");
+        }
+    }
+
+    #[test]
+    fn to_sign_request_requires_blank_params() {
         let mut record = caller_record();
-        record.caip2_id = [0xff; 32];
+        record.params[0] = 1;
         let err = to_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect_err("non-UTF-8 caip2 bytes must fail closed")
+            .expect_err("params is reserved: non-blank bytes must fail closed")
             .to_string();
-        assert!(err.contains("caip2_id"), "err: {err}");
+        assert!(err.contains("params"), "err: {err}");
     }
 }

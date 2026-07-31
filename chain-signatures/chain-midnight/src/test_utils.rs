@@ -171,7 +171,7 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
         path: ascii_padded(b"caller-path"),
         algo: 0,
         dest: 0,
-        params: ascii_padded(b"integrator-params"),
+        params: [0u8; 64],
         tx_param_type: 0,
         tx_params: EvmType2TxParams {
             chain_id: 31337,
