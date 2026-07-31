@@ -65,27 +65,3 @@ impl ProtocolContractState {
         }
     }
 }
-
-/// Previous [`RunningContractState`] shape, before the `threshold_votes` field
-/// was introduced. Used only by [`crate::MpcContract::migrate`] to deserialize
-/// state that was stored by an older contract version and bring it forward.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-pub struct OldRunningContractState {
-    pub epoch: u64,
-    pub participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
-    pub candidates: Candidates,
-    pub join_votes: Votes,
-    pub leave_votes: Votes,
-}
-
-/// Previous [`ProtocolContractState`] shape, matching [`OldRunningContractState`].
-/// Used only by [`crate::MpcContract::migrate`] for legacy deserialization.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-pub enum OldProtocolContractState {
-    NotInitialized,
-    Initializing(InitializingContractState),
-    Running(OldRunningContractState),
-    Resharing(ResharingContractState),
-}

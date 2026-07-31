@@ -3,6 +3,8 @@ use common::init_env;
 
 use serde_json::json;
 
+use near_workspaces::types::NearToken;
+
 #[tokio::test]
 async fn test_join() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
@@ -16,6 +18,7 @@ async fn test_join() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
 
@@ -38,6 +41,7 @@ async fn test_join() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -50,9 +54,82 @@ async fn test_join() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_requires_deposit() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .transact()
+        .await?;
+
+    assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_rejects_oversized_url() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+
+    // Deposit is attached so the call can only fail on the url length check.
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1),
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .deposit(NearToken::from_near(1))
+        .transact()
+        .await?;
+
+    assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_refunds_excess_deposit() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    let balance = alice.view_account().await?.balance;
+    let execution = alice
+        .call(contract.id(), "join")
+        .args_json(json!({
+            "url": "127.0.0.1",
+            "cipher_pk": vec![1u8; 32],
+            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+        }))
+        .deposit(NearToken::from_near(2))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let new_balance = alice.view_account().await?.balance;
+    let spent = balance.as_millinear() - new_balance.as_millinear();
+    assert!(
+        spent < 1100,
+        "excess deposit should be refunded; spent {spent} milliNEAR"
+    );
+    assert!(
+        spent >= 1000,
+        "required join deposit should remain with the contract; spent {spent} milliNEAR"
+    );
+
     Ok(())
 }
 
@@ -69,6 +146,7 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -160,6 +238,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -207,6 +286,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_failure());
@@ -227,6 +307,7 @@ async fn test_vote_leave() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -388,6 +469,7 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -502,6 +584,7 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());
@@ -613,6 +696,7 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
             "cipher_pk": vec![1u8; 32],
             "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
         }))
+        .deposit(NearToken::from_near(1))
         .transact()
         .await?;
     assert!(execution.is_success());

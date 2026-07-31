@@ -306,10 +306,6 @@ impl ChainPublisher for HydrationClient {
                     "Hydration publish signature: published respond bidirectional signature successfully"
                 );
             }
-            SignKind::Checkpoint(_) => {
-                tracing::error!(?sign_id, "Hydration: checkpoint publishing not supported");
-                anyhow::bail!("checkpoint publishing not supported on Hydration");
-            }
         }
 
         self.telemetry.record_publish_metrics(action);

@@ -88,6 +88,12 @@ pub(super) fn test_mock_network(
                                 publish_action.request,
                             )
                         },
+                        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+                            format!("RpcAction::VoteCheckpoint({checkpoint:?})")
+                        },
+                        RpcAction::AbortCheckpoints(chain) => {
+                            format!("RpcAction::AbortCheckpoints({chain:?})")
+                        }
                     };
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;

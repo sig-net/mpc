@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::util::AffinePointExt as _;
 
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
-use mpc_primitives::{ConsensusCheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{SignId, Signature};
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -58,23 +58,6 @@ impl NearClient {
             .transact()
             .await
     }
-
-    async fn call_respond_checkpoint(
-        &self,
-        checkpoint: &ConsensusCheckpointDigest,
-        signature: &Signature,
-    ) -> Result<ExecutionFinalResult, near_fetch::Error> {
-        self.client
-            .call(&self.signer, &self.contract_id, "respond_checkpoint")
-            .args_json(json!({
-                "checkpoint": checkpoint,
-                "signature": signature,
-            }))
-            .max_gas()
-            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
-            .transact()
-            .await
-    }
 }
 
 #[async_trait::async_trait]
@@ -82,20 +65,17 @@ impl ChainPublisher for NearClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let signature = &action.signature;
-        let outcome = match &action.request.kind {
-            SignKind::Checkpoint(checkpoint) => {
-                self.call_respond_checkpoint(checkpoint, signature).await
-            }
-            _ => self.call_respond(&action.request.id, signature).await,
-        }
-        .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
-        .inspect_err(|err| {
-            tracing::error!(
-                sign_id = ?action.request.id,
-                ?err,
-                "failed to publish signature",
-            );
-        })?;
+        let outcome = self
+            .call_respond(&action.request.id, signature)
+            .await
+            .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    sign_id = ?action.request.id,
+                    ?err,
+                    "failed to publish signature",
+                );
+            })?;
 
         outcome
             .json::<()>()

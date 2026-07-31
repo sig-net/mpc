@@ -1,7 +1,4 @@
-use crate::{
-    Chain, ConsensusCheckpointDigest, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent,
-    SignId,
-};
+use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -9,7 +6,6 @@ pub enum SignKind {
     Sign,
     SignBidirectional(SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
-    Checkpoint(ConsensusCheckpointDigest),
 }
 
 /// Messages sent into the node's sign-request processing queue.
@@ -18,7 +14,6 @@ pub enum SignKind {
 pub enum SignCommand {
     Request(IndexedSignRequest),
     Completion(SignId),
-    Checkpoint(IndexedSignRequest),
     AbortChain(Chain),
 }
 
@@ -84,30 +79,6 @@ impl IndexedSignRequest {
             chain,
             unix_timestamp_indexed,
             SignKind::RespondBidirectional(tx),
-        )
-    }
-
-    pub fn checkpoint(checkpoint: ConsensusCheckpointDigest, epsilon: k256::Scalar) -> Self {
-        let payload = checkpoint.sign_payload_scalar();
-        let id = checkpoint.sign_id();
-        let entropy = id.request_id;
-        let args = SignArgs {
-            entropy,
-            epsilon,
-            payload,
-            path: checkpoint.sign_path(),
-            key_version: crate::LATEST_MPC_KEY_VERSION,
-        };
-        let unix_timestamp_indexed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self::new(
-            id,
-            args,
-            Chain::NEAR,
-            unix_timestamp_indexed,
-            SignKind::Checkpoint(checkpoint),
         )
     }
 }
