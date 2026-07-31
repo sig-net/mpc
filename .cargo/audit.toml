@@ -24,4 +24,7 @@ ignore = [
 	# no fixed upgrade is available, transitively pulled by reqwest 0.12 consumers (helios, near-jsonrpc-client, solana-rpc-client)
 	"RUSTSEC-2026-0185", # quinn-proto 0.11.14 remote memory exhaustion via unbounded out-of-order stream reassembly;
 	# blocked on Anchor 1.0.x upgrade (anchor-client 1.0.2 has a build bug against solana-rpc-client 3.x, no patch yet).
+	# wasmtime stores can mix up type indices between engines; only reachable via near-sdk's `unit-testing`
+	# dev-only dependency (near-vm-runner 0.37.2 pins wasmtime ^45, which has no patched release; blocked upstream).
+	"RUSTSEC-2026-0222",
 ]
