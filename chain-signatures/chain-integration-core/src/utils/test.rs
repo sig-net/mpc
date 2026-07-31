@@ -93,14 +93,20 @@ pub fn make_publish_action_for(
         .expect("valid signature should produce a publish action")
 }
 
+/// A stream wrapper around a `ChainIndexer` that buffers events until catchup is complete.
 pub struct ChainIndexerStream {
+    /// Receiver for chain events.
     events_rx: mpsc::Receiver<ChainEvent>,
+    /// Buffered events received before catchup completed.
     pending: VecDeque<ChainEvent>,
+    /// Cancellation token for the indexer run task.
     cancel: CancellationToken,
+    /// Handle for the indexer run task.
     run_task: JoinHandle<anyhow::Result<()>>,
 }
 
 impl ChainIndexerStream {
+    /// Start a new `ChainIndexerStream`, waiting for the indexer to complete catchup.
     pub async fn start(
         indexer: impl ChainIndexer,
         catchup_timeout: Duration,
