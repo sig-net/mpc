@@ -164,17 +164,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// Constructs an [`ExecutionWatcher`] bound to this indexer's client, state
-    /// manager, indexer config, and shared watcher gate.
-    pub(crate) fn execution_watcher(&self) -> ExecutionWatcher<'_, S> {
-        ExecutionWatcher::new(
-            self.client.as_ref(),
-            &self.state_manager,
-            &self.eth.indexer,
-            &self.watcher_gate,
-        )
-    }
-
     async fn index_live_blocks(
         client: Arc<EthereumClient>,
         start_block_number: u64,
@@ -306,7 +295,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
-        let exec_events = self.execution_watcher().collect(block).await?;
+        let watcher = ExecutionWatcher::new(
+            self.client.as_ref(),
+            &self.state_manager,
+            &self.eth.indexer,
+            &self.watcher_gate,
+        );
+        let exec_events = watcher.collect(block).await?;
 
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.

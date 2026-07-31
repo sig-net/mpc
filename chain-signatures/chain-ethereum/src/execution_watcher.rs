@@ -607,20 +607,19 @@ mod tests {
             nonce: 0,
         };
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
-        let indexer = builder.build().await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
         let mut block: Block = Block::default();
         block.header.number = 10;
         block.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("late watcher backfill should succeed");
@@ -693,7 +692,7 @@ mod tests {
             .create_async().await;
 
         // Setup Indexer & Watchers
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
         let create_tx = |hash: alloy::primitives::B256, nonce: u64| BidirectionalTx {
             id: BidirectionalTxId(hash.0),
@@ -715,7 +714,7 @@ mod tests {
             nonce,
         };
 
-        builder
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -723,7 +722,7 @@ mod tests {
                 create_tx(tx_hash_0, 0),
             )
             .await;
-        builder
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -731,7 +730,7 @@ mod tests {
                 create_tx(tx_hash_1, 1),
             )
             .await;
-        builder
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -740,15 +739,13 @@ mod tests {
             )
             .await;
 
-        let indexer = builder.build().await;
-
         // Mock block at height 10
         let mut block: Block = Block::default();
         block.header.number = 10;
         block.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("should succeed");
@@ -833,20 +830,19 @@ mod tests {
             nonce: 0,
         };
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
-        let indexer = builder.build().await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
         let mut block: Block = Block::default();
         block.header.number = 5;
         block.transactions = BlockTransactions::Hashes(vec![tx_hash]);
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("should succeed");
@@ -907,7 +903,7 @@ mod tests {
             .create_async()
             .await;
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
         let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
             id: BidirectionalTxId(hash.0),
@@ -929,11 +925,11 @@ mod tests {
             nonce: 0,
         };
 
-        builder
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, SignId::new([1; 32]), create_tx(tx_hash_ok))
             .await;
-        builder
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -942,16 +938,13 @@ mod tests {
             )
             .await;
 
-        let state_manager = builder.state_manager.clone();
-        let indexer = builder.build().await;
-
         let mut block: Block = Block::default();
         block.header.number = 5;
         block.transactions = BlockTransactions::Hashes(vec![tx_hash_ok, tx_hash_err]);
 
         // One failing receipt must not fail the whole block
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("block processing should tolerate a single receipt failure");
@@ -969,7 +962,10 @@ mod tests {
         }
 
         // The failed watcher stays pending for a later retry
-        let pending = state_manager.get_execution_watchers(Chain::Ethereum).await;
+        let pending = harness
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
         assert!(
             pending.contains_key(&BidirectionalTxId(tx_hash_err.0)),
             "failed watcher should remain pending"
@@ -1025,27 +1021,28 @@ mod tests {
             nonce: 0,
         };
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
             .await;
-        let state_manager = builder.state_manager.clone();
-        let indexer = builder.build().await;
 
         // Block height 10 triggers the throttled nonce check
         let mut block: Block = Block::default();
         block.header.number = 10;
         block.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("nonce fetch failure should not fail block processing");
 
         assert!(events.is_empty());
-        let pending = state_manager.get_execution_watchers(Chain::Ethereum).await;
+        let pending = harness
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
         assert!(pending.contains_key(&BidirectionalTxId(tx_hash.0)));
 
         nonce_mock.assert_async().await;
@@ -1105,8 +1102,8 @@ mod tests {
             .create_async()
             .await;
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -1132,14 +1129,13 @@ mod tests {
                 },
             )
             .await;
-        let indexer = builder.build().await;
 
         let mut block: Block = Block::default();
         block.header.number = 5;
         block.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block)
             .await
             .expect("should succeed");
@@ -1199,8 +1195,8 @@ mod tests {
             .create_async()
             .await;
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -1226,14 +1222,13 @@ mod tests {
                 },
             )
             .await;
-        let indexer = builder.build().await;
 
         let mut block5: Block = Block::default();
         block5.header.number = 5;
         block5.transactions = BlockTransactions::Hashes(vec![tx_hash]);
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block5)
             .await
             .expect("receipt failure should not fail block processing");
@@ -1273,8 +1268,8 @@ mod tests {
         block6.header.number = 6;
         block6.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block6)
             .await
             .expect("should succeed");
@@ -1314,8 +1309,8 @@ mod tests {
             .create_async()
             .await;
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
@@ -1341,14 +1336,13 @@ mod tests {
                 },
             )
             .await;
-        let indexer = builder.build().await;
 
         let mut block10: Block = Block::default();
         block10.header.number = 10;
         block10.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block10)
             .await
             .expect("nonce failure should not fail block processing");
@@ -1388,8 +1382,8 @@ mod tests {
         block11.header.number = 11;
         block11.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block11)
             .await
             .expect("should succeed");
@@ -1476,7 +1470,7 @@ mod tests {
             .create_async()
             .await;
 
-        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
         let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
             id: BidirectionalTxId(hash.0),
             sender: [0u8; 32],
@@ -1497,22 +1491,21 @@ mod tests {
             nonce: 0,
         };
 
-        builder
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
             .await;
-        builder
+        harness
             .state_manager
             .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
             .await;
-        let indexer = builder.build().await;
 
         let mut block4: Block = Block::default();
         block4.header.number = 4;
         block4.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block4)
             .await
             .expect("should succeed");
@@ -1526,8 +1519,8 @@ mod tests {
         block5.header.number = 5;
         block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
 
-        let events = indexer
-            .execution_watcher()
+        let events = harness
+            .watcher()
             .collect(&block5)
             .await
             .expect("should succeed");
