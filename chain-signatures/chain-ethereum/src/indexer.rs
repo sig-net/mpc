@@ -13,7 +13,7 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream, StreamExt};
-use mpc_chain_integration_core::utils::task::AbortOnDrop;
+use mpc_chain_integration_core::utils::task::{AbortOnDrop, CancellationTokenExt};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
@@ -22,7 +22,7 @@ use mpc_primitives::{
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{mpsc, watch};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct BlockAndRequests {
@@ -98,16 +98,6 @@ type WatcherReceipt = (
 enum BackfillOutcome {
     NotObserved,
     Observed { event: Option<ChainEvent> },
-}
-
-// TODO: Probably can be reused elsewhere, double check and put in a common place
-/// Sleeps for `dur`, returning early if `cancel` fires first. Returns `true`
-/// if the sleep was interrupted by cancellation.
-async fn sleep_or_cancel(cancel: &CancellationToken, dur: Duration) -> bool {
-    tokio::select! {
-        _ = cancel.cancelled() => true,
-        _ = sleep(dur) => false,
-    }
 }
 
 /// Tracks finalized-head advancement for stall detection, emitting the
@@ -880,9 +870,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     }
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = sleep(Self::RETRY_DELAY) => {}
+            if cancel.cancelled_within(Self::RETRY_DELAY).await {
+                return;
             }
         }
     }
@@ -907,9 +896,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     }
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = sleep(Self::RETRY_DELAY) => {}
+            if cancel.cancelled_within(Self::RETRY_DELAY).await {
+                return;
             }
         }
     }
@@ -1155,7 +1143,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 }
             }
 
-            if sleep_or_cancel(&cancel, interval).await {
+            if cancel.cancelled_within(interval).await {
                 return;
             }
         }
@@ -1183,9 +1171,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                     tracing::warn!(?err, "ethereum latest block fetch failed");
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = sleep(Self::RETRY_DELAY) => {}
+            if cancel.cancelled_within(Self::RETRY_DELAY).await {
+                return Ok(());
             }
         };
 

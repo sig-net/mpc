@@ -1,4 +1,4 @@
-use mpc_chain_integration_core::utils::stream::chain_event_channel;
+use mpc_chain_integration_core::utils::{stream::chain_event_channel, task::CancellationTokenExt};
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
 use std::collections::{BTreeSet, HashMap};
@@ -272,9 +272,8 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                     }
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(Self::RETRY_DELAY) => {}
+            if cancel.cancelled_within(Self::RETRY_DELAY).await {
+                return;
             }
         }
     }
