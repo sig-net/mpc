@@ -484,11 +484,13 @@ impl VersionedMpcContract {
                 threshold_votes,
                 ..
             }) => {
-                let participants_len = participants.len();
+                // same threshold removes prior vote
                 if new_threshold == *threshold {
-                    threshold_votes.remove_vote(&voter);
+                    threshold_votes.remove(&voter);
                     return Ok(false);
                 }
+
+                let participants_len = participants.len();
                 let min_threshold = compute_threshold(participants_len);
                 let max_threshold = participants_len.saturating_sub(1);
                 if new_threshold < min_threshold || new_threshold > max_threshold {

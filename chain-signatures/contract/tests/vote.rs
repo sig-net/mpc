@@ -725,8 +725,8 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     match state {
         mpc_contract::ProtocolContractState::Running(running) => {
             assert_eq!(
-                running.threshold_votes.votes.get(&6).map(|s| s.len()),
-                Some(1),
+                running.threshold_votes.tally(6),
+                1,
                 "vote should be recorded under the proposed threshold"
             );
         }
@@ -795,12 +795,13 @@ async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
     match &state {
         mpc_contract::ProtocolContractState::Running(running) => {
             assert_eq!(
-                running.threshold_votes.votes.get(&8).map(|s| s.len()),
-                Some(1),
+                running.threshold_votes.tally(8),
+                1,
                 "vote should be recorded under threshold 8"
             );
-            assert!(
-                running.threshold_votes.votes.get(&9).is_none(),
+            assert_eq!(
+                running.threshold_votes.tally(9),
+                0,
                 "no vote should exist for threshold 9 yet"
             );
         }
@@ -819,13 +820,14 @@ async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
         contract.view("state").await.unwrap().json().unwrap();
     match &state {
         mpc_contract::ProtocolContractState::Running(running) => {
-            assert!(
-                running.threshold_votes.votes.get(&8).is_none(),
+            assert_eq!(
+                running.threshold_votes.tally(8),
+                0,
                 "vote for threshold 8 must be removed after switching to 9"
             );
             assert_eq!(
-                running.threshold_votes.votes.get(&9).map(|s| s.len()),
-                Some(1),
+                running.threshold_votes.tally(9),
+                1,
                 "vote should now be recorded under threshold 9"
             );
         }
@@ -850,10 +852,7 @@ async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
     let state: mpc_contract::ProtocolContractState =
         contract.view("state").await.unwrap().json().unwrap();
     if let mpc_contract::ProtocolContractState::Running(running) = &state {
-        assert_eq!(
-            running.threshold_votes.votes.get(&8).map(|s| s.len()),
-            Some(1)
-        );
+        assert_eq!(running.threshold_votes.tally(8), 1);
     } else {
         panic!("expected running state");
     }
@@ -869,8 +868,9 @@ async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
     let state: mpc_contract::ProtocolContractState =
         contract.view("state").await.unwrap().json().unwrap();
     if let mpc_contract::ProtocolContractState::Running(running) = &state {
-        assert!(
-            running.threshold_votes.votes.get(&8).is_none(),
+        assert_eq!(
+            running.threshold_votes.tally(8),
+            0,
             "vote for threshold 8 must be removed after voting for current threshold"
         );
     } else {

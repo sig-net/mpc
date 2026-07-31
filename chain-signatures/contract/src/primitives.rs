@@ -361,12 +361,12 @@ pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
 }
 
+pub type Threshold = usize;
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ThresholdVotes {
-    /// Maps each proposed new threshold to the set of participants that have
-    /// voted for it. Multiple thresholds can be voted on in parallel; the first
-    /// to reach the running threshold triggers a resharing.
-    pub votes: BTreeMap<usize, HashSet<AccountId>>,
+    /// Maps each participant AccountId to the proposed threshold value they voted for.
+    pub votes: BTreeMap<AccountId, Threshold>,
 }
 
 impl Default for PkVotes {
@@ -400,26 +400,26 @@ impl ThresholdVotes {
         }
     }
 
-    /// Record `voter`'s support for `threshold`, dropping any vote they had
-    /// previously cast for a different threshold, and return the resulting
-    /// number of voters backing `threshold`. A participant backs at most one
-    /// proposed threshold at a time.
-    pub fn vote(&mut self, threshold: usize, voter: AccountId) -> usize {
-        self.remove_vote(&voter);
-        let voters = self.votes.entry(threshold).or_default();
-        voters.insert(voter);
-        voters.len()
+    /// Record `voter`'s support for `threshold`, replacing any vote they had
+    /// previously cast, and return the resulting number of voters backing `threshold`.
+    pub fn vote(&mut self, threshold: Threshold, voter: AccountId) -> usize {
+        self.votes.insert(voter, threshold);
+        self.tally(threshold)
     }
 
-    pub fn remove_vote(&mut self, voter: &AccountId) {
-        for voters in self.votes.values_mut() {
-            voters.remove(voter);
-        }
-        self.votes.retain(|_, voters| !voters.is_empty());
+    /// Remove `voter`'s vote for any proposed threshold.
+    pub fn remove(&mut self, voter: &AccountId) {
+        self.votes.remove(voter);
     }
 
-    pub fn get(&self, threshold: usize) -> Option<&HashSet<AccountId>> {
-        self.votes.get(&threshold)
+    /// Count the number of voters currently backing `threshold`.
+    pub fn tally(&self, threshold: Threshold) -> usize {
+        self.votes.values().filter(|&&t| t == threshold).count()
+    }
+
+    /// Get the threshold value voted for by `voter`, if any.
+    pub fn get(&self, voter: &AccountId) -> Option<Threshold> {
+        self.votes.get(voter).copied()
     }
 
     pub fn is_empty(&self) -> bool {
