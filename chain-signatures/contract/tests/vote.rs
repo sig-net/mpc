@@ -784,3 +784,302 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
+    // 7 participants, threshold 5 ─ valid changes are to 6 (compute(7)=5, max=6).
+    // We use `init_env_with_participant_count` here because the default
+    // 3-participant setup has no room for a threshold change (min=2, max=2,
+    // current=2).
+    let (worker, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // A single vote for new_threshold=6 is not enough to trigger resharing
+    // (threshold is 5).
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "a single vote must not start resharing");
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(6),
+                1,
+                "vote should be recorded under the proposed threshold"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    // A duplicate vote from the same voter does not double-count.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "duplicate vote must not start resharing");
+
+    // Four more distinct voters (total 5) trigger resharing.
+    for account in &accounts[1..5] {
+        let execution = account
+            .call(contract.id(), "vote_threshold")
+            .args_json(json!({ "new_threshold": 6 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+    // The 5th vote should have triggered resharing.
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    assert!(
+        matches!(state, mpc_contract::ProtocolContractState::Resharing(_)),
+        "5 votes must trigger resharing when threshold is 5"
+    );
+
+    // Non-participants are rejected.
+    let bob_account = worker.dev_create_account().await?;
+    let execution = bob_account
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "non-participants must not be able to vote"
+    );
+
+    Ok(())
+}
+
+/// A participant who switches their vote from one valid threshold to
+/// another must only back the new threshold — the old vote is removed.
+#[tokio::test]
+async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
+    // 10 participants, threshold 7 — valid alternatives: 8, 9.
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 7).await;
+
+    // Vote for threshold 8.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match &state {
+        mpc_contract::ProtocolContractState::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(8),
+                1,
+                "vote should be recorded under threshold 8"
+            );
+            assert_eq!(
+                running.threshold_votes.tally(9),
+                0,
+                "no vote should exist for threshold 9 yet"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    // Switch to threshold 9; the vote for 8 must disappear.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 9 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match &state {
+        mpc_contract::ProtocolContractState::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(8),
+                0,
+                "vote for threshold 8 must be removed after switching to 9"
+            );
+            assert_eq!(
+                running.threshold_votes.tally(9),
+                1,
+                "vote should now be recorded under threshold 9"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 6).await;
+
+    // Vote for threshold 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+        assert_eq!(running.threshold_votes.tally(8), 1);
+    } else {
+        panic!("expected running state");
+    }
+
+    // Voting for current threshold (6) removes the vote for 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+        assert_eq!(
+            running.threshold_votes.tally(8),
+            0,
+            "vote for threshold 8 must be removed after voting for current threshold"
+        );
+    } else {
+        panic!("expected running state");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_validation() -> anyhow::Result<()> {
+    // Use the configurable helper here — the default 3-participant setup has
+    // no room for a threshold change (min=2, max=2, current=2).
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // new_threshold == current threshold (5) succeeds and removes existing vote.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 5 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_success(),
+        "voting current threshold should succeed"
+    );
+
+    // new_threshold > participants.len() (7) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold above participant count must be rejected"
+    );
+
+    // new_threshold == participants.len() (7) is rejected (no fault tolerance).
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 7 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold equal to participant count must be rejected"
+    );
+
+    // new_threshold < compute_threshold(7) (5) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 4 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold below compute_threshold must be rejected"
+    );
+
+    // new_threshold == 0 is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 0 }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure(), "zero threshold must be rejected");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
+    // 7 participants, threshold 5 ─ valid changes are to 6.
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // Raise the threshold from 5 → 6. Current threshold is 5, so 5 votes
+    // are required.
+    for account in &accounts[..5] {
+        let execution = account
+            .call(contract.id(), "vote_threshold")
+            .args_json(json!({ "new_threshold": 6 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Resharing(r) => {
+            // Same participant set, just a new threshold.
+            assert_eq!(
+                r.old_participants.participants,
+                r.new_participants.participants
+            );
+            assert_eq!(r.old_participants.participants.len(), 7);
+            assert_eq!(r.threshold, 5, "old threshold must stay put");
+            assert_eq!(
+                r.new_threshold, 6,
+                "new threshold must match the proposed value"
+            );
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    // Completion is gated by the *old* threshold (5).
+    for account in &accounts[..5] {
+        let execution = account
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert_eq!(r.threshold, 6, "running state adopts the new threshold");
+            assert_eq!(r.epoch, 1, "epoch must bump after resharing");
+            assert_eq!(r.participants.participants.len(), 7);
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}
