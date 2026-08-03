@@ -39,6 +39,9 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
+/// The maximum time to wait for a checkpoint vote to complete before retrying
+const VOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+
 // `PublishAction` makes this enum relatively large, but boxing it is not worth
 // the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
 // enum storage), and these values are not copied on a performance-critical path.
@@ -657,7 +660,7 @@ async fn execute_vote_checkpoint(
     };
 
     let result = retry_rpc!(
-        Duration::MAX,
+        VOTE_CHECKPOINT_TIMEOUT,
         retry_config,
         |attempt, err, sleep| {
             tracing::warn!(
