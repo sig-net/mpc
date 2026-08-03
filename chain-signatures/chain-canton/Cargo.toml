@@ -18,7 +18,9 @@ mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
 oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
-reqwest.workspace = true
+# Pinned to reqwest 0.11 because `oauth2` 4.4.2 hard-pins `reqwest = "0.11"` and we use
+# `oauth2::reqwest::async_http_client`. The rest of the workspace is on reqwest 0.12.
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 serde-aux = { version = "4", default-features = false }
