@@ -189,6 +189,7 @@ impl ContractStateWatcher {
                 join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
+                threshold_votes: Default::default(),
             }),
         )
     }
@@ -727,6 +728,7 @@ mod tests {
             join_votes,
             leave_votes: Default::default(),
             threshold: 1,
+            threshold_votes: Default::default(),
         };
 
         // Vote churn: state changed, governance content did not.
@@ -813,6 +815,7 @@ mod tests {
             join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(initial))).unwrap();
 
@@ -846,6 +849,7 @@ mod tests {
             join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 
@@ -1039,7 +1043,11 @@ mod tests {
             "rpc-cancellation-test",
         );
         let signer =
-            near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone());
+            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
+            {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
         let contract_id: AccountId = "contract.testnet".parse().unwrap();
