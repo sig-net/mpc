@@ -7424,6 +7424,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-localnet"
+version = "1.11.0"
+dependencies = [
+ "anchor-lang",
+ "anyhow",
+ "borsh 1.5.7",
+ "bs58 0.5.1",
+ "clap",
+ "ethabi",
+ "hex",
+ "k256",
+ "mpc-contract",
+ "mpc-crypto",
+ "mpc-keys",
+ "near-account-id",
+ "near-crypto 0.26.0",
+ "near-workspaces",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "sha3",
+ "signet-program",
+ "solana-client",
+ "solana-sdk",
+ "solana-transaction-status",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "mpc-node"
 version = "1.11.0"
 dependencies = [

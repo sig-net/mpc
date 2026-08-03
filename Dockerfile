@@ -17,6 +17,10 @@ RUN apt-get update \
 
 COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
+# Cargo needs every workspace member's manifest present to resolve the workspace at all,
+# even though this stage only builds mpc-node. Only the manifest is copied, not the sources,
+# so editing the localnet bootstrap crate does not invalidate the node build cache.
+COPY localnet/bootstrap/Cargo.toml ./localnet/bootstrap/Cargo.toml
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts

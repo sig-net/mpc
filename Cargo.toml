@@ -6,7 +6,8 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
-    "integration-tests"
+    "integration-tests",
+    "localnet/bootstrap"
 ]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"

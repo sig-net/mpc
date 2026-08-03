@@ -1,0 +1,159 @@
+# A complete local MPC cluster: three nodes, the two chains they depend on, and a one-shot
+# job that prepares both.
+#
+#   docker compose -f localnet/docker-compose.yaml up --build
+#
+# Builds use `context: ..` because the Cargo workspace is the repository root. The node
+# image comes from the repository's own Dockerfile.
+#
+# See localnet/README.md for what to expect and how to submit a signature request.
+
+name: mpc-localnet
+
+services:
+  # Shared by all three nodes. Storage keys are namespaced per account id, so one instance
+  # is enough. The node image bundles its own Redis, but its entrypoint is overridden below
+  # and that copy never starts.
+  redis:
+    image: redis:7.4.2
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The MPC contract deployed here is the only source of truth for the participant set.
+  #
+  # Built from NEAR's own published sandbox binary rather than pulled, so it runs natively on
+  # both arm64 and amd64. See localnet/near-sandbox.Dockerfile for why neither tag of
+  # ghcr.io/near/sandbox works.
+  #
+  # Genesis is baked in at image build time with a seeded validator key, so the chain and the
+  # root account key are the same on every build and the bootstrap can derive the key rather
+  # than being told it.
+  near-sandbox:
+    build:
+      context: .
+      dockerfile: near-sandbox.Dockerfile
+    image: mpc-localnet/near-sandbox:2.6.5
+    ports:
+      - "3030:3030"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:3030/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  # Where signature requests come from. Surfpool is a drop-in for solana-test-validator that
+  # publishes a native arm64 image, and its surfnet_writeProgram cheat code lets the
+  # bootstrap install the signet program without the Solana CLI or a deploy.
+  #
+  # --offline keeps it from reaching for a remote datasource, so the stack stays hermetic.
+  # The image ships its own healthcheck, so none is declared here.
+  surfpool:
+    image: surfpool/surfpool@sha256:4f7b64daa96ab42d8a0d46cd0de556b1c90386f56fd66cfdefcb5f7039fdec9f
+    command: ["start", "--no-tui", "--no-studio", "--offline", "--host", "0.0.0.0"]
+    ports:
+      - "8899:8899"
+      - "8900:8900"
+
+  # Creates the NEAR accounts, deploys and initialises the MPC contract, installs the signet
+  # program and creates its state account, then exits. Every step checks for its own effect
+  # first, so re-running it against a live stack is a no-op.
+  bootstrap:
+    build:
+      context: ..
+      dockerfile: localnet/Dockerfile
+    image: mpc-localnet/bootstrap:dev
+    command: ["bootstrap"]
+    volumes:
+      - ./nodes:/localnet/nodes:ro
+      - ./keyshares:/localnet/keyshares:ro
+    environment:
+      LOCALNET_NODES_DIR: /localnet/nodes
+      LOCALNET_KEYSHARES_DIR: /localnet/keyshares
+      RUST_LOG: mpc_localnet=info
+    depends_on:
+      near-sandbox:
+        condition: service_healthy
+      surfpool:
+        condition: service_healthy
+    restart: "no"
+
+  # Only this node declares a build. All three share one image, and compose runs a separate
+  # build per service that declares one, which on a Rust project means three full concurrent
+  # compiles fighting over the same cores. The build phase completes before anything starts,
+  # so the other two find the tag already present.
+  mpc-node-0:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: near/mpc-node:latest
+    # The image's baked entrypoint takes no arguments, starts the Redis it bundles, and
+    # hardcodes RUST_LOG because ${RUST_LOG:-...} was expanded when the image was built.
+    # Overriding it puts every setting back under the env files.
+    entrypoint: ["mpc-node", "start"]
+    env_file:
+      - ./nodes/common.env
+      - ./nodes/node0.env
+    ports:
+      - "3000:3000"
+    healthcheck: &node-health
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    depends_on: &node-deps
+      redis:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      # Read-write on purpose. The node only rewrites its share during key generation or
+      # resharing, neither of which should happen here, but a read-only mount would turn a
+      # harmless write into a crash.
+      - ./keyshares/mpc0.test.near.json:/data/keyshare-mpc0.test.near
+
+  mpc-node-1:
+    image: near/mpc-node:latest
+    entrypoint: ["mpc-node", "start"]
+    env_file:
+      - ./nodes/common.env
+      - ./nodes/node1.env
+    ports:
+      - "3001:3000"
+    healthcheck: *node-health
+    depends_on: *node-deps
+    volumes:
+      - ./keyshares/mpc1.test.near.json:/data/keyshare-mpc1.test.near
+
+  mpc-node-2:
+    image: near/mpc-node:latest
+    entrypoint: ["mpc-node", "start"]
+    env_file:
+      - ./nodes/common.env
+      - ./nodes/node2.env
+    ports:
+      - "3002:3000"
+    healthcheck: *node-health
+    depends_on: *node-deps
+    volumes:
+      - ./keyshares/mpc2.test.near.json:/data/keyshare-mpc2.test.near
+
+  # Submits a signature request and waits for the cluster to answer. Not started by
+  # `up`; run it on demand:
+  #
+  #   docker compose -f localnet/docker-compose.yaml --profile tools run --rm signer sign --path test
+  signer:
+    profiles: ["tools"]
+    # Same image as bootstrap, built by it, so this does not trigger a second build.
+    image: mpc-localnet/bootstrap:dev
+    entrypoint: ["mpc-localnet"]
+    command: ["sign", "--path", "test"]
+    volumes:
+      - ./nodes:/localnet/nodes:ro
+      - ./keyshares:/localnet/keyshares:ro
+    environment:
+      RUST_LOG: mpc_localnet=info

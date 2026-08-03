@@ -1,0 +1,46 @@
+[package]
+name = "mpc-localnet"
+version.workspace = true
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mpc-localnet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+borsh.workspace = true
+bs58 = "0.5.1"
+clap.workspace = true
+ethabi.workspace = true
+hex.workspace = true
+k256.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# near dependencies
+near-account-id.workspace = true
+near-crypto = "0.26.0"
+# The default "install" feature makes the build script download a near-sandbox binary, which
+# only exists for linux-x86_64 and darwin-arm64 and so fails the build outright on linux
+# arm64. The localnet attaches to a sandbox that is already running in its own container and
+# never spawns one, so the binary is not wanted here.
+near-workspaces = { version = "0.15.0", default-features = false }
+
+# solana dependencies
+anchor-lang.workspace = true
+signet-program.workspace = true
+solana-client.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
+
+# local chain-signatures dependencies
+mpc-contract.workspace = true
+mpc-crypto.workspace = true
+mpc-keys.workspace = true
