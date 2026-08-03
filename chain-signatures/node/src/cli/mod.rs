@@ -284,7 +284,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let chains = ChainConfigs::from_args(eth, sol, hydration, canton)?;
             let network = NetworkConfig { cipher_sk, sign_sk };
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
 
             let RpcHandles {
                 near_client,

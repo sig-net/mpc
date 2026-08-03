@@ -2,6 +2,10 @@
 //! clients) live in `signet-primitives` and are re-exported here so node code
 //! can keep a single import path.
 
+/// Protocol 85 (nearcore 2.13.x) is required for contracts compiled with
+/// near-sdk 5.29+ which use host functions like `chain_id` and `p256_verify`.
+pub const SANDBOX_VERSION: &str = "2.13.1";
+
 mod backlog;
 mod bidirectional;
 mod chain;

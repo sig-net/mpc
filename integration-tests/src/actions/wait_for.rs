@@ -51,9 +51,16 @@ async fn poll_status(
 ) -> Result<Poll<ExecutionFinalResult>, WaitForError> {
     match status.status().await {
         Ok(poll) => Ok(poll),
-        Err(near_fetch::Error::RpcTransactionError(JsonRpcError::ServerError(
-            JsonRpcServerError::ResponseStatusError(JsonRpcServerResponseStatusError::TimeoutError),
-        ))) => Ok(Poll::Pending),
+        Err(near_fetch::Error::RpcTransactionError(err))
+            if matches!(
+                *err,
+                JsonRpcError::ServerError(JsonRpcServerError::ResponseStatusError(
+                    JsonRpcServerResponseStatusError::TimeoutError,
+                ))
+            ) =>
+        {
+            Ok(Poll::Pending)
+        }
         Err(err) => Err(WaitForError::JsonRpc(format!("{err:?}"))),
     }
 }

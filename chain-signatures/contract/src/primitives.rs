@@ -355,6 +355,14 @@ pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
 }
 
+pub type Threshold = usize;
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThresholdVotes {
+    /// Maps each participant AccountId to the proposed threshold value they voted for.
+    pub votes: BTreeMap<AccountId, Threshold>,
+}
+
 impl Default for PkVotes {
     fn default() -> Self {
         Self::new()
@@ -370,6 +378,46 @@ impl PkVotes {
 
     pub fn entry(&mut self, public_key: PublicKey) -> &mut HashSet<AccountId> {
         self.votes.entry(public_key).or_default()
+    }
+}
+
+impl Default for ThresholdVotes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThresholdVotes {
+    pub fn new() -> Self {
+        ThresholdVotes {
+            votes: BTreeMap::new(),
+        }
+    }
+
+    /// Record `voter`'s support for `threshold`, replacing any vote they had
+    /// previously cast, and return the resulting number of voters backing `threshold`.
+    pub fn vote(&mut self, threshold: Threshold, voter: AccountId) -> usize {
+        self.votes.insert(voter, threshold);
+        self.tally(threshold)
+    }
+
+    /// Remove `voter`'s vote for any proposed threshold.
+    pub fn remove(&mut self, voter: &AccountId) {
+        self.votes.remove(voter);
+    }
+
+    /// Count the number of voters currently backing `threshold`.
+    pub fn tally(&self, threshold: Threshold) -> usize {
+        self.votes.values().filter(|&&t| t == threshold).count()
+    }
+
+    /// Get the threshold value voted for by `voter`, if any.
+    pub fn get(&self, voter: &AccountId) -> Option<Threshold> {
+        self.votes.get(voter).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
     }
 }
 
