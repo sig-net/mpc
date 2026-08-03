@@ -667,7 +667,7 @@ async fn execute_vote_checkpoint(
     .await
 }
 
-/// Submit a checkpoint vote under a bounded retry policy. 
+/// Submit a checkpoint vote under a bounded retry policy.
 async fn vote_checkpoint_with_retry<F, Fut>(
     checkpoint: &ConsensusCheckpointDigest,
     timeout: Duration,
