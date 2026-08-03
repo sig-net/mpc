@@ -20,7 +20,6 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
-use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
 use near_workspaces::Account;
 use rand::Rng;
@@ -53,7 +52,7 @@ pub async fn request_batch_random_sign(
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }
@@ -87,7 +86,7 @@ pub async fn request_batch_duplicate_sign(
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }

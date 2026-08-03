@@ -48,11 +48,16 @@ NODE_FEATURE_ARGS="--features ${NODE_FEATURES}"
 
 set --
 set -e
-if [ -n "$CONTRACT_FEATURES" ]; then
-    . $ROOT_DIR/build-contract.sh $CONTRACT_FEATURES
-else
-    . $ROOT_DIR/build-contract.sh
+
+# Apple default clang lacks WASM support
+if [ -z "$CC" ] && [ -x "/opt/homebrew/opt/llvm/bin/clang" ]; then
+    export CC="/opt/homebrew/opt/llvm/bin/clang"
 fi
+
+./build-contract.sh $CONTRACT_FEATURES
+
+mkdir -p $ROOT_DIR/target/wasm32-unknown-unknown/release
+cp $ROOT_DIR/target/near/mpc_contract/mpc_contract.wasm $ROOT_DIR/target/wasm32-unknown-unknown/release/mpc_contract.wasm
 
 cargo build -p mpc-node --release $NODE_FEATURE_ARGS
 
