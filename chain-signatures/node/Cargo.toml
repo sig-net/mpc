@@ -75,7 +75,6 @@ parity-scale-codec.workspace = true
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
-near-jsonrpc-client.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
 
