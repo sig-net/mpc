@@ -39,6 +39,15 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
+/// The maximum time to wait for a checkpoint vote to complete before retrying
+const VOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
+    max_times: usize::MAX,
+    min_delay: PUBLISH_MIN_DELAY,
+    max_delay: PUBLISH_MAX_DELAY,
+    jitter: true,
+};
+
 // `PublishAction` makes this enum relatively large, but boxing it is not worth
 // the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
 // enum storage), and these values are not copied on a performance-critical path.
@@ -649,15 +658,27 @@ async fn execute_vote_checkpoint(
     near: NearGovernanceClient,
     checkpoint: ConsensusCheckpointDigest,
 ) {
-    let retry_config = RetryConfig {
-        max_times: usize::MAX,
-        min_delay: PUBLISH_MIN_DELAY,
-        max_delay: PUBLISH_MAX_DELAY,
-        jitter: true,
-    };
+    vote_checkpoint_with_retry(
+        &checkpoint,
+        VOTE_CHECKPOINT_TIMEOUT,
+        VOTE_CHECKPOINT_RETRY,
+        || near.vote_checkpoint(&checkpoint),
+    )
+    .await
+}
 
+/// Submit a checkpoint vote under a bounded retry policy.
+async fn vote_checkpoint_with_retry<F, Fut>(
+    checkpoint: &ConsensusCheckpointDigest,
+    timeout: Duration,
+    retry_config: RetryConfig,
+    vote: F,
+) where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
+{
     let result = retry_rpc!(
-        Duration::MAX,
+        timeout,
         retry_config,
         |attempt, err, sleep| {
             tracing::warn!(
@@ -668,7 +689,7 @@ async fn execute_vote_checkpoint(
                 "failed to vote for checkpoint, retrying"
             );
         },
-        { near.vote_checkpoint(&checkpoint).await }
+        { vote().await }
     );
 
     match result {
@@ -695,8 +716,6 @@ async fn execute_vote_checkpoint(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
@@ -704,6 +723,41 @@ mod tests {
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
+        let checkpoint = ConsensusCheckpointDigest {
+            chain: Chain::Ethereum,
+            height: 1,
+            digest: [0; 32],
+        };
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let vote = move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<anyhow::Result<CheckpointVoteOutcome>>().await
+            }
+        };
+
+        let timeout = Duration::from_millis(20);
+        let retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+
+        vote_checkpoint_with_retry(&checkpoint, timeout, retry, vote).await;
+
+        // 1 initial attempt + 2 retries, each cut off by the per-attempt timeout.
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 
     /// Vote churn must be absorbed without completing; real governance changes
     /// and leaving the running state must be delivered.
