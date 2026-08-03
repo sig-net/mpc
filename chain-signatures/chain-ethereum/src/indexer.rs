@@ -3,6 +3,7 @@ use crate::client::{
     block_may_contain_logs, BlockNumber, CatchupItem, CatchupIter, EthereumClient, MaybeBlock,
 };
 use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
+use crate::respond_bidirectional::TraceOutput;
 use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
@@ -376,15 +377,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 ?tx_id,
                 "Extracting transaction output via debug_traceTransaction"
             );
-            Some(self.client.trace_transaction_output(tx_id).await?)
+            match self.client.trace_transaction_output(tx_id).await? {
+                Some(output) => TraceOutput::Output(output),
+                None => {
+                    tracing::warn!(
+                        ?tx_id,
+                        "debug_traceTransaction returned no return data for a call frame"
+                    );
+                    TraceOutput::NoReturnData
+                }
+            }
         } else {
-            None
+            TraceOutput::NotTraced
         };
 
         crate::respond_bidirectional::build_serialized_output(
             is_contract_call,
             &tx.output_deserialization_schema,
-            trace_output.as_ref(),
+            trace_output,
             tx.source_chain.respond_serialization_format(),
             &tx.respond_serialization_schema,
         )
@@ -430,6 +440,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                         ?err,
                         "Failed to extract transaction output"
                     );
+                    // TODO: Surface unrecoverable extraction failures as telemetry
+                    // or an explicit failed execution outcome. Returning `None`
+                    // drops the event, which can leave the bidirectional request
+                    // pending with only this log as evidence.
                     return None;
                 }
             }
