@@ -22,8 +22,8 @@ use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
-    PromiseError, PublicKey,
+    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PublicKey,
 };
 use primitives::{
     CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
+use crate::primitives::ThresholdVotes;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
@@ -64,8 +65,8 @@ pub const MAX_JOIN_URL_LEN: usize = 2048;
 /// Fixed anti-spam deposit required to join as a candidate.
 pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
-#[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[near(contract_state)]
+#[derive(Debug)]
 pub enum VersionedMpcContract {
     V0(MpcContract),
 }
@@ -131,7 +132,7 @@ impl MpcContract {
 }
 
 // User contract API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
@@ -257,7 +258,7 @@ impl VersionedMpcContract {
 }
 
 // Node API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
@@ -301,7 +302,7 @@ impl VersionedMpcContract {
             return Err(RespondError::InvalidSignature.into());
         }
 
-        env::promise_yield_resume(&index.data_id, &serde_json::to_vec(&signature).unwrap());
+        env::promise_yield_resume(&index.data_id, serde_json::to_vec(&signature).unwrap());
         Ok(())
     }
 
@@ -349,7 +350,9 @@ impl VersionedMpcContract {
                 }
                 if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
                     if diff > NearToken::from_yoctonear(0) {
-                        Promise::new(signer_account_id.clone()).transfer(diff);
+                        Promise::new(signer_account_id.clone())
+                            .transfer(diff)
+                            .detach();
                     }
                 }
                 candidates.insert(
@@ -489,6 +492,64 @@ impl VersionedMpcContract {
         }
     }
 
+    /// Vote to change the running threshold without otherwise modifying the
+    /// participant set. Each participant backs at most one proposed threshold
+    /// at a time (casting a new vote removes any prior vote). The first
+    /// proposed threshold to reach the current `threshold` triggers a resharing
+    /// whose `new_threshold` is the proposed value. Voting for the same
+    /// threshold as the current one in the network will remove a prior vote.
+    #[handle_result]
+    pub fn vote_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
+        log!(
+            "vote_threshold: signer={}, new_threshold={}",
+            env::signer_account_id(),
+            new_threshold
+        );
+        let voter = self.voter()?;
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                epoch,
+                participants,
+                threshold,
+                public_key,
+                threshold_votes,
+                ..
+            }) => {
+                // same threshold removes prior vote
+                if new_threshold == *threshold {
+                    threshold_votes.remove(&voter);
+                    return Ok(false);
+                }
+
+                let participants_len = participants.len();
+                let min_threshold = compute_threshold(participants_len);
+                let max_threshold = participants_len.saturating_sub(1);
+                if new_threshold < min_threshold || new_threshold > max_threshold {
+                    return Err(VoteError::ThresholdOutOfRange.into());
+                }
+                if threshold_votes.vote(new_threshold, voter) >= *threshold {
+                    // Same participants, different threshold; the resharing
+                    // protocol re-shares the key with a new threshold.
+                    *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
+                        old_epoch: *epoch,
+                        old_participants: participants.clone(),
+                        threshold: *threshold,
+                        new_threshold,
+                        new_participants: participants.clone(),
+                        public_key: public_key.clone(),
+                        finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
     #[handle_result]
     pub fn vote_pk(&mut self, public_key: PublicKey) -> Result<bool, Error> {
         log!(
@@ -515,6 +576,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -561,6 +623,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -602,6 +665,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -642,7 +706,7 @@ impl VersionedMpcContract {
         // Refund the difference if the propser attached more than required.
         if let Some(diff) = attached.checked_sub(required) {
             if diff > NearToken::from_yoctonear(0) {
-                Promise::new(proposer).transfer(diff);
+                Promise::new(proposer).transfer(diff).detach();
             }
         }
 
@@ -681,7 +745,7 @@ impl VersionedMpcContract {
 }
 
 // Contract developer helper API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     #[init]
@@ -748,6 +812,7 @@ impl VersionedMpcContract {
                 candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
@@ -929,7 +994,7 @@ impl VersionedMpcContract {
     pub fn sign_helper(&mut self, request: InternalSignRequest) {
         let yield_promise = env::promise_yield_create(
             "clear_state_on_finish",
-            &serde_json::to_vec(&(&request,)).unwrap(),
+            serde_json::to_vec(&(&request,)).unwrap(),
             CLEAR_STATE_ON_FINISH_CALL_GAS,
             GasWeight(0),
             DATA_ID_REGISTER,
@@ -953,7 +1018,7 @@ impl VersionedMpcContract {
             yield_promise,
             env::current_account_id(),
             "return_signature_on_finish",
-            &[],
+            [],
             NearToken::from_near(0),
             RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
         );
@@ -981,7 +1046,7 @@ impl VersionedMpcContract {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
-        Promise::new(to).transfer(amount);
+        Promise::new(to).transfer(amount).detach();
     }
 
     fn refund_on_success(request: &InternalSignRequest) {
@@ -991,7 +1056,7 @@ impl VersionedMpcContract {
             if diff > NearToken::from_yoctonear(0) {
                 let to = request.requester.clone();
                 log!("refund more than required deposit {diff} to {to}");
-                Promise::new(to).transfer(diff);
+                Promise::new(to).transfer(diff).detach();
             }
         }
     }

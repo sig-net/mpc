@@ -206,6 +206,7 @@ impl MpcFixtureBuilder {
                 join_votes: Votes::default(),
                 leave_votes: Default::default(),
                 threshold: self.threshold,
+                threshold_votes: Default::default(),
             });
 
             for node in &mut self.prepared_nodes {
@@ -624,6 +625,7 @@ impl MpcFixtureNodeBuilder {
 
         let mut node = MpcFixtureNode {
             me: self.me,
+            account_id: self.participant_info.account_id.clone(),
             state: node_state,
             mesh: mesh_tx,
             config: config_tx,

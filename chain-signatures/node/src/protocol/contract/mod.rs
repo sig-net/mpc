@@ -1,6 +1,6 @@
 pub mod primitives;
 
-use self::primitives::{Candidates, Participants, PkVotes, Votes};
+use self::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
 use crate::{rpc::GovernanceInfo, util::NearPublicKeyExt as _};
 
 use mpc_contract::ProtocolContractState;
@@ -35,6 +35,7 @@ pub struct RunningContractState {
     pub candidates: Candidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
 }
 
 impl From<mpc_contract::RunningContractState> for RunningContractState {
@@ -47,6 +48,7 @@ impl From<mpc_contract::RunningContractState> for RunningContractState {
             candidates: value.candidates.into(),
             join_votes: value.join_votes.into(),
             leave_votes: value.leave_votes.into(),
+            threshold_votes: value.threshold_votes,
         }
     }
 }

@@ -1,21 +1,66 @@
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
-use crate::primitives::{CheckpointVotes, PendingRequest, StorageKey};
-use crate::state::ProtocolContractState;
+use crate::primitives::{
+    Candidates, CheckpointVotes, Participants, PendingRequest, StorageKey, ThresholdVotes, Votes,
+};
+use crate::state::{
+    InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
+};
 use crate::update::ProposedUpdates;
 use crate::{MpcContract, VersionedMpcContract};
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature};
+use borsh::BorshDeserialize;
+use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
+use near_sdk::PublicKey;
+
+#[derive(BorshDeserialize)]
+pub struct OldRunningContractState {
+    pub epoch: u64,
+    pub participants: Participants,
+    pub threshold: usize,
+    pub public_key: PublicKey,
+    pub candidates: Candidates,
+    pub join_votes: Votes,
+    pub leave_votes: Votes,
+}
+
+#[derive(BorshDeserialize)]
+pub enum OldProtocolContractState {
+    NotInitialized,
+    Initializing(InitializingContractState),
+    Running(OldRunningContractState),
+    Resharing(ResharingContractState),
+}
+
+fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
+    match old {
+        OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+        OldProtocolContractState::Initializing(state) => ProtocolContractState::Initializing(state),
+        OldProtocolContractState::Running(state) => {
+            ProtocolContractState::Running(RunningContractState {
+                epoch: state.epoch,
+                participants: state.participants,
+                threshold: state.threshold,
+                public_key: state.public_key,
+                candidates: state.candidates,
+                join_votes: state.join_votes,
+                leave_votes: state.leave_votes,
+                threshold_votes: ThresholdVotes::new(),
+            })
+        }
+        OldProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
+    }
+}
 
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousDevnet {
-    protocol_state: ProtocolContractState,
+    protocol_state: OldProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    _latest_checkpoints: IterableMap<Chain, PreviousSignedCheckpoint>,
+    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    checkpoint_votes: CheckpointVotes,
 }
 
 impl PreviousDevnet {
@@ -25,45 +70,24 @@ impl PreviousDevnet {
             pending_requests,
             proposed_updates,
             config,
-            ..
+            latest_checkpoints,
+            checkpoint_votes,
         } = self;
 
-        clear_legacy_checkpoints_storage();
-
         MpcContract {
-            protocol_state,
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
-        }
-    }
-}
-
-fn clear_legacy_checkpoints_storage() {
-    let base_prefix = near_sdk::IntoStorageKey::into_storage_key(StorageKey::LatestCheckpoints);
-
-    let mut vec_len_key = base_prefix.clone();
-    vec_len_key.push(b'v');
-    vec_len_key.extend_from_slice(&0u32.to_le_bytes());
-    near_sdk::env::storage_remove(&vec_len_key);
-
-    let mut map_prefix = base_prefix;
-    map_prefix.push(b'm');
-    for chain in Chain::iter() {
-        let mut key_bytes = map_prefix.clone();
-        if let Ok(chain_bytes) = near_sdk::borsh::to_vec(&chain) {
-            key_bytes.extend_from_slice(&chain_bytes);
-            let raw_key = near_sdk::env::sha256(&key_bytes);
-            near_sdk::env::storage_remove(&raw_key);
+            latest_checkpoints,
+            checkpoint_votes,
         }
     }
 }
 
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousTestnet {
-    protocol_state: ProtocolContractState,
+    protocol_state: OldProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
@@ -78,7 +102,7 @@ impl PreviousTestnet {
             config,
         } = self;
         MpcContract {
-            protocol_state,
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
@@ -90,7 +114,7 @@ impl PreviousTestnet {
 
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousMainnet {
-    protocol_state: ProtocolContractState,
+    protocol_state: OldProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
@@ -105,7 +129,7 @@ impl PreviousMainnet {
             config,
         } = self;
         MpcContract {
-            protocol_state,
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
@@ -113,12 +137,6 @@ impl PreviousMainnet {
             checkpoint_votes: CheckpointVotes::new(),
         }
     }
-}
-
-#[derive(BorshDeserialize, BorshSerialize)]
-struct PreviousSignedCheckpoint {
-    checkpoint: ConsensusCheckpointDigest,
-    signature: Signature,
 }
 
 #[derive(BorshDeserialize)]

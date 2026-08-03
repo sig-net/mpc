@@ -868,7 +868,7 @@ impl SignAction<'_> {
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(self.gas)
+            .gas(near_primitives::types::Gas::from_gas(self.gas.as_gas()))
             .deposit(self.deposit)
             .transact_async()
             .await?;
