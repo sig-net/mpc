@@ -190,6 +190,7 @@ impl OrganizingPhase {
                             id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                             from: ctx.governance.me,
                             action: PositAction::Propose,
+                            stale_round: None,
                         },
                     )
                     .await;

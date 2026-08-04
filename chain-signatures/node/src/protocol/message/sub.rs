@@ -43,7 +43,16 @@ pub enum SubscribeResponse {
     Presignature(mpsc::Receiver<PresignatureMessage>),
     PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
     Signature(mpsc::Receiver<SignatureMessage>),
-    SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+    SignaturePosit(
+        mpsc::Receiver<(
+            SignId,
+            PresignatureId,
+            Round,
+            Participant,
+            PositAction,
+            Option<Round>,
+        )>,
+    ),
 }
 
 /// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
@@ -73,7 +82,7 @@ impl_subscription_message! {
     PresignatureMessage => Presignature,
     (FullPresignatureId, Participant, PositAction) => PresignaturePosit,
     SignatureMessage => Signature,
-    (SignId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
+    (SignId, PresignatureId, Round, Participant, PositAction, Option<Round>) => SignaturePosit,
 }
 
 pub enum SubscribeRequestAction {

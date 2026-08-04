@@ -68,8 +68,8 @@ pub enum PositRejectReason {
     /// round / proposer mismatches.
     InvalidRequest,
     /// The message's round is behind the rejector's current round, carried
-    /// here so the sender can catch up in one bump.
-    StaleRound(usize),
+    /// in `PositMessage::stale_round` so the sender can catch up in one bump.
+    StaleRound,
 }
 
 impl PositAction {

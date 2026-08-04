@@ -34,12 +34,15 @@ impl PositPhase {
                     from,
                     action,
                     round: peer_round,
+                    stale_round,
                 } = &task_msg;
 
                 // A StaleRound reject carries the rejector's current round;
                 // remember it so our next bump catches up in one step.
-                if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) =
-                    action
+                if let (
+                    PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                    Some(peer_current),
+                ) = (action, stale_round)
                 {
                     state.highest_seen_round = state.highest_seen_round.max(*peer_current);
                 }
@@ -79,8 +82,9 @@ impl PositPhase {
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::StaleRound(state.round()),
+                                    PositRejectReason::StaleRound,
                                 ),
+                                stale_round: Some(state.round()),
                             },
                         )
                         .await;
@@ -139,6 +143,7 @@ impl PositPhase {
                                     action: PositAction::RejectWithReason(
                                         PositRejectReason::MissingArtifact,
                                     ),
+                                    stale_round: None,
                                 },
                             )
                             .await;
@@ -168,6 +173,7 @@ impl PositPhase {
                                 action: PositAction::RejectWithReason(
                                     PositRejectReason::InvalidRequest,
                                 ),
+                                stale_round: None,
                             },
                         )
                         .await;
@@ -195,6 +201,7 @@ impl PositPhase {
                     id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
+                    stale_round: None,
                 },
             )
             .await;
@@ -270,8 +277,8 @@ impl PositPhase {
 
                     // A StaleRound reject carries the rejector's current round;
                     // remember it so our next bump catches up in one step.
-                    if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) = &task_msg.action {
-                        state.highest_seen_round = state.highest_seen_round.max(*peer_current);
+                    if let (PositAction::RejectWithReason(PositRejectReason::StaleRound), Some(peer_current)) = (&task_msg.action, task_msg.stale_round) {
+                        state.highest_seen_round = state.highest_seen_round.max(peer_current);
                     }
 
                     // Ignore messages for older rounds
@@ -293,7 +300,7 @@ impl PositPhase {
                         continue;
                     }
 
-                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
+                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action, stale_round: _ } = task_msg;
 
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
@@ -423,6 +430,7 @@ impl PositPhase {
                         id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
+                        stale_round: None,
                     },
                 )
                 .await;
@@ -535,6 +543,7 @@ mod tests {
             round: propose_round,
             from: proposer,
             action: PositAction::Propose,
+            stale_round: None,
         });
 
         // Behind-proposer Propose is rejected; the call then times out waiting
@@ -559,13 +568,12 @@ mod tests {
         };
         // The id echoes the round of the message being rejected.
         assert_eq!(reject_round, propose_round);
-        let PositAction::RejectWithReason(PositRejectReason::StaleRound(rejectors_round)) =
-            posit.action
-        else {
-            panic!("expected a StaleRound reject");
-        };
-        // Our round rides in the reason so the sender can catch up in one bump.
-        assert_eq!(rejectors_round, our_round);
+        assert!(matches!(
+            posit.action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
+        // Our round rides in `stale_round` so the sender can catch up in one bump.
+        assert_eq!(posit.stale_round, Some(our_round));
     }
 
     /// Receiving side of the same contract: the rejector's round carried in
@@ -588,7 +596,8 @@ mod tests {
             presignature_id: 42,
             round: 2,
             from: peer,
-            action: PositAction::RejectWithReason(PositRejectReason::StaleRound(5)),
+            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+            stale_round: Some(5),
         });
 
         // No Propose ever arrives, so the wait times out and reorganizes,

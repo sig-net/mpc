@@ -291,7 +291,14 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(
+        SignId,
+        PresignatureId,
+        Round,
+        Participant,
+        PositAction,
+        Option<Round>,
+    )> {
         self.subscribe_or_closed(SubscribeId::SignaturePosit, "signature posit")
             .await
     }
