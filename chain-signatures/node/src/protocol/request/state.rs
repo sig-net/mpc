@@ -61,7 +61,7 @@ impl SignState {
 
     fn bump_round(&mut self) {
         let prev_round = self.round;
-        self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
+        self.round = std::cmp::max(self.round.saturating_add(1), self.highest_seen_round);
         self.budget.reset(round_timeout(self.round));
         self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
