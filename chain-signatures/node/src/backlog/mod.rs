@@ -1,4 +1,7 @@
 pub mod consensus;
+mod work;
+
+pub use work::{WorkKey, WorkStage};
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
