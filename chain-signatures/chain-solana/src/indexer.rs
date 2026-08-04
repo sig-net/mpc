@@ -1,4 +1,4 @@
-use mpc_chain_integration_core::utils::stream::chain_event_channel;
+use mpc_chain_integration_core::utils::{stream::chain_event_channel, task::retry_until_ok};
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
 use std::collections::{BTreeSet, HashMap};
@@ -260,23 +260,13 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         block: &SolanaCatchupBlock,
         cancel: &CancellationToken,
     ) {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = self.process_catchup_item(events_tx, slot, block) => {
-                    match result {
-                        Ok(()) => return,
-                        Err(err) => {
-                            tracing::warn!(?err, slot, "solana catchup block processing failed; retrying");
-                        }
-                    }
-                }
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(Self::RETRY_DELAY) => {}
-            }
-        }
+        retry_until_ok(
+            cancel,
+            Self::RETRY_DELAY,
+            &format!("solana catchup block processing (slot {slot})"),
+            || async { self.process_catchup_item(events_tx, slot, block).await },
+        )
+        .await;
     }
 
     /// Live phase: forward events produced by the live subscription until
