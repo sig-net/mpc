@@ -17,6 +17,12 @@ pub struct PublishState {
     pub is_proposer: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointPhase {
+    AwaitingInitialResponse,
+    AwaitingBidirectionalCompletion,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
@@ -27,6 +33,21 @@ pub enum SignStatus {
 }
 
 impl SignStatus {
+    /// Project local signing and publication progress into the source-chain
+    /// state that is safe to share through checkpoint consensus.
+    pub fn checkpoint_phase(&self) -> CheckpointPhase {
+        match self {
+            SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => {
+                CheckpointPhase::AwaitingInitialResponse
+            }
+            SignStatus::PendingExecution { .. }
+            | SignStatus::PendingGenerationBidirectional
+            | SignStatus::PendingPublishBidirectional { .. } => {
+                CheckpointPhase::AwaitingBidirectionalCompletion
+            }
+        }
+    }
+
     pub fn is_pending_generation(&self) -> bool {
         matches!(
             self,

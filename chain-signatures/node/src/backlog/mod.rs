@@ -917,7 +917,7 @@ impl BacklogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sign_bidirectional::{PublishState, SignStatus};
+    use crate::sign_bidirectional::{CheckpointPhase, PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
@@ -1438,6 +1438,48 @@ mod tests {
         // different digests, so nodes don't reach consensus on a checkpoint
         // while disagreeing on the progress of a request.
         assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+    }
+
+    #[test]
+    fn test_checkpoint_phase_groups_local_initial_response_states() {
+        let statuses = [
+            SignStatus::PendingGeneration,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(true),
+            },
+            SignStatus::PendingPublish {
+                publish: test_publish_state(false),
+            },
+        ];
+
+        for status in statuses {
+            assert_eq!(
+                status.checkpoint_phase(),
+                CheckpointPhase::AwaitingInitialResponse
+            );
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_phase_groups_local_bidirectional_states() {
+        let tx = create_test_tx(13);
+        let statuses = [
+            pending_execution_status(&tx),
+            SignStatus::PendingGenerationBidirectional,
+            SignStatus::PendingPublishBidirectional {
+                publish: test_publish_state(true),
+            },
+            SignStatus::PendingPublishBidirectional {
+                publish: test_publish_state(false),
+            },
+        ];
+
+        for status in statuses {
+            assert_eq!(
+                status.checkpoint_phase(),
+                CheckpointPhase::AwaitingBidirectionalCompletion
+            );
+        }
     }
 
     #[tokio::test]
