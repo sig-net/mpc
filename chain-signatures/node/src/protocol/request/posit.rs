@@ -44,7 +44,7 @@ impl PositPhase {
                     Some(peer_current),
                 ) = (action, stale_round)
                 {
-                    state.highest_seen_round = state.highest_seen_round.max(*peer_current);
+                    state.record_peer_round(*peer_current);
                 }
 
                 // Nothing else to do with a Reject: a deliberator has sent
@@ -278,7 +278,7 @@ impl PositPhase {
                     // A StaleRound reject carries the rejector's current round;
                     // remember it so our next bump catches up in one step.
                     if let (PositAction::RejectWithReason(PositRejectReason::StaleRound), Some(peer_current)) = (&task_msg.action, task_msg.stale_round) {
-                        state.highest_seen_round = state.highest_seen_round.max(peer_current);
+                        state.record_peer_round(peer_current);
                     }
 
                     // Ignore messages for older rounds
