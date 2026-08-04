@@ -71,7 +71,7 @@ pub trait SignBidirectionalEventExt {
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
     fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
-            Chain::Canton => Ok(hex::encode(self.sender)),
+            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
             _ => crate::stream::ops::sender_string(self.sender, self.chain),
         }
     }
@@ -93,6 +93,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path,
             )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -110,7 +115,7 @@ pub trait BidirectionalTxExt {
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
-        if self.source_chain == Chain::Canton {
+        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
             return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
@@ -129,6 +134,11 @@ impl BidirectionalTxExt for BidirectionalTx {
                 path,
             )),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 path,

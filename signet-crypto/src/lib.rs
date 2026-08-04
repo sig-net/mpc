@@ -10,8 +10,8 @@ mod kdf;
 
 pub use kdf::{
     derive_epsilon, derive_epsilon_bitcoin, derive_epsilon_canton, derive_epsilon_eth,
-    derive_epsilon_hydration, derive_epsilon_sol, derive_key, DerivationParams,
-    EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
+    derive_epsilon_hydration, derive_epsilon_midnight, derive_epsilon_sol, derive_key,
+    DerivationParams, EPSILON_DERIVATION_PREFIX_V1, EPSILON_DERIVATION_PREFIX_V2,
 };
 pub use signet_primitives::{PublicKey, ScalarExt};
 
