@@ -1,5 +1,5 @@
 use crate::abi::ChainSignatures;
-use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient, MaybeBlock};
+use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::FinalizedHeadTracker;
@@ -114,12 +114,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .spawn_watcher(self.client.clone(), cancel)
     }
 
-    async fn index_live_blocks(
+    /// Track the chain tip and forward each new block number to the channel.
+    async fn track_chain_tip(
         client: Arc<EthereumClient>,
         start_block_number: u64,
-        live_blocks: mpsc::Sender<MaybeBlock>,
+        block_numbers: mpsc::Sender<u64>,
     ) {
-        tracing::info!("indexing ethereum live blocks");
+        tracing::info!("tracking ethereum chain tip starting at block {start_block_number}");
 
         let mut current_block_number = start_block_number;
 
@@ -130,7 +131,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         loop {
             interval.tick().await;
 
-            // Fetch the latest block number
             let latest_block_number = match client.get_latest_block_number().await {
                 Ok(Some(number)) => number,
                 Ok(None) => continue,
@@ -140,41 +140,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 }
             };
 
-            // Fetch blocks in order until we reach the latest block number
             while current_block_number <= latest_block_number {
-                let block = match client
-                    .get_block(BlockId::Number(BlockNumberOrTag::Number(
-                        current_block_number,
-                    )))
-                    .await
-                {
-                    Ok(Some(block)) => block,
-                    Ok(None) => {
-                        tracing::warn!(
-                            current_block_number,
-                            "ethereum live block not yet available"
-                        );
-                        break;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            current_block_number,
-                            "ethereum live block fetch failed"
-                        );
-                        break;
-                    }
-                };
-
-                if let Err(err) = live_blocks.send(MaybeBlock::Block(block)).await {
-                    tracing::warn!(
-                        ?err,
-                        current_block_number,
-                        "failed to add ethereum live block"
-                    );
+                if block_numbers.send(current_block_number).await.is_err() {
                     return;
                 }
-
                 current_block_number = current_block_number.saturating_add(1);
             }
         }
@@ -269,31 +238,32 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     async fn emit_processed_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
-        BlockAndRequests {
-            block_number,
-            block_hash,
-            block_timestamp,
-            indexed_requests,
-            respond_logs,
-            execution_events,
-        }: BlockAndRequests,
+        parsed: BlockAndRequests,
     ) -> anyhow::Result<()> {
-        // Wait for the finalized head to reach this block number before emitting events.)
-        self.finalized_head.wait_for(block_number).await?;
+        // Wait for the finalized head to reach this block number before emitting.
+        // Non-optimistic in production - the block is guaranteed to be canonical.
+        self.finalized_head.wait_for(parsed.block_number).await?;
 
         // Reorg hash-check: only for blocks not covered by the finalized head.
-        if self.finalized_head.current() < block_number {
+        // Always false in production because the finalized head is guaranteed to be canonical
+        // TODO: move optimistic policy into FinalizedHeadTracker so the indexer becomes mode-agnostic and the branch disappears (larger refactor)
+        if self.finalized_head.current() < parsed.block_number {
             let block = self
                 .client
                 .as_ref()
-                .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
+                .get_block(BlockId::Number(BlockNumberOrTag::Number(
+                    parsed.block_number,
+                )))
                 .await?
                 .ok_or_else(|| {
-                    anyhow::anyhow!("ethereum block {block_number} not found during emission")
+                    anyhow::anyhow!(
+                        "ethereum block {} not found during emission",
+                        parsed.block_number
+                    )
                 })?;
 
-            if block.header.hash != block_hash {
-                // The block was reorged after `process_block` produced this payload.
+            if block.header.hash != parsed.block_hash {
+                // The block was reorged after `parse_block` produced this payload.
                 // Do not emit stale events for a different canonical block, but also do
                 // not return an error that would cause the catchup path to retry this
                 // same stale payload forever.
@@ -301,6 +271,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             }
         }
 
+        self.emit_block_events(events_tx, parsed).await
+    }
+
+    /// Emit the parsed block's events.
+    /// Used directly by the live path, which fetches the block post-finality.
+    async fn emit_block_events(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        BlockAndRequests {
+            block_number,
+            block_timestamp,
+            indexed_requests,
+            respond_logs,
+            execution_events,
+            ..
+        }: BlockAndRequests,
+    ) -> anyhow::Result<()> {
         for event in execution_events {
             events_tx
                 .send(event)
@@ -371,8 +358,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Box::pin(stream)
     }
 
-    /// Process a single catchup item (batch block, missing-block refetch, or
-    /// live block) and emit its events.
+    /// Process a single catchup item (batch block or missing-block refetch)
+    /// and emit its events.
     pub async fn process_catchup_item(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -410,10 +397,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 _logs = l;
                 (&_block, _logs.as_slice())
             }
-            CatchupItem::LiveBlock(block) => {
-                _logs = self.fetch_block_logs(block).await?;
-                (block, _logs.as_slice())
-            }
         };
 
         let height = block.header.number;
@@ -437,40 +420,25 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Process a single live item and emit its events, keeping the reorg hash
-    /// check (live blocks are not yet finalized).
-    async fn process_live_item(
+    /// Process a block number: wait for finality, fetch the
+    /// canonical block, parse and emit events.
+    async fn process_finalized_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
-        item: &CatchupItem,
+        block_number: u64,
     ) -> anyhow::Result<()> {
-        let _block;
-        let _logs;
+        self.finalized_head.wait_for(block_number).await?;
 
-        let (block, logs) = match item {
-            CatchupItem::LiveBlock(block) => {
-                _logs = self.fetch_block_logs(block).await?;
-                (block, _logs.as_slice())
-            }
-            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
-            CatchupItem::Missing(block_id) => {
-                let block = self
-                    .client
-                    .get_block(*block_id)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "ethereum live stream yielded missing block {block_id:?} and refetch failed"
-                        )
-                    })?;
-                _logs = self.fetch_block_logs(&block).await?;
-                _block = block;
-                (&_block, _logs.as_slice())
-            }
-        };
+        let block = self
+            .client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("ethereum finalized block {block_number} not found"))?;
+        let logs = self.fetch_block_logs(&block).await?;
 
-        self.process_block(events_tx, block, logs).await?;
-        Ok(())
+        self.telemetry.block_indexed(block_number);
+        let parsed = self.parse_block(&block, &logs).await?;
+        self.emit_block_events(events_tx, parsed).await
     }
 }
 
@@ -528,31 +496,27 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         // Spawned only after catchup: no catchup/live coordination needed, and
         // the abort-on-drop guard ties the task's lifetime to this `run()`.
-        let (live_blocks_tx, mut live_blocks_rx) =
+        let (block_numbers_tx, mut block_numbers_rx) =
             mpsc::channel(self.eth.indexer.live_block_buffer);
-        let _live_task = AbortOnDrop(tokio::spawn(Self::index_live_blocks(
+        let _live_task = AbortOnDrop(tokio::spawn(Self::track_chain_tip(
             self.client.clone(),
             anchor_height,
-            live_blocks_tx,
+            block_numbers_tx,
         )));
 
         loop {
-            let maybe = tokio::select! {
+            let number = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                maybe = live_blocks_rx.recv() => maybe,
+                number = block_numbers_rx.recv() => number,
             };
-            let Some(maybe) = maybe else {
-                anyhow::bail!("ethereum live block producer terminated");
-            };
-            let item = match maybe {
-                MaybeBlock::Block(block) => CatchupItem::LiveBlock(block),
-                MaybeBlock::Missing(id) => CatchupItem::Missing(id),
+            let Some(number) = number else {
+                anyhow::bail!("ethereum chain tip tracker terminated at block {anchor_height}");
             };
             retry_until_ok(
                 &cancel,
                 Self::RETRY_DELAY,
                 "ethereum live block processing",
-                || async { self.process_live_item(&events_tx, &item).await },
+                || async { self.process_finalized_block(&events_tx, number).await },
             )
             .await;
         }
@@ -860,16 +824,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_process_fetches_logs_singly() {
+    async fn live_fetches_finalized_block_after_finality() {
         let mut server = Server::new_async().await;
         let block_number = 42;
-        let item = test_utils::live_block(block_number);
-        let CatchupItem::LiveBlock(_) = &item else {
-            unreachable!()
-        };
 
-        // Live path with an empty-bloom block: the bloom gate skips the
-        // eth_getLogs fetch entirely.
+        // Empty-bloom block: the bloom gate skips eth_getLogs entirely.
         let logs_mock = server
             .mock("POST", "/")
             .match_body(Matcher::Regex("eth_getLogs".to_string()))
@@ -880,10 +839,13 @@ mod tests {
             .create_async()
             .await;
 
-        // Reorg check also happens for live blocks.
-        let reorg_mock = server
+        // Post-finality block fetch by number
+        let block_mock = server
             .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{block_number:x}"), false]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(test_utils::block_response(2, block_number).to_string())
@@ -897,7 +859,7 @@ mod tests {
         let (events_tx, mut events_rx) = chain_event_channel();
 
         indexer
-            .process_live_item(&events_tx, &item)
+            .process_finalized_block(&events_tx, block_number)
             .await
             .expect("live process should succeed");
 
@@ -907,7 +869,7 @@ mod tests {
         ));
 
         logs_mock.assert_async().await;
-        reorg_mock.assert_async().await;
+        block_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1053,115 +1015,6 @@ mod tests {
             events_rx.recv().await,
             Some(ChainEvent::Block(n)) if n == block_number
         ));
-    }
-
-    #[tokio::test]
-    async fn live_process_refetches_block_for_reorg_check() {
-        let mut server = Server::new_async().await;
-
-        let item = test_utils::live_block(42);
-        let CatchupItem::LiveBlock(block) = &item else {
-            unreachable!("test_utils::live_block returns CatchupItem::LiveBlock")
-        };
-        let block_number = block.header.number;
-
-        let logs_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getLogs".to_string()))
-            .expect(0)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("[]")
-            .create_async()
-            .await;
-
-        // `eth_getBlockByNumber(Number)` — expected once for the reorg check.
-        // Returns the same block (matching hash) so emission proceeds.
-        let reorg_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": [format!("0x{block_number:x}"), false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::block_response(3, block_number).to_string())
-            .expect(1)
-            .create_async()
-            .await;
-
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .build()
-            .await;
-        let (events_tx, mut events_rx) = chain_event_channel();
-
-        indexer
-            .process_live_item(&events_tx, &item)
-            .await
-            .expect("live process over a block should succeed");
-
-        assert!(matches!(
-            events_rx.recv().await,
-            Some(ChainEvent::Block(n)) if n == block_number
-        ));
-
-        logs_mock.assert_async().await;
-        reorg_mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn live_process_skips_emission_when_block_reorged() {
-        let mut server = Server::new_async().await;
-
-        let item = test_utils::live_block(42);
-        let CatchupItem::LiveBlock(block) = &item else {
-            unreachable!("test_utils::live_block returns CatchupItem::LiveBlock")
-        };
-        let block_number = block.header.number;
-
-        let logs_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getLogs".to_string()))
-            .expect(0)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("[]")
-            .create_async()
-            .await;
-
-        // Re-fetch returns a block with a DIFFERENT number/hash (99), so the
-        // hash comparison fails and emission is skipped.
-        let reorg_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": [format!("0x{block_number:x}"), false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::block_response(3, 99).to_string())
-            .expect(1)
-            .create_async()
-            .await;
-
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .build()
-            .await;
-        let (events_tx, mut events_rx) = chain_event_channel();
-
-        indexer
-            .process_live_item(&events_tx, &item)
-            .await
-            .expect("reorged live block should not error");
-
-        // No events should be emitted for the reorged block.
-        assert!(
-            events_rx.try_recv().is_err(),
-            "no events should be emitted for a reorged live block"
-        );
-
-        logs_mock.assert_async().await;
-        reorg_mock.assert_async().await;
     }
 
     /// JSON-RPC response for a single `eth_getBlockByNumber` request, echoing
@@ -1370,7 +1223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_aborts_live_block_producer() {
+    async fn cancel_aborts_chain_tip_tracker() {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
@@ -1379,8 +1232,7 @@ mod tests {
 
         f.cancel_and_join().await;
 
-        // The live producer ticks every RETRY_DELAY (500ms); if it survived
-        // run() it would fetch block 11 well within this window.
+        // Check that the live block producer did not advance after cancellation.
         let max_at_cancel = f.max_requested_block.load(Ordering::Relaxed);
         f.latest.store(11, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(1200)).await;

@@ -186,18 +186,6 @@ pub fn block_response(request_id: u64, number: u64) -> serde_json::Value {
     })
 }
 
-/// Build a deserialized `Block` for a given block `number`, suitable for
-/// feeding directly into `process_catchup` / `process` as `CatchupItem::LiveBlock`.
-/// The hash is `0x{number:064x}` and the timestamp is `0x1`.
-pub fn live_block(number: u64) -> CatchupItem {
-    let value = block_response(1, number)
-        .get("result")
-        .expect("block_response has a result envelope")
-        .clone();
-    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
-    CatchupItem::LiveBlock(block)
-}
-
 pub fn batch_block(number: u64, logs: Vec<Log>) -> CatchupItem {
     let value = block_response(1, number)
         .get("result")
