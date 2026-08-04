@@ -74,7 +74,7 @@ impl OrganizingPhase {
 
         ctx.is_proposer.store(false, Ordering::Relaxed);
 
-        tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
+        tracing::info!(?sign_id, round = ?state.round(), "entering organizing phase");
         let (active, proposer, is_proposer) = {
             let Some(active) = self
                 .wait_for_active_participants(ctx, state, threshold)
@@ -86,7 +86,7 @@ impl OrganizingPhase {
             // Elect from inputs every node shares (round, membership, entropy), no
             // local-only information: filtering by the local active set makes nodes
             // elect different proposers and diverge permanently (#907).
-            let proposer = Self::proposer_per_round(state.round, &participants, &entropy);
+            let proposer = Self::proposer_per_round(state.round(), &participants, &entropy);
 
             // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
             let skip_proposing = state
@@ -97,7 +97,7 @@ impl OrganizingPhase {
 
             tracing::info!(
                 ?sign_id,
-                round = ?state.round,
+                round = ?state.round(),
                 ?proposer,
                 ?me,
                 is_proposer,
@@ -113,7 +113,7 @@ impl OrganizingPhase {
             let remaining = state.budget.remaining();
             tracing::info!(
                 ?sign_id,
-                round = ?state.round,
+                round = ?state.round(),
                 timeout = ?remaining,
                 limit = ctx.limiter.limit(),
                 "proposer waiting for concurrency slot"
@@ -136,7 +136,7 @@ impl OrganizingPhase {
         }
 
         let (presignature_id, presignature, active) = if is_proposer {
-            tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
+            tracing::info!(?sign_id, round = ?state.round(), "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
@@ -187,7 +187,7 @@ impl OrganizingPhase {
                         ctx.governance.me,
                         p,
                         PositMessage {
-                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
+                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                             from: ctx.governance.me,
                             action: PositAction::Propose,
                         },

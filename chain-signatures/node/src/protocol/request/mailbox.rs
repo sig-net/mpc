@@ -18,7 +18,12 @@ pub(crate) struct SignPositMessage {
 
 /// Mailbox holding the latest posit message per sending participant.
 ///
-/// A message for round N from sender P replaces any earlier message from P.
+/// Ordered by round, not by arrival: messages travel as independent HTTP
+/// requests with their own retries, so a stale one can land after a fresher
+/// one and must not overwrite it. Rounds normally only go up per sender (they
+/// are carried across task respawns); after the rare reset (process restart,
+/// retire and re-add) fresh low-round messages may be dropped while an old
+/// one sits unread — the task's StaleRound rejects drive catch-up instead.
 ///
 /// Only a single message per round and sender buffered. This is enough because:
 ///
@@ -90,5 +95,41 @@ impl PositMailbox {
             }
             notified.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn posit(from: u32, round: usize, action: PositAction) -> SignPositMessage {
+        SignPositMessage {
+            presignature_id: 0,
+            round,
+            from: Participant::from(from),
+            action,
+        }
+    }
+
+    /// One slot per sender, highest round wins. An equal round still
+    /// overwrites: that is a sender superseding its own message (Propose then
+    /// Accept), not a reordering.
+    #[test]
+    fn one_slot_per_sender_highest_round_wins() {
+        let mailbox = PositMailbox::new();
+        mailbox.push(posit(1, 5, PositAction::Propose));
+        mailbox.push(posit(1, 5, PositAction::Accept));
+        mailbox.push(posit(1, 2, PositAction::Propose));
+        mailbox.push(posit(2, 3, PositAction::Accept));
+
+        let mut got = [
+            mailbox.try_recv().expect("first message"),
+            mailbox.try_recv().expect("second message"),
+        ];
+        got.sort_by_key(|msg| u32::from(msg.from));
+        assert!(matches!(got[0].action, PositAction::Accept));
+        assert_eq!(got[0].round, 5, "the round-2 straggler must not win");
+        assert_eq!(got[1].round, 3);
+        assert!(mailbox.try_recv().is_none());
     }
 }

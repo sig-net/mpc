@@ -43,7 +43,7 @@ impl PositPhase {
                 // that round later. What we must not do is immediately jump to
                 // that higher round, or else any peer could force themselves to
                 // be the proposer every time.
-                if state.round > *peer_round {
+                if state.round() > *peer_round {
                     ctx.msg
                         .send(
                             ctx.governance.me,
@@ -52,7 +52,7 @@ impl PositPhase {
                                 id: PositProtocolId::Signature(
                                     sign_id,
                                     *presignature_id,
-                                    state.round,
+                                    state.round(),
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
@@ -68,10 +68,10 @@ impl PositPhase {
                 // Note that we must first try and finish the current round and
                 // not immediately jump to that higher round. Otherwise, any peer
                 // could force themselves to be the proposer every time.
-                if state.round < *peer_round {
+                if state.round() < *peer_round {
                     tracing::info!(
                         peer_round,
-                        my_round = state.round,
+                        my_round = state.round(),
                         "Storing message for future round, as deliberator",
                     );
                     state.buffer_future_posit_message(task_msg);
@@ -110,7 +110,7 @@ impl PositPhase {
                                     id: PositProtocolId::Signature(
                                         sign_id,
                                         *presignature_id,
-                                        state.round,
+                                        state.round(),
                                     ),
                                     from: ctx.governance.me,
                                     action: PositAction::RejectWithReason(
@@ -139,7 +139,7 @@ impl PositPhase {
                                 id: PositProtocolId::Signature(
                                     sign_id,
                                     *presignature_id,
-                                    state.round,
+                                    state.round(),
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
@@ -169,7 +169,7 @@ impl PositPhase {
                 ctx.governance.me,
                 proposer,
                 PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
+                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
                 },
@@ -193,7 +193,7 @@ impl PositPhase {
         let presignature = self.presignature.take();
 
         let sign_id = ctx.sign_id;
-        let round = state.round;
+        let round = state.round();
         let is_proposer = proposer == ctx.governance.me;
         let is_deliberator = !is_proposer;
 
@@ -246,7 +246,7 @@ impl PositPhase {
                     let SignPositMessage { round: peer_round , ..} = task_msg;
 
                     // Ignore messages for older rounds
-                    if state.round > peer_round {
+                    if state.round() > peer_round {
                         continue;
                     }
 
@@ -254,10 +254,10 @@ impl PositPhase {
                     // Note that we must first try and finish the current round and
                     // not immediately jump to that higher round. Otherwise, any peer
                     // could force themselves to be the proposer every time.
-                    if state.round < peer_round {
+                    if state.round() < peer_round {
                         tracing::info!(
                             peer_round,
-                            my_round = state.round,
+                            my_round = state.round(),
                             "Storing message for future round",
                         );
                         state.buffer_future_posit_message(task_msg);
@@ -380,7 +380,7 @@ impl PositPhase {
         presignature_id: PresignatureId,
     ) -> Vec<Participant> {
         let participants = counter.accepts.into_iter().collect::<Vec<_>>();
-        tracing::info!(?sign_id, round=?state.round, me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
+        tracing::info!(?sign_id, round=?state.round(), me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
 
         for &p in &participants {
             if p == ctx.governance.me {
@@ -391,7 +391,7 @@ impl PositPhase {
                     ctx.governance.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
+                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
                     },
@@ -452,6 +452,7 @@ mod tests {
             backlog: Backlog::new(),
             cfg: ProtocolConfig::default(),
             is_proposer: Arc::new(AtomicBool::new(false)),
+            round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,
         };
@@ -470,12 +471,12 @@ mod tests {
             SignKind::Sign,
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let mut state = SignState::new(request, mesh_rx);
+        let mut state = SignState::new(request, mesh_rx, Arc::new(AtomicUsize::new(0)));
 
         // We are ahead of the proposer: our round is 5, the incoming Propose is
         // for round 2. Give the round a short budget so `wait_for_propose`
         // times out and returns shortly after emitting the reject.
-        state.round = 5;
+        state.set_round(5);
         state.budget.reset(Duration::from_millis(200));
 
         let mailbox = PositMailbox::new();

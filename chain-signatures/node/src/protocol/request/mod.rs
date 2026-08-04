@@ -22,7 +22,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
@@ -111,10 +111,12 @@ fn round_timeout(round: usize) -> Duration {
 const MAX_DEAD_IDS: usize = 4096;
 
 /// A retained in-flight request. `is_proposer` is shared with the current
-/// task incarnation and read by the deadline watcher.
+/// task incarnation and read by the deadline watcher; `round` carries the
+/// posit round across respawns.
 struct SignEntry {
     request: IndexedSignRequest,
     is_proposer: Arc<AtomicBool>,
+    round: Arc<AtomicUsize>,
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
@@ -168,6 +170,7 @@ impl SignatureSpawner {
             SignEntry {
                 request: request.clone(),
                 is_proposer: Arc::clone(&is_proposer),
+                round: Arc::new(AtomicUsize::new(0)),
             },
         );
 
@@ -217,10 +220,10 @@ impl SignatureSpawner {
         let sign_id = request.id;
         tracing::info!(?sign_id, "spawning signature task");
 
-        let is_proposer = self
+        let (is_proposer, round) = self
             .requests
             .get(&sign_id)
-            .map(|entry| Arc::clone(&entry.is_proposer))
+            .map(|entry| (Arc::clone(&entry.is_proposer), Arc::clone(&entry.round)))
             .expect("sign request entry must exist when spawning its task");
 
         // Take (or create) the posit mailbox; it may already hold messages
@@ -240,6 +243,7 @@ impl SignatureSpawner {
             backlog: self.backlog.clone(),
             cfg,
             is_proposer,
+            round,
             limiter: self.limiter.clone(),
             node_account_id: self.node_account_id.clone(),
         };
@@ -624,6 +628,7 @@ mod tests {
             SignEntry {
                 request: probe_request,
                 is_proposer: Arc::new(AtomicBool::new(false)),
+                round: Arc::new(AtomicUsize::new(0)),
             },
         );
         spawner.tasks.spawn(probe_id, async move {
@@ -661,13 +666,21 @@ mod tests {
         spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
 
-        // Step 6: Governance respawn → task swapped in place, nothing retired.
+        // Step 6: Governance respawn → task swapped in place, nothing retired,
+        // and the new incarnation resumes from the entry's carried round.
+        let carried = Arc::new(AtomicUsize::new(7));
+        spawner.requests.get_mut(&sign_id).unwrap().round = Arc::clone(&carried);
         spawner.tasks.abort_all();
         spawner.spawn_tasks(&governance, &cfg);
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(
+            Arc::strong_count(&carried) >= 3,
+            "respawned task must share the entry's round, not a fresh one"
+        );
+        assert!(carried.load(Ordering::Relaxed) >= 7);
     }
 
     #[test]
