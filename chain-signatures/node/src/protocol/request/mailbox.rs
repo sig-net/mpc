@@ -18,12 +18,7 @@ pub(crate) struct SignPositMessage {
 
 /// Mailbox holding the latest posit message per sending participant.
 ///
-/// Ordered by round, not by arrival: messages travel as independent HTTP
-/// requests with their own retries, so a stale one can land after a fresher
-/// one and must not overwrite it. Rounds normally only go up per sender (they
-/// are carried across task respawns); after the rare reset (process restart,
-/// retire and re-add) fresh low-round messages may be dropped while an old
-/// one sits unread — the task's StaleRound rejects drive catch-up instead.
+/// A message for round N from sender P replaces messages from P for earlier rounds.
 ///
 /// Only a single message per round and sender buffered. This is enough because:
 ///
