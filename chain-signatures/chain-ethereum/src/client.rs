@@ -430,7 +430,7 @@ impl EthereumClient {
     pub async fn trace_transaction_output(
         &self,
         tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<alloy::primitives::Bytes> {
+    ) -> anyhow::Result<Option<alloy::primitives::Bytes>> {
         // TODO: trace_transaction_output can be slow, consider a longer timeout than the configured RPC timeout if necessary
         retry_rpc_gated!(
             self.rpc.timeout,

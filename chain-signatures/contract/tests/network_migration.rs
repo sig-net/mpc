@@ -5,8 +5,9 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 
-const TESTNET_RPC_URL: &str = "https://rpc.testnet.fastnear.com";
-const MAINNET_RPC_URL: &str = "https://rpc.mainnet.fastnear.com";
+const TESTNET_RPC_URL: &str = "https://rpc.testnet.near.org";
+const MAINNET_RPC_URL: &str = "https://rpc.mainnet.near.org";
+const VIEW_STATE_PAGE_SIZE: u64 = 1000;
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
@@ -21,6 +22,7 @@ struct ViewStateResponse {
 #[derive(Deserialize)]
 struct ViewStateResult {
     values: Vec<StateValue>,
+    last_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -33,9 +35,12 @@ async fn view_state(
     rpc_url: &str,
     contract_id: &AccountId,
 ) -> anyhow::Result<HashMap<Vec<u8>, Vec<u8>>> {
-    let response = reqwest::Client::new()
-        .post(rpc_url)
-        .json(&json!({
+    let client = reqwest::Client::new();
+    let mut state = HashMap::new();
+    let mut after_key: Option<String> = None;
+
+    loop {
+        let params = json!({
             "jsonrpc": "2.0",
             "id": "network-migration-test",
             "method": "query",
@@ -43,27 +48,39 @@ async fn view_state(
                 "request_type": "view_state",
                 "finality": "final",
                 "account_id": contract_id,
-                "prefix_base64": ""
+                "prefix_base64": "",
+                "limit": VIEW_STATE_PAGE_SIZE,
+                "after_key_base64": after_key,
             }
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<ViewStateResponse>()
-        .await?;
+        });
 
-    if let Some(error) = response.error {
-        anyhow::bail!("view_state failed for {contract_id}: {error}");
+        let response = client
+            .post(rpc_url)
+            .json(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ViewStateResponse>()
+            .await?;
+
+        if let Some(error) = response.error {
+            anyhow::bail!("view_state failed for {contract_id}: {error}");
+        }
+
+        let result = response
+            .result
+            .with_context(|| format!("view_state returned no result for {contract_id}"))?;
+        for entry in result.values {
+            state.insert(from_base64(&entry.key)?, from_base64(&entry.value)?);
+        }
+
+        match result.last_key {
+            Some(last_key) => after_key = Some(last_key),
+            None => break,
+        }
     }
 
-    let result = response
-        .result
-        .with_context(|| format!("view_state returned no result for {contract_id}"))?;
-    result
-        .values
-        .into_iter()
-        .map(|entry| Ok((from_base64(&entry.key)?, from_base64(&entry.value)?)))
-        .collect()
+    Ok(state)
 }
 
 async fn assert_migration(

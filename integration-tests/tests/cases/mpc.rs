@@ -304,6 +304,126 @@ fn sign_request(seed: u8) -> SignCommand {
     ))
 }
 
+/// Drive the network through a threshold-change resharing via the real
+/// [`MockGovernance::vote_new_threshold`] path on every node.
+///
+/// Steps:
+///   1. Build a 3-node fixture (computed threshold = 2).
+///   2. Wait for nodes to be running.
+///   3. Drive the [`MockGovernance::vote_new_threshold`] call on every
+///      node concurrently. The first call observes the running state and
+///      tallies the vote; once the running threshold is met the contract
+///      flips into `Resharing`. The remaining nodes see `Resharing` and
+///      gracefully no-op.
+///   4. Wait for every node to enter the resharing phase (the consensus
+///      loop should pick up the new state).
+///   5. Use the existing helper to mark the cryptographic resharing done
+///      and the contract flips back to `Running` with `new_threshold`.
+///   6. Assert the running threshold was actually changed and that the
+///      network still produces signatures end-to-end.
+///
+/// This replaces an earlier test that poked the contract state directly; the
+/// goal is to exercise the actual governance path (`MockGovernance::vote_new_
+/// threshold`) so the new code path is covered by an end-to-end test.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_threshold_change_via_mpc_governance() {
+    const NEW_THRESHOLD: usize = 3;
+
+    let network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_preshared_presignatures()
+        .with_node_min_triples(1)
+        .with_node_min_presignatures(1)
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    let initial_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state, got {other:?}"),
+    };
+    assert_eq!(initial_threshold, 2, "fixture default threshold");
+
+    // Drive every node's MockGovernance.vote_threshold concurrently.
+    // Only the first vote that crosses the running threshold flips the
+    // contract into Resharing; the rest see Resharing and gracefully no-op.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        network.vote_threshold(NEW_THRESHOLD),
+    )
+    .await
+    .expect("vote_threshold helper should finish")
+    .expect("vote_threshold should succeed");
+
+    // The shared contract state must now be Resharing.
+    let resharing_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Resharing(state)) => (state.threshold, state.new_threshold),
+        other => panic!("expected resharing state after governance vote, got {other:?}"),
+    };
+    assert_eq!(
+        resharing_threshold,
+        (2, NEW_THRESHOLD),
+        "resharing state must keep the old threshold and adopt the new one"
+    );
+
+    // Wait for every node to enter the resharing phase via the consensus loop.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let all_resharing = network.nodes.iter().all(|node| {
+                matches!(
+                    node.state.status(),
+                    mpc_node::protocol::state::NodeStatus::Resharing { .. }
+                )
+            });
+            if all_resharing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("nodes should reach resharing state via the consensus loop");
+
+    // Simulate the cryptographic resharing completing on every node. This
+    // helper mirrors what the contract would do after threshold-many nodes
+    // called `vote_reshared` (the mock's `MockGovernance::vote_reshared`
+    // does not tally, so we still hop the state forward here).
+    network.complete_resharing();
+
+    tokio::time::timeout(Duration::from_secs(15), network.wait_for_running())
+        .await
+        .expect("nodes should return to running with the new threshold");
+
+    let new_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state after complete_resharing, got {other:?}"),
+    };
+    assert_eq!(
+        new_threshold, NEW_THRESHOLD,
+        "running state must adopt the reshared threshold"
+    );
+    // Sign a request end-to-end to prove the network still produces valid
+    // signatures after the threshold-change resharing.
+    network
+        .assert_presignatures(1, Duration::from_secs(60))
+        .await;
+    let request = sign_request(88);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
+    assert_eq!(actions.len(), 1);
+    assert!(actions
+        .iter()
+        .next()
+        .unwrap()
+        .contains("RpcAction::Publish"));
+}
+
 /// drop the first 20 presignature messages on each node and see if the system
 /// can recover
 #[test(tokio::test(flavor = "multi_thread"))]

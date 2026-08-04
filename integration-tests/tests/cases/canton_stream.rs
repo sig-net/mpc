@@ -7,8 +7,7 @@ use mpc_chain_canton::{
     der_encode_signature, CantonChainCtx, CantonIndexer,
 };
 use mpc_chain_integration_core::{
-    utils::hashing::hash_payload, utils::stream::chain_event_channel, ChainIndexer,
-    NoopChainTelemetry, StateManager,
+    utils::hashing::hash_payload, utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
 };
 use mpc_node::backlog::Backlog;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
@@ -19,70 +18,24 @@ use serial_test::serial;
 use std::collections::HashSet;
 use std::time::Duration;
 use test_log::test;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
-
-struct RunningCantonIndexer {
-    events_rx: mpsc::Receiver<ChainEvent>,
-    cancel: CancellationToken,
-    run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
-
-impl RunningCantonIndexer {
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.events_rx.recv().await
-    }
-}
-
-impl Drop for RunningCantonIndexer {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.run_handle.abort();
-    }
-}
 
 /// Spawn `CantonIndexer::run()` against the sandbox, waiting for catchup to
 /// complete before returning.
 async fn run_canton_indexer(
     sandbox: &CantonSandbox,
     backlog: Backlog,
-) -> Result<RunningCantonIndexer> {
+) -> Result<ChainIndexerStream> {
     let config = sandbox.get_config();
     let indexer = CantonIndexer::new(config, backlog, NoopChainTelemetry)
         .await
         .context("failed to create CantonIndexer")?;
-    let (events_tx, mut events_rx) = chain_event_channel();
-    let cancel = CancellationToken::new();
-    let run_handle = tokio::spawn({
-        let cancel = cancel.clone();
-        async move { indexer.run(events_tx, cancel).await }
-    });
-
-    // Wait until catchup completes so the subscription and anchor are established
-    // before callers begin submitting transactions.
-    timeout(Duration::from_secs(30), async {
-        loop {
-            match events_rx.recv().await {
-                Some(ChainEvent::CatchupCompleted) => return Ok(()),
-                Some(_) => continue,
-                None => anyhow::bail!("indexer stopped before completing catchup"),
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for catchup to complete")??;
-
-    Ok(RunningCantonIndexer {
-        events_rx,
-        cancel,
-        run_handle,
-    })
+    ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
 
 /// Poll indexer for a SignRequest event with timeout.
 async fn wait_for_sign_request(
-    indexer: &mut RunningCantonIndexer,
+    indexer: &mut ChainIndexerStream,
     timeout_secs: u64,
 ) -> Result<IndexedSignRequest> {
     timeout(Duration::from_secs(timeout_secs), async {

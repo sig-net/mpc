@@ -1,11 +1,13 @@
 use crate::client::{CatchupItem, EthereumClient};
+use crate::config::IndexerConfig;
+use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
 use alloy::rpc::types::{Block, Log};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Dummy signer for tests; the read-side client never signs.
@@ -56,7 +58,6 @@ pub struct TestIndexerBuilder {
     server_url: String,
     pub eth: EthConfig,
     pub state_manager: MockStateManager,
-    optimistic_requests: bool,
 }
 
 impl TestIndexerBuilder {
@@ -81,7 +82,6 @@ impl TestIndexerBuilder {
                 indexer: Default::default(),
             },
             state_manager: MockStateManager::new(),
-            optimistic_requests: true,
         }
     }
 
@@ -102,13 +102,6 @@ impl TestIndexerBuilder {
         self
     }
 
-    /// Override `eth.optimistic_requests`
-    pub fn optimistic_requests(mut self, v: bool) -> Self {
-        self.optimistic_requests = v;
-        self.eth.optimistic_requests = v;
-        self
-    }
-
     /// Build the indexer.
     pub async fn build(self) -> EthereumIndexer<MockStateManager, NoopChainTelemetry> {
         let client = Arc::new(create_test_ethereum_client(&self.server_url).await);
@@ -118,6 +111,39 @@ impl TestIndexerBuilder {
             NoopChainTelemetry,
             client,
             Address::ZERO,
+        )
+    }
+}
+
+/// Harness for testing an `ExecutionWatcher` against a mockito server. The harness
+/// owns a client, state manager, and config, and can construct a watcher borrowing
+/// those dependencies.
+pub struct WatcherHarness {
+    pub client: Arc<EthereumClient>,
+    pub state_manager: MockStateManager,
+    pub config: IndexerConfig,
+    gate: Mutex<WatcherGateState>,
+}
+
+impl WatcherHarness {
+    /// Build a harness with a fresh client, empty state, default config, and a
+    /// fresh gate, all wired to `url`.
+    pub async fn new(url: &str) -> Self {
+        Self {
+            client: Arc::new(create_test_ethereum_client(url).await),
+            state_manager: MockStateManager::new(),
+            config: IndexerConfig::default(),
+            gate: Mutex::new(WatcherGateState::default()),
+        }
+    }
+
+    /// Construct an [`ExecutionWatcher`] borrowing this harness's dependencies.
+    pub fn watcher(&self) -> ExecutionWatcher<'_, MockStateManager> {
+        ExecutionWatcher::new(
+            self.client.as_ref(),
+            &self.state_manager,
+            &self.config,
+            &self.gate,
         )
     }
 }

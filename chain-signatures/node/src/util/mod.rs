@@ -41,6 +41,7 @@ impl NearPublicKeyExt for near_crypto::PublicKey {
         match self {
             near_crypto::PublicKey::SECP256K1(public_key) => public_key.into_affine_point(),
             near_crypto::PublicKey::ED25519(_) => panic!("unsupported key type"),
+            near_crypto::PublicKey::MLDSA65(_) => panic!("unsupported key type"),
         }
     }
 }

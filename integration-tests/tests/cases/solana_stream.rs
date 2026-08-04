@@ -3,7 +3,7 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::stream::chain_event_channel, ChainIndexer, NoopChainTelemetry, StateManager,
+    utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
 };
 use mpc_chain_solana::{SolConfig, SolanaIndexer};
 use mpc_crypto::ScalarExt;
@@ -26,7 +26,6 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use std::time::Duration;
 
@@ -43,26 +42,7 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-struct RunningSolanaIndexer {
-    events_rx: mpsc::Receiver<ChainEvent>,
-    cancel: CancellationToken,
-    run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
-
-impl RunningSolanaIndexer {
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.events_rx.recv().await
-    }
-}
-
-impl Drop for RunningSolanaIndexer {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.run_handle.abort();
-    }
-}
-
-async fn run_solana_indexer(config: SolConfig) -> Result<RunningSolanaIndexer> {
+async fn run_solana_indexer(config: SolConfig) -> Result<ChainIndexerStream> {
     let (backlog, _, _) = test_dependencies();
     run_solana_indexer_with_backlog(config, backlog).await
 }
@@ -70,39 +50,14 @@ async fn run_solana_indexer(config: SolConfig) -> Result<RunningSolanaIndexer> {
 async fn run_solana_indexer_with_backlog(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<RunningSolanaIndexer> {
+) -> Result<ChainIndexerStream> {
     let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry)
         .context("failed to create SolanaIndexer")?;
-    let (events_tx, mut events_rx) = chain_event_channel();
-    let cancel = CancellationToken::new();
-    let run_handle = tokio::spawn({
-        let cancel = cancel.clone();
-        async move { indexer.run(events_tx, cancel).await }
-    });
-
-    // Wait until catchup completes so the WS subscription and anchor are established
-    // before callers begin submitting transactions.
-    timeout(Duration::from_secs(30), async {
-        loop {
-            match events_rx.recv().await {
-                Some(ChainEvent::CatchupCompleted) => return Ok(()),
-                Some(_) => continue,
-                None => anyhow::bail!("indexer stopped before completing catchup"),
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for catchup to complete")??;
-
-    Ok(RunningSolanaIndexer {
-        events_rx,
-        cancel,
-        run_handle,
-    })
+    ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(indexer: &mut RunningSolanaIndexer) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(indexer: &mut ChainIndexerStream) -> Result<IndexedSignRequest> {
     loop {
         match timeout(Duration::from_secs(6), indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
