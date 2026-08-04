@@ -460,6 +460,33 @@ impl Backlog {
         let Some(entry) = pending.requests.get_mut(id) else {
             return Err(BacklogError::NotFound { chain, id: *id });
         };
+        let original = entry.original_request();
+        if request.id != original.id || request.chain != original.chain {
+            return Err(BacklogError::InvalidRequestTransition);
+        }
+        match (&original.kind, &request.kind) {
+            (SignKind::SignBidirectional(_), SignKind::RespondBidirectional(response)) => {
+                if let Some(execution) = entry.execution_tx() {
+                    if response.tx_id != execution.id {
+                        return Err(BacklogError::InvalidExecutionTransition);
+                    }
+                }
+            }
+            (SignKind::SignBidirectional(_), _) => {
+                return Err(BacklogError::InvalidRequestTransition);
+            }
+            (SignKind::Sign, SignKind::RespondBidirectional(response)) => {
+                let Some(execution) = entry.execution_tx() else {
+                    return Err(BacklogError::InvalidExecutionTransition);
+                };
+                if response.tx_id != execution.id {
+                    return Err(BacklogError::InvalidExecutionTransition);
+                }
+            }
+            (SignKind::Sign, SignKind::Sign)
+            | (SignKind::RespondBidirectional(_), SignKind::RespondBidirectional(_)) => {}
+            _ => return Err(BacklogError::InvalidRequestTransition),
+        }
         entry.set_request(request);
         Ok(())
     }
@@ -471,6 +498,33 @@ impl Backlog {
         sign_id: SignId,
         tx: BidirectionalTx,
     ) -> Option<(SignId, BidirectionalTx)> {
+        // The watcher is local recovery state, but the transaction itself is
+        // part of the source request's durable projection. Retain it on the
+        // source entry so a later execution confirmation can safely transition
+        // even when the original request was represented as a plain `Sign`.
+        {
+            let mut pending = self.pending(&tx.source_chain).write().await;
+            let Some(entry) = pending.requests.get_mut(&sign_id) else {
+                tracing::warn!(
+                    ?sign_id,
+                    ?tx,
+                    "execution watcher source request was not found"
+                );
+                return None;
+            };
+            if tx.request_id != entry.original_request().id.request_id
+                || tx.source_chain != entry.original_request().chain
+            {
+                tracing::warn!(
+                    ?sign_id,
+                    ?tx,
+                    "execution watcher transaction does not match source request"
+                );
+                return None;
+            }
+            entry.execution = Some(tx.clone());
+        }
+
         let mut entry = self.watchers(&chain).write().await;
 
         entry
@@ -509,6 +563,19 @@ impl Backlog {
             );
             return None;
         };
+        if let SignStatus::PendingExecution { tx } = &status {
+            if tx.request_id != entry.original_request().id.request_id
+                || tx.source_chain != entry.original_request().chain
+            {
+                tracing::warn!(
+                    ?chain,
+                    ?id,
+                    "set_status: execution transaction does not match request"
+                );
+                return None;
+            }
+            entry.execution = Some(tx.clone());
+        }
         tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
         entry.set_status(status);
         Some(entry.clone())
@@ -793,28 +860,54 @@ pub enum BacklogError {
     InvalidPublishingTransition,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
+    #[error("request identity does not match backlog entry")]
+    InvalidRequestTransition,
+    #[error("execution transaction does not match backlog entry")]
+    InvalidExecutionTransition,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
+    /// The currently active source-chain request. For bidirectional work this
+    /// becomes the final response request after target execution.
     pub request: IndexedSignRequest,
     pub status: SignStatus,
+    /// Original source-chain request, retained when `request` advances to a
+    /// final bidirectional response. Optional for legacy checkpoint payloads.
+    #[serde(default)]
+    pub original_request: Option<IndexedSignRequest>,
+    /// Bidirectional target transaction retained independently of local status.
+    /// Optional for legacy checkpoint payloads.
+    #[serde(default)]
+    pub execution: Option<BidirectionalTx>,
 }
 
 impl BacklogEntry {
     pub fn new(request: IndexedSignRequest) -> Self {
         Self {
+            original_request: Some(request.clone()),
             request,
             status: SignStatus::PendingGeneration,
+            execution: None,
         }
     }
 
     pub fn with_status(request: IndexedSignRequest, status: SignStatus) -> Self {
-        Self { request, status }
+        Self {
+            original_request: Some(request.clone()),
+            request,
+            status,
+            execution: None,
+        }
     }
 
     pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
-        Self::with_status(request, SignStatus::PendingExecution { tx })
+        Self {
+            original_request: Some(request.clone()),
+            request,
+            status: SignStatus::PendingExecution { tx: tx.clone() },
+            execution: Some(tx),
+        }
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -837,12 +930,19 @@ impl BacklogEntry {
     }
 
     /// Set the status of this transaction
-    pub fn set_status(&mut self, status: SignStatus) {
+    fn set_status(&mut self, status: SignStatus) {
+        if let SignStatus::PendingExecution { tx } = &status {
+            self.execution = Some(tx.clone());
+        }
         self.status = status;
     }
 
-    pub fn set_request(&mut self, request: IndexedSignRequest) {
+    fn set_request(&mut self, request: IndexedSignRequest) {
         self.request = request;
+    }
+
+    pub fn original_request(&self) -> &IndexedSignRequest {
+        self.original_request.as_ref().unwrap_or(&self.request)
     }
 
     pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
@@ -863,14 +963,21 @@ impl BacklogEntry {
         &mut self,
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
+        if bidirectional_tx.request_id != self.original_request().id.request_id
+            || bidirectional_tx.source_chain != self.original_request().chain
+        {
+            return Err(BacklogError::InvalidExecutionTransition);
+        }
+
         match (&self.request.kind, self.status.clone()) {
             (
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
                 self.status = SignStatus::PendingExecution {
-                    tx: bidirectional_tx,
+                    tx: bidirectional_tx.clone(),
                 };
+                self.execution = Some(bidirectional_tx);
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -880,23 +987,23 @@ impl BacklogEntry {
     /// Get target chain if this is a bidirectional transaction
     // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        match &self.request.kind {
-            SignKind::Sign => None,
-            SignKind::SignBidirectional(event) => self
-                .execution_tx()
-                .map(|tx| tx.target_chain)
-                .or_else(|| event.target_chain().ok()),
-            SignKind::RespondBidirectional(_) => None,
-        }
+        self.execution_tx().map(|tx| tx.target_chain).or_else(|| {
+            match &self.original_request().kind {
+                SignKind::SignBidirectional(event) => event.target_chain().ok(),
+                SignKind::Sign | SignKind::RespondBidirectional(_) => None,
+            }
+        })
     }
 
     /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
-        matches!(self.request.kind, SignKind::SignBidirectional(_))
+        matches!(self.original_request().kind, SignKind::SignBidirectional(_))
     }
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        self.status.execution_tx()
+        self.execution
+            .as_ref()
+            .or_else(|| self.status.execution_tx())
     }
 
     pub fn typename(&self) -> &'static str {
@@ -1061,6 +1168,8 @@ mod tests {
         status: SignStatus,
         dest: &str,
     ) {
+        let mut tx = tx;
+        tx.source_chain = chain;
         let sign_id = SignId::new(tx.request_id);
         backlog
             .insert(create_bidirectional_request(sign_id, chain, dest, 0))
@@ -1793,6 +1902,137 @@ mod tests {
         assert!(matches!(
             recovered_entry.request.kind,
             SignKind::SignBidirectional(_)
+        ));
+    }
+
+    #[test]
+    fn test_legacy_backlog_entry_deserializes_with_projection_fallbacks() {
+        let request = IndexedSignRequest::sign(
+            SignId::new([47; 32]),
+            create_test_args(47),
+            Chain::Solana,
+            0,
+        );
+        let entry = BacklogEntry::new(request.clone());
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&entry, &mut encoded).unwrap();
+        let mut value: ciborium::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let ciborium::Value::Map(map) = &mut value else {
+            panic!("backlog entry must serialize as a CBOR map");
+        };
+        map.retain(|(key, _)| {
+            !matches!(
+                key,
+                ciborium::Value::Text(name)
+                    if name == "original_request" || name == "execution"
+            )
+        });
+        let mut legacy_encoded = Vec::new();
+        ciborium::ser::into_writer(&value, &mut legacy_encoded).unwrap();
+
+        let restored: BacklogEntry = ciborium::de::from_reader(legacy_encoded.as_slice()).unwrap();
+        assert_eq!(restored.original_request(), &request);
+        assert!(restored.execution_tx().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_transition_preserves_original_request_and_execution() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(45);
+        let sign_id = SignId::new(tx.request_id);
+        let original = create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0);
+
+        backlog.insert(original.clone()).await;
+        backlog
+            .advance(Chain::Solana, sign_id, tx.clone())
+            .await
+            .unwrap();
+
+        let completion = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            Chain::Solana,
+            1,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![9],
+                chain_ctx: None,
+            },
+        );
+        backlog
+            .set_request(Chain::Solana, &sign_id, completion)
+            .await
+            .unwrap();
+
+        let entry = backlog.get(Chain::Solana, &sign_id).await.unwrap();
+        assert!(matches!(
+            entry.original_request().kind,
+            SignKind::SignBidirectional(_)
+        ));
+        assert_eq!(entry.original_request().id, original.id);
+        assert_eq!(entry.execution_tx(), Some(&tx));
+
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+        let recovered = Backlog::new();
+        recovered.recover_by_checkpoint(checkpoint).await.unwrap();
+        let recovered_entry = recovered.get(Chain::Solana, &sign_id).await.unwrap();
+        assert!(matches!(
+            recovered_entry.original_request().kind,
+            SignKind::SignBidirectional(_)
+        ));
+        assert_eq!(recovered_entry.execution_tx(), Some(&tx));
+    }
+
+    #[tokio::test]
+    async fn test_backlog_rejects_mismatched_request_and_execution_updates() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(46);
+        let sign_id = SignId::new(tx.request_id);
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await;
+
+        let wrong_request = IndexedSignRequest::sign(
+            SignId::new([99; 32]),
+            create_test_args(99),
+            Chain::Solana,
+            0,
+        );
+        assert!(matches!(
+            backlog
+                .set_request(Chain::Solana, &sign_id, wrong_request)
+                .await,
+            Err(BacklogError::InvalidRequestTransition)
+        ));
+
+        let mut wrong_tx = tx.clone();
+        wrong_tx.request_id = [99; 32];
+        assert!(backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution {
+                    tx: wrong_tx.clone(),
+                },
+            )
+            .await
+            .is_none());
+        assert!(backlog
+            .watch_execution(Chain::Ethereum, sign_id, wrong_tx.clone())
+            .await
+            .is_none());
+        assert!(backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .is_empty());
+        assert!(matches!(
+            backlog.advance(Chain::Solana, sign_id, wrong_tx).await,
+            Err(BacklogError::InvalidExecutionTransition)
         ));
     }
 
