@@ -203,7 +203,7 @@ impl RpcEthereumClient {
     pub async fn trace_transaction_output(
         &self,
         tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Bytes> {
+    ) -> anyhow::Result<Option<Bytes>> {
         #[cfg(feature = "bench")]
         bench::rpc_inc("debug_traceTransaction");
 
@@ -414,7 +414,23 @@ impl RpcEthereumClient {
 fn trace_output_to_bytes(
     tx_hash: alloy::primitives::B256,
     frame: &serde_json::Value,
-) -> anyhow::Result<Bytes> {
+) -> anyhow::Result<Option<Bytes>> {
+    let Some(frame) = frame.as_object() else {
+        anyhow::bail!(
+            "debug_traceTransaction response for {:#x} is not a call frame: {:?}",
+            tx_hash,
+            frame
+        );
+    };
+
+    if !frame.contains_key("type") {
+        anyhow::bail!(
+            "debug_traceTransaction response for {:#x} has no call frame `type`: {:?}",
+            tx_hash,
+            frame
+        );
+    }
+
     // `callTracer` populates `error` when the top-level call failed (revert,
     // OOG, invalid opcode, etc.). `revertReason` is the decoded `Error(string)`,
     // only present for Solidity `revert("...")` aborts.
@@ -442,23 +458,16 @@ fn trace_output_to_bytes(
         }
     }
 
-    let output = frame
-        .get("output")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "debug_traceTransaction response for {:#x} is missing `output`: {:?}",
-                tx_hash,
-                frame
-            )
-        })?;
+    let Some(output) = frame.get("output").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
 
     let stripped = output.strip_prefix("0x").unwrap_or(output);
     if stripped.is_empty() {
-        return Ok(Bytes::default());
+        return Ok(Some(Bytes::default()));
     }
 
-    Ok(Bytes::from(hex::decode(stripped)?))
+    Ok(Some(Bytes::from(hex::decode(stripped)?)))
 }
 
 /// Bails with the HTTP status and a truncated body when the response is not
@@ -812,6 +821,7 @@ mod tests {
             "output": "0x0000000000000000000000000000000000000000000000000000000000000001",
         });
         let bytes = trace_output_to_bytes(B256::ZERO, &frame).expect("should parse");
+        let bytes = bytes.expect("output should be present");
         assert_eq!(bytes.len(), 32);
         assert_eq!(bytes[31], 1);
     }
@@ -830,9 +840,24 @@ mod tests {
     }
 
     #[test]
-    fn bails_when_output_missing_and_no_error() {
+    fn returns_none_when_output_missing_and_no_error() {
         let frame = json!({ "type": "CALL" });
-        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
-        assert!(format!("{err}").contains("missing `output`"));
+        let output = trace_output_to_bytes(B256::ZERO, &frame).expect("should parse");
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn bails_when_trace_result_is_null() {
+        let err = trace_output_to_bytes(B256::ZERO, &serde_json::Value::Null)
+            .expect_err("null trace result should fail");
+        assert!(format!("{err}").contains("is not a call frame"));
+    }
+
+    #[test]
+    fn bails_when_trace_result_has_no_call_type() {
+        let frame = json!({});
+        let err =
+            trace_output_to_bytes(B256::ZERO, &frame).expect_err("empty trace object should fail");
+        assert!(format!("{err}").contains("has no call frame `type`"));
     }
 }

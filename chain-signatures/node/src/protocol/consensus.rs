@@ -684,11 +684,11 @@ impl<G: Governance> ConsensusProtocol<G> for ResharingState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        if contract_state.threshold != self.contract.threshold {
+                        if contract_state.threshold != self.contract.new_threshold {
                             tracing::warn!(
-                                node_threshold = self.contract.threshold,
+                                node_threshold = self.contract.new_threshold,
                                 contract_threshold = contract_state.threshold,
-                                "resharing(running): our threshold does not match contract, rejoining...",
+                                "resharing(running): our new threshold does not match contract, rejoining...",
                             );
                             return NodeState::Joining(JoiningState {
                                 participants: contract_state.participants,
@@ -910,4 +910,188 @@ async fn resharing(
         phase: ResharingPhase::awaiting(me),
         ready_nonce: random(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::contract::RunningContractState;
+
+    use cait_sith::protocol::Participant;
+    use k256::AffinePoint;
+    use std::collections::HashSet;
+
+    /// `Governance` stub whose methods are never invoked by the
+    /// `ResharingState::advance` branch we are exercising. Returning
+    /// `Ok(false)` keeps the stub inert if anything ever reaches it.
+    struct DummyGov;
+
+    impl Governance for DummyGov {
+        async fn propose_join(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn vote_reshared(&self, _epoch: u64) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn vote_public_key(
+            &self,
+            _public_key: &near_crypto::PublicKey,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn vote_threshold(&self, _new_threshold: usize) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn build_resharing_state(
+        threshold: usize,
+        new_threshold: usize,
+        participants: Participants,
+    ) -> ResharingState {
+        let me = Participant::from(0);
+        let contract = ResharingContractState {
+            old_epoch: 1,
+            old_participants: participants.clone(),
+            new_participants: participants,
+            threshold,
+            new_threshold,
+            public_key: AffinePoint::default(),
+            finished_votes: HashSet::new(),
+            cancel_votes: HashSet::new(),
+        };
+        ResharingState {
+            me,
+            contract,
+            local_private_share: None,
+            phase: ResharingPhase::awaiting(me),
+            ready_nonce: 0,
+        }
+    }
+
+    fn build_running_state(
+        epoch: u64,
+        threshold: usize,
+        participants: Participants,
+    ) -> ProtocolState {
+        ProtocolState::Running(RunningContractState {
+            epoch,
+            participants,
+            threshold,
+            public_key: AffinePoint::default(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold_votes: Default::default(),
+        })
+    }
+
+    /// Regression guard for the threshold-comparison fix in
+    /// `ResharingState::advance`'s `ProtocolState::Running` branch: after
+    /// resharing completes, the running threshold must match the reshared
+    /// key's `new_threshold`, not the prior `threshold`.
+    #[tokio::test]
+    async fn test_resharing_running_new_threshold_matches() {
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let state = build_resharing_state(
+            /* threshold */ 2,
+            /* new_threshold */ 3,
+            participants.clone(),
+        );
+        let contract_state = build_running_state(
+            /* epoch */ 2,
+            /* threshold */ 3, // matches new_threshold
+            participants,
+        );
+
+        // SAFETY: the `ProtocolState::Running` branch we are exercising never
+        // touches `_ctx` or `_gov`, so casting an uninitialised slot satisfies
+        // the trait bounds without producing UB on this path.
+        let mut uninit_ctx = std::mem::MaybeUninit::<MpcSignProtocol>::uninit();
+        let ctx = unsafe { &mut *uninit_ctx.as_mut_ptr() };
+        let mut dummy_gov = DummyGov;
+
+        let result = state.advance(ctx, &mut dummy_gov, contract_state).await;
+
+        assert!(
+            matches!(result, NodeState::Resharing(_)),
+            "running threshold matching `new_threshold` must keep the node in Resharing"
+        );
+    }
+
+    /// If the contract lands on a running threshold equal to the OLD
+    /// `threshold` (instead of the freshly reshared `new_threshold`), the node
+    /// must fall back to `Joining` because the reshared key it holds expects
+    /// a different threshold.
+    #[tokio::test]
+    async fn test_resharing_running_old_threshold_misses() {
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let state = build_resharing_state(
+            /* threshold */ 2,
+            /* new_threshold */ 3,
+            participants.clone(),
+        );
+        let contract_state = build_running_state(
+            /* epoch */ 2,
+            /* threshold */ 2, // matches OLD threshold, NOT new_threshold
+            participants,
+        );
+
+        let mut uninit_ctx = std::mem::MaybeUninit::<MpcSignProtocol>::uninit();
+        let ctx = unsafe { &mut *uninit_ctx.as_mut_ptr() };
+        let mut dummy_gov = DummyGov;
+
+        let result = state.advance(ctx, &mut dummy_gov, contract_state).await;
+
+        assert!(
+            matches!(result, NodeState::Joining(_)),
+            "running threshold matching the OLD threshold must cause a Joining fallback"
+        );
+    }
+
+    /// Pins the early `public_key != self.contract.public_key` check that
+    /// precedes the threshold comparison. Without this test, the two
+    /// threshold tests above could silently pass even if the public-key
+    /// guard were removed.
+    #[tokio::test]
+    async fn test_resharing_running_public_key_mismatch_joins() {
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let state = build_resharing_state(2, 3, participants.clone());
+
+        // The resharing state was built with `AffinePoint::default()` (the
+        // identity). Use the secp256k1 generator as a guaranteed-different
+        // public key for the contract side.
+        let different_pk = k256::ProjectivePoint::GENERATOR.to_affine();
+        let contract_state = ProtocolState::Running(RunningContractState {
+            epoch: 2,
+            participants,
+            threshold: 3,
+            public_key: different_pk,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold_votes: Default::default(),
+        });
+
+        let mut uninit_ctx = std::mem::MaybeUninit::<MpcSignProtocol>::uninit();
+        let ctx = unsafe { &mut *uninit_ctx.as_mut_ptr() };
+        let mut dummy_gov = DummyGov;
+
+        let result = state.advance(ctx, &mut dummy_gov, contract_state).await;
+
+        assert!(
+            matches!(result, NodeState::Joining(_)),
+            "mismatched public key must force a Joining fallback before the threshold check"
+        );
+    }
 }

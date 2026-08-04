@@ -11,8 +11,9 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
-use mpc_chain_integration_core::utils::stream::chain_event_channel;
-use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
+};
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
@@ -32,7 +33,6 @@ use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 
 fn signature_deposit() -> U256 {
     U256::from(1u64)
@@ -347,82 +347,13 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     }
 }
 
-struct StartedEthereumIndexer {
-    events_rx: mpsc::Receiver<ChainEvent>,
-    /// Events observed while waiting for catchup to complete, replayed first so
-    /// tests see the full event stream.
-    pending: std::collections::VecDeque<ChainEvent>,
-    cancel: CancellationToken,
-    run_task: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
-
-impl StartedEthereumIndexer {
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        if let Some(event) = self.pending.pop_front() {
-            return Some(event);
-        }
-        self.events_rx.recv().await
-    }
-}
-
-impl Drop for StartedEthereumIndexer {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.run_task.abort();
-    }
-}
-
-async fn next_event_within(
-    client: &mut StartedEthereumIndexer,
-    duration: Duration,
-) -> Result<ChainEvent> {
-    timeout(duration, async {
-        loop {
-            if let Some(event) = client.next_event().await {
-                return event;
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for chain event")
-}
-
-/// Helper for starting the ethereum indexer, especially in cases where we do not want
-/// to call into run_supervised where we want to directly call `next_event` on each test.
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
-) -> Result<StartedEthereumIndexer> {
+) -> Result<ChainIndexerStream> {
     let indexer =
         EthereumIndexer::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
-    let (events_tx, mut events_rx) = chain_event_channel();
-    let cancel = CancellationToken::new();
-    let run_task = tokio::spawn({
-        let cancel = cancel.clone();
-        async move { indexer.run(events_tx, cancel).await }
-    });
-
-    // Wait until catchup completes so the live task and anchor are established
-    // before callers begin submitting transactions.
-    let mut pending = std::collections::VecDeque::new();
-    timeout(Duration::from_secs(30), async {
-        loop {
-            match events_rx.recv().await {
-                Some(ChainEvent::CatchupCompleted) => return Ok(()),
-                Some(event) => pending.push_back(event),
-                None => anyhow::bail!("indexer run() exited before completing catchup"),
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for indexer to complete catchup")??;
-
-    Ok(StartedEthereumIndexer {
-        events_rx,
-        pending,
-        cancel,
-        run_task,
-    })
+    ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
 
 #[test_log::test(tokio::test)]
@@ -732,7 +663,7 @@ async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
     submit_sign_request(&ctx, payload, path).await?;
 
     let req = loop {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
@@ -754,7 +685,7 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
 
     let mut saw_block = false;
     for _ in 0..5 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Block(_) => {
                 saw_block = true;
                 break;
@@ -808,7 +739,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
 
     let mut saw_execution = false;
     for _ in 0..20 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::ExecutionConfirmed { sign_id: ev_id, .. } if ev_id == sign_id => {
                 saw_execution = true;
                 break;
@@ -1010,7 +941,7 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     let mut received: Vec<[u8; 32]> = Vec::new();
     while received.len() < payloads.len() {
         if let ChainEvent::SignRequest { request, .. } =
-            next_event_within(&mut stream, Duration::from_secs(10)).await?
+            stream.next_event_within(Duration::from_secs(10)).await?
         {
             let bytes: [u8; 32] = request.args.payload.to_bytes().into();
             received.push(bytes);
@@ -1087,7 +1018,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
     let mut saw_new_event = false;
     let mut saw_new_checkpoint = false;
     for _ in 0..12 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::SignRequest { request, .. } => {
                 saw_new_event = true;
 
@@ -1137,7 +1068,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     submit_sign_request(&ctx, payload, path).await?;
 
     let sign_req = loop {
-        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
+        match stream.next_event_within(Duration::from_secs(30)).await? {
             ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
@@ -1192,7 +1123,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;
     for _ in 0..8 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Respond(ev) => {
                 assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
                 assert_eq!(ev.request_id, sign_req.id.request_id);

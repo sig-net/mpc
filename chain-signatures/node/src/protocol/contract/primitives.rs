@@ -8,6 +8,8 @@ use std::{
     str::FromStr,
 };
 
+pub use mpc_contract::primitives::ThresholdVotes;
+
 type ParticipantId = u32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
