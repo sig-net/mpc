@@ -89,16 +89,6 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn retry_until_some_returns_value_when_ready() {
-        let cancel = CancellationToken::new();
-        let val = retry_until_some(&cancel, Duration::from_millis(1), "test", || async {
-            Ok::<_, anyhow::Error>(Some(42u64))
-        })
-        .await;
-        assert_eq!(val, Some(42));
-    }
-
-    #[tokio::test]
     async fn retry_until_some_retries_on_none_then_yields_value() {
         let cancel = CancellationToken::new();
         let count = Arc::new(AtomicU32::new(0));
@@ -150,5 +140,101 @@ mod tests {
         })
         .await;
         assert!(val.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_retries_on_error_then_succeeds() {
+        let cancel = CancellationToken::new();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        retry_until_ok(&cancel, Duration::from_millis(1), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                if count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("boom"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_stops_on_cancel() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_clone.cancel();
+        });
+        retry_until_ok(&cancel, Duration::from_millis(50), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Err::<(), anyhow::Error>(anyhow::anyhow!("always fails"))
+            }
+        })
+        .await;
+        // The task should have been retried at least once before cancellation.
+        assert!(count.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_within_returns_false_when_duration_elapses() {
+        let cancel = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let cancelled = cancel.cancelled_within(Duration::from_millis(30)).await;
+        assert!(!cancelled);
+        // `sleep` never returns early, so the full duration must have elapsed.
+        assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn cancelled_within_returns_true_when_cancelled_during_wait() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel_clone.cancel();
+        });
+        let started = std::time::Instant::now();
+        let cancelled = cancel.cancelled_within(Duration::from_millis(500)).await;
+        assert!(cancelled);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn abort_on_drop_aborts_the_wrapped_task() {
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        {
+            let guard = AbortOnDrop(handle);
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            assert!(
+                count.load(Ordering::Relaxed) >= 2,
+                "task should have incremented before drop"
+            );
+            drop(guard);
+        }
+
+        // After dropping the guard, the wrapped task must stop running.
+        let after_drop = count.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            after_drop,
+            "wrapped task kept running after AbortOnDrop was dropped"
+        );
     }
 }
