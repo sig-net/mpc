@@ -385,12 +385,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
 
-    // TODO: add tracing
     async fn run(
         &self,
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
+        tracing::info!("ethereum indexer started");
+
         // Spawn the finalized head watcher.
         let _finalized_watcher = self
             .finalized_head
@@ -398,7 +399,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
         let Some(anchor) = self.sample_anchor(&cancel).await else {
-            return Ok(()); // cancelled while waiting for anchor
+            tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
+            return Ok(());
         };
 
         // Next block to process, starting from the last processed block + 1
@@ -410,6 +412,20 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor);
         next = self.client.clamp_oldest_supported(next, anchor);
+
+        if next < anchor {
+            tracing::info!(
+                start = next,
+                tip = anchor.saturating_sub(1),
+                blocks = anchor - next,
+                "ethereum indexer starting catchup"
+            );
+        } else {
+            tracing::info!(
+                height = next,
+                "ethereum indexer already caught up; skipping catchup"
+            );
+        }
 
         // Catchup: process all blocks up to the anchor, then emit a CatchupCompleted event.
         while next < anchor {
@@ -424,8 +440,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         }
 
         if cancel.is_cancelled() {
+            tracing::debug!("ethereum indexer cancelled after catchup; skipping CatchupCompleted");
             return Ok(());
         }
+        tracing::info!(
+            height = next,
+            "ethereum catchup complete; entering live tail"
+        );
         events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
