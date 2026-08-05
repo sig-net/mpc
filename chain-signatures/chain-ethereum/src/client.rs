@@ -39,9 +39,6 @@ pub enum CatchupItem {
     /// A block that was missing from the catchup batch response.
     /// `process_catchup` refetches both block and receipts individually.
     Missing(BlockId),
-    /// A block from the live stream. Receipts are fetched lazily in
-    /// `process`.
-    LiveBlock(Block),
 }
 
 /// Intermediate state of a block during catchup batch processing.
