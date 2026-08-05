@@ -19,11 +19,9 @@ midnight-storage.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
-# Crate-local rather than workspace so this manifest states its own features.
 # Cargo unifies features across this crate and `node` in a workspace build, so
-# nothing here may rely on `unstable-light-client` being absent. Keep the
-# version in lockstep with `chain-signatures/node/Cargo.toml`.
-subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native"] }
+# nothing here may rely on `unstable-light-client` (node's addition) being absent.
+subxt = { workspace = true, features = ["jsonrpsee", "native"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
