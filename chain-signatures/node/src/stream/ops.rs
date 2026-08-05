@@ -295,7 +295,7 @@ pub async fn process_execution_confirmed(
         .backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match &entry.original_request().kind {
+        .and_then(|entry| match &entry.source_request().kind {
             SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
             _ => None,
         });
