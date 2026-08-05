@@ -1,9 +1,16 @@
 //! Component tests that combine the MPC network combined with a chain stream as
 //! input and output.
 
+use alloy::primitives::{Address, B256};
+use cait_sith::protocol::Participant;
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
+use k256::{AffinePoint, Scalar};
 use mpc_node::protocol::IndexedSignRequest;
-use mpc_primitives::{Chain, SignId};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, RespondBidirectionalTx, SignArgs,
+    SignBidirectionalEvent, SignId,
+};
 use std::time::Duration;
 use test_log::test;
 
@@ -21,6 +28,189 @@ fn sign_request(seed: u32) -> IndexedSignRequest {
         Chain::Solana,
         0,
     )
+}
+
+fn bidirectional_request(seed: u8) -> IndexedSignRequest {
+    let sign_id = SignId::new([seed; 32]);
+    IndexedSignRequest::sign_bidirectional(
+        sign_id,
+        SignArgs {
+            entropy: [seed; 32],
+            epsilon: Scalar::ONE,
+            payload: Scalar::from(seed as u64 + 1),
+            path: format!("fixture-path-{seed}"),
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
+        },
+        Chain::Solana,
+        0,
+        SignBidirectionalEvent {
+            sender: [0; 32],
+            serialized_transaction: vec![seed],
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+            key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: format!("fixture-target-path-{seed}"),
+            algo: "secp256k1".to_string(),
+            dest: "0x0000000000000000000000000000000000000000".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+        },
+    )
+}
+
+fn bidirectional_tx(seed: u8) -> BidirectionalTx {
+    BidirectionalTx {
+        id: BidirectionalTxId(B256::from([seed; 32]).0),
+        sender: [0; 32],
+        serialized_transaction: vec![seed, seed + 1],
+        source_chain: Chain::Solana,
+        target_chain: Chain::Ethereum,
+        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
+        deposit: 0,
+        path: format!("fixture-target-path-{seed}"),
+        algo: "secp256k1".to_string(),
+        dest: "0x0000000000000000000000000000000000000000".to_string(),
+        params: "{}".to_string(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+        request_id: [seed; 32],
+        from_address: **Address::ZERO,
+        nonce: 0,
+    }
+}
+
+/// Checkpoint projections must agree even when nodes have different local
+/// generation/publication state and different target-execution progress.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_fixture_checkpoint_projection_with_partial_bidirectional_observation() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let network = MpcFixtureBuilder::new(3, 2).build().await;
+        let request = bidirectional_request(42);
+        let sign_id = request.id;
+        let tx = bidirectional_tx(42);
+        let initial_request = bidirectional_request(43);
+
+        for node in &network.nodes {
+            node.backlog.insert(request.clone()).await;
+            node.backlog.insert(initial_request.clone()).await;
+            node.backlog.set_processed_block(Chain::Solana, 100).await;
+        }
+
+        // The initial-response projection also ignores local generation and
+        // publication ownership.
+        for (index, status) in [
+            SignStatus::PendingGeneration,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0), Participant::from(1)],
+                    is_proposer: false,
+                },
+            },
+            SignStatus::PendingGeneration,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let initial_id = initial_request.id;
+            network.nodes[index]
+                .backlog
+                .set_status(Chain::Solana, &initial_id, status)
+                .await;
+        }
+
+        let final_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            SignArgs {
+                entropy: [42; 32],
+                epsilon: Scalar::ONE,
+                payload: Scalar::from(43u64),
+                path: "fixture-final-path".to_string(),
+                key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
+            },
+            Chain::Solana,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![1, 2, 3],
+                chain_ctx: None,
+            },
+        );
+
+        // All nodes have observed the source response, but local progress
+        // differs: one is executing while another is generating the final
+        // response and the third has a publication artifact. These substates
+        // must share one canonical completion projection.
+        for (index, status) in [
+            SignStatus::PendingExecution { tx: tx.clone() },
+            SignStatus::PendingGenerationBidirectional,
+            SignStatus::PendingPublishBidirectional {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0), Participant::from(1)],
+                    is_proposer: true,
+                },
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            network.nodes[index]
+                .backlog
+                .set_status(
+                    Chain::Solana,
+                    &sign_id,
+                    SignStatus::PendingExecution { tx: tx.clone() },
+                )
+                .await;
+            network.nodes[index]
+                .backlog
+                .set_request(Chain::Solana, &sign_id, final_request.clone())
+                .await
+                .unwrap();
+            network.nodes[index]
+                .backlog
+                .set_status(Chain::Solana, &sign_id, status)
+                .await;
+        }
+
+        let checkpoints: Vec<_> = futures::future::join_all(
+            network
+                .nodes
+                .iter()
+                .map(|node| node.backlog.checkpoint(Chain::Solana)),
+        )
+        .await
+        .into_iter()
+        .map(|checkpoint| checkpoint.expect("fixture checkpoint should be available"))
+        .collect();
+
+        assert_eq!(checkpoints[0].digest(), checkpoints[1].digest());
+        assert_eq!(checkpoints[1].digest(), checkpoints[2].digest());
+        assert_eq!(checkpoints[0].pending_requests.len(), 2);
+        assert_eq!(
+            checkpoints[0].pending_requests[0].canonical_transaction,
+            checkpoints[1].pending_requests[0].canonical_transaction
+        );
+        assert_eq!(
+            checkpoints[1].pending_requests[1].canonical_transaction,
+            checkpoints[2].pending_requests[1].canonical_transaction
+        );
+    })
+    .await
+    .expect("fixture checkpoint projection test exceeded 120 seconds");
 }
 
 /// Simple test, mostly just here to check the MockStream setup is working.
