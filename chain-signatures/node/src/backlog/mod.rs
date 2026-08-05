@@ -44,34 +44,35 @@ fn canonical_request_bytes(request: &IndexedSignRequest) -> Vec<u8> {
     bytes
 }
 
-fn canonical_execution_tx(entry: &BacklogEntry) -> Option<&BidirectionalTx> {
+fn canonical_entry_bytes(entry: &BacklogEntry) -> Vec<u8> {
+    checked_canonical_entry_bytes(entry).expect("serialize canonical checkpoint entry")
+}
+
+fn checked_canonical_entry_bytes(entry: &BacklogEntry) -> anyhow::Result<Vec<u8>> {
     // A watcher attached to an ordinary `Sign` entry is local recovery state
     // and must not enter consensus. For completion work, the transaction is
     // derived from the source-chain response and is therefore safe to commit;
     // target execution output is not part of `BidirectionalTx` and remains local.
-    if entry.status().checkpoint_phase() == CheckpointPhase::AwaitingInitialResponse {
-        return None;
-    }
-
-    entry.execution_tx()
-}
-
-fn canonical_entry_bytes(entry: &BacklogEntry) -> Vec<u8> {
     let phase = match entry.status().checkpoint_phase() {
         CheckpointPhase::AwaitingInitialResponse => 0u8,
         CheckpointPhase::AwaitingBidirectionalCompletion => 1u8,
+    };
+    let execution = if phase == 0 {
+        None
+    } else {
+        entry.checked_execution_tx()?
     };
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(
         &(
             canonical_request_bytes(entry.source_request()),
             phase,
-            canonical_execution_tx(entry),
+            execution,
         ),
         &mut bytes,
     )
     .expect("serialize canonical checkpoint entry");
-    bytes
+    Ok(bytes)
 }
 
 fn normalize_recovered_entry(mut entry: BacklogEntry) -> anyhow::Result<BacklogEntry> {
@@ -83,19 +84,18 @@ fn normalize_recovered_entry(mut entry: BacklogEntry) -> anyhow::Result<BacklogE
     match entry.status().checkpoint_phase() {
         CheckpointPhase::AwaitingInitialResponse => {
             entry.request = source_request.clone();
-            entry.execution = None;
-            entry.status = SignStatus::PendingGeneration;
+            entry.clear_execution();
+            entry.set_status(SignStatus::PendingGeneration);
         }
         CheckpointPhase::AwaitingBidirectionalCompletion => {
-            let tx = entry.execution_tx().cloned().ok_or_else(|| {
+            let tx = entry.checked_execution_tx()?.cloned().ok_or_else(|| {
                 anyhow::anyhow!(
                     "completion checkpoint entry is missing its source-derived execution transaction"
                 )
             })?;
             validate_execution_tx(&source_request, &tx)?;
             entry.request = source_request.clone();
-            entry.execution = Some(tx.clone());
-            entry.status = SignStatus::PendingExecution { tx };
+            entry.set_status(SignStatus::PendingExecution { tx });
         }
     }
     Ok(entry)
@@ -152,6 +152,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
             "checkpoint backlog entry has inconsistent source and active request identity"
         );
 
+        let execution = entry.checked_execution_tx()?;
         match entry.status().checkpoint_phase() {
             CheckpointPhase::AwaitingInitialResponse => {
                 anyhow::ensure!(
@@ -168,7 +169,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                     ),
                     "initial-response checkpoint entry must contain a sign request"
                 );
-                if let Some(tx) = entry.execution_tx() {
+                if let Some(tx) = execution {
                     validate_execution_tx(source_request, tx)?;
                 }
             }
@@ -187,7 +188,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                     ),
                     "completion checkpoint entry must contain bidirectional work"
                 );
-                let tx = entry.execution_tx().ok_or_else(|| {
+                let tx = execution.ok_or_else(|| {
                     anyhow::anyhow!(
                         "completion checkpoint entry is missing its source-derived execution transaction"
                     )
@@ -206,7 +207,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
             "checkpoint is missing canonical pending transaction payload"
         );
         anyhow::ensure!(
-            pending.canonical_transaction == canonical_entry_bytes(&entry),
+            pending.canonical_transaction == checked_canonical_entry_bytes(&entry)?,
             "checkpoint canonical pending transaction payload does not match entry"
         );
     }
@@ -683,30 +684,29 @@ impl Backlog {
             return None;
         }
 
-        {
-            let mut pending = self.pending(&tx.source_chain).write().await;
-            let Some(entry) = pending.requests.get_mut(&sign_id) else {
-                tracing::warn!(
-                    ?sign_id,
-                    ?tx,
-                    "execution watcher source request was not found"
-                );
-                return None;
-            };
-            if validate_execution_tx(entry.source_request(), &tx).is_err() {
-                tracing::warn!(
-                    ?sign_id,
-                    ?tx,
-                    "execution watcher transaction does not match source request"
-                );
-                return None;
-            }
-            entry.execution = Some(tx.clone());
+        // Acquire the watcher lock before mutating the source entry. Holding
+        // it across both operations preserves the existing replacement
+        // semantics and establishes one lock order for watcher admission.
+        let mut watchers = self.watchers(&chain).write().await;
+        let mut pending = self.pending(&tx.source_chain).write().await;
+        let Some(source_entry) = pending.requests.get_mut(&sign_id) else {
+            tracing::warn!(
+                ?sign_id,
+                ?tx,
+                "execution watcher source request was not found"
+            );
+            return None;
+        };
+        if source_entry.attach_execution(tx.clone()).is_err() {
+            tracing::warn!(
+                ?sign_id,
+                ?tx,
+                "execution watcher transaction does not match source request"
+            );
+            return None;
         }
 
-        let mut entry = self.watchers(&chain).write().await;
-
-        entry
+        watchers
             .insert(tx.id, ExecutionWatcher { sign_id, tx })
             .map(|previous| (previous.sign_id, previous.tx))
     }
@@ -743,7 +743,7 @@ impl Backlog {
             return None;
         };
         if let SignStatus::PendingExecution { tx } = &status {
-            if validate_execution_tx(entry.source_request(), tx).is_err() {
+            if entry.attach_execution(tx.clone()).is_err() {
                 tracing::warn!(
                     ?chain,
                     ?id,
@@ -751,7 +751,6 @@ impl Backlog {
                 );
                 return None;
             }
-            entry.execution = Some(tx.clone());
         }
         tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
         entry.set_status(status);
@@ -1135,6 +1134,39 @@ impl BacklogEntry {
         self.request = request;
     }
 
+    fn checked_execution_tx(&self) -> anyhow::Result<Option<&BidirectionalTx>> {
+        match (&self.execution, self.status.execution_tx()) {
+            (Some(stored), Some(status)) => {
+                anyhow::ensure!(
+                    stored == status,
+                    "backlog entry contains conflicting execution transactions"
+                );
+                Ok(Some(stored))
+            }
+            (Some(stored), None) => Ok(Some(stored)),
+            (None, Some(status)) => Ok(Some(status)),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn attach_execution(&mut self, tx: BidirectionalTx) -> anyhow::Result<()> {
+        validate_execution_tx(self.source_request(), &tx)?;
+        if let Some(existing) = self.checked_execution_tx()?.cloned() {
+            anyhow::ensure!(
+                existing == tx,
+                "execution transaction conflicts with the backlog entry"
+            );
+            self.execution = Some(tx);
+            return Ok(());
+        }
+        self.execution = Some(tx);
+        Ok(())
+    }
+
+    fn clear_execution(&mut self) {
+        self.execution = None;
+    }
+
     pub fn source_request(&self) -> &IndexedSignRequest {
         &self.source_request
     }
@@ -1170,10 +1202,12 @@ impl BacklogEntry {
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
-                self.status = SignStatus::PendingExecution {
-                    tx: bidirectional_tx.clone(),
-                };
-                self.execution = Some(bidirectional_tx);
+                if self.attach_execution(bidirectional_tx.clone()).is_err() {
+                    return Err(BacklogError::InvalidExecutionTransition);
+                }
+                self.set_status(SignStatus::PendingExecution {
+                    tx: bidirectional_tx,
+                });
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -2296,6 +2330,79 @@ mod tests {
         assert!(restored.execution_tx().is_none());
     }
 
+    #[test]
+    fn test_backlog_entry_rejects_conflicting_execution_representations() {
+        let tx = create_test_tx(44);
+        let mut conflicting_tx = tx.clone();
+        conflicting_tx.serialized_transaction.push(99);
+        let request =
+            create_bidirectional_request(SignId::new(tx.request_id), Chain::Solana, "ethereum", 0);
+        let entry = BacklogEntry {
+            source_request: request.clone(),
+            request,
+            status: SignStatus::PendingExecution { tx: tx.clone() },
+            execution: Some(conflicting_tx.clone()),
+        };
+
+        let error = entry
+            .checked_execution_tx()
+            .expect_err("conflicting execution representations must be rejected");
+        assert!(error
+            .to_string()
+            .contains("conflicting execution transactions"));
+
+        let request =
+            create_bidirectional_request(SignId::new(tx.request_id), Chain::Solana, "ethereum", 0);
+        let mut legacy_entry = BacklogEntry {
+            source_request: request.clone(),
+            request,
+            status: SignStatus::PendingExecution { tx: tx.clone() },
+            execution: None,
+        };
+        assert!(legacy_entry.attach_execution(conflicting_tx).is_err());
+        legacy_entry.attach_execution(tx.clone()).unwrap();
+        assert_eq!(legacy_entry.execution, Some(tx));
+    }
+
+    #[tokio::test]
+    async fn test_recovery_rejects_conflicting_execution_representations() {
+        let tx = create_test_tx(43);
+        let mut conflicting_tx = tx.clone();
+        conflicting_tx.serialized_transaction.push(99);
+        let request =
+            create_bidirectional_request(SignId::new(tx.request_id), Chain::Solana, "ethereum", 0);
+        let entry = BacklogEntry {
+            source_request: request.clone(),
+            request,
+            status: SignStatus::PendingExecution { tx: tx.clone() },
+            execution: Some(conflicting_tx.clone()),
+        };
+        let sign_id = entry.sign_id();
+        let mut transaction = Vec::new();
+        ciborium::ser::into_writer(&entry, &mut transaction).unwrap();
+        let canonical_entry =
+            BacklogEntry::pending_execution(entry.source_request().clone(), create_test_tx(43));
+        let checkpoint = Checkpoint {
+            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
+            chain: Chain::Solana,
+            block_height: 10,
+            pending_requests: vec![PendingTx {
+                sign_id,
+                canonical_transaction: canonical_entry_bytes(&canonical_entry),
+                transaction,
+            }],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        };
+
+        let error = Backlog::new()
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect_err("conflicting execution representations must be rejected");
+        assert!(error
+            .to_string()
+            .contains("conflicting execution transactions"));
+    }
+
     #[tokio::test]
     async fn test_bidirectional_transition_preserves_source_request_and_execution() {
         let backlog = Backlog::new();
@@ -2332,6 +2439,49 @@ mod tests {
         ));
         assert_eq!(entry.source_request().id, original.id);
         assert_eq!(entry.execution_tx(), Some(&tx));
+
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingGenerationBidirectional,
+            )
+            .await
+            .expect("entry should transition to pending bidirectional generation");
+        assert!(matches!(
+            backlog.get(Chain::Solana, &sign_id).await.unwrap().status(),
+            SignStatus::PendingGenerationBidirectional
+        ));
+        assert_eq!(
+            backlog
+                .get(Chain::Solana, &sign_id)
+                .await
+                .unwrap()
+                .execution_tx(),
+            Some(&tx)
+        );
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublishBidirectional {
+                    publish: test_publish_state(true),
+                },
+            )
+            .await
+            .expect("entry should transition to pending bidirectional publication");
+        assert!(matches!(
+            backlog.get(Chain::Solana, &sign_id).await.unwrap().status(),
+            SignStatus::PendingPublishBidirectional { .. }
+        ));
+        assert_eq!(
+            backlog
+                .get(Chain::Solana, &sign_id)
+                .await
+                .unwrap()
+                .execution_tx(),
+            Some(&tx)
+        );
 
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
         let recovered = Backlog::new();
