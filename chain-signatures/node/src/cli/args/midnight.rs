@@ -77,3 +77,74 @@ impl MidnightArgs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+    use mpc_chain_midnight::IndexerConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn tuning_fields_do_not_survive_the_cli_round_trip() {
+        // Known limitation, pinned deliberately: only the two
+        // endpoint/identity fields have flags, so `from_config` discards the
+        // tuning sub-structs and `into_config` reinstates their defaults, which
+        // means no tuning can traverse a process restart. Adding real flags
+        // flips this into a round-trip assert.
+        crate::cli::tests::assert_midnight_env_unset();
+
+        let mut cfg = MidnightConfig {
+            node_ws_url: "ws://127.0.0.1:9944".into(),
+            central_address: "ab".repeat(32),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        cfg.indexer.live_block_buffer = 77;
+        cfg.indexer.stall_timeout = Duration::from_secs(7);
+        assert_ne!(
+            cfg.indexer,
+            IndexerConfig::default(),
+            "the pin is vacuous unless the tuning actually differs"
+        );
+
+        let reparsed = MidnightArgs::try_parse_from(
+            std::iter::once("test".to_string())
+                .chain(MidnightArgs::from_config(Some(cfg.clone())).into_str_args()),
+        )
+        .unwrap()
+        .into_config()
+        .expect("a valid config passes the boundary check")
+        .expect("both flagged fields are set");
+
+        assert_eq!(reparsed.node_ws_url, cfg.node_ws_url);
+        assert_eq!(reparsed.central_address, cfg.central_address);
+        assert_eq!(
+            reparsed.indexer,
+            IndexerConfig::default(),
+            "tuning does not traverse the CLI; if this fails, flags were added and this test should become a round-trip assert"
+        );
+    }
+
+    #[test]
+    fn into_str_args_round_trips_into_config() {
+        // Load-bearing here: this test reparses via try_parse_from and then
+        // asserts equality, so a flag dropped by into_str_args would be
+        // silently backfilled from a set MPC_MIDNIGHT_* env var and the
+        // assertion would still pass.
+        crate::cli::tests::assert_midnight_env_unset();
+
+        let cfg = MidnightConfig {
+            node_ws_url: "ws://127.0.0.1:9944".into(),
+            central_address: "ab".repeat(32),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let args = MidnightArgs::from_config(Some(cfg.clone()));
+        let reparsed = MidnightArgs::try_parse_from(
+            std::iter::once("test".to_string()).chain(args.clone().into_str_args()),
+        )
+        .unwrap();
+        assert_eq!(reparsed.into_config().unwrap(), Some(cfg));
+    }
+}
