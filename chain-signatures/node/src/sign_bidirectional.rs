@@ -13,7 +13,11 @@ pub type RequestId = [u8; 32];
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublishState {
     pub signature: Signature,
+    /// The participants that completed the signing protocol, in deterministic
+    /// order. All of them may publish after their failover slot.
     pub participants: Vec<Participant>,
+    /// Whether this node was the proposer for the signing round. This is local
+    /// state and is intentionally ignored by checkpoint consensus.
     pub is_proposer: bool,
 }
 

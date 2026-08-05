@@ -100,11 +100,16 @@ async fn test_stream_handles_sign_and_respond() {
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
+    let mut participants = crate::protocol::contract::primitives::Participants::default();
+    participants.insert(
+        &cait_sith::protocol::Participant::from(0u32),
+        crate::protocol::contract::primitives::ParticipantInfo::new(0),
+    );
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
+        &"p-0".parse::<AccountId>().unwrap(),
         root_pk,
         0,
-        Default::default(),
+        participants,
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
@@ -565,11 +570,16 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
+    let mut participants = crate::protocol::contract::primitives::Participants::default();
+    participants.insert(
+        &cait_sith::protocol::Participant::from(0u32),
+        crate::protocol::contract::primitives::ParticipantInfo::new(0),
+    );
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
+        &"p-0".parse::<AccountId>().unwrap(),
         k256::ProjectivePoint::GENERATOR.to_affine(),
         0,
-        Default::default(),
+        participants,
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
@@ -619,7 +629,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 }
 
 #[tokio::test]
-async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
+async fn test_stream_schedules_non_proposer_pending_publish_after_catchup() {
     use crate::sign_bidirectional::SignStatus;
 
     let backlog = Backlog::new();
@@ -631,7 +641,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             sign_id,
             test_sign_args(10),
             Chain::Solana,
-            current_unix_timestamp(),
+            0,
         ))
         .await;
     backlog
@@ -651,11 +661,16 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let (rpc, mut rpc_rx) = test_rpc_channel(4);
+    let mut participants = crate::protocol::contract::primitives::Participants::default();
+    participants.insert(
+        &cait_sith::protocol::Participant::from(0u32),
+        crate::protocol::contract::primitives::ParticipantInfo::new(0),
+    );
     let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
+        &"p-0".parse::<AccountId>().unwrap(),
         k256::ProjectivePoint::GENERATOR.to_affine(),
         0,
-        Default::default(),
+        participants,
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
@@ -678,8 +693,22 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
         .await;
     });
 
-    let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;
-    assert!(matches!(no_publish, Err(_) | Ok(None)));
+    let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+        .await
+        .expect("publish failover should eventually enqueue an RPC action")
+        .expect("publish failover should enqueue an RPC action");
+    match action {
+        RpcAction::Publish(action) => {
+            assert_eq!(action.request.id, sign_id);
+            assert_eq!(action.signature, signature);
+        }
+        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            panic!("unexpected checkpoint vote: {checkpoint:?}");
+        }
+        RpcAction::AbortCheckpoints(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
+        }
+    }
 
     run_handle.abort();
 }

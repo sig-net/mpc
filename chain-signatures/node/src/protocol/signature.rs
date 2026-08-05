@@ -280,17 +280,16 @@ impl SignGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
 
-                    let is_proposer = self.proposer == me;
                     if let Some(publish) = build_publish_state(
                         ctx.governance.public_key,
                         &self.request,
                         &output,
                         self.participants.clone(),
-                        is_proposer,
+                        self.proposer == me,
                     ) {
                         if let Err(err) = ctx
                             .backlog
-                            .mark_publishing(self.request.chain, &sign_id, publish)
+                            .mark_publishing(self.request.chain, &sign_id, publish.clone())
                             .await
                         {
                             tracing::warn!(
@@ -299,15 +298,15 @@ impl SignGenerator {
                                 "failed to mark publishing for sign request"
                             );
                         }
-                    }
 
-                    if is_proposer {
-                        crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        ctx.rpc.publish(
+                        if self.proposer == me {
+                            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
+                        }
+                        ctx.rpc.publish_signature_after_failover(
                             ctx.governance.public_key,
                             self.request.clone(),
-                            output,
-                            self.participants.clone(),
+                            publish,
+                            me,
                         );
                     }
 
@@ -352,6 +351,8 @@ fn build_publish_state(
         request.args.payload,
     )
     .ok()?;
+    let mut participants = participants;
+    participants.sort_unstable();
     let publish = PublishState {
         signature,
         participants,

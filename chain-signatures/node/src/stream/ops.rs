@@ -69,19 +69,17 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
         return;
     };
-    for (sign_request, publish) in publishable {
-        if !publish.is_proposer {
-            continue;
-        }
+    let me = ctx.contract_watcher.me().await;
+    let Some(me) = me else {
+        tracing::warn!(%source_chain, "cannot resume pending publish requests without local participant id");
+        return;
+    };
 
+    for (sign_request, publish) in publishable {
         let sign_id = sign_request.id;
-        ctx.rpc.publish_signature(
-            public_key,
-            sign_request,
-            publish.signature,
-            publish.participants,
-        );
-        tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+        ctx.rpc
+            .publish_signature_after_failover(public_key, sign_request, publish, me);
+        tracing::info!(?sign_id, %source_chain, ?me, "scheduled pending publish request after catchup");
     }
 }
 

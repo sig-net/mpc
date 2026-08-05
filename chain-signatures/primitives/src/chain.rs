@@ -15,6 +15,13 @@ pub trait ChainConfig {
     fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
     fn expected_finality_time_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
+    /// Delay between deterministic publish-failover slots for this chain.
+    ///
+    /// Implementations should keep this value consistent across all nodes in a
+    /// signing cluster because it is part of the publication schedule.
+    fn publish_failover_delay_secs(&self) -> u64 {
+        10
+    }
     fn respond_serialization_format(&self) -> SerDeserFormat;
 }
 
@@ -61,6 +68,13 @@ impl ChainConfig for Chain {
     fn expected_response_time_secs(&self) -> u64 {
         // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
         self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    }
+
+    fn publish_failover_delay_secs(&self) -> u64 {
+        match self {
+            Chain::Ethereum | Chain::Bitcoin => 60,
+            Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => 10,
+        }
     }
 
     fn respond_serialization_format(&self) -> SerDeserFormat {

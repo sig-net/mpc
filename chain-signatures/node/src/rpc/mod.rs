@@ -22,7 +22,9 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
+use mpc_primitives::{
+    ChainConfig as _, CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature,
+};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -122,6 +124,62 @@ impl RpcChannel {
         });
     }
 
+    /// Schedule publication by the proposer or by this node's deterministic
+    /// failover slot. Every participant keeps the completed signature, so a
+    /// proposer outage cannot strand the request.
+    pub fn publish_signature_after_failover(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: IndexedSignRequest,
+        publish: crate::sign_bidirectional::PublishState,
+        me: Participant,
+    ) {
+        let chain = request.chain;
+        let sign_id = request.id;
+        let Some(slot) = failover_slot(chain, &publish, me) else {
+            tracing::warn!(
+                ?sign_id,
+                ?chain,
+                ?me,
+                participants = ?publish.participants,
+                "not scheduling signature publication because local participant is not in the signing set"
+            );
+            return;
+        };
+        let elapsed = crate::util::unix_elapsed(request.unix_timestamp_indexed);
+        let wait = slot.saturating_sub(elapsed);
+        let rpc = self.clone();
+        tokio::spawn(async move {
+            if !wait.is_zero() {
+                tracing::info!(
+                    ?sign_id,
+                    ?chain,
+                    ?wait,
+                    ?me,
+                    "waiting for signature publication failover slot"
+                );
+                tokio::time::sleep(wait).await;
+            }
+
+            if let Err(err) = rpc
+                .tx
+                .send(RpcAction::Publish(PublishAction {
+                    public_key,
+                    request,
+                    signature: publish.signature,
+                    participants: publish.participants,
+                    timestamp: Instant::now(),
+                }))
+                .await
+            {
+                tracing::error!(%err, ?sign_id, "failed to send publish action");
+            }
+        });
+    }
+
+    /// Immediate publication entry point retained for callers that already
+    /// have a fully formed action. New completed signatures should use
+    /// [`Self::publish_signature_after_failover`].
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
@@ -146,6 +204,29 @@ impl RpcChannel {
             }
         });
     }
+}
+
+fn failover_slot(
+    chain: Chain,
+    publish: &crate::sign_bidirectional::PublishState,
+    me: Participant,
+) -> Option<Duration> {
+    if !publish.participants.contains(&me) {
+        return None;
+    }
+
+    if publish.is_proposer {
+        return Some(Duration::ZERO);
+    }
+
+    let rank = publish
+        .participants
+        .iter()
+        .filter(|participant| **participant < me)
+        .count() as u32;
+    let failover_delay = Duration::from_secs(chain.publish_failover_delay_secs());
+    let response_deadline = Duration::from_secs(chain.expected_response_time_secs());
+    Some(response_deadline.saturating_add(failover_delay.saturating_mul(rank.saturating_add(1))))
 }
 
 #[derive(Clone)]
@@ -727,6 +808,45 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn failover_slot_is_deterministic_and_requires_membership() {
+        let publish = crate::sign_bidirectional::PublishState {
+            signature: Signature::new(AffinePoint::GENERATOR, k256::Scalar::ONE, 0),
+            participants: vec![
+                Participant::from(2),
+                Participant::from(0),
+                Participant::from(1),
+            ],
+            is_proposer: false,
+        };
+
+        assert_eq!(
+            failover_slot(Chain::Solana, &publish, Participant::from(0)),
+            Some(Duration::from_secs(
+                Chain::Solana.expected_response_time_secs() + 10
+            )),
+        );
+        assert_eq!(
+            failover_slot(Chain::Solana, &publish, Participant::from(2)),
+            Some(Duration::from_secs(
+                Chain::Solana.expected_response_time_secs() + 30
+            )),
+        );
+        assert_eq!(
+            failover_slot(Chain::Solana, &publish, Participant::from(3)),
+            None
+        );
+
+        let proposer = crate::sign_bidirectional::PublishState {
+            is_proposer: true,
+            ..publish
+        };
+        assert_eq!(
+            failover_slot(Chain::Ethereum, &proposer, Participant::from(1)),
+            Some(Duration::ZERO),
+        );
+    }
 
     #[tokio::test]
     async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
