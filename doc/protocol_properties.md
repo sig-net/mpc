@@ -60,7 +60,7 @@ The coordination layer neither achieves nor requires consensus; safety-critical 
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is eﬀectively reliable and timely (caveat: currently not guaranteed due to message queue implementation).  
   * Channels are authenticated and encrypted.  
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active): a subset of the participant set, never a substitute for it.  It may be wrong, and no two nodes ever need the same guess (currently, this does not hold, see §D3). A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
+* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active): a subset of the participant set, never a substitute for it.  It may be wrong, and no two nodes ever need the same guess (§D3). A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 
@@ -79,13 +79,13 @@ Progress is guaranteed during a suﬃciently long synchronous interval, never at
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples / min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature). Presignature supply therefore rests on triple supply: the two are one property under diﬀerent input preconditions.  
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.
 
-Currently L1 and L3 are not met; L2 holds only while the node's local active set stays ≥ t (see Appendix).
+Currently L3 is not met; L1 and L2 hold only while the node's local active set stays ≥ t (see Appendix).
 
 ## 5\. Efficiency targets
 
 E1. Amortized ≈ 1 presignature consumed per settled signature. (Currently violated on any failed generation)
 
-E2. ≈ 1 generation instance per request at a time. Best-effort via rotation, the posit round, and the AlreadyGenerating back-off (request/posit.rs).
+E2. ≈ 1 generation instance per request at a time. Best-effort via deterministic rotation (`proposer_per_round`), the posit round, and the AlreadyGenerating back-off (request/posit.rs).
 
 Duplicate instances, duplicate on-chain responses, and wasted rounds are correct but wasteful: the contract settles a request on the first valid response and the rest are harmless. Consequently, any mechanism that serves only E-properties may be lossy, heuristic, or deleted; it must be judged on cost, not correctness.
 
@@ -96,7 +96,6 @@ These are design invariants: the *how* that keeps the properties (the *what*) tr
 * D1. The chain is the sole arbiter. Request settlement and membership live on-chain. The off-chain layer must remain safe under arbitrary duplication, reordering, loss, and retry of its own actions. *Serves S2, S3 (safety-critical agreement is delegated to the chain) and underwrites D2.*  
 * D2. Abort anywhere, retry fresh. Every phase must be abortable without cleanup obligations on peers, and retried with fresh resources (or resources provably safe to reuse). No step may assume any peer observed a previous attempt. *Serves L1, L2 (retry drives progress) and protects S1 on retry.*  
 * D3. Peer-identical values come from shared inputs only. Anything two nodes must compute identically (e.g. "who proposes in round r") may depend only on contract state, request data (e.g. the entropy, which is chain-fixed per request, the transaction hash on Ethereum), and the round number, never on the local failure detector or local clocks. The active set may steer *scheduling* (what to attempt, whom to include as candidates), never the *identity* of a coordination role. Rationale: local views differ by design; deriving shared roles from them silently reintroduces the agreement problem this layer avoids. *Serves L1.*  
-  * Unlike D1/D2/D4, this rule is currently violated:  state.round and the proposer are computed by filtering candidates through the local active set (`request/organize.rs:83-97`).  
 * D4. One-shot resources are single-writer. Consumption is initiated only by the owner; every holder deletes on first use, durably before emitting anything derived from the artifact (§S1). Losing an artifact (owner crash) is acceptable; reusing one is not. *Serves S1.*
 
 # **Protocol Appendix: Property Details and Precedents**
@@ -150,12 +149,12 @@ Given a
 * a usable presignature whose holders are online and owner is correct and online (*that such a presignature keeps existing is L2)*  
 * and ≥ t nodes having indexed the request when the interval starts,
 
-then the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). Under the per-round timeout schedule T(r), ∆timeout is no longer a constant: rotating past f dead proposers costs Σ T(r) over the failed rounds, quadratic in f for the linear tail, still bounded.
+then the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). ∆timeout is not a constant: the round budget follows the shared schedule `round_timeout(r)` (a generous round 0, then geometric growth from a short floor to a hard ceiling), so rotating past f dead proposers costs the sum of `round_timeout` over the failed rounds, at most f times the ceiling.
 
 How it is meant to work, combines two regimes  
 (i) Optimistic (honest, reachable proposer). The proposer starts the instant every invitee has Accepted (meets\_totality()), so the signature is produced at network speed, one generation round, independent of ∆timeout. (ii) Advance (crashed / slow proposer). Rotation must carry all nodes past the bad proposer to the next round within ∆timeout \+ O(δ).
 
-Currently not guaranteed because proposer election reads the local failure detector, so nodes may never rendezvous on a round at all; and with a fixed ∆timeout the advance bound holds only while the real delay stays under the constants (§2).
+Mechanisms: election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on r, so peers that agree on the round agree on the proposer and the deadline (D3). Rounds still advance on local timeouts only; a node that falls behind catches up in one `bump_round`, because StaleRound rejects carry the rejector's current round (sent from both the deliberator and the proposer path) and the round survives a task respawn instead of resetting to 0. Two caveats remain: organizing waits for the local active set to reach t with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts (the same local-active gate as L2); and the schedule is capped at its ceiling, so the advance bound holds only while the real δ stays under that ceiling (§2).
 
 ### L2. Artifact supply.
 
@@ -185,4 +184,4 @@ Currently not guaranteed, since there's no timer-based resubmit.
 
 Increasing round durations for unknown δ originates in DLS 1988 and appears as view-timeout doubling in PBFT. Tendermint ships a linear per-round schedule in production, reset per height (`timeout_propose + r · timeout_propose_delta`). ICC's recommended delay functions are linear in a shared index, the proposer's rank (∆prop(k) \= 2∆bnd·k, ∆ntry(k) \= 2∆bnd·k \+ η); its production implementation (dfinity/ic `rs/consensus`, `get_block_maker_delay` / `get_adjusted_notary_delay`) ships that linear-in-rank base and keys further adaptivity to a *shared progress gap* rather than learned local timing: the rank component is multiplied by 1.5^(notarized − finalized gap) with rank 0 exempt, execution lag adds a linear backlog delay with an exemption where the gap has a known benign cause (upgrades), and oversized gaps hard-stop the notary. These adjustments carry no hysteresis state: each is a memoryless function of the current gap (or of a sliding window of recent blocks), so the delay relaxes automatically when the gap closes; the base constants come from the registry and are never adapted at runtime. The round number r is the same kind of progress index, and its per-request reset gives it the same relaxation-by-construction, which is why no relaxation policy appears anywhere in the schedule. Simplex (Shoup 2024\) instead fixes ∆timeout ≥ 3δ per slot with δ effectively assumed bounded, deferring unknown δ to "standard techniques of dynamically increasing timeouts."
 
-Linear was picked over PBFT-style doubling: most failed rounds here are dead-or-unable proposers, not a slow network, so linear wastes the least on them and `bump_round`'s jumps land on sane values; doubling wins only at converging to a very large unknown δ, an abnormal regime.
+The shipped schedule (`round_timeout`) grows gently (×23/20 per round) from a short floor to a hard ceiling instead of PBFT-style doubling: most failed rounds here are dead-or-unable proposers, not a slow network, so slow growth wastes the least on them and `bump_round`'s jumps land on sane values; doubling wins only at converging to a very large unknown δ, an abnormal regime, and the ceiling bounds the δ the schedule can absorb.
