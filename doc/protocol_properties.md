@@ -64,7 +64,7 @@ The coordination layer neither achieves nor requires consensus; safety-critical 
 
 ## 3\. Safety properties
 
-* **S1  No cross-request use of artifacts:** No honest node emits a signature share derived from a given presignature for more than one sign request.  
+* **S1  One-shot artifacts are consumed once:** No presignature yields signature shares for more than one sign request, and no triple pair for more than one presignature. (Today enforced only per node; see Appendix.)  
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
 * **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state reported by RPC service provider.  
 * **S4 Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
@@ -101,16 +101,22 @@ These are design invariants: the *how* that keeps the properties (the *what*) tr
 
 # **Protocol Appendix: Property Details and Precedents**
 
-### S1. No cross-request use of one-shot artifacts
+### S1. One-shot artifacts are consumed once
 
-*Property.* No honest node emits a signature share derived from a given presignature for more than one sign request (and no honest node contributes to consuming a triple pair for more than one presignature). Corollary: with fewer than t corrupted nodes, fewer than t shares ever exist for a second request, so no second signature can be formed.
+*Property.* No presignature yields signature shares for more than one sign request (and no triple pair for more than one presignature).
 
-Why it matters: ECDSA nonce reuse across two different requests leaks the private key. Because each presignature is re-randomized per request (../chain-signatures/node/src/protocol/signature.rs, keyed on request id, request entropy, and big\_r), even two requests with equal payloads count as "different".
+*Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (../chain-signatures/node/src/protocol/signature.rs, keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
+
+*Gap.* The mechanisms below are per node: each holder burns the artifact on first use. That stops one node serving the same presignature twice; it does not stop two **disjoint** honest quorums each serving their own first request on it. A presignature's holders are all accepters of its generation, so there can be up to n of them; with ≥ 2t honest holders the two quorums exist. Opening an instance requires being the recorded owner (mechanism 1), so this needs a Byzantine owner: one node, well inside f \< t.
+
+Closing the gap needs the artifact bound to its first *consumer*, not merely deleted: on first use persist presignature\_id → sign\_id and reject that presignature under any other sign\_id, retaining the tombstone at least as long as the request can be retried. Still local, still single-writer, no agreement involved. Until then the property holds only for presignatures with fewer than 2t honest holders.
+
+*Corollary, once the above holds.* With f \< t corrupted nodes, fewer than t shares ever exist for a second request, so no second signature can be formed.
 
 Currently enforced by three *local* mechanisms (no distributed agreement involved):
 
-1. Single writer. Only the artifact's owner initiates consumption (../chain-signatures/node/src/storage/protocol\_storage.rs); reservation and commit are local atomic operations on the owner's storage.  
-2. Delete-on-first-use at every holder. When generation starts, the proposer commits (removes from storage) and every deliberator takes its local share (../chain-signatures/node/src/protocol/signature.rs); a second use attempt fails at every honest holder (MissingArtifact reject). Durability rule: the removal must be persisted *before* any protocol message derived from the artifact is sent; otherwise a crash-and-recover holder resurrects the share and honestly serves a second request. (Today the store is Redis and the take precedes generation; whether the removal is durable at send time is a deployment property of Redis persistence.)  
+1. Single writer. Only the artifact's owner initiates consumption (../chain-signatures/node/src/storage/protocol\_storage.rs). Every holder enforces this, not just the owner: its take is keyed on the claimed owner and fails if that node is not the recorded owner of the artifact. This pins each instance to one opener; it constrains nothing about an opener that is itself corrupt.  
+2. Delete-on-first-use at every holder. When generation starts, the proposer commits (removes from storage) and every deliberator takes its local share (../chain-signatures/node/src/protocol/signature.rs); a further use attempt fails at any holder that already used it (MissingArtifact reject), and only there, which is the gap above. Durability rule: the removal must be persisted *before* any protocol message derived from the artifact is sent; otherwise a crash-and-recover holder resurrects the share and honestly serves a second request. (Today the store is Redis and the take precedes generation; whether the removal is durable at send time is a deployment property of Redis persistence.)  
 3. Instance binding. Every signature posit message carries (sign\_id, presignature\_id, round) and mismatches are rejected; generation messages carry (sign\_id, presignature\_id) and are only ever delivered to the matching instance's inbox (../chain-signatures/node/src/protocol/signature.rs).
 
 ### S2. Only indexed requests are signed
