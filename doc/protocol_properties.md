@@ -65,7 +65,7 @@ The coordination layer neither achieves nor requires consensus; safety-critical 
 
 ## 3\. Safety properties
 
-* **S1  No cross-request use of artifacts:** No honest node emits a signature share derived from a given presignature for more than one sign request.  
+* **S1  One-shot artifacts are consumed once:** No presignature yields signature shares for more than one sign request, and no triple pair for more than one presignature. (Today enforced only per node — see Appendix.)  
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
   Note: maybe add tests or other measures to prevent this  
 * **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state reported by RPC service provider.  
