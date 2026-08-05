@@ -29,9 +29,9 @@ const CONTRACT_BALANCE: NearToken = NearToken::from_near(200);
 /// would have three nodes generating material for minutes on end before the first
 /// signature. These numbers are large enough to serve requests and small enough to reach
 /// quickly.
-const MIN_TRIPLES: u32 = 8;
+pub const MIN_TRIPLES: u32 = 8;
 const MAX_TRIPLES: u32 = 64;
-const MIN_PRESIGNATURES: u32 = 4;
+pub const MIN_PRESIGNATURES: u32 = 4;
 const MAX_PRESIGNATURES: u32 = 32;
 
 pub struct NearConfig {

@@ -133,7 +133,7 @@ impl Node {
             message_options: ctx.message_options.clone(),
         }
         .into_str_args();
-        let container = GenericImage::new("near/mpc-node", "latest")
+        let container = GenericImage::new("sig-net/mpc-node", "latest")
             .with_wait_for(WaitFor::Nothing)
             .with_exposed_port(Self::CONTAINER_PORT.tcp())
             .with_env_var("RUST_LOG", "mpc_node=DEBUG")

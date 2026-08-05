@@ -15,7 +15,7 @@ protocol.
 | `near-sandbox` | NEAR localnet. Hosts the MPC contract, which is the only source of truth for the participant set. Built locally, see below. |
 | `surfpool` | Solana localnet. Hosts the signet program that signature requests arrive on. |
 | `redis` | Shared triple, presignature and checkpoint storage. Keys are namespaced per node account. |
-| `bootstrap` | One-shot. Creates accounts, deploys and initialises the contract, installs the signet program. Exits when done. |
+| `bootstrap` | One-shot. Creates accounts, deploys and initialises the contract, installs the signet program, fills Redis with triples and presignatures. Exits when done. |
 | `mpc-node-0/1/2` | The MPC nodes, on ports 3000, 3001 and 3002. |
 
 ## Before you start
@@ -58,7 +58,14 @@ curl -s localhost:3000/state | jq
 ```
 
 You want `running` with all three participants listed, and triple and presignature counts
-climbing. Ports 3001 and 3002 should say the same thing.
+that start above zero, since the bootstrap preloads them. Ports 3001 and 3002 should say the
+same thing.
+
+`running` is not the same as ready. All three nodes report it around 16 seconds in, and a
+request submitted at that moment goes unanswered. The cluster starts serving roughly 25
+seconds after that, about 42 seconds from cold. Anything scripted against this stack has to
+retry its request rather than trust the state endpoint. This is a property of the cluster,
+not of the preload: it measures the same with `LOCALNET_STOCKPILE=false`.
 
 To wipe the chains and start over, `docker compose -f localnet/docker-compose.yaml down -v`.
 The bootstrap is safe to re-run at any time and does nothing when everything is already in
@@ -110,6 +117,23 @@ startup and gives clients a fixed root public key to derive addresses from:
 03FF3D22262B4BF9B4D0D293E5E28031F1D5CF0FEC44566A1DF7D7B04982DE3A2A
 ```
 
+It arrives stocked as well. A signature spends a presignature, which spends a pair of
+triples, and both are produced by multi-round protocols between the nodes. The bootstrap
+writes 18 triple pairs and 15 presignatures per node into Redis before any node starts, dealt
+in advance and taken from `integration-tests/src/mpc_fixture/3_nodes.json`, the same file the
+key shares come from. Every node therefore holds material from the moment it starts, and it is
+the same material on every run, which makes a failure reproducible.
+
+Be clear about what this buys, since it is less than it looks. Measured on this three-node
+profile, cold start to first signature was 42 seconds with the preload and 45 seconds without:
+the same, within noise. Three nodes at `min_triples: 8` generate what they need in seconds, so
+generation was never the thing you were waiting for. The preload is there for determinism, and
+for profiles where generation would genuinely dominate. Set `LOCALNET_STOCKPILE=false` in your
+shell before `docker compose up` to turn it off.
+
+Dealing shares from one party is sound only when that party is trusted to forget them. It
+protects nothing, exactly like the keys beside it. Never reuse any of it.
+
 Account naming matters more than it looks. The contract assigns participant ids by walking
 a `BTreeMap<AccountId, _>`, so participant *i* is whichever account sorts *i*-th, while the
 key shares are numbered. `mpc0`, `mpc1` and `mpc2` keep those two orderings equal. The
@@ -131,7 +155,8 @@ compiles the contract and node before running anything, which is not what you wa
 Key shares are a separate matter. The committed ones come from
 `integration-tests/src/mpc_fixture/3_nodes.json`, and each node's share must keep its
 numeric index. Rotating the network key means generating a fresh set of shares, not editing
-these.
+these. The preloaded triples and presignatures come from that same file and are shares under
+that same key, so a fresh set has to replace all three together.
 
 ## Troubleshooting
 

@@ -7441,6 +7441,7 @@ dependencies = [
  "near-account-id",
  "near-crypto 0.26.0",
  "near-workspaces",
+ "redis",
  "reqwest 0.11.27",
  "serde",
  "serde_json",

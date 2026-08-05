@@ -48,6 +48,9 @@ COPY --from=contract-builder \
 # Prebuilt from sig-net/solana-signet-program 0.4.0. Its declare_id! pins it to the address
 # in localnet/bootstrap/src/solana.rs.
 COPY chain-signatures/contract-sol/artifacts/chain_signatures.so /artifacts/chain_signatures.so
+# The dealt triples and presignatures the bootstrap preloads into Redis, from the same file
+# the committed key shares under localnet/keyshares come from.
+COPY integration-tests/src/mpc_fixture/3_nodes.json /artifacts/mpc_fixture.json
 
 WORKDIR /localnet
 ENTRYPOINT ["mpc-localnet"]

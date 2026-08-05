@@ -29,6 +29,49 @@ the committed files. Do not remove those checks.
 it finds there. Adding a field that is written down twice reintroduces exactly the drift
 this design removes.
 
+## The preloaded triples and presignatures
+
+`stockpile.rs` writes dealt protocol material straight into Redis before any node starts.
+
+**It does not make the cluster faster, and the docs must not claim it does.** Measured on this
+three-node profile: cold start to first signature was 42 s with the preload and 45 s without.
+Three nodes at `min_triples: 8` and `min_presignatures: 4` generate what they need in seconds,
+so generation was never on the critical path. What the preload buys is determinism: identical
+material on every run, which makes a failure reproducible. Reach for it as leverage only on a
+profile where generation would genuinely dominate, and measure before saying it helped.
+
+Four things about it are load-bearing.
+
+**The Redis layout is a copy, guarded by tests.** `mpc_node::storage::{triple_storage,
+presignature_storage}` own those keys. Calling them would mean compiling `mpc-node` into the
+bootstrap image for four Redis commands, so the layout is written out again. Three tests read
+the node's own source with `include_str!` and fail on drift: `storage_version_matches_the_node`
+parses `STORAGE_VERSION` out of `storage/mod.rs`, and `triple_pair_fields_match_the_node`
+parses the `TriplePair` declaration. Each was watched failing against a planted violation. Do
+not weaken them into constants copied by hand.
+
+**Pairs are cut from the intersection, not from each node's own list.** A pair is spent as a
+unit and named by its first triple's id, so all nodes have to form the same pairs. In the
+committed fixture, participant 2 holds shares of owners 0 and 2 that the others do not,
+part-way through the list. `MpcFixtureBuilder` chunks each node's own list in stored order,
+which on this fixture gives one pair id naming a different second triple on participant 2 than
+on participant 0, plus a pair participant 0 forms alone. `pairs_by_owner` intersects and sorts
+instead. `every_node_pairs_the_committed_fixture_identically` is the guard.
+
+**It runs before the nodes and never touches a live cluster.** The bootstrap exits before any
+node starts, and `run` returns early if either store already holds anything. Topping up a
+running cluster would race its own generation and collide with ids it has already retired.
+
+**`running` is not ready, and that is not this module's doing.** A signature request submitted
+the moment all three nodes report `running` is never answered. Serving begins roughly 25
+seconds later. Measured identically with the preload on and off, so do not go looking for the
+cause in here. Any script that signs has to retry rather than gate on `/state`, and a harness
+that gates on `/state` will report a false failure that looks exactly like a broken stockpile.
+
+The material is a trusted-dealer deal, which is only acceptable because it is committed to the
+repository alongside the key shares and protects nothing. Everything the fixture supplies
+passes through as opaque JSON, so the curve types are never re-encoded here.
+
 ## Build and test, and how the repo fights you
 
 `.cargo/config.toml` sets `runner = "./setup.sh"` for non-wasm targets, so `cargo run` and
@@ -45,6 +88,11 @@ CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="env" cargo test -p mpc-localnet
 ```
 
 An empty string for that variable is rejected by Cargo, hence `env` as a no-op runner.
+
+`redis` is declared directly in `bootstrap/Cargo.toml` with `tokio-comp` spelled out rather
+than taken from the workspace. The node gets those features through `deadpool-redis`, and
+feature unification does not reach a `-p mpc-localnet` build that has no reason to depend on
+it.
 
 The root `Dockerfile` copies `localnet/bootstrap/Cargo.toml` and deliberately not the
 sources. Cargo needs every workspace member's manifest to resolve the workspace at all, but
@@ -148,6 +196,10 @@ Ports published: 3000 to 3002 (nodes), 3030 (NEAR), 8899 and 8900 (Solana RPC an
   unset. `near-sandbox.Dockerfile` reads `uname -m` instead, which also happens to match the
   names NEAR publishes under.
 - `docker build` writes progress to stderr. Capturing only stdout gives an empty log.
+- Editing anything under `localnet/` invalidates the `COPY localnet/` layer in
+  `localnet/Dockerfile`, and the classic builder carries no cargo cache across layers, so the
+  bootstrap image rebuilds the whole workspace in release mode. Budget around fifteen minutes
+  and use the Redis-only smoke test below while iterating.
 
 ## Verifying a change
 
@@ -158,9 +210,25 @@ curl -s localhost:3000/state
 docker compose -f localnet/docker-compose.yaml --profile tools run --rm signer sign --path test
 ```
 
-All three ports should report `running` with `[0,1,2]` and rising triple and presignature
-counts. The signer should print `big_r`, `s` and `recovery_id`. Then run
+All three ports should report `running` with `[0,1,2]` and triple and presignature counts that
+start above zero, since `bootstrap` preloads 18 pairs and 15 presignatures per node. The
+signer should print `big_r`, `s` and `recovery_id`, though not on the first attempt if you run
+it the instant `/state` says `running`: give it a minute or retry. Then run
 `docker compose ... run --rm bootstrap` twice more and confirm it changes nothing.
+
+The stockpile can be exercised on its own against nothing but a Redis, which is much faster
+than a stack rebuild:
+
+```bash
+docker run -d --name redis-smoke -p 16399:6379 redis:7.4.2
+```
+
+```bash
+cargo build -p mpc-localnet && ./target/debug/mpc-localnet stockpile --nodes-dir localnet/nodes --keyshares-dir localnet/keyshares --fixture integration-tests/src/mpc_fixture/3_nodes.json --redis-url redis://127.0.0.1:16399
+```
+
+To see what the cluster does without it, put `LOCALNET_STOCKPILE=false` in the shell that runs
+`docker compose up`. The compose file reads it through.
 
 Any claim you add to `README.md` or to this file must come from having run something and
 read the result. A wrong note here propagates into every future change.

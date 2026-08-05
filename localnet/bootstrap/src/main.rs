@@ -2,8 +2,10 @@
 //!
 //! `bootstrap` prepares both chains the cluster depends on: it creates the NEAR accounts,
 //! deploys and initialises the MPC contract that holds the participant set, installs the
-//! Solana signet program and creates its state account. `sign` submits a signature request
-//! through that program and waits for the cluster to answer.
+//! Solana signet program and creates its state account. It also writes a dealt stock of
+//! triples and presignatures into Redis, so every node starts from the same material on every
+//! run. `sign` submits a signature request through that program and waits for the cluster to
+//! answer.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,6 +22,7 @@ mod near;
 mod nodes;
 mod request_id;
 mod solana;
+mod stockpile;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -38,6 +41,8 @@ enum Command {
     BootstrapNear(BootstrapArgs),
     /// Prepare only the Solana side.
     BootstrapSolana(BootstrapArgs),
+    /// Preload only the triples and presignatures.
+    Stockpile(BootstrapArgs),
     /// Submit a signature request and wait for the cluster to answer it.
     Sign(SignArgs),
     /// Write a fresh set of per-node env files. Run this to rotate the localnet's keys.
@@ -105,6 +110,23 @@ struct BootstrapArgs {
     /// Balance to top the requester and each node's Solana account up to, in lamports.
     #[arg(long, env = "LOCALNET_ACCOUNT_LAMPORTS", default_value_t = 10_000_000_000)]
     account_lamports: u64,
+
+    #[arg(long, env = "LOCALNET_REDIS_URL", default_value = "redis://redis:6379")]
+    redis_url: String,
+    /// Dealt triples and presignatures to preload, from the integration test fixture.
+    #[arg(long, env = "LOCALNET_FIXTURE", default_value = "/artifacts/mpc_fixture.json")]
+    fixture: PathBuf,
+    /// Preload triples and presignatures at all.
+    ///
+    /// Turn this off to have the cluster generate its own, the way a deployed network does.
+    /// On this profile that costs nothing measurable: see `AGENTS.md`.
+    #[arg(
+        long,
+        env = "LOCALNET_STOCKPILE",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+    )]
+    stockpile: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -143,10 +165,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Bootstrap(args) => {
             bootstrap_near(&args).await?;
             bootstrap_solana(&args).await?;
+            stockpile(&args).await?;
             println!("localnet is bootstrapped");
         }
         Command::BootstrapNear(args) => bootstrap_near(&args).await?,
         Command::BootstrapSolana(args) => bootstrap_solana(&args).await?,
+        Command::Stockpile(args) => stockpile(&args).await?,
         Command::Sign(args) => sign(&args).await?,
         Command::Keygen(args) => {
             keygen::write_all(
@@ -227,6 +251,31 @@ async fn bootstrap_solana(args: &BootstrapArgs) -> anyhow::Result<()> {
         responders = ?nodes.iter().map(|node| node.solana_pubkey().to_string()).collect::<Vec<_>>(),
         "solana side is ready",
     );
+    Ok(())
+}
+
+/// Fill Redis with dealt triples and presignatures, so every node starts from the same known
+/// stock on every run.
+///
+/// This runs before any node starts, since the compose file makes them wait for the bootstrap
+/// to exit. Writing into a live cluster's storage would race its own generation.
+async fn stockpile(args: &BootstrapArgs) -> anyhow::Result<()> {
+    if !args.stockpile {
+        tracing::info!("stockpiling is off, the cluster will generate its own material");
+        return Ok(());
+    }
+
+    let nodes = nodes::load_all(&args.nodes_dir)?;
+    if let Some(loaded) =
+        stockpile::run(&args.fixture, &args.redis_url, &nodes, args.threshold).await?
+    {
+        tracing::info!(
+            triple_pairs = loaded.triple_pairs,
+            presignatures = loaded.presignatures,
+            nodes = nodes.len(),
+            "preloaded triples and presignatures for every node",
+        );
+    }
     Ok(())
 }
 

@@ -59,8 +59,12 @@ services:
       - "8900:8900"
 
   # Creates the NEAR accounts, deploys and initialises the MPC contract, installs the signet
-  # program and creates its state account, then exits. Every step checks for its own effect
-  # first, so re-running it against a live stack is a no-op.
+  # program and creates its state account, fills Redis with dealt triples and presignatures,
+  # then exits. Every step checks for its own effect first, so re-running it against a live
+  # stack is a no-op.
+  #
+  # This has to finish before any node starts, which the nodes' depends_on guarantees.
+  # Writing into the storage of a running cluster would race its own generation.
   bootstrap:
     build:
       context: ..
@@ -73,11 +77,17 @@ services:
     environment:
       LOCALNET_NODES_DIR: /localnet/nodes
       LOCALNET_KEYSHARES_DIR: /localnet/keyshares
+      LOCALNET_REDIS_URL: redis://redis:6379
+      # LOCALNET_STOCKPILE=false in your shell turns the preload off, so the cluster generates
+      # its own triples and presignatures the way a deployed network does.
+      LOCALNET_STOCKPILE: "${LOCALNET_STOCKPILE:-true}"
       RUST_LOG: mpc_localnet=info
     depends_on:
       near-sandbox:
         condition: service_healthy
       surfpool:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: "no"
 
@@ -89,7 +99,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: near/mpc-node:latest
+    image: sig-net/mpc-node:latest
     # The image's baked entrypoint takes no arguments, starts the Redis it bundles, and
     # hardcodes RUST_LOG because ${RUST_LOG:-...} was expanded when the image was built.
     # Overriding it puts every setting back under the env files.
@@ -117,7 +127,7 @@ services:
       - ./keyshares/mpc0.test.near.json:/data/keyshare-mpc0.test.near
 
   mpc-node-1:
-    image: near/mpc-node:latest
+    image: sig-net/mpc-node:latest
     entrypoint: ["mpc-node", "start"]
     env_file:
       - ./nodes/common.env
@@ -130,7 +140,7 @@ services:
       - ./keyshares/mpc1.test.near.json:/data/keyshare-mpc1.test.near
 
   mpc-node-2:
-    image: near/mpc-node:latest
+    image: sig-net/mpc-node:latest
     entrypoint: ["mpc-node", "start"]
     env_file:
       - ./nodes/common.env
