@@ -112,8 +112,11 @@ fn validate_execution_tx(
     tx: &BidirectionalTx,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        matches!(original_request.kind, SignKind::SignBidirectional(_)),
-        "completion checkpoint entry must originate from a bidirectional source request"
+        matches!(
+            original_request.kind,
+            SignKind::Sign | SignKind::SignBidirectional(_)
+        ),
+        "completion checkpoint entry must originate from a sign request"
     );
     anyhow::ensure!(
         tx.request_id == original_request.id.request_id
@@ -172,17 +175,18 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                     ),
                     "initial-response checkpoint entry must contain a sign request"
                 );
-                if matches!(original_request.kind, SignKind::SignBidirectional(_)) {
-                    anyhow::ensure!(
-                        entry.execution_tx().is_none(),
-                        "initial-response bidirectional entry cannot contain an execution transaction"
-                    );
-                }
+                anyhow::ensure!(
+                    entry.execution_tx().is_none(),
+                    "initial-response entry cannot contain an execution transaction"
+                );
             }
             CheckpointPhase::AwaitingBidirectionalCompletion => {
                 anyhow::ensure!(
-                    matches!(original_request.kind, SignKind::SignBidirectional(_)),
-                    "completion checkpoint entry must originate from a bidirectional sign request"
+                    matches!(
+                        original_request.kind,
+                        SignKind::Sign | SignKind::SignBidirectional(_)
+                    ),
+                    "completion checkpoint entry must originate from a sign request"
                 );
                 anyhow::ensure!(
                     matches!(
@@ -2192,6 +2196,64 @@ mod tests {
             recovered_entry.request.kind,
             SignKind::SignBidirectional(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_recover_preserves_plain_sign_completion() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(48);
+        let sign_id = SignId::new(tx.request_id);
+        let request = IndexedSignRequest::sign(sign_id, create_test_args(48), Chain::Solana, 0);
+
+        backlog.insert(request.clone()).await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution { tx: tx.clone() },
+            )
+            .await;
+        let completion = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(48),
+            Chain::Solana,
+            1,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![9],
+                chain_ctx: None,
+            },
+        );
+        backlog
+            .set_request(Chain::Solana, &sign_id, completion)
+            .await
+            .unwrap();
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingGenerationBidirectional,
+            )
+            .await;
+        backlog.set_processed_block(Chain::Solana, 10).await;
+
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+        let recovered = Backlog::new();
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("plain Sign completion should be recoverable");
+
+        let entry = recovered
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("plain Sign completion should remain in the backlog");
+        assert!(matches!(entry.request.kind, SignKind::Sign));
+        assert!(matches!(
+            entry.status(),
+            SignStatus::PendingExecution { .. }
+        ));
+        assert_eq!(entry.execution_tx(), Some(&tx));
     }
 
     #[test]
