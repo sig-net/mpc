@@ -1,7 +1,4 @@
 pub mod consensus;
-mod work;
-
-pub use work::{WorkKey, WorkStage};
 
 use crate::sign_bidirectional::{
     CheckpointPhase, PublishState, SignBidirectionalEventExt, SignStatus,
