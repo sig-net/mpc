@@ -59,21 +59,6 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
-    pub fn checkpoint_consensus_bytes(&self) -> Vec<u8> {
-        match self {
-            SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { .. } => vec![1],
-            SignStatus::PendingExecution { tx } => {
-                let mut bytes = vec![2];
-                bytes.extend_from_slice(tx.id.0.as_slice());
-                bytes.extend_from_slice(&tx.target_chain.to_bytes());
-                bytes
-            }
-            SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { .. } => vec![4],
-        }
-    }
-
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),

@@ -11,7 +11,6 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PendingTx,
     SignId, SignKind,
 };
-use sha3::Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -291,43 +290,29 @@ impl PendingRequests {
     }
 
     fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        let mut encoded = self
+        let mut pending_requests = self
             .requests
             .iter()
             .map(|(&sign_id, entry)| {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                let status = entry.status().checkpoint_consensus_bytes();
-                (
-                    PendingTx {
-                        sign_id,
-                        canonical_transaction: canonical_entry_bytes(entry),
-                        transaction,
-                    },
-                    status,
-                )
+                PendingTx {
+                    sign_id,
+                    canonical_transaction: canonical_entry_bytes(entry),
+                    transaction,
+                }
             })
             .collect::<Vec<_>>();
-        encoded.sort_by_key(|(pending, _)| pending.sign_id);
-
-        let mut cumulative = sha3::Sha3_256::new();
-        for (_, status) in &encoded {
-            cumulative.update(status);
-        }
-        let cumulative_digest = cumulative.finalize().into();
-
-        let pending_requests = encoded
-            .into_iter()
-            .map(|(pending, _)| pending)
-            .collect::<Vec<_>>();
+        pending_requests.sort_by_key(|pending| pending.sign_id);
 
         Checkpoint {
             schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
             chain,
             block_height: self.processed_block_height.unwrap_or(0),
             pending_requests,
-            cumulative_digest,
+            // Retained only for compatibility with the legacy checkpoint wire format.
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
         }
     }
 
@@ -1247,6 +1232,7 @@ mod tests {
         BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
         SignBidirectionalEvent, SignId, SignKind,
     };
+    use sha3::Digest;
 
     fn test_signature() -> mpc_primitives::Signature {
         mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)

@@ -166,6 +166,22 @@ impl Checkpoint {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Checkpoint;
+    use crate::Chain;
+
+    #[test]
+    fn digest_ignores_legacy_cumulative_digest() {
+        let mut first = Checkpoint::empty(Chain::Ethereum);
+        let mut second = first.clone();
+        first.cumulative_digest = [1; 32];
+        second.cumulative_digest = [2; 32];
+
+        assert_eq!(first.digest(), second.digest());
+    }
+}
+
 #[derive(
     BorshDeserialize,
     BorshSerialize,

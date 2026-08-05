@@ -209,7 +209,6 @@ mod tests {
     use crate::node_client::Options as NodeClientOptions;
 
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
-    use sha3::Digest;
     use std::collections::HashMap;
 
     struct AlignFixture {
@@ -402,16 +401,12 @@ mod tests {
                 } else {
                     vec![]
                 };
-                let mut cumulative = sha3::Sha3_256::new();
-                if case.peer_checkpoint_has_pending_tx {
-                    cumulative.update([0u8]);
-                }
                 let peer_checkpoint = Checkpoint {
                     schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,
-                    cumulative_digest: cumulative.finalize().into(),
+                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
                 };
                 peer_digest = peer_checkpoint.digest();
 
