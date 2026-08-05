@@ -16,6 +16,34 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
 
     /// Report that a request was indexed without a block timestamp (faster chains, e.g. for Solana, Canton, or Hydration)
     fn request_indexed(&self);
+
+    /// Records a failed attempt to extract the output of a bidirectional
+    /// execution on this chain. Counts *attempts*: a retryable failure on the
+    /// same transaction increments once per retry.
+    fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
+}
+
+/// Consensus-safety classification of a bidirectional output extraction
+/// failure, used as a metric label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractionFailureKind {
+    /// Node-local failure (RPC transport, missing trace support, malformed
+    /// provider response). Another node may well succeed, so the watcher is
+    /// retried rather than resolved.
+    Retryable,
+    /// Deterministic failure of on-chain data against the request's schemas.
+    /// Every node observes it identically, so the execution is resolved as
+    /// failed.
+    Terminal,
+}
+
+impl ExtractionFailureKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Terminal => "terminal",
+        }
+    }
 }
 
 /// No-op implementation for tests
@@ -28,6 +56,7 @@ impl ChainTelemetry for NoopChainTelemetry {
     fn checkpoint_created(&self, _block_number: u64) {}
     fn request_indexed_at(&self, _block_timestamp: u64) {}
     fn request_indexed(&self) {}
+    fn bidirectional_extraction_failed(&self, _kind: ExtractionFailureKind) {}
 }
 
 /// Interface for the chain clients to record telemetry data during publishing signatures to the chain.

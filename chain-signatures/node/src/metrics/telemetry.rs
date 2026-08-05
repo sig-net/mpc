@@ -1,8 +1,10 @@
-use mpc_chain_integration_core::{ChainTelemetry, PublishAction, PublisherTelemetry};
+use mpc_chain_integration_core::{
+    ChainTelemetry, ExtractionFailureKind, PublishAction, PublisherTelemetry,
+};
 use mpc_primitives::{Chain, ChainConfig as _};
 
 use super::{
-    indexers::LATEST_BLOCK_NUMBER,
+    indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -68,5 +70,11 @@ impl ChainTelemetry for NodeTelemetry {
 
     fn request_indexed(&self) {
         record_indexing_step_reached(self.chain);
+    }
+
+    fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {
+        BIDIRECTIONAL_EXTRACTION_FAILURES
+            .with_label_values(&[self.chain.as_str(), kind.as_str()])
+            .inc();
     }
 }
