@@ -103,7 +103,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Spawn the background finalized-head watcher. Returns a guard whose drop
     /// aborts the task, or `None` in optimistic mode (dev chains never report a
     /// finalized head).
-    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> Option<AbortOnDrop> {
+    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> AbortOnDrop {
         self.finalized_head
             .spawn_watcher(self.client.clone(), cancel)
     }
@@ -331,31 +331,18 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         .map(|tip| tip.saturating_add(1))
     }
 
-    /// Wait until the next block is processable, either by waiting for the finalized head to reach it, or by polling the latest tip in optimistic mode.
+    /// Wait until `next` is processable (the head covers it), returning the
+    /// ready upper bound. Returns `None` on cancellation.
     async fn wait_processable_bound(
         &self,
         next: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<u64>> {
-        // TODO: clean up next
-        if self.eth.optimistic_requests {
-            Ok(
-                retry_until_some(cancel, Self::RETRY_DELAY, "ethereum latest tip", || async {
-                    Ok(self
-                        .client
-                        .get_latest_block_number()
-                        .await?
-                        .filter(|&latest| latest >= next))
-                })
-                .await,
-            )
-        } else {
-            tokio::select! {
-                _ = cancel.cancelled() => Ok(None),
-                res = self.finalized_head.wait_for(next) => {
-                    res?;
-                    Ok(Some(self.finalized_head.current()))
-                }
+        tokio::select! {
+            _ = cancel.cancelled() => Ok(None),
+            res = self.finalized_head.wait_for(next) => {
+                res?;
+                Ok(Some(self.finalized_head.current()))
             }
         }
     }
@@ -398,6 +385,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
 
+    // TODO: add tracing
     async fn run(
         &self,
         events_tx: mpsc::Sender<ChainEvent>,
@@ -996,34 +984,6 @@ mod tests {
     async fn run_stops_promptly_on_cancel_during_catchup() {
         let mut f = RunFixture::spawn(0, 500).await;
         f.cancel_and_join().await;
-    }
-
-    #[tokio::test]
-    async fn wait_processable_bound_polls_latest_in_optimistic_mode() {
-        let mut server = Server::new_async().await;
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getBlockByNumber",
-                "params": ["latest", false]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(test_utils::block_response(1, 10).to_string())
-            .create_async()
-            .await;
-
-        // Optimistic mode is the TestIndexerBuilder default.
-        let indexer = test_utils::TestIndexerBuilder::new(server.url())
-            .build()
-            .await;
-        let cancel = CancellationToken::new();
-
-        let upper = indexer
-            .wait_processable_bound(5, &cancel)
-            .await
-            .expect("optimistic wait_processable_bound resolves once latest >= next");
-        assert_eq!(upper, Some(10));
     }
 
     #[tokio::test]
