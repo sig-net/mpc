@@ -8,6 +8,11 @@ use std::time::Duration;
 pub struct RpcConfig {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
+    /// Largest response the websocket client accepts. Must exceed the node's own cap
+    /// (substrate serves 15 MiB by default) so an oversized contract state arrives as
+    /// the server's per-call refusal rather than a frame that kills the client and
+    /// turns the drop into a reconnect loop; raise this whenever the node's is raised.
+    pub max_response_size: u32,
     pub retry: RetryConfig,
 }
 
@@ -24,6 +29,7 @@ impl PartialEq for RpcConfig {
         } = self.retry;
         self.connect_timeout == other.connect_timeout
             && self.request_timeout == other.request_timeout
+            && self.max_response_size == other.max_response_size
             && min_delay == other.retry.min_delay
             && max_delay == other.retry.max_delay
             && max_times == other.retry.max_times
@@ -36,6 +42,7 @@ impl Default for RpcConfig {
         Self {
             connect_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(10),
+            max_response_size: 32 * 1024 * 1024,
             retry: RetryConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
@@ -51,7 +58,8 @@ impl Default for RpcConfig {
 pub struct IndexerConfig {
     pub live_block_buffer: usize,
     /// How long the finalized-head subscription may go silent before `run()` returns
-    /// and lets the supervisor restart it
+    /// and lets the supervisor restart it. Midnight finalizes a block roughly every
+    /// 6 seconds, so the 60s default is ~10 missed blocks.
     pub stall_timeout: Duration,
 }
 
