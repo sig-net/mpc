@@ -33,7 +33,7 @@ pub(crate) async fn process_sign_request(
         }
     }
 
-    ctx.backlog.insert(sign_request.clone()).await;
+    ctx.backlog.insert(sign_request.clone()).await?;
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 

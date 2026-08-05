@@ -305,7 +305,7 @@ impl SignatureSpawner {
         self.abort_delayed_watcher(sign_id, reason);
     }
 
-    fn handle_sign(
+    async fn handle_sign(
         &mut self,
         governance: &GovernanceInfo,
         sign: SignCommand,
@@ -334,13 +334,42 @@ impl SignatureSpawner {
             SignCommand::Request(request) => {
                 let sign_id = request.id;
 
-                // Skip requests we already track. Use the request map rather than
-                // the mailbox map, which may already hold buffered messages (e.g. a
-                // Propose arriving before the indexer notifies us), and rather than
-                // the task map, which is empty while requests are held for governance.
-                if self.requests.contains_key(&sign_id) {
-                    tracing::info!(?sign_id, "skipping duplicate sign request");
-                    return;
+                // Keep the first request for each SignId. Identical replay is
+                // harmless, but a conflicting payload must never be allowed to
+                // diverge from the request already driving the signature task.
+                if let Some(existing) = self.requests.get(&sign_id) {
+                    if existing.request.same_signing_request(&request) {
+                        tracing::info!(?sign_id, "skipping duplicate sign request");
+                        return;
+                    }
+
+                    // The final bidirectional request intentionally reuses the
+                    // source SignId. It is admitted only after the initial
+                    // request has advanced to execution, so replace the old
+                    // task incarnation atomically inside the spawner. Any other
+                    // conflicting request is rejected and the first request
+                    // remains authoritative.
+                    if matches!(
+                        (&existing.request.kind, &request.kind),
+                        (
+                            mpc_primitives::SignKind::SignBidirectional(_),
+                            mpc_primitives::SignKind::RespondBidirectional(_)
+                        )
+                    ) && self
+                        .backlog
+                        .accepts_bidirectional_completion(&request)
+                        .await
+                    {
+                        tracing::info!(
+                            ?sign_id,
+                            "advancing signature spawner to final bidirectional request"
+                        );
+                        self.retire_task(sign_id, "initial bidirectional response");
+                        self.tasks.abort(sign_id);
+                    } else {
+                        tracing::warn!(?sign_id, "rejecting conflicting duplicate sign request");
+                        return;
+                    }
                 }
 
                 record_request_latency_since(
@@ -380,7 +409,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_sign(&governance, sign, &protocol);
+                    self.handle_sign(&governance, sign, &protocol).await;
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, presignature_id, round, from, action);
@@ -593,8 +622,24 @@ mod tests {
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
+        // A conflicting duplicate must not replace the request that owns the
+        // task or create another task incarnation.
+        let mut conflicting = request.clone();
+        conflicting.args.path.push_str("/conflict");
+        spawner
+            .handle_sign(&governance, SignCommand::Request(conflicting), &cfg)
+            .await;
+        assert_eq!(
+            spawner.requests.get(&sign_id).unwrap().request,
+            request,
+            "the first request remains authoritative"
+        );
+        assert!(spawner.test_tasks_contains(sign_id));
+
         // Step 2: Abort chain → mailbox removed, request dropped, marked dead
-        spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
+        spawner
+            .handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg)
+            .await;
         tokio::time::timeout(Duration::from_secs(1), dropped.notified())
             .await
             .expect("aborting a chain should cancel its sign tasks");

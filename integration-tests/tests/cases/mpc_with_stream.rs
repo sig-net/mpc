@@ -95,8 +95,8 @@ async fn test_fixture_checkpoint_projection_with_partial_bidirectional_observati
         let initial_request = bidirectional_request(43);
 
         for node in &network.nodes {
-            node.backlog.insert(request.clone()).await;
-            node.backlog.insert(initial_request.clone()).await;
+            node.backlog.insert(request.clone()).await.unwrap();
+            node.backlog.insert(initial_request.clone()).await.unwrap();
             node.backlog.set_processed_block(Chain::Solana, 100).await;
         }
 

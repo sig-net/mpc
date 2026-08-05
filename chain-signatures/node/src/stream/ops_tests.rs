@@ -71,7 +71,8 @@ async fn recover_backlog_requeues_pending_signs() {
             unix_timestamp_indexed,
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let threshold = 1;
@@ -130,7 +131,8 @@ async fn process_execution_confirmed_success_creates_respond_request() {
             unix_timestamp_indexed,
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
@@ -214,7 +216,8 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
         .await;
@@ -288,7 +291,8 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
         .await;
@@ -368,7 +372,8 @@ async fn process_execution_confirmed_recovery_rewatches_execution_after_send_fai
                 chain_ctx: None,
             }),
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
         .await;
@@ -491,7 +496,8 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
                 respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             },
         ))
-        .await;
+        .await
+        .unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
@@ -611,7 +617,8 @@ async fn process_respond_event_rejects_invalid_signature() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &args);
@@ -656,7 +663,8 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
                 chain_ctx: None,
             },
         ))
-        .await;
+        .await
+        .unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let signature = mpc_crypto::generate_signature(&root_sk, &args);
@@ -711,7 +719,8 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
                 chain_ctx: None,
             },
         ))
-        .await;
+        .await
+        .unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &args);
@@ -748,7 +757,8 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
@@ -836,7 +846,8 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                 respond_serialization_schema: tx.respond_serialization_schema.clone(),
             },
         ))
-        .await;
+        .await
+        .unwrap();
 
     backlog
         .set_status(
@@ -918,7 +929,8 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
             unix_timestamp_indexed,
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
@@ -1017,7 +1029,8 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
@@ -1066,7 +1079,8 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
             sign_id,
             sign_event_contract_id,
         ))
-        .await;
+        .await
+        .unwrap();
 
     backlog
         .watch_execution(tx.target_chain, sign_id, tx.clone())
@@ -1154,7 +1168,8 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .insert(test_indexed_request(
             ethereum_sign_id,
@@ -1163,7 +1178,8 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
             current_unix_timestamp(),
             SignKind::Sign,
         ))
-        .await;
+        .await
+        .unwrap();
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);

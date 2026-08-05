@@ -189,7 +189,8 @@ mod tests {
                     Chain::Solana,
                     0,
                 ))
-                .await;
+                .await
+                .unwrap();
             let mut checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
             checkpoint.block_height = current.block_height;
             checkpoint

@@ -11,7 +11,7 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PendingTx,
     SignId, SignKind,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -184,9 +184,11 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                 anyhow::ensure!(
                     matches!(
                         entry.request().kind,
-                        SignKind::SignBidirectional(_) | SignKind::RespondBidirectional(_)
+                        SignKind::Sign
+                            | SignKind::SignBidirectional(_)
+                            | SignKind::RespondBidirectional(_)
                     ),
-                    "completion checkpoint entry must contain bidirectional work"
+                    "completion checkpoint entry must contain completion work"
                 );
                 let tx = execution.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -291,9 +293,12 @@ impl PendingRequests {
             .requests
             .iter()
             .map(|(&sign_id, entry)| {
+                let consensus_entry = entry
+                    .consensus_projection()
+                    .expect("build canonical backlog entry for checkpoint");
                 let mut transaction = Vec::new();
-                ciborium::ser::into_writer(entry, &mut transaction)
-                    .expect("serialize backlog entry for checkpoint");
+                ciborium::ser::into_writer(&consensus_entry, &mut transaction)
+                    .expect("serialize canonical backlog entry for checkpoint");
                 PendingTx {
                     sign_id,
                     canonical_transaction: canonical_entry_bytes(entry),
@@ -455,24 +460,29 @@ impl Backlog {
             .expect("chain should be initialized within `persisted` method")
     }
 
-    /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
+    /// Insert a sign request into the backlog.
+    ///
+    /// Replaying the same request is idempotent. A different request with the
+    /// same `SignId` is rejected and the retained entry is left untouched.
+    pub async fn insert(&self, request: IndexedSignRequest) -> Result<(), BacklogError> {
         let chain = request.chain;
         let id = request.id;
-        let entry = BacklogEntry::new(request);
-        let (prev, len) = {
-            let mut pending = self.pending(&chain).write().await;
-            let p = pending.insert(id, entry);
-            (p, pending.len())
-        };
+        let mut pending = self.pending(&chain).write().await;
 
-        // Only increment total pending if this is a new entry
-        if prev.is_none() {
-            self.total_pending.fetch_add(1, Ordering::Relaxed);
+        if let Some(existing) = pending.get(&id) {
+            if existing.source_request().same_signing_request(&request) {
+                return Ok(());
+            }
+            return Err(BacklogError::ConflictingRequest { chain, id });
         }
 
+        pending.insert(id, BacklogEntry::new(request));
+        let len = pending.len();
+        drop(pending);
+
+        self.total_pending.fetch_add(1, Ordering::Relaxed);
         self.observe_backlog_size(chain, len);
-        prev
+        Ok(())
     }
 
     /// Remove a Sign request from the backlog for the specified chain.
@@ -594,6 +604,25 @@ impl Backlog {
             .await
             .pending_execution(id)
             .cloned()
+    }
+
+    /// Returns whether a final bidirectional request is the exact completion
+    /// request currently admitted by the source-chain backlog.
+    pub async fn accepts_bidirectional_completion(&self, request: &IndexedSignRequest) -> bool {
+        let Some(entry) = self.get(request.chain, &request.id).await else {
+            return false;
+        };
+        matches!(
+            entry.status(),
+            SignStatus::PendingGenerationBidirectional
+                | SignStatus::PendingPublishBidirectional { .. }
+        ) && matches!(
+            (&entry.source_request().kind, &request.kind),
+            (
+                SignKind::SignBidirectional(_),
+                SignKind::RespondBidirectional(_)
+            )
+        ) && entry.request().same_signing_request(request)
     }
 
     /// Returns the number of pending requests for a specific chain
@@ -973,36 +1002,70 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // Clear all pending (unconfirmed) checkpoints for this chain.
-        // Any checkpoint that was waiting for consensus is now obsolete.
+        // Decode and normalize the replacement before mutating live state. A
+        // malformed checkpoint must not discard pending candidates or change the
+        // active backlog.
+        let restored_requests = PendingRequests::from_checkpoint(&checkpoint)?;
+        let restored_watchers: Vec<_> = restored_requests
+            .pending_executions()
+            .into_iter()
+            .filter_map(|(sign_id, entry)| {
+                entry
+                    .execution_tx()
+                    .cloned()
+                    .map(|tx| (tx.target_chain, ExecutionWatcher { sign_id, tx }))
+            })
+            .collect();
+
+        // Every watcher is derived from the already validated replacement
+        // state. Build the complete watcher plan before changing live state so
+        // recovery cannot fail halfway through installation.
+        let mut watcher_keys = HashSet::new();
+        for (target_chain, watcher) in &restored_watchers {
+            validate_execution_tx(
+                restored_requests
+                    .get(&watcher.sign_id)
+                    .expect("restored watcher source entry must exist")
+                    .source_request(),
+                &watcher.tx,
+            )?;
+            anyhow::ensure!(
+                *target_chain == watcher.tx.target_chain,
+                "restored execution watcher target chain does not match transaction"
+            );
+            anyhow::ensure!(
+                watcher_keys.insert((*target_chain, watcher.tx.id)),
+                "checkpoint contains duplicate execution watcher id"
+            );
+        }
+
+        let (cleared, restored, previous_height) = {
+            let mut pending = self.pending(&checkpoint.chain).write().await;
+            let previous_height = pending.processed_block_height().unwrap_or(0);
+            let cleared = pending.len();
+            let restored = restored_requests.len();
+            *pending = restored_requests;
+            (cleared, restored, previous_height)
+        };
+
+        self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
+        self.total_pending.fetch_add(restored, Ordering::Relaxed);
+
+        tracing::info!(
+            ?chain,
+            old_block = previous_height,
+            new_block = checkpoint_height,
+            cleared_requests = cleared,
+            restored_requests = restored,
+            "successfully recovered from checkpoint"
+        );
+
+        // Any checkpoint that was waiting for consensus is now obsolete only
+        // after the replacement state has been built successfully.
         self.pending_checkpoints(&chain).write().await.clear();
         self.observe_pending_checkpoints(chain, 0);
 
-        let execution_to_watch = {
-            let mut pending = self.pending(&checkpoint.chain).write().await;
-            let previous_height = pending.processed_block_height().unwrap_or(0);
-
-            // Execution watchers are ephemeral, we need to get all the execution watchers here
-            let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(&checkpoint)?;
-            let restored = pending.len();
-
-            // Update total pending count based on the difference between cleared and restored requests
-            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending.fetch_add(restored, Ordering::Relaxed);
-
-            tracing::info!(
-                ?chain,
-                old_block = previous_height,
-                new_block = checkpoint_height,
-                cleared_requests = cleared,
-                restored_requests = restored,
-                "successfully recovered from checkpoint"
-            );
-            pending.pending_executions()
-        };
-
-        // Clear execution watchers whose source chain is the recovered chain
+        // Clear execution watchers whose source chain is the recovered chain.
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
             watchers
@@ -1010,12 +1073,13 @@ impl Backlog {
                 .retain(|_, watcher| watcher.tx.source_chain != chain);
         }
 
-        // now repopulate our execution watchers
-        for (sign_id, tx) in execution_to_watch {
-            // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = tx.execution_tx().cloned() {
-                self.watch_execution(tx.target_chain, sign_id, tx).await;
-            }
+        // Install the prevalidated watcher plan without reopening the source
+        // backlog lock or introducing a fallible mid-recovery transition.
+        for (target_chain, watcher) in restored_watchers {
+            self.watchers(&target_chain)
+                .write()
+                .await
+                .insert(watcher.tx.id, watcher);
         }
 
         Ok(())
@@ -1059,6 +1123,8 @@ pub enum BacklogError {
     InvalidAdvanceTransition,
     #[error("request identity does not match backlog entry")]
     InvalidRequestTransition,
+    #[error("conflicting request for chain {chain:?} with id {id:?}")]
+    ConflictingRequest { chain: Chain, id: SignId },
     #[error("execution transaction does not match backlog entry")]
     InvalidExecutionTransition,
 }
@@ -1236,6 +1302,22 @@ impl BacklogEntry {
             .or_else(|| self.status.execution_tx())
     }
 
+    fn consensus_projection(&self) -> anyhow::Result<Self> {
+        let source_request = self.source_request.clone();
+        match self.status().checkpoint_phase() {
+            CheckpointPhase::AwaitingInitialResponse => Ok(Self::new(source_request)),
+            CheckpointPhase::AwaitingBidirectionalCompletion => {
+                let tx = self.checked_execution_tx()?.cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "completion checkpoint entry is missing its source-derived execution transaction"
+                    )
+                })?;
+                validate_execution_tx(&source_request, &tx)?;
+                Ok(Self::pending_execution(source_request, tx))
+            }
+        }
+    }
+
     pub fn typename(&self) -> &'static str {
         match (&self.request.kind, &self.status) {
             (SignKind::Sign, _) => "Sign",
@@ -1364,11 +1446,12 @@ mod tests {
     }
 
     fn create_execution_entry(
-        tx: BidirectionalTx,
+        mut tx: BidirectionalTx,
         chain: Chain,
         status: SignStatus,
         dest: &str,
     ) -> BacklogEntry {
+        tx.source_chain = chain;
         let sign_id = SignId::new(tx.request_id);
         let request = IndexedSignRequest::new(
             sign_id,
@@ -1396,7 +1479,8 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
         backlog
             .insert(create_bidirectional_request(sign_id, chain, dest, 0))
-            .await;
+            .await
+            .unwrap();
 
         match status {
             SignStatus::PendingGeneration => {}
@@ -1422,7 +1506,7 @@ mod tests {
                 backlog
                     .set_request(chain, &sign_id, completion_request)
                     .await
-                    .unwrap();
+                    .expect("failed to store completion request");
                 backlog
                     .set_status(chain, &sign_id, SignStatus::PendingGenerationBidirectional)
                     .await;
@@ -2192,7 +2276,8 @@ mod tests {
                 sign_kind,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
         backlog.set_processed_block(Chain::Solana, 10).await;
 
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -2221,7 +2306,7 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
         let request = IndexedSignRequest::sign(sign_id, create_test_args(49), Chain::Solana, 0);
 
-        backlog.insert(request).await;
+        backlog.insert(request).await.unwrap();
         assert!(backlog
             .watch_execution(Chain::Ethereum, sign_id, tx.clone())
             .await
@@ -2250,7 +2335,7 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
         let request = IndexedSignRequest::sign(sign_id, create_test_args(48), Chain::Solana, 0);
 
-        backlog.insert(request.clone()).await;
+        backlog.insert(request.clone()).await.unwrap();
         backlog
             .set_status(
                 Chain::Solana,
@@ -2272,7 +2357,7 @@ mod tests {
         backlog
             .set_request(Chain::Solana, &sign_id, completion)
             .await
-            .unwrap();
+            .expect("failed to store completion request");
         backlog
             .set_status(
                 Chain::Solana,
@@ -2410,7 +2495,7 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
         let original = create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0);
 
-        backlog.insert(original.clone()).await;
+        backlog.insert(original.clone()).await.unwrap();
         backlog
             .advance(Chain::Solana, sign_id, tx.clone())
             .await
@@ -2506,7 +2591,8 @@ mod tests {
                 "ethereum",
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         let wrong_request = IndexedSignRequest::sign(
             SignId::new([99; 32]),
@@ -2634,7 +2720,26 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await
+            .unwrap();
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution { tx: tx.clone() },
+            )
+            .await;
+        backlog
+            .set_request(Chain::Solana, &sign_id, completion_request)
+            .await
+            .expect("failed to store completion request");
         backlog
             .set_status(
                 Chain::Solana,
@@ -2664,7 +2769,8 @@ mod tests {
                 "ethereum",
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         backlog
             .mark_publishing(Chain::Solana, &sign_id, test_publish_state(true))
@@ -2696,7 +2802,26 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await
+            .unwrap();
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution { tx: tx.clone() },
+            )
+            .await;
+        backlog
+            .set_request(Chain::Solana, &sign_id, completion_request)
+            .await
+            .expect("failed to store completion request");
         backlog
             .set_status(
                 Chain::Solana,
@@ -2744,7 +2869,8 @@ mod tests {
                 SignKind::Sign,
                 unix_timestamp_indexed,
             ))
-            .await;
+            .await
+            .unwrap();
 
         // Watch execution on the target chain
         backlog
@@ -2972,7 +3098,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         let err = backlog
             .advance(tx.source_chain, sign_id, tx)
@@ -2995,7 +3122,8 @@ mod tests {
                 "ethereum",
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         backlog
             .advance(tx.source_chain, sign_id, tx.clone())
@@ -3022,7 +3150,8 @@ mod tests {
                 "ethereum",
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
         backlog
             .set_status(
                 tx.source_chain,
@@ -3062,7 +3191,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(backlog.len(), 1);
         assert!(!backlog.is_empty());
@@ -3081,16 +3211,32 @@ mod tests {
         );
 
         // Insert first time
-        backlog.insert(request.clone()).await;
+        backlog.insert(request.clone()).await.unwrap();
         assert_eq!(backlog.len(), 1);
 
-        // Insert exactly the same ID again (overwrites)
-        backlog.insert(request).await;
+        // Replaying exactly the same request is idempotent and retains the
+        // original backlog entry, even when local indexing metadata differs.
+        let mut replay = request.clone();
+        replay.unix_timestamp_indexed += 1;
+        backlog.insert(replay).await.unwrap();
         assert_eq!(
             backlog.len(),
             1,
             "Duplicate insert should not increment total"
         );
+
+        let mut conflicting = request;
+        conflicting.args.path.push_str("/conflict");
+        assert!(matches!(
+            backlog.insert(conflicting).await,
+            Err(BacklogError::ConflictingRequest { .. })
+        ));
+        let retained = backlog
+            .get(Chain::Ethereum, &SignId::new(tx.request_id))
+            .await
+            .unwrap();
+        assert_eq!(retained.request().args.path, "test");
+        assert_eq!(retained.request().unix_timestamp_indexed, 0);
     }
 
     #[tokio::test]
@@ -3105,7 +3251,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         backlog
             .insert(create_indexed_request(
@@ -3115,7 +3262,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(backlog.len(), 2);
     }
@@ -3133,7 +3281,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(backlog.len(), 1);
 
         backlog.remove(Chain::Ethereum, &sign_id).await;
@@ -3155,7 +3304,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         backlog.remove(Chain::Ethereum, &sign_id2).await;
         assert_eq!(
@@ -3179,7 +3329,8 @@ mod tests {
                     SignKind::Sign,
                     0,
                 ))
-                .await;
+                .await
+                .unwrap();
         }
         backlog.set_processed_block(Chain::Ethereum, 10).await;
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
@@ -3210,7 +3361,8 @@ mod tests {
                     SignKind::Sign,
                     0,
                 ))
-                .await;
+                .await
+                .unwrap();
         }
         backlog.set_processed_block(Chain::Ethereum, 10).await;
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
@@ -3225,7 +3377,8 @@ mod tests {
                 SignKind::Sign,
                 0,
             ))
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(dirty_backlog.len(), 1);
 

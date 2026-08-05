@@ -377,7 +377,7 @@ mod tests {
                         chain,
                         0,
                     );
-                    fixture.backlog.insert(tx).await;
+                    fixture.backlog.insert(tx).await.unwrap();
                 }
 
                 for &height in &case.local_checkpoints {

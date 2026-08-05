@@ -81,4 +81,16 @@ impl IndexedSignRequest {
             SignKind::RespondBidirectional(tx),
         )
     }
+
+    /// Returns whether two indexed requests describe the same signing work.
+    ///
+    /// The indexing timestamp is local metadata and may differ when the same
+    /// source-chain event is replayed. Every field that identifies or changes
+    /// the signing request itself must match.
+    pub fn same_signing_request(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.args == other.args
+            && self.chain == other.chain
+            && self.kind == other.kind
+    }
 }

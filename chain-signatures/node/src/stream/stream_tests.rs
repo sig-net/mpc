@@ -279,7 +279,7 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     // Pre-seed the backlog with the bidirectional entry and mark it as already
     // published so the incoming respond event advances it into execution pending.
-    backlog.insert(request).await;
+    backlog.insert(request).await.unwrap();
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
     backlog
         .set_status(
@@ -365,7 +365,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
         mpc_primitives::SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
         _ => unreachable!("helper always produces a SignBidirectional request"),
     };
-    backlog.insert(request).await;
+    backlog.insert(request).await.unwrap();
 
     // Register an execution watcher for the derived bidirectional tx on the target chain (Ethereum)
     let tx = test_bidirectional_tx(seed, Chain::Solana, Chain::Ethereum);
@@ -439,7 +439,8 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
             Chain::Ethereum,
             current_unix_timestamp(),
         ))
-        .await;
+        .await
+        .unwrap();
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
         .await;
@@ -485,7 +486,8 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
             Chain::Ethereum,
             recovered_timestamp,
         ))
-        .await;
+        .await
+        .unwrap();
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
         .await;
@@ -547,7 +549,8 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             Chain::Solana,
             current_unix_timestamp(),
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .set_status(
             Chain::Solana,
@@ -633,7 +636,8 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             Chain::Solana,
             current_unix_timestamp(),
         ))
-        .await;
+        .await
+        .unwrap();
     backlog
         .set_status(
             Chain::Solana,

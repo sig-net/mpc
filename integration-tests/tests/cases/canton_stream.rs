@@ -252,7 +252,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
                     saw_sign_request = true;
-                    backlog.insert(request).await;
+                    backlog.insert(request).await?;
                 }
                 ChainEvent::Block(height) => {
                     if let Some(persisted_checkpoint) = backlog
