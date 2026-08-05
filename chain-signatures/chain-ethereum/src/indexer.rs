@@ -219,6 +219,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             &self.state_manager,
             &self.eth.indexer,
             &self.watcher_gate,
+            &self.telemetry,
         );
         let exec_events = watcher.collect(block).await?;
 
