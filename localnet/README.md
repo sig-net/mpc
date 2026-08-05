@@ -1,22 +1,48 @@
 # Local MPC cluster
 
-A complete three-node MPC network on your machine, with the two chains it depends on and a
-job that prepares them. One command takes you from nothing to a cluster that answers
-signature requests made through the Solana signet program.
+A complete three-node MPC network in one container, answering signature requests made
+through the Solana signet program. Add it to a compose file, point a client at it, and you
+have the real threshold protocol running locally.
 
 This exists to replace the `fakenet-signer` stand-in for local development. Fakenet derives
-child keys from a single local root key in one process; this runs the real threshold
+child keys from a single local root key in one process, and this runs the real threshold
 protocol.
 
 ## What it runs
 
 | Service | Purpose |
 |---|---|
-| `near-sandbox` | NEAR localnet. Hosts the MPC contract, which is the only source of truth for the participant set. Built locally, see below. |
+| `mpc-localnet` | The MPC network. One container holding Redis, a NEAR sandbox with the MPC contract, the one-shot bootstrap and three MPC nodes on ports 3000 to 3002. |
 | `surfpool` | Solana localnet. Hosts the signet program that signature requests arrive on. |
-| `redis` | Shared triple, presignature and checkpoint storage. Keys are namespaced per node account. |
-| `bootstrap` | One-shot. Creates accounts, deploys and initialises the contract, installs the signet program, fills Redis with triples and presignatures. Exits when done. |
-| `mpc-node-0/1/2` | The MPC nodes, on ports 3000, 3001 and 3002. |
+
+Solana sits outside the image on purpose. It is the piece a consumer is most likely to
+already run, or to want to share with the rest of their stack, so it is reached over the
+network and configured with `LOCALNET_SOLANA_RPC`.
+
+## Using it from your own stack
+
+The image needs nothing mounted and nothing prepared. Every part, including the key
+material, is baked in:
+
+```yaml
+services:
+  mpc-localnet:
+    image: sig-net/mpc-localnet:dev
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+      - "3002:3002"
+    environment:
+      LOCALNET_SOLANA_RPC: http://your-solana:8899
+      LOCALNET_SOLANA_WS: ws://your-solana:8900
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOCALNET_SOLANA_RPC` | `http://surfpool:8899` | Solana RPC the nodes and bootstrap use |
+| `LOCALNET_SOLANA_WS` | `ws://surfpool:8900` | Solana websocket the nodes subscribe on |
+| `LOCALNET_STOCKPILE` | `true` | Preload dealt triples and presignatures |
+| `RUST_LOG` | `mpc_node=info,mpc_node::indexer_sol=debug` | Log filter for all three nodes |
 
 ## Before you start
 
@@ -38,8 +64,8 @@ worth recording because the obvious choices all fail:
 What does work is that NEAR publishes `Linux-aarch64` sandbox binaries directly, from
 nearcore 2.6.5 onwards. They are simply newer than the 2.3.1 that `near-sandbox-utils`
 0.12.0 defaults to, which is why the Rust tooling still reports arm64 as unsupported.
-`near-sandbox.Dockerfile` downloads one and builds a small native image around it, picking
-the platform from `uname -m` so the same file works on amd64.
+`localnet/Dockerfile` downloads one and builds a native stage around it, picking the platform
+from `uname -m` so the same file works on amd64.
 
 ## Running it
 
@@ -47,9 +73,8 @@ the platform from `uname -m` so the same file works on amd64.
 docker compose -f localnet/docker-compose.yaml up --build
 ```
 
-The first run builds three images and takes a while, mostly compiling the MPC node. After
-that a cold start takes about 20 seconds: the two chains come up, `bootstrap` exits 0, and
-the three nodes reach `running`.
+The first run builds the image and takes a while, mostly compiling the MPC node. After that a
+cold start takes about 17 seconds to all three nodes reporting `running`.
 
 Check the cluster agrees it is running:
 
@@ -61,15 +86,14 @@ You want `running` with all three participants listed, and triple and presignatu
 that start above zero, since the bootstrap preloads them. Ports 3001 and 3002 should say the
 same thing.
 
-`running` is not the same as ready. All three nodes report it around 16 seconds in, and a
-request submitted at that moment goes unanswered. The cluster starts serving roughly 25
-seconds after that, about 42 seconds from cold. Anything scripted against this stack has to
-retry its request rather than trust the state endpoint. This is a property of the cluster,
-not of the preload: it measures the same with `LOCALNET_STOCKPILE=false`.
+Cold start to a signature is about 18 seconds: 17 to all three nodes reporting `running`, and
+the next request served. Measured twice, identical both times.
+
+Scripts should still retry rather than fire once on seeing `running`. Serving lags the state
+endpoint by some margin, and 18 seconds is what this machine measured, not a guarantee.
 
 To wipe the chains and start over, `docker compose -f localnet/docker-compose.yaml down -v`.
-The bootstrap is safe to re-run at any time and does nothing when everything is already in
-place, so you rarely need to.
+Both chains live inside the container, so restarting it is a full reset of the NEAR side.
 
 ## Asking it to sign something
 
@@ -85,22 +109,31 @@ second.
 To watch it happen:
 
 ```bash
-docker compose -f localnet/docker-compose.yaml logs -f mpc-node-0
+docker compose -f localnet/docker-compose.yaml logs -f mpc-localnet
 ```
 
-Exactly one node publishes each response, so if you are watching a single node you may see
-another one win the race.
+All three nodes log into that one stream, prefixed by the entrypoint. Exactly one of them
+publishes each response, so most of what you see is the other two losing the race.
 
 ## How it is put together
 
 ```
 localnet/
-  docker-compose.yaml   the service graph
-  Dockerfile            the bootstrap image (the node image is the repository root Dockerfile)
+  docker-compose.yaml   the service graph: the MPC network and Solana
+  Dockerfile            the whole image, from the two Rust binaries to the NEAR genesis
+  entrypoint.sh         starts Redis, NEAR, the bootstrap and the three nodes, and supervises
   nodes/                common.env plus one node<N>.env per node
   keyshares/            one key share per node account
-  bootstrap/            the mpc-localnet crate
+  bootstrap/            the mpc-localnet crate: bootstrap, stockpile, keygen and signer
 ```
+
+The three nodes reach each other over loopback, since they share a network namespace. That
+is why `node<N>.env` registers `http://127.0.0.1:300<N>` in the contract and gives each node
+its own `MPC_WEB_PORT`.
+
+Any process dying takes the container down. A cluster missing a node reports itself healthy
+and then times out every signature, which costs far more to debug than a container that
+exits.
 
 `nodes/node<N>.env` is the only place key material is written down. The bootstrap reads
 those same files and derives every public value it registers in the contract, so the
@@ -124,12 +157,13 @@ in advance and taken from `integration-tests/src/mpc_fixture/3_nodes.json`, the 
 key shares come from. Every node therefore holds material from the moment it starts, and it is
 the same material on every run, which makes a failure reproducible.
 
-Be clear about what this buys, since it is less than it looks. Measured on this three-node
-profile, cold start to first signature was 42 seconds with the preload and 45 seconds without:
-the same, within noise. Three nodes at `min_triples: 8` generate what they need in seconds, so
-generation was never the thing you were waiting for. The preload is there for determinism, and
-for profiles where generation would genuinely dominate. Set `LOCALNET_STOCKPILE=false` in your
-shell before `docker compose up` to turn it off.
+Be clear about what this buys, since it is less than it looks. Cold start to first signature
+measured 18 and 20 seconds with the preload, and 17 and 18 seconds without: the same, within
+noise. Switched off, the nodes start with nothing and still answer the first request a second
+after reaching `running`, so at `min_triples: 8` generation was never the thing you were
+waiting for. The preload is there for determinism, and for profiles where generation would
+genuinely dominate. Set `LOCALNET_STOCKPILE=false` in your shell before `docker compose up`
+to turn it off.
 
 Dealing shares from one party is sound only when that party is trusted to forget them. It
 protects nothing, exactly like the keys beside it. Never reuse any of it.

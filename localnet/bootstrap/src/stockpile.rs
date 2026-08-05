@@ -6,9 +6,9 @@
 //! every run, which is what makes a failure here reproducible.
 //!
 //! It does not make the cluster reach its first signature any sooner. Cold start to first
-//! signature measures 42 s with this on and 45 s with it off on the committed three-node
-//! profile: at `min_triples: 8` the nodes generate what they need in seconds. `AGENTS.md`
-//! carries the numbers. Do not sell this as a speed-up.
+//! signature measures 18 s and 20 s with this on, 17 s and 18 s with it off, on the committed
+//! three-node profile: at `min_triples: 8` the nodes generate what they need in seconds.
+//! `AGENTS.md` carries the numbers. Do not sell this as a speed-up.
 //!
 //! The material comes from `integration-tests/src/mpc_fixture/3_nodes.json`, the same file
 //! the committed key shares come from, so the triples are shares under the very key the

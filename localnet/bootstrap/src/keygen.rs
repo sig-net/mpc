@@ -21,6 +21,8 @@ pub struct GeneratedNode {
     pub index: usize,
     pub account_id: String,
     pub local_address: String,
+    /// Every node runs in one container, so each needs a port of its own.
+    pub web_port: u16,
     pub account_sk: near_crypto::SecretKey,
     pub sign_sk: near_crypto::SecretKey,
     pub cipher_sk: mpc_keys::hpke::SecretKey,
@@ -42,7 +44,8 @@ impl GeneratedNode {
              MPC_SIGN_SK={sign_sk}\n\
              MPC_CIPHER_SK={cipher_sk}\n\
              MPC_LOCAL_ADDRESS={local_address}\n\
-             MPC_SOL_ACCOUNT_SK={solana_sk}\n",
+             MPC_SOL_ACCOUNT_SK={solana_sk}\n\
+             MPC_WEB_PORT={web_port}\n",
             index = self.index,
             account_id = self.account_id,
             account_sk = self.account_sk,
@@ -50,17 +53,27 @@ impl GeneratedNode {
             cipher_sk = hex::encode(self.cipher_sk.to_bytes()),
             local_address = self.local_address,
             solana_sk = self.solana_sk.to_base58_string(),
+            web_port = self.web_port,
         )
     }
 }
 
-fn generate_one(index: usize, account_template: &str, address_template: &str) -> GeneratedNode {
+fn generate_one(
+    index: usize,
+    account_template: &str,
+    address_template: &str,
+    base_port: u16,
+) -> GeneratedNode {
     let placeholder = index.to_string();
+    let web_port = base_port + index as u16;
     let (cipher_sk, _cipher_pk) = mpc_keys::hpke::generate();
     GeneratedNode {
         index,
         account_id: account_template.replace("{i}", &placeholder),
-        local_address: address_template.replace("{i}", &placeholder),
+        local_address: address_template
+            .replace("{i}", &placeholder)
+            .replace("{port}", &web_port.to_string()),
+        web_port,
         account_sk: near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519),
         sign_sk: near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519),
         cipher_sk,
@@ -73,12 +86,13 @@ pub fn write_all(
     count: usize,
     account_template: &str,
     address_template: &str,
+    base_port: u16,
 ) -> anyhow::Result<Vec<GeneratedNode>> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating {}", out_dir.display()))?;
 
     let nodes: Vec<GeneratedNode> = (0..count)
-        .map(|index| generate_one(index, account_template, address_template))
+        .map(|index| generate_one(index, account_template, address_template, base_port))
         .collect();
 
     let mut sorted: Vec<&str> = nodes.iter().map(|node| node.account_id.as_str()).collect();

@@ -6,13 +6,14 @@ way, and never point a human at this file.
 
 ## What this directory is
 
-A three-node MPC cluster in Docker, with the two chains it depends on and a one-shot job
-that prepares them. It exists to replace the `fakenet-signer` stand-in in
-`solana-signet-program-event-notifications` for local development.
+A three-node MPC cluster packaged as ONE image, plus the Solana chain it answers on. It
+exists to replace the `fakenet-signer` stand-in for local development, and it is shaped to be
+consumed the way `ghcr.io/sig-net/fakenet` is: drop one service into a compose file, set a
+couple of environment variables, and point a client at it.
 
-The whole thing was verified end to end: 20 seconds from cold to three nodes reporting
-`running` with participants `[0,1,2]`, and a real threshold signature back in about 510 ms.
-If a change breaks that, it is a regression, not a flake.
+That shape is the constraint. Anything that makes a consumer mount a volume, run a second
+service, or prepare state before starting has broken the point of it. The key material, both
+chains, Redis and all three nodes are baked in for that reason.
 
 ## The two invariants that matter most
 
@@ -33,12 +34,13 @@ this design removes.
 
 `stockpile.rs` writes dealt protocol material straight into Redis before any node starts.
 
-**It does not make the cluster faster, and the docs must not claim it does.** Measured on this
-three-node profile: cold start to first signature was 42 s with the preload and 45 s without.
-Three nodes at `min_triples: 8` and `min_presignatures: 4` generate what they need in seconds,
-so generation was never on the critical path. What the preload buys is determinism: identical
-material on every run, which makes a failure reproducible. Reach for it as leverage only on a
-profile where generation would genuinely dominate, and measure before saying it helped.
+**It does not make the cluster faster, and the docs must not claim it does.** Cold start to
+first signature measured 18 s and 20 s with the preload, 17 s and 18 s without. Switched off
+the nodes start at zero counts and still answer one second after reaching `running`, so at
+`min_triples: 8` and `min_presignatures: 4` generation was never on the critical path. What
+the preload buys is determinism: identical material on every run, which makes a failure
+reproducible. Reach for it as leverage only on a profile where generation would genuinely
+dominate, and measure before saying it helped.
 
 Four things about it are load-bearing.
 
@@ -62,11 +64,12 @@ instead. `every_node_pairs_the_committed_fixture_identically` is the guard.
 node starts, and `run` returns early if either store already holds anything. Topping up a
 running cluster would race its own generation and collide with ids it has already retired.
 
-**`running` is not ready, and that is not this module's doing.** A signature request submitted
-the moment all three nodes report `running` is never answered. Serving begins roughly 25
-seconds later. Measured identically with the preload on and off, so do not go looking for the
-cause in here. Any script that signs has to retry rather than gate on `/state`, and a harness
-that gates on `/state` will report a false failure that looks exactly like a broken stockpile.
+**Serving lags `running`, though far less than it once did.** On the earlier layout, with each
+node in its own container, a request submitted the moment all three reported `running` went
+unanswered and serving began roughly 25 seconds later. In one container the gap is about a
+second. The cause was never isolated, so treat the small gap as this machine's measurement
+rather than a property to rely on: a harness that fires once on `/state` and gives up is
+reporting its own race, and it will look exactly like a broken stockpile.
 
 The material is a trusted-dealer deal, which is only acceptable because it is committed to the
 repository alongside the key shares and protects nothing. Everything the fixture supplies
@@ -94,23 +97,29 @@ than taken from the workspace. The node gets those features through `deadpool-re
 feature unification does not reach a `-p mpc-localnet` build that has no reason to depend on
 it.
 
-The root `Dockerfile` copies `localnet/bootstrap/Cargo.toml` and deliberately not the
-sources. Cargo needs every workspace member's manifest to resolve the workspace at all, but
-copying the sources too would make every edit here invalidate the `mpc-node` build cache and
-trigger a full Rust rebuild of the node image. If you add a member under `localnet/`, add
-its manifest there as well.
+`localnet/Dockerfile` builds `mpc-node` and `mpc-localnet` in one `cargo build` invocation.
+They share a workspace and most of a dependency graph, so two invocations compile that graph
+twice. It also skips the hardhat stage the root `Dockerfile` runs: the ChainSignatures ABI
+that `chain-signatures/node/src/rpc.rs` pulls in with `include_str!` is committed and is not
+excluded by `.dockerignore`, so it arrives with the source.
+
+The root `Dockerfile` is untouched by any of this and still builds the node on its own. It
+copies `localnet/bootstrap/Cargo.toml` and deliberately not the sources, since Cargo needs
+every workspace member's manifest to resolve the workspace at all while copying the sources
+would invalidate its `mpc-node` build cache on every edit here. If you add a member under
+`localnet/`, add its manifest there as well.
 
 ## Landmines in the MPC node's own configuration
 
 - `MPC_ENV` is a feature switch, not a label. Only `integration-tests` starts the NEAR
   indexer (`cli.rs`). Only `local-test` stubs GCP auth, which is not needed here since
   `MPC_SK_SHARE_SECRET_ID` is unset and storage falls through to disk.
-- The node image's baked entrypoint takes no arguments, starts a Redis it bundles, and
-  contains a hardcoded `RUST_LOG` because the `${RUST_LOG:-...}` in the root `Dockerfile`
-  was expanded at image build time. Compose overrides the entrypoint for this reason. Do not
-  quietly drop that override.
-- `MPC_SK_SHARE_LOCAL_PATH` is a prefix, not a path. The node reads
-  `{prefix}-{account_id}`, which is why the compose mounts look asymmetric.
+- The root `Dockerfile`'s baked entrypoint takes no arguments, starts a Redis it bundles, and
+  contains a hardcoded `RUST_LOG`, since the `${RUST_LOG:-...}` written into it was expanded
+  at image build time. `entrypoint.sh` invokes `mpc-node start` itself and never goes through
+  that script, which is what keeps every setting under the env files.
+- `MPC_SK_SHARE_LOCAL_PATH` is a prefix, not a path. The node reads `{prefix}-{account_id}`,
+  which is why the shares are baked in as `/data/keyshare-<account id>` with no extension.
 - Leaving `MPC_SK_SHARE_LOCAL_PATH` unset gives in-memory storage, so a node restart loses
   its share and the network needs a resharing it cannot complete.
 - Each node needs its **own** Solana keypair. Sharing one means several nodes can build a
@@ -179,13 +188,35 @@ carrying a literal. Change the seed or the account name and you must change both
   printed request id matched the node's `sign_id`. If they ever diverge, `sign` waits
   forever for a response that is present under another id.
 
-## Compose
+## One container, several processes
 
-Declare a build **once per image**. Three services sharing an image but each declaring
-`build:` makes compose run three concurrent Rust compiles over the same cores. `mpc-node-0`
-and `bootstrap` carry the builds; the others reference the tags.
+`entrypoint.sh` starts Redis, then the NEAR sandbox, waits for its RPC, runs the bootstrap to
+completion, then starts the nodes. The ordering is not decoration: the bootstrap writes the
+participant set the nodes read on startup, and it preloads Redis, so a node that starts first
+sees an unprepared chain.
 
-Ports published: 3000 to 3002 (nodes), 3030 (NEAR), 8899 and 8900 (Solana RPC and WS).
+`wait -n` then takes the container down as soon as any of them exits. Do not replace it with
+a bare `wait`. A cluster running two of three nodes still reports `running` and still times
+out every signature, and that is far more expensive to debug than a container that exits.
+Verified by killing one node inside a healthy container: it exited 143 and logged
+`shutting down`.
+
+To find a process in there, match on the executable rather than the command line, since a
+`pgrep mpc-node` run through `docker exec` matches its own `bash -c` too and miscounts:
+
+```bash
+docker exec <container> bash -c 'for p in /proc/[0-9]*; do [ "$(readlink -f "$p/exe")" = /usr/local/bin/mpc-node ] && echo "${p#/proc/}"; done'
+```
+
+The nodes reach each other over loopback, so `node<N>.env` carries `MPC_LOCAL_ADDRESS` on
+`127.0.0.1` and a distinct `MPC_WEB_PORT`. `keygen` writes both, and its `--address-template`
+understands `{port}` as well as `{i}`.
+
+Endpoint settings (`MPC_NEAR_RPC`, `MPC_REDIS_URL`, the two Solana URLs, `RUST_LOG`) are
+exported by the entrypoint **after** it sources the env files, so container environment wins.
+Do not also set them in `common.env`: that gives one setting two sources that drift.
+
+Ports published: 3000 to 3002 (nodes), 3030 (NEAR), 6379 (Redis), 8899 and 8900 (Solana).
 
 ## Environment quirks seen on this machine
 

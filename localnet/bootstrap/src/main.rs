@@ -60,9 +60,15 @@ struct KeygenArgs {
     /// NEAR account each node uses, formatted with its index.
     #[arg(long, default_value = "mpc{i}.test.near")]
     account_template: String,
-    /// URL peers reach each node on, formatted with its index.
-    #[arg(long, default_value = "http://mpc-node-{i}:3000")]
+    /// URL peers reach each node on. `{i}` is the node index, `{port}` its web port.
+    ///
+    /// Every node runs inside one container, so peers reach each other over loopback and
+    /// each needs a port of its own.
+    #[arg(long, default_value = "http://127.0.0.1:{port}")]
     address_template: String,
+    /// Port of node 0. Each subsequent node takes the next one.
+    #[arg(long, default_value_t = 3000)]
+    base_port: u16,
 }
 
 #[derive(clap::Args, Debug)]
@@ -178,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
                 args.nodes,
                 &args.account_template,
                 &args.address_template,
+                args.base_port,
             )?;
         }
     }
