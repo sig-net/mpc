@@ -9,13 +9,17 @@ pub struct OrganizingPhase;
 
 impl OrganizingPhase {
     /// Seeded by request entropy so all nodes pick the same proposer.
+    ///
+    /// Both operands are reduced before adding: `round` comes from
+    /// `highest_seen_round`, which a peer sets, so it can be arbitrarily large.
     fn proposer_per_round(
         round: usize,
         participants: &[Participant],
         entropy: &[u8; 32],
     ) -> Participant {
-        let index = entropy[0] as usize + round;
-        participants[index % participants.len()]
+        let n = participants.len();
+        let index = (entropy[0] as usize % n + round % n) % n;
+        participants[index]
     }
 
     /// Waits for threshold active participants to be present.
@@ -79,21 +83,10 @@ impl OrganizingPhase {
                 return state.reorganize("no active participants");
             };
 
-            let max_rounds = state.round + PROPOSER_SEARCH_WINDOW;
-            let (selected_round, proposer) = (state.round..max_rounds)
-                .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
-                .find(|(_, potential_proposer)| active.contains(potential_proposer))
-                .unwrap_or_else(|| {
-                    (
-                        max_rounds,
-                        *active
-                            .iter()
-                            .choose(&mut StdRng::from_seed(entropy))
-                            .unwrap(),
-                    )
-                });
-
-            state.round = selected_round;
+            // Elect from inputs every node shares (round, membership, entropy), no
+            // local-only information: filtering by the local active set makes nodes
+            // elect different proposers and diverge permanently (#907).
+            let proposer = Self::proposer_per_round(state.round, &participants, &entropy);
 
             // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
             let skip_proposing = state
@@ -104,7 +97,7 @@ impl OrganizingPhase {
 
             tracing::info!(
                 ?sign_id,
-                round = selected_round,
+                round = ?state.round,
                 ?proposer,
                 ?me,
                 is_proposer,
@@ -247,5 +240,38 @@ mod tests {
             OrganizingPhase::proposer_per_round(2, &participants, &entropy),
             Participant::from(0)
         );
+    }
+
+    /// From any starting round, with any `f < n` participants down, rotation must
+    /// reach a live proposer within `f + 1` rounds — the bound that lets a request
+    /// make progress past dead proposers. A rotation that revisited a participant
+    /// before covering the rest (say a hash of the round, or a stride sharing a
+    /// factor with `n`) would silently lose it.
+    #[test]
+    fn rotation_reaches_live_proposer_within_f_plus_1_rounds() {
+        // Only `entropy[0]` selects the offset, so varying the seed is the same
+        // as varying the starting round, which the loop below already sweeps.
+        let entropy = [0u8; 32];
+        for n in [4usize, 5] {
+            let participants: Vec<Participant> = (0..n as u32).map(Participant::from).collect();
+            // Every down-set except "all down", which has no live proposer.
+            for down_mask in 0..((1u32 << n) - 1) {
+                let down: BTreeSet<Participant> = (0..n)
+                    .filter(|&i| down_mask & (1 << i) != 0)
+                    .map(|i| participants[i])
+                    .collect();
+                let budget = down.len() + 1;
+                for start in 0..n {
+                    let reached_live = (start..start + budget).any(|r| {
+                        let p = OrganizingPhase::proposer_per_round(r, &participants, &entropy);
+                        !down.contains(&p)
+                    });
+                    assert!(
+                        reached_live,
+                        "n {n}, down {down:?}, start {start}: no live proposer within {budget} rounds"
+                    );
+                }
+            }
+        }
     }
 }
