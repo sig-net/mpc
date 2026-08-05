@@ -49,6 +49,8 @@ pub enum PublicKeyError {
 pub enum InitError {
     #[error("Threshold cannot be greater than the number of candidates")]
     ThresholdTooHigh,
+    #[error("Threshold must be a strict majority of the participants")]
+    ThresholdTooLow,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

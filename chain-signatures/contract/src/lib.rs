@@ -597,6 +597,24 @@ impl VersionedMpcContract {
             epoch
         );
         let voter = self.voter()?;
+        let completes_resharing = match self.state() {
+            ProtocolContractState::Resharing(state) => {
+                if state.old_epoch + 1 != epoch {
+                    return Err(InvalidState::EpochMismatch.into());
+                }
+                state.finished_votes.len() + 1 >= state.threshold
+            }
+            ProtocolContractState::Running(state) if state.epoch == epoch => false,
+            ProtocolContractState::Running(_) => {
+                return Err(InvalidState::UnexpectedProtocolState.message("Running: invalid epoch"));
+            }
+            _ => return Err(InvalidState::UnexpectedProtocolState.message(self.state().name())),
+        };
+        // Checkpoint votes are scoped to the governance epoch. Only discard
+        // them once this call has been validated and will complete resharing.
+        if completes_resharing {
+            self.checkpoint_votes_mut().votes.clear();
+        }
         let protocol_state = self.mutable_state();
         match protocol_state {
             ProtocolContractState::Resharing(ResharingContractState {
@@ -608,9 +626,6 @@ impl VersionedMpcContract {
                 finished_votes,
                 ..
             }) => {
-                if *old_epoch + 1 != epoch {
-                    return Err(InvalidState::EpochMismatch.into());
-                }
                 finished_votes.insert(voter);
                 // Completion is attested by the old participants, so it is gated by
                 // the old threshold. The reshared key adopts the new threshold.
@@ -765,6 +780,9 @@ impl VersionedMpcContract {
         if threshold > candidates.len() {
             return Err(InitError::ThresholdTooHigh.into());
         }
+        if threshold <= candidates.len() / 2 {
+            return Err(InitError::ThresholdTooLow.into());
+        }
 
         Ok(Self::V0(MpcContract::init(threshold, candidates, config)))
     }
@@ -794,6 +812,9 @@ impl VersionedMpcContract {
 
         if threshold > participants.len() {
             return Err(InitError::ThresholdTooHigh.into());
+        }
+        if threshold <= participants.len() / 2 {
+            return Err(InitError::ThresholdTooLow.into());
         }
 
         let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
@@ -890,11 +911,13 @@ impl VersionedMpcContract {
     /// - If the contract already has a checkpoint at the same height with a
     ///   different digest, the request is rejected as conflicting.
     /// - If the submitted height is greater than the current checkpoint, the
-    ///   caller votes for the submitted digest. Competing digests at the same
-    ///   unfinalized height may retain overlapping voters.
-    /// - If the resulting vote count is below the threshold, the vote remains
+    ///   caller votes for the submitted digest. At a given chain and height a
+    ///   voter can support only one digest; changing the vote removes the old
+    ///   choice before recording the new one.
+    /// - If the resulting vote count is below the participant majority quorum,
+    ///   the vote remains
     ///   stored and the latest checkpoint is unchanged.
-    /// - If the resulting vote count reaches the threshold, the submitted
+    /// - If the resulting vote count reaches the participant majority quorum, the submitted
     ///   checkpoint becomes the latest checkpoint. Votes for that chain at
     ///   this height or any lower height are removed; votes for higher heights
     ///   are retained.
@@ -914,8 +937,8 @@ impl VersionedMpcContract {
         checkpoint: ConsensusCheckpointDigest,
     ) -> Result<bool, Error> {
         let voter = self.voter()?;
-        let threshold = match self.state() {
-            ProtocolContractState::Running(state) => state.threshold,
+        let checkpoint_quorum = match self.state() {
+            ProtocolContractState::Running(state) => state.participants.len() / 2 + 1,
             _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
         };
 
@@ -935,12 +958,21 @@ impl VersionedMpcContract {
 
         let vote_count = {
             let checkpoint_votes = self.checkpoint_votes_mut();
+            // A voter may support at most one digest for a chain and height.
+            // Remove any previous choice before recording the new one so an
+            // equivocation cannot contribute to multiple candidates.
+            checkpoint_votes.votes.retain(|candidate, voters| {
+                if candidate.chain == checkpoint.chain && candidate.height == checkpoint.height {
+                    voters.remove(&voter);
+                }
+                !voters.is_empty()
+            });
             let voters = checkpoint_votes.entry(checkpoint);
             voters.insert(voter);
             voters.len()
         };
 
-        if vote_count < threshold {
+        if vote_count < checkpoint_quorum {
             return Ok(false);
         }
         self.insert_checkpoint(checkpoint.chain, checkpoint);
