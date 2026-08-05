@@ -100,9 +100,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// Spawn the background finalized-head watcher. Returns a guard whose drop
-    /// aborts the task, or `None` in optimistic mode (dev chains never report a
-    /// finalized head).
+    /// Spawn the background head watcher (`Finalized` in production, `Latest` in
+    /// optimistic dev mode). Returns a guard whose drop aborts the task.
     pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> AbortOnDrop {
         self.finalized_head
             .spawn_watcher(self.client.clone(), cancel)
@@ -189,8 +188,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         );
         let exec_events = watcher.collect(block).await?;
 
-        // Always forward the processed block to the "finalization" stage so it can emit
-        // `ChainEvent::Block` even when there are no relevant contract logs.
+        // Always produce a payload so `ChainEvent::Block` is emitted even when
+        // the block has no relevant contract logs.
         Ok(BlockAndRequests::new(
             block_number,
             block.header.timestamp,
@@ -241,9 +240,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
-    /// Catchup blocks in `[processed + 1, anchor_height)` fetched in batches.
-    /// Samples the finalized head once at catchup start, so blocks at or below
-    /// it can skip the per-block re-fetch + reorg hash check.
+    /// Catchup blocks in `[processed + 1, anchor_height)` fetched in batches,
+    /// clamped to the RPC's supported historical window.
     pub async fn catchup_blocks(
         &self,
         anchor_height: u64,
