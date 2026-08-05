@@ -80,6 +80,10 @@ async fn fetch_peer_checkpoint(
         .await;
     match result {
         Ok(Some(checkpoint)) => {
+            if let Err(err) = crate::backlog::validate_checkpoint_payload(&checkpoint) {
+                tracing::warn!(?url, ?chain, %err, "peer checkpoint failed canonical validation; skipping");
+                return None;
+            }
             let digest = checkpoint.digest();
             if digest == target_digest {
                 Some(checkpoint)
@@ -393,6 +397,7 @@ mod tests {
                     vec![PendingTx {
                         sign_id: SignId::new([1u8; 32]),
                         transaction: vec![1, 2, 3],
+                        canonical_transaction: vec![],
                     }]
                 } else {
                     vec![]
@@ -402,6 +407,7 @@ mod tests {
                     cumulative.update([0u8]);
                 }
                 let peer_checkpoint = Checkpoint {
+                    schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,

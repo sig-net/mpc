@@ -319,50 +319,35 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
-    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
-        use sha3::Digest;
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(status);
-        hasher.finalize().into()
-    }
-
     // 2. Persist first checkpoint (simulates consensus confirmation)
-    let tx1 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([1u8; 32]),
-        transaction: vec![1, 2, 3],
-    };
     let cp1 = Checkpoint {
+        schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
         chain: Chain::Solana,
         block_height: 10,
-        pending_requests: vec![tx1],
-        cumulative_digest: cumulative_digest([0]),
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
     };
     storage.persist(&cp1).await?;
 
     // 3. Verify latest
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
-    assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![1, 2, 3]);
+    assert!(latest.pending_requests.is_empty());
 
     // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
-    let tx2 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([2u8; 32]),
-        transaction: vec![4, 5, 6],
-    };
     let cp2 = Checkpoint {
+        schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
         chain: Chain::Solana,
         block_height: 20,
-        pending_requests: vec![tx2],
-        cumulative_digest: cumulative_digest([0]),
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
     };
     storage.persist(&cp2).await?;
 
     // 5. Verify latest is updated
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
-    assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![4, 5, 6]);
+    assert!(latest.pending_requests.is_empty());
 
     Ok(())
 }

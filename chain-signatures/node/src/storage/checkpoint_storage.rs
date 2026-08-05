@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const CHECKPOINT_VERSION: &str = "v13";
+const CHECKPOINT_VERSION: &str = "v14";
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
@@ -47,6 +47,9 @@ impl CheckpointStorage {
     /// Only consensus-confirmed checkpoints should be persisted.
     /// Overwrites the previous latest entry.
     pub async fn persist(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        crate::backlog::validate_checkpoint_payload(checkpoint)
+            .context("refusing to persist invalid checkpoint")?;
+
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -79,12 +82,21 @@ impl CheckpointStorage {
                     Some(v) => {
                         let checkpoint: Checkpoint =
                             serde_json::from_str(&v).context("failed to deserialize checkpoint")?;
+                        crate::backlog::validate_checkpoint_payload(&checkpoint)
+                            .context("loaded checkpoint failed canonical validation")?;
                         Ok(Some(checkpoint))
                     }
                     None => Ok(None),
                 }
             }
-            CheckpointStorage::InMemory { latest } => Ok(latest.read().await.get(&chain).cloned()),
+            CheckpointStorage::InMemory { latest } => {
+                let checkpoint = latest.read().await.get(&chain).cloned();
+                if let Some(checkpoint) = &checkpoint {
+                    crate::backlog::validate_checkpoint_payload(checkpoint)
+                        .context("loaded checkpoint failed canonical validation")?;
+                }
+                Ok(checkpoint)
+            }
         }
     }
 }
@@ -103,6 +115,7 @@ mod tests {
 
         // 2. Persist first checkpoint
         let cp1 = Checkpoint {
+            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
@@ -116,6 +129,7 @@ mod tests {
 
         // 4. Persist second checkpoint at higher height
         let cp2 = Checkpoint {
+            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
             chain: Chain::Solana,
             block_height: 20,
             pending_requests: vec![],

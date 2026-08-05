@@ -6,6 +6,13 @@ use std::fmt;
 
 use crate::{Chain, SignId};
 
+/// Version of the canonical checkpoint commitment format.
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
+
+fn legacy_checkpoint_schema_version() -> u32 {
+    1
+}
+
 /// Transaction information tracked across checkpoints.
 #[derive(
     BorshDeserialize,
@@ -21,8 +28,13 @@ use crate::{Chain, SignId};
 )]
 pub struct PendingTx {
     pub sign_id: SignId,
+    /// Full durable recovery payload.
     #[serde(with = "serde_bytes")]
     pub transaction: Vec<u8>,
+    /// Canonical source-chain projection committed by the checkpoint digest.
+    /// Empty values are accepted only for legacy checkpoints.
+    #[serde(default, with = "serde_bytes")]
+    pub canonical_transaction: Vec<u8>,
 }
 
 impl fmt::Debug for PendingTx {
@@ -48,23 +60,49 @@ impl fmt::Debug for PendingTx {
     Hash,
 )]
 pub struct Checkpoint {
+    /// Wire-level version for the canonical checkpoint projection.
+    #[serde(default = "legacy_checkpoint_schema_version")]
+    pub schema_version: u32,
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<PendingTx>,
-    /// Commitment to each pending request's checkpoint-consensus status.
+    /// Legacy status projection retained for wire compatibility.
     ///
-    /// This is computed by hashing each request's checkpoint-consensus status
-    /// in the same sorted order as `pending_requests`. It lets the checkpoint
-    /// digest commit to cross-node request progress without hashing
-    /// `transaction`, which is the full recovery payload and may include
-    /// node-local fields.
+    /// Version 2 checkpoint digests commit directly to the canonical pending
+    /// payload, so this field is intentionally not part of `digest()`.
     #[serde(default, with = "serde_bytes")]
     pub cumulative_digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointValidationError {
+    UnsupportedSchemaVersion(u32),
+    UnsortedPendingRequests,
+    DuplicatePendingRequest(SignId),
+}
+
+impl std::fmt::Display for CheckpointValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(f, "unsupported checkpoint schema version {version}")
+            }
+            Self::UnsortedPendingRequests => {
+                write!(f, "checkpoint pending requests are not canonically ordered")
+            }
+            Self::DuplicatePendingRequest(id) => {
+                write!(f, "checkpoint contains duplicate pending request {id:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CheckpointValidationError {}
+
 impl Checkpoint {
     pub fn empty(chain: Chain) -> Self {
         Self {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
             chain,
             block_height: 0,
             pending_requests: Vec::new(),
@@ -76,15 +114,55 @@ impl Checkpoint {
         sha3::Sha3_256::new().finalize().into()
     }
 
-    pub fn digest(&self) -> [u8; 32] {
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(self.chain.caip2_chain_id().as_bytes());
-        hasher.update(self.block_height.to_le_bytes());
-        for pending in &self.pending_requests {
-            hasher.update(pending.sign_id.request_id);
+    /// Validate the structural invariants required by canonical serialization.
+    pub fn validate(&self) -> Result<(), CheckpointValidationError> {
+        if self.schema_version != CHECKPOINT_SCHEMA_VERSION {
+            return Err(CheckpointValidationError::UnsupportedSchemaVersion(
+                self.schema_version,
+            ));
         }
-        hasher.update(self.cumulative_digest);
-        hasher.finalize().into()
+        for pair in self.pending_requests.windows(2) {
+            if pair[0].sign_id > pair[1].sign_id {
+                return Err(CheckpointValidationError::UnsortedPendingRequests);
+            }
+            if pair[0].sign_id == pair[1].sign_id {
+                return Err(CheckpointValidationError::DuplicatePendingRequest(
+                    pair[0].sign_id,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the deterministic bytes committed by a version 2 checkpoint.
+    ///
+    /// Pending requests are sorted by `SignId` for the commitment even when a
+    /// caller constructed the value in another order. Recovery/persistence
+    /// still require canonical ordering through `validate()` so the wire
+    /// projection cannot have multiple representations for one checkpoint.
+    pub fn canonical_payload_bytes(&self) -> Vec<u8> {
+        let mut pending_requests = self.pending_requests.clone();
+        pending_requests.sort_by_key(|pending| pending.sign_id);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"mpc-checkpoint");
+        bytes.extend_from_slice(&self.schema_version.to_le_bytes());
+        bytes.extend_from_slice(&borsh::to_vec(&self.chain).expect("serialize checkpoint chain"));
+        bytes.extend_from_slice(&self.block_height.to_le_bytes());
+        bytes.extend_from_slice(
+            &borsh::to_vec(&(pending_requests.len() as u32))
+                .expect("serialize checkpoint request count"),
+        );
+        for pending in pending_requests {
+            bytes.extend_from_slice(&pending.sign_id.request_id);
+            bytes.extend_from_slice(&(pending.canonical_transaction.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&pending.canonical_transaction);
+        }
+        bytes
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        sha3::Sha3_256::digest(self.canonical_payload_bytes()).into()
     }
 }
 

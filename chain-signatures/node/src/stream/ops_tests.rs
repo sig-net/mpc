@@ -334,7 +334,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
 }
 
 #[tokio::test]
-async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_failure() {
+async fn process_execution_confirmed_recovery_rewatches_execution_after_send_failure() {
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
@@ -352,7 +352,21 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
             tx.source_chain,
             args.clone(),
             current_unix_timestamp(),
-            SignKind::Sign,
+            SignKind::SignBidirectional(SignBidirectionalEvent {
+                sender: tx.sender,
+                serialized_transaction: tx.serialized_transaction.clone(),
+                caip2_id: tx.caip2_id.clone(),
+                key_version: tx.key_version,
+                deposit: tx.deposit,
+                path: tx.path.clone(),
+                algo: tx.algo.clone(),
+                dest: tx.dest.clone(),
+                params: tx.params.clone(),
+                output_deserialization_schema: tx.output_deserialization_schema.clone(),
+                respond_serialization_schema: tx.respond_serialization_schema.clone(),
+                chain: tx.source_chain,
+                chain_ctx: None,
+            }),
         ))
         .await;
     backlog
@@ -400,22 +414,35 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .unwrap();
     recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
+    // The final response contains target-chain observation data and is not
+    // consensus state. Recovery restores the source request and re-watches the
+    // source-derived execution transaction instead of importing the donor's
+    // final response/output or publisher state.
+    let watchers = recovered.get_execution_watchers(tx.target_chain).await;
+    assert_eq!(watchers.len(), 1);
+    assert!(watchers.contains_key(&tx.id));
+
     let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
     requeue_pending_sign_requests(&recovered_ctx, tx.source_chain)
         .await
         .unwrap();
-
-    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+    assert!(timeout(Duration::from_millis(100), sign_rx.recv())
         .await
-        .unwrap()
-        .unwrap();
-    match msg {
-        SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
-        }
-        other => panic!("expected recovered final respond request, got {other:?}"),
-    }
+        .is_err());
+
+    let recovered_entry = recovered_ctx
+        .backlog
+        .get(tx.source_chain, &sign_id)
+        .await
+        .expect("source request should remain recoverable");
+    assert!(matches!(
+        recovered_entry.request.kind,
+        SignKind::SignBidirectional(_)
+    ));
+    assert!(matches!(
+        recovered_entry.status(),
+        SignStatus::PendingExecution { .. }
+    ));
 }
 
 #[tokio::test]

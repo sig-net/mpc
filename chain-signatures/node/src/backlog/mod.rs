@@ -3,7 +3,9 @@ mod work;
 
 pub use work::{WorkKey, WorkStage};
 
-use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
+use crate::sign_bidirectional::{
+    CheckpointPhase, PublishState, SignBidirectionalEventExt, SignStatus,
+};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
@@ -34,6 +36,143 @@ impl Default for PendingRequests {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn canonical_request_bytes(request: &IndexedSignRequest) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(
+        &(request.id, &request.args, request.chain, &request.kind),
+        &mut bytes,
+    )
+    .expect("serialize canonical checkpoint request");
+    bytes
+}
+
+fn canonical_execution_tx(entry: &BacklogEntry) -> Option<&BidirectionalTx> {
+    // A watcher attached to an ordinary `Sign` entry is local recovery state
+    // and must not enter consensus. For completion work, the transaction is
+    // derived from the source-chain response and is therefore safe to commit;
+    // target execution output is not part of `BidirectionalTx` and remains local.
+    if entry.status().checkpoint_phase() == CheckpointPhase::AwaitingInitialResponse {
+        return None;
+    }
+
+    entry.execution_tx()
+}
+
+fn canonical_entry_bytes(entry: &BacklogEntry) -> Vec<u8> {
+    let phase = match entry.status().checkpoint_phase() {
+        CheckpointPhase::AwaitingInitialResponse => 0u8,
+        CheckpointPhase::AwaitingBidirectionalCompletion => 1u8,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(
+        &(
+            canonical_request_bytes(entry.original_request()),
+            phase,
+            canonical_execution_tx(entry),
+        ),
+        &mut bytes,
+    )
+    .expect("serialize canonical checkpoint entry");
+    bytes
+}
+
+fn normalize_recovered_entry(mut entry: BacklogEntry) -> anyhow::Result<BacklogEntry> {
+    // Checkpoint consensus carries the source projection only. Never restore
+    // a donor's publisher identity, publication signature, final response, or
+    // target output. Rewatch source-derived execution from the original request
+    // and regenerate the final response locally when execution is observed.
+    let original_request = entry.original_request().clone();
+    match entry.status().checkpoint_phase() {
+        CheckpointPhase::AwaitingInitialResponse => {
+            entry.request = original_request.clone();
+            entry.original_request = Some(original_request);
+            entry.execution = None;
+            entry.status = SignStatus::PendingGeneration;
+        }
+        CheckpointPhase::AwaitingBidirectionalCompletion => {
+            let tx = entry.execution_tx().cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "completion checkpoint entry is missing its source-derived execution transaction"
+                )
+            })?;
+            validate_execution_tx(&original_request, &tx)?;
+            entry.request = original_request.clone();
+            entry.original_request = Some(original_request);
+            entry.execution = Some(tx.clone());
+            entry.status = SignStatus::PendingExecution { tx };
+        }
+    }
+    Ok(entry)
+}
+
+fn validate_execution_tx(
+    original_request: &IndexedSignRequest,
+    tx: &BidirectionalTx,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(original_request.kind, SignKind::SignBidirectional(_)),
+        "completion checkpoint entry must originate from a bidirectional source request"
+    );
+    anyhow::ensure!(
+        tx.request_id == original_request.id.request_id
+            && tx.source_chain == original_request.chain,
+        "execution transaction does not match its source request"
+    );
+    if let SignKind::SignBidirectional(event) = &original_request.kind {
+        let target_chain = event
+            .target_chain()
+            .context("source bidirectional request has an invalid target chain")?;
+        anyhow::ensure!(
+            tx.target_chain == target_chain,
+            "execution transaction target chain does not match its source request"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Result<()> {
+    checkpoint
+        .validate()
+        .context("invalid checkpoint canonical ordering")?;
+
+    for pending in &checkpoint.pending_requests {
+        let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
+            .with_context(|| {
+                format!(
+                    "failed to deserialize pending backlog entry for sign_id {:?}",
+                    pending.sign_id
+                )
+            })?;
+        anyhow::ensure!(
+            pending.sign_id == entry.sign_id(),
+            "checkpoint sign id does not match recovered backlog entry"
+        );
+        let original_request = entry.original_request();
+        anyhow::ensure!(
+            original_request.id == entry.request.id
+                && original_request.chain == entry.request.chain,
+            "checkpoint backlog entry has inconsistent original and active request identity"
+        );
+        if entry.status().checkpoint_phase() == CheckpointPhase::AwaitingBidirectionalCompletion {
+            let tx = entry.execution_tx().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "completion checkpoint entry is missing its source-derived execution transaction"
+                )
+            })?;
+            validate_execution_tx(entry.original_request(), tx)?;
+        }
+        anyhow::ensure!(
+            !pending.canonical_transaction.is_empty(),
+            "checkpoint is missing canonical pending transaction payload"
+        );
+        anyhow::ensure!(
+            pending.canonical_transaction == canonical_entry_bytes(&entry),
+            "checkpoint canonical pending transaction payload does not match entry"
+        );
+    }
+    Ok(())
 }
 
 impl PendingRequests {
@@ -120,6 +259,7 @@ impl PendingRequests {
                 (
                     PendingTx {
                         sign_id,
+                        canonical_transaction: canonical_entry_bytes(entry),
                         transaction,
                     },
                     status,
@@ -140,6 +280,7 @@ impl PendingRequests {
             .collect::<Vec<_>>();
 
         Checkpoint {
+            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
             chain,
             block_height: self.processed_block_height.unwrap_or(0),
             pending_requests,
@@ -148,6 +289,8 @@ impl PendingRequests {
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
+        validate_checkpoint_payload(checkpoint)?;
+
         fn decode(pending: &mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
             let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
                 .with_context(|| {
@@ -162,7 +305,11 @@ impl PendingRequests {
         let mut requests = HashMap::new();
         for pending_tx in &checkpoint.pending_requests {
             let (sign_id, tx) = decode(pending_tx)?;
-            requests.insert(sign_id, tx);
+            let tx = normalize_recovered_entry(tx)?;
+            anyhow::ensure!(
+                requests.insert(sign_id, tx).is_none(),
+                "checkpoint contains duplicate pending request"
+            );
         }
         Ok(Self {
             requests,
@@ -686,6 +833,9 @@ impl Backlog {
         drop(pending);
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
+        checkpoint
+            .validate()
+            .expect("locally constructed checkpoint must be canonically ordered");
 
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
@@ -700,6 +850,15 @@ impl Backlog {
     /// Called when consensus confirms a checkpoint (via the watcher).
     /// Removes it from pending and persists to storage as the latest consensus checkpoint.
     pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
+        if checkpoint.chain != chain {
+            tracing::warn!(?chain, checkpoint_chain = ?checkpoint.chain, "refusing checkpoint for a different chain");
+            return;
+        }
+        if let Err(err) = validate_checkpoint_payload(checkpoint) {
+            tracing::warn!(?chain, %err, "refusing to persist invalid consensus checkpoint");
+            return;
+        }
+
         // Remove from pending checkpoints (frees a slot for future checkpoints)
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
@@ -767,6 +926,8 @@ impl Backlog {
     /// Recover backlog state from a checkpoint.
     /// This is called when a node restarts or when it needs to align/regress to consensus.
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        validate_checkpoint_payload(&checkpoint)?;
+
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
@@ -1036,14 +1197,6 @@ mod tests {
         BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
         SignBidirectionalEvent, SignId, SignKind,
     };
-    use std::convert::TryInto;
-
-    fn digest_hex(hex_str: &str) -> [u8; 32] {
-        hex::decode(hex_str)
-            .unwrap()
-            .try_into()
-            .expect("digest hex must be 32 bytes")
-    }
 
     fn test_signature() -> mpc_primitives::Signature {
         mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
@@ -1178,6 +1331,13 @@ mod tests {
         match status {
             SignStatus::PendingGeneration => {}
             SignStatus::PendingGenerationBidirectional => {
+                backlog
+                    .set_status(
+                        chain,
+                        &sign_id,
+                        SignStatus::PendingExecution { tx: tx.clone() },
+                    )
+                    .await;
                 let completion_request = IndexedSignRequest::respond_bidirectional(
                     sign_id,
                     create_test_args(sign_id.request_id[0]),
@@ -1213,6 +1373,13 @@ mod tests {
                 backlog.advance(chain, sign_id, tx).await.unwrap();
             }
             SignStatus::PendingPublishBidirectional { .. } => {
+                backlog
+                    .set_status(
+                        chain,
+                        &sign_id,
+                        SignStatus::PendingExecution { tx: tx.clone() },
+                    )
+                    .await;
                 let completion_request = IndexedSignRequest::respond_bidirectional(
                     sign_id,
                     create_test_args(sign_id.request_id[0]),
@@ -1453,7 +1620,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("303f69437253715e486f272e60a1176db272e018241aecf88af0f1c1197670b9")
+            <[u8; 32]>::from(sha3::Sha3_256::digest(checkpoint.canonical_payload_bytes()))
         );
     }
 
@@ -1546,9 +1713,7 @@ mod tests {
         let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
-        // The same request observed in different sign statuses must produce
-        // different digests, so nodes don't reach consensus on a checkpoint
-        // while disagreeing on the progress of a request.
+        // Different canonical phases must produce different checkpoint digests.
         assert_ne!(checkpoint1.digest(), checkpoint2.digest());
     }
 
@@ -1627,7 +1792,8 @@ mod tests {
         let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
-        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+        // Generation and publication are the same canonical initial-response phase.
+        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
     }
 
     #[tokio::test]
@@ -1666,6 +1832,51 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
         assert_eq!(checkpoint1.digest(), checkpoint2.digest());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_digest_commits_active_payload() {
+        let tx = create_test_tx(18);
+        let mut first = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+        );
+        let mut second = first.clone();
+        first.request.unix_timestamp_indexed = 1000;
+        second.request.unix_timestamp_indexed = 9999;
+
+        let mut pending1 = PendingRequests::new();
+        pending1.insert(SignId::new(tx.request_id), first);
+        pending1.set_processed_block(200);
+        let mut pending2 = PendingRequests::new();
+        pending2.insert(SignId::new(tx.request_id), second);
+        pending2.set_processed_block(200);
+
+        assert_eq!(
+            pending1.checkpoint(Chain::Ethereum).digest(),
+            pending2.checkpoint(Chain::Ethereum).digest(),
+            "indexing timestamps must remain outside the canonical commitment"
+        );
+
+        let mut changed = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+        );
+        let mut changed_request = changed.request.clone();
+        changed_request.args.path.push_str("/changed");
+        changed.request = changed_request.clone();
+        changed.original_request = Some(changed_request);
+        let mut pending3 = PendingRequests::new();
+        pending3.insert(SignId::new(tx.request_id), changed);
+        pending3.set_processed_block(200);
+        assert_ne!(
+            pending1.checkpoint(Chain::Ethereum).digest(),
+            pending3.checkpoint(Chain::Ethereum).digest()
+        );
     }
 
     #[tokio::test]
@@ -1766,7 +1977,7 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("0a516bf905dd18465b558748d84a9d14c2d36a32427252ea67b9218d1aaa263f")
+            <[u8; 32]>::from(sha3::Sha3_256::digest(checkpoint.canonical_payload_bytes()))
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -1785,6 +1996,36 @@ mod tests {
             restored_tx.serialized_transaction,
             tx1.serialized_transaction
         );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_rejects_tampered_canonical_payload_before_mutation() {
+        let source = Backlog::new();
+        let tx = create_test_tx(17);
+        insert_bidirectional_with_status(
+            &source,
+            Chain::Solana,
+            tx.clone(),
+            pending_execution_status(&tx),
+            "ethereum",
+        )
+        .await;
+        source.set_processed_block(Chain::Solana, 10).await;
+        let mut checkpoint = source.checkpoint(Chain::Solana).await.unwrap();
+        checkpoint.pending_requests[0].canonical_transaction[0] ^= 1;
+
+        let recovered = Backlog::new();
+        let error = recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect_err("tampered canonical payload must be rejected");
+        assert!(error
+            .to_string()
+            .contains("canonical pending transaction payload"));
+        assert!(recovered
+            .get(Chain::Solana, &SignId::new(tx.request_id))
+            .await
+            .is_none());
     }
 
     #[tokio::test]
