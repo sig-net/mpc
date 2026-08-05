@@ -44,8 +44,10 @@ impl CheckpointStorage {
 
     /// Persist a checkpoint as the latest consensus checkpoint.
     ///
-    /// Only consensus-confirmed checkpoints should be persisted.
-    /// Overwrites the previous latest entry.
+    /// Only consensus-confirmed checkpoints should be persisted. Persistence is
+    /// monotonic by block height: a lower or equal-height checkpoint never
+    /// replaces the first checkpoint already stored at that height. This keeps
+    /// delayed confirmations from regressing durable recovery state.
     pub async fn persist(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         crate::backlog::validate_checkpoint_payload(checkpoint)
             .context("refusing to persist invalid checkpoint")?;
@@ -55,16 +57,42 @@ impl CheckpointStorage {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
+                let key = self.checkpoint_key(checkpoint.chain);
 
-                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), &value)
+                // The compare-and-set must happen on the Redis server. A
+                // read-then-write sequence would allow two nodes to race and
+                // let a stale checkpoint overwrite a newer one.
+                const SCRIPT: &str = r#"
+                    local current = redis.call('GET', KEYS[1])
+                    if not current then
+                        redis.call('SET', KEYS[1], ARGV[2])
+                        return 1
+                    end
+
+                    local current_height = tonumber(cjson.decode(current).block_height)
+                    if tonumber(ARGV[1]) > current_height then
+                        redis.call('SET', KEYS[1], ARGV[2])
+                        return 1
+                    end
+                    return 0
+                "#;
+
+                redis::Script::new(SCRIPT)
+                    .key(key)
+                    .arg(checkpoint.block_height)
+                    .arg(value)
+                    .invoke_async::<i32>(&mut conn)
                     .await
                     .context("failed to persist checkpoint to redis")?;
             }
             CheckpointStorage::InMemory { latest } => {
-                latest
-                    .write()
-                    .await
-                    .insert(checkpoint.chain, checkpoint.clone());
+                let mut latest = latest.write().await;
+                let should_replace = latest
+                    .get(&checkpoint.chain)
+                    .is_none_or(|current| checkpoint.block_height > current.block_height);
+                if should_replace {
+                    latest.insert(checkpoint.chain, checkpoint.clone());
+                }
             }
         }
         Ok(())
@@ -104,43 +132,74 @@ impl CheckpointStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mpc_primitives::Chain;
+    use crate::backlog::Backlog;
+    use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
+
+    fn checkpoint(chain: Chain, height: u64, marker: u8) -> Checkpoint {
+        let mut checkpoint = Checkpoint::empty(chain);
+        checkpoint.block_height = height;
+        checkpoint.cumulative_digest = [marker; 32];
+        checkpoint
+    }
 
     #[tokio::test]
     async fn test_in_memory_checkpoint_storage() -> anyhow::Result<()> {
         let storage = CheckpointStorage::in_memory();
 
-        // 1. Clean storage returns None
         assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
-        // 2. Persist first checkpoint
-        let cp1 = Checkpoint {
-            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
-            chain: Chain::Solana,
-            block_height: 10,
-            pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
-        };
+        let cp1 = checkpoint(Chain::Solana, 10, 1);
         storage.persist(&cp1).await?;
+        assert_eq!(storage.load_latest(Chain::Solana).await?, Some(cp1));
 
-        // 3. Verify latest
-        let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-        assert_eq!(latest.block_height, 10);
-
-        // 4. Persist second checkpoint at higher height
-        let cp2 = Checkpoint {
-            schema_version: mpc_primitives::CHECKPOINT_SCHEMA_VERSION,
-            chain: Chain::Solana,
-            block_height: 20,
-            pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
-        };
+        let cp2 = checkpoint(Chain::Solana, 20, 2);
         storage.persist(&cp2).await?;
-
-        // 5. Verify latest is updated
-        let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-        assert_eq!(latest.block_height, 20);
+        assert_eq!(storage.load_latest(Chain::Solana).await?, Some(cp2));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpoint_storage_ignores_stale_and_conflicting_equal_height_writes() {
+        let storage = CheckpointStorage::in_memory();
+        let current = checkpoint(Chain::Solana, 20, 1);
+        storage.persist(&current).await.unwrap();
+
+        storage
+            .persist(&checkpoint(Chain::Solana, 10, 2))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.load_latest(Chain::Solana).await.unwrap(),
+            Some(current.clone())
+        );
+
+        let competing = {
+            let backlog = Backlog::new();
+            backlog
+                .insert(IndexedSignRequest::sign(
+                    SignId::new([3; 32]),
+                    SignArgs {
+                        entropy: [3; 32],
+                        epsilon: k256::Scalar::ONE,
+                        payload: k256::Scalar::from(2u64),
+                        path: "test".to_string(),
+                        key_version: 0,
+                    },
+                    Chain::Solana,
+                    0,
+                ))
+                .await;
+            let mut checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+            checkpoint.block_height = current.block_height;
+            checkpoint
+        };
+        assert_ne!(competing.digest(), current.digest());
+
+        storage.persist(&competing).await.unwrap();
+        assert_eq!(
+            storage.load_latest(Chain::Solana).await.unwrap(),
+            Some(current)
+        );
     }
 }
