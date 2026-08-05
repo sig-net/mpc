@@ -167,11 +167,30 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         block: &Block,
         relevant_logs: &[Log],
     ) -> anyhow::Result<()> {
-        // Emit telemetry for the indexed block number
-        self.telemetry.block_indexed(block.header.number);
+        let block_number = block.header.number;
 
-        let processed = self.parse_block(block, relevant_logs).await?;
-        self.emit_processed_block(events_tx, processed).await?;
+        // Log progress every 10 blocks
+        if block_number.is_multiple_of(10) {
+            tracing::info!(
+                height = block_number,
+                "processed ethereum catchup block attempt"
+            );
+        }
+
+        #[cfg(feature = "bench")]
+        let start = std::time::Instant::now();
+
+        self.telemetry.block_indexed(block_number);
+        let parsed = self.parse_block(block, relevant_logs).await?;
+        self.emit_processed_block(events_tx, parsed).await?;
+
+        #[cfg(feature = "bench")]
+        {
+            crate::bench::add_process_time(start.elapsed());
+            if crate::bench::inc_block() % 100 == 0 {
+                crate::bench::report_metrics("catchup_progress");
+            }
+        }
 
         Ok(())
     }
@@ -191,27 +210,18 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             block_hash
         );
 
-        let mut sign_requests = Vec::new();
-
-        let (respond_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
-            relevant_logs.iter().cloned().partition(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::SignatureResponded::SIGNATURE_HASH
-                })
-            });
-
-        let request_logs: Vec<Log> = potential_request_logs
-            .into_iter()
-            .filter(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::SignatureRequested::SIGNATURE_HASH
-                })
-            })
+        // Filter relevant logs into request and respond categories
+        let request_logs: Vec<Log> = relevant_logs
+            .iter()
+            .filter(|l| l.topic0() == Some(&ChainSignatures::SignatureRequested::SIGNATURE_HASH))
+            .cloned()
             .collect();
-
-        if !request_logs.is_empty() {
-            sign_requests.extend(parse_filtered_logs(request_logs));
-        }
+        let respond_logs: Vec<Log> = relevant_logs
+            .iter()
+            .filter(|l| l.topic0() == Some(&ChainSignatures::SignatureResponded::SIGNATURE_HASH))
+            .cloned()
+            .collect();
+        let sign_requests = parse_filtered_logs(request_logs);
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
         let watcher = ExecutionWatcher::new(
@@ -366,14 +376,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         events_tx: &mpsc::Sender<ChainEvent>,
         item: &CatchupItem,
     ) -> anyhow::Result<()> {
-        // NOTE: oh rust: needed otherwise the block gets dropped before we can use
-        // it, since it `block` is of reference type. Maybe the language will let
-        // us elide this in the future, but for now we need to introduce a new var.
-        let _block;
-        let _logs;
-
-        let (block, logs) = match item {
-            CatchupItem::BatchBlock { block, logs } => (block, logs.as_slice()),
+        match item {
+            CatchupItem::BatchBlock { block, logs } => {
+                self.process_block(events_tx, block, logs).await
+            }
             CatchupItem::Missing(block_id) => {
                 tracing::warn!(
                     ?block_id,
@@ -383,42 +389,19 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 #[cfg(feature = "bench")]
                 let start = std::time::Instant::now();
 
-                // Refetch the block, then bloom-gate a single-block `eth_getLogs`.
                 let block = self.client.get_block(*block_id).await?.ok_or_else(|| {
                     anyhow::anyhow!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
                 })?;
-                let l = self.fetch_block_logs(&block).await?;
+                let logs = self.fetch_block_logs(&block).await?;
 
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(start.elapsed());
 
-                _block = block;
-                _logs = l;
-                (&_block, _logs.as_slice())
-            }
-        };
-
-        let height = block.header.number;
-        if height.is_multiple_of(10) {
-            tracing::info!(height, "processed ethereum catchup block attempt");
-        }
-
-        #[cfg(feature = "bench")]
-        let start_process = std::time::Instant::now();
-
-        self.process_block(events_tx, block, logs).await?;
-
-        #[cfg(feature = "bench")]
-        {
-            crate::bench::add_process_time(start_process.elapsed());
-            if crate::bench::inc_block() % 100 == 0 {
-                crate::bench::report_metrics("catchup_progress");
+                self.process_block(events_tx, &block, &logs).await
             }
         }
-
-        Ok(())
     }
 
     /// Process a block number: wait for finality, fetch the
