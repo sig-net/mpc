@@ -173,7 +173,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         tx_after.status()
     );
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.request().kind,
         SignKind::RespondBidirectional(_)
     ));
 
@@ -314,7 +314,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         SignStatus::PendingGenerationBidirectional
     );
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.request().kind,
         SignKind::RespondBidirectional(_)
     ));
     assert!(ctx
@@ -436,7 +436,7 @@ async fn process_execution_confirmed_recovery_rewatches_execution_after_send_fai
         .await
         .expect("source request should remain recoverable");
     assert!(matches!(
-        recovered_entry.request.kind,
+        recovered_entry.request().kind,
         SignKind::SignBidirectional(_)
     ));
     assert!(matches!(
@@ -952,7 +952,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.request().kind,
         SignKind::RespondBidirectional(_)
     ));
 
@@ -1103,7 +1103,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         tx_after.status(),
         SignStatus::PendingGenerationBidirectional
     );
-    match &tx_after.request.kind {
+    match &tx_after.request().kind {
         SignKind::RespondBidirectional(res) => {
             assert_eq!(res.tx_id, tx.id);
             assert_eq!(res.output, vec![1]);

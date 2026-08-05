@@ -147,7 +147,8 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
         );
         let source_request = entry.source_request();
         anyhow::ensure!(
-            source_request.id == entry.request.id && source_request.chain == entry.request.chain,
+            source_request.id == entry.request().id
+                && source_request.chain == entry.request().chain,
             "checkpoint backlog entry has inconsistent source and active request identity"
         );
 
@@ -162,7 +163,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                 );
                 anyhow::ensure!(
                     matches!(
-                        entry.request.kind,
+                        entry.request().kind,
                         SignKind::Sign | SignKind::SignBidirectional(_)
                     ),
                     "initial-response checkpoint entry must contain a sign request"
@@ -181,7 +182,7 @@ pub(crate) fn validate_checkpoint_payload(checkpoint: &Checkpoint) -> anyhow::Re
                 );
                 anyhow::ensure!(
                     matches!(
-                        entry.request.kind,
+                        entry.request().kind,
                         SignKind::SignBidirectional(_) | SignKind::RespondBidirectional(_)
                     ),
                     "completion checkpoint entry must contain bidirectional work"
@@ -527,7 +528,7 @@ impl Backlog {
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| entry.request.clone())
+            .map(|entry| entry.request().clone())
             .collect();
 
         requeueable.sort_by(|left, right| {
@@ -553,7 +554,7 @@ impl Backlog {
             .filter_map(|entry| match entry.status() {
                 SignStatus::PendingPublish { publish }
                 | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((entry.request.clone(), publish))
+                    Some((entry.request().clone(), publish))
                 }
                 _ => None,
             })
@@ -1069,7 +1070,7 @@ pub struct BacklogEntry {
     source_request: IndexedSignRequest,
     /// Currently active request. For final bidirectional work this becomes a
     /// `RespondBidirectional` request while `source_request` remains unchanged.
-    pub request: IndexedSignRequest,
+    request: IndexedSignRequest,
     pub status: SignStatus,
     /// Bidirectional target transaction retained independently of local status.
     pub execution: Option<BidirectionalTx>,
@@ -1136,6 +1137,10 @@ impl BacklogEntry {
 
     pub fn source_request(&self) -> &IndexedSignRequest {
         &self.source_request
+    }
+
+    pub fn request(&self) -> &IndexedSignRequest {
+        &self.request
     }
 
     pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
@@ -2170,7 +2175,7 @@ mod tests {
             .expect("missing recovered entry");
 
         assert!(matches!(
-            recovered_entry.request.kind,
+            recovered_entry.request().kind,
             SignKind::SignBidirectional(_)
         ));
     }
@@ -2254,7 +2259,7 @@ mod tests {
             .get(Chain::Solana, &sign_id)
             .await
             .expect("plain Sign completion should remain in the backlog");
-        assert!(matches!(entry.request.kind, SignKind::Sign));
+        assert!(matches!(entry.request().kind, SignKind::Sign));
         assert!(matches!(
             entry.status(),
             SignStatus::PendingExecution { .. }

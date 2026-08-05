@@ -93,8 +93,8 @@ fn verify_entry_signature(
 ) -> anyhow::Result<()> {
     mpc_crypto::verify_signature(
         root_public_key,
-        entry.request.args.epsilon,
-        entry.request.args.payload,
+        entry.request().args.epsilon,
+        entry.request().args.payload,
         signature,
     )
     .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))
@@ -118,7 +118,7 @@ pub(crate) async fn process_respond_event(
 
     verify_entry_signature(root_pk, &entry, &respond_event.signature, sign_id)?;
 
-    match &entry.request.kind {
+    match &entry.request().kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             ctx.backlog.remove(source_chain, &sign_id).await;
@@ -236,10 +236,10 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     };
 
-    if !matches!(entry.request.kind, SignKind::RespondBidirectional(_)) {
+    if !matches!(entry.request().kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!(
             "unexpected sign type for RespondBidirectionalEvent: {:?}",
-            entry.request.kind
+            entry.request().kind
         );
     }
 
