@@ -1073,7 +1073,7 @@ pub struct BacklogEntry {
     request: IndexedSignRequest,
     pub status: SignStatus,
     /// Bidirectional target transaction retained independently of local status.
-    pub execution: Option<BidirectionalTx>,
+    execution: Option<BidirectionalTx>,
 }
 
 impl BacklogEntry {
