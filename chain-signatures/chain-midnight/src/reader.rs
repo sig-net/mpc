@@ -224,6 +224,16 @@ pub enum Resolved {
     },
 }
 
+/// The request id of a composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`
+/// wire key: two trimmed atoms, the count checked as a `Uint<64>` and the rid re-padded.
+pub(crate) fn signet_map_key_rid(key: &AlignedValue) -> Option<[u8; 32]> {
+    let [count, rid] = key.value.0.as_slice() else {
+        return None;
+    };
+    u64::try_from(count).ok()?;
+    <[u8; 32]>::try_from(rid.clone()).ok()
+}
+
 /// Decode the two-atom notification cell: version, then the 128-byte payload. Every
 /// property here is circuit-enforced, the version included (`signBidirectional`
 /// asserts `version == 1`), so a failure is schema drift or a future singleton this

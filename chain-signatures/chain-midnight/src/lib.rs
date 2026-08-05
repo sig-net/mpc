@@ -8,6 +8,7 @@ mod reader;
 pub mod records;
 mod request_id;
 mod rpc;
+mod source;
 mod state;
 #[cfg(test)]
 mod test_utils;

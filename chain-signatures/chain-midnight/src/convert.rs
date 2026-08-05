@@ -121,17 +121,12 @@ fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use crate::records::SignBidirectionalRecord;
+    use crate::test_utils::ascii_padded;
     use mpc_primitives::{Chain, SignKind};
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
-
-    fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
-        let mut out = [0u8; N];
-        out[..text.len()].copy_from_slice(text);
-        out
-    }
 
     fn caller_record() -> SignBidirectionalRecord {
         crate::test_utils::sample_record()

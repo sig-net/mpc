@@ -12,14 +12,16 @@ use midnight_storage::DefaultDB;
 
 use crate::reader::Node;
 
+/// Trailing-zero trim, the form the state layer stores every atom in.
+pub(crate) fn trim(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+    bytes[..end].to_vec()
+}
+
 /// Wire-form atoms of a record, each field trimmed as the state layer stores it:
 /// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
 /// integers little-endian trimmed.
 pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
-    fn trim(bytes: &[u8]) -> Vec<u8> {
-        let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-        bytes[..end].to_vec()
-    }
     let tx = &record.tx_params;
     let mut atoms: Vec<Vec<u8>> = vec![
         trim(&record.sender),
@@ -148,7 +150,8 @@ pub(crate) fn array_of(children: Vec<Node>) -> Node {
     StateValue::Array(Array::new_from_slice(&children))
 }
 
-fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
+/// `text` left-aligned in an all-NUL `[u8; N]`, the `pad(N, "text")` convention.
+pub(crate) fn ascii_padded<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];
     out[..text.len()].copy_from_slice(text);
     out
