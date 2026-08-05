@@ -1071,7 +1071,7 @@ pub struct BacklogEntry {
     /// Currently active request. For final bidirectional work this becomes a
     /// `RespondBidirectional` request while `source_request` remains unchanged.
     request: IndexedSignRequest,
-    pub status: SignStatus,
+    status: SignStatus,
     /// Bidirectional target transaction retained independently of local status.
     execution: Option<BidirectionalTx>,
 }
