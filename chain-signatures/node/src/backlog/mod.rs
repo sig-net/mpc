@@ -113,21 +113,24 @@ impl PendingRequests {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                let status = entry.status().checkpoint_consensus_bytes();
+                let phase = entry.consensus_phase();
                 (
                     PendingTx {
                         sign_id,
                         transaction,
                     },
-                    status,
+                    phase,
                 )
             })
             .collect::<Vec<_>>();
         encoded.sort_by_key(|(pending, _)| pending.sign_id);
 
         let mut cumulative = sha3::Sha3_256::new();
-        for (_, status) in &encoded {
-            cumulative.update(status);
+        for phase in encoded
+            .iter()
+            .filter_map(|(_, phase)| phase.map(BidirectionalAwaitingPhase::consensus_byte))
+        {
+            cumulative.update([phase]);
         }
         let cumulative_digest = cumulative.finalize().into();
 
@@ -446,6 +449,11 @@ impl Backlog {
     // where we can have proper typestate on a set of types. With these types, we can easily guide
     // ourselves into the right transitions. For now, this is used to set the request in
     // `execution_confirmed` to transition from PendingExecution to PendingGenerationBidirectional.
+    //
+    // Test-only: production transitions go through the checked helpers above, which keep
+    // request kind and status paired. `test-feature` is what exposes this to
+    // `integration-tests`; a bare `cfg(test)` would not.
+    #[cfg(any(test, feature = "test-feature"))]
     pub async fn set_request(
         &self,
         chain: Chain,
@@ -461,13 +469,48 @@ impl Backlog {
         Ok(())
     }
 
+    /// Atomically move a completed target-chain execution into final response signing.
+    pub async fn transition_to_bidirectional_response(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        request: IndexedSignRequest,
+    ) -> Result<BacklogEntry, BacklogError> {
+        let mut pending = self.pending(&chain).write().await;
+
+        let entry = pending
+            .requests
+            .get_mut(id)
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+        entry.transition_to_bidirectional_response(request)?;
+        Ok(entry.clone())
+    }
+
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
+    ///
+    /// The watcher's `sign_id` and `tx.request_id` are expected to agree: on
+    /// confirmation the final-response request is rebuilt from `tx.request_id` while
+    /// the backlog entry is looked up by `sign_id`, and
+    /// `BacklogEntry::transition_to_bidirectional_response` rejects the pair when they
+    /// disagree. Warn here, where the divergence originates, rather than leaving only
+    /// a stalled request at confirmation time.
     pub async fn watch_execution(
         &self,
         chain: Chain,
         sign_id: SignId,
         tx: BidirectionalTx,
     ) -> Option<(SignId, BidirectionalTx)> {
+        if sign_id != SignId::new(tx.request_id) {
+            tracing::warn!(
+                ?chain,
+                ?sign_id,
+                request_id = ?SignId::new(tx.request_id),
+                tx_id = ?tx.id,
+                "execution watcher sign_id disagrees with tx request_id; the final \
+                 response transition will be rejected for this request"
+            );
+        }
+
         let mut entry = self.watchers(&chain).write().await;
 
         entry
@@ -489,6 +532,9 @@ impl Backlog {
     }
 
     /// Update the status of a tracked bidirectional transaction on the source chain.
+    ///
+    /// Test-only; see the note on [`Backlog::set_request`].
+    #[cfg(any(test, feature = "test-feature"))]
     pub async fn set_status(
         &self,
         chain: Chain,
@@ -790,6 +836,29 @@ pub enum BacklogError {
     InvalidPublishingTransition,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
+    #[error("cannot transition backlog entry to a bidirectional response request")]
+    InvalidBidirectionalResponseTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BidirectionalAwaitingPhase {
+    /// Awaiting the initial response on the source chain.
+    InitialResponse,
+    /// Past the initial response and awaiting bidirectional completion.
+    ///
+    /// This covers both target-chain execution and the final source-chain response.
+    /// Their boundary is target-chain-gated, so nodes at the same source-chain height
+    /// must not be required to agree on it.
+    Completion,
+}
+
+impl BidirectionalAwaitingPhase {
+    pub(crate) const fn consensus_byte(self) -> u8 {
+        match self {
+            Self::InitialResponse => 0,
+            Self::Completion => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -834,12 +903,88 @@ impl BacklogEntry {
     }
 
     /// Set the status of this transaction
+    ///
+    /// Test-only; see the note on [`Backlog::set_request`].
+    #[cfg(any(test, feature = "test-feature"))]
     pub fn set_status(&mut self, status: SignStatus) {
         self.status = status;
     }
 
+    /// Test-only; see the note on [`Backlog::set_request`].
+    #[cfg(any(test, feature = "test-feature"))]
     pub fn set_request(&mut self, request: IndexedSignRequest) {
         self.request = request;
+    }
+
+    /// Project this entry onto the phase committed to by `Checkpoint::cumulative_digest`.
+    ///
+    /// A plain signing request contributes nothing: its membership in the checkpoint
+    /// fully describes it until its response is indexed.
+    pub(crate) fn consensus_phase(&self) -> Option<BidirectionalAwaitingPhase> {
+        use BidirectionalAwaitingPhase::{Completion, InitialResponse};
+
+        match (&self.request.kind, &self.status) {
+            (SignKind::Sign, SignStatus::PendingGeneration | SignStatus::PendingPublish { .. }) => {
+                None
+            }
+            (
+                SignKind::SignBidirectional(_),
+                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
+            ) => Some(InitialResponse),
+            (SignKind::SignBidirectional(_), SignStatus::PendingExecution { .. }) => {
+                Some(Completion)
+            }
+            // `PendingExecution` here is the window the pre-atomic transition could
+            // checkpoint in: it rewrote the request kind before the status. Treat it
+            // as completion so recovered state agrees with the settled state.
+            (
+                SignKind::RespondBidirectional(_),
+                SignStatus::PendingGenerationBidirectional
+                | SignStatus::PendingPublishBidirectional { .. }
+                | SignStatus::PendingExecution { .. },
+            ) => Some(Completion),
+            // No local transition produces the remaining pairings, so this entry came
+            // from a peer's checkpoint payload. Omit it from the commitment rather than
+            // guessing: the resulting digest disagreement is recoverable, and this warn
+            // is what connects it to its cause.
+            (kind, status) => {
+                let kind = match kind {
+                    SignKind::Sign => "Sign",
+                    SignKind::SignBidirectional(_) => "SignBidirectional",
+                    SignKind::RespondBidirectional(_) => "RespondBidirectional",
+                };
+                tracing::warn!(
+                    sign_id = ?self.request.id,
+                    kind,
+                    ?status,
+                    "omitting consensus phase for incoherent backlog entry"
+                );
+                None
+            }
+        }
+    }
+
+    /// Rewrite this entry into the final-response request produced by a confirmed
+    /// target-chain execution.
+    ///
+    /// Rejects a request whose id differs from this entry's. Callers look the entry
+    /// up by `SignId`, so accepting a mismatch would leave `request.id` disagreeing
+    /// with the key it is stored under, and `checkpoint` commits to the key while
+    /// diagnostics report the id. `Backlog::watch_execution` warns when the two
+    /// identifiers diverge, which is the only way to reach this rejection.
+    fn transition_to_bidirectional_response(
+        &mut self,
+        request: IndexedSignRequest,
+    ) -> Result<(), BacklogError> {
+        if self.request.id != request.id
+            || !matches!(&request.kind, SignKind::RespondBidirectional(_))
+        {
+            return Err(BacklogError::InvalidBidirectionalResponseTransition);
+        }
+
+        self.request = request;
+        self.status = SignStatus::PendingGenerationBidirectional;
+        Ok(())
     }
 
     pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
@@ -1339,9 +1484,10 @@ mod tests {
         assert_eq!(checkpoint.block_height, 100);
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 2);
+        // Guard the checkpoint digest wire format; update only for intentional changes.
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("303f69437253715e486f272e60a1176db272e018241aecf88af0f1c1197670b9")
+            digest_hex("884b11ef5550724b788b7e29e9a07e7a6fd46f94d604e6d38bae71a36816b65e")
         );
     }
 
@@ -1404,7 +1550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_digest_differs_for_different_status() {
+    async fn test_checkpoint_digest_changes_after_initial_bidirectional_response() {
         let tx = create_test_tx(7);
 
         let mut pending1 = PendingRequests::new();
@@ -1434,14 +1580,13 @@ mod tests {
         let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
-        // The same request observed in different sign statuses must produce
-        // different digests, so nodes don't reach consensus on a checkpoint
-        // while disagreeing on the progress of a request.
+        // The initial source-chain response is observable at this checkpoint's
+        // height, so nodes must agree whether it has happened.
         assert_ne!(checkpoint1.digest(), checkpoint2.digest());
     }
 
     #[tokio::test]
-    async fn test_checkpoint_digest_differs_for_generation_vs_publish() {
+    async fn test_checkpoint_digest_ignores_generation_vs_publish() {
         let tx = create_test_tx(12);
 
         let mut pending1 = PendingRequests::new();
@@ -1473,7 +1618,244 @@ mod tests {
         let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
-        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
+    }
+
+    #[test]
+    fn test_plain_request_contributes_no_consensus_phase() {
+        let sign_id = SignId::new([20; 32]);
+        let request = create_indexed_request(
+            sign_id,
+            Chain::Ethereum,
+            create_test_args(20),
+            SignKind::Sign,
+            0,
+        );
+
+        let mut pending_generation = PendingRequests::new();
+        pending_generation.insert(sign_id, BacklogEntry::new(request.clone()));
+        pending_generation.set_processed_block(100);
+
+        let mut pending_publish = PendingRequests::new();
+        pending_publish.insert(
+            sign_id,
+            BacklogEntry::with_status(
+                request,
+                SignStatus::PendingPublish {
+                    publish: test_publish_state(true),
+                },
+            ),
+        );
+        pending_publish.set_processed_block(100);
+
+        let generation_checkpoint = pending_generation.checkpoint(Chain::Ethereum);
+        let publish_checkpoint = pending_publish.checkpoint(Chain::Ethereum);
+        assert_eq!(
+            generation_checkpoint.cumulative_digest,
+            Checkpoint::empty_cumulative_digest()
+        );
+        assert_eq!(
+            publish_checkpoint.cumulative_digest,
+            Checkpoint::empty_cumulative_digest()
+        );
+        assert_eq!(generation_checkpoint.digest(), publish_checkpoint.digest());
+    }
+
+    #[test]
+    fn test_bidirectional_awaiting_phase_ignores_publish_state() {
+        let sign_id = SignId::new([21; 32]);
+
+        let mut initial_bidirectional = BacklogEntry::new(create_bidirectional_request(
+            sign_id,
+            Chain::Ethereum,
+            "ethereum",
+            0,
+        ));
+        let initial_phase = initial_bidirectional.consensus_phase();
+        initial_bidirectional
+            .mark_publishing(test_publish_state(true))
+            .unwrap();
+        assert_eq!(initial_bidirectional.consensus_phase(), initial_phase);
+        assert_eq!(
+            initial_phase,
+            Some(BidirectionalAwaitingPhase::InitialResponse)
+        );
+
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(21),
+            Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: create_test_tx(21).id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+        let mut final_response =
+            BacklogEntry::with_status(response_request, SignStatus::PendingGenerationBidirectional);
+        let final_phase = final_response.consensus_phase();
+        final_response
+            .mark_publishing(test_publish_state(true))
+            .unwrap();
+        assert_eq!(final_response.consensus_phase(), final_phase);
+        assert_eq!(final_phase, Some(BidirectionalAwaitingPhase::Completion));
+    }
+
+    #[tokio::test]
+    async fn test_incoherent_entry_contributes_no_consensus_phase() {
+        let sign_id = SignId::new([26; 32]);
+
+        // No local transition pairs an un-advanced bidirectional request with a
+        // final-response status; this can only arrive by decoding a peer's payload.
+        let entry = BacklogEntry::with_status(
+            create_bidirectional_request(sign_id, Chain::Ethereum, "ethereum", 0),
+            SignStatus::PendingGenerationBidirectional,
+        );
+        assert_eq!(entry.consensus_phase(), None);
+
+        let mut pending = PendingRequests::new();
+        pending.insert(sign_id, entry);
+        pending.set_processed_block(100);
+
+        // It must be omitted from the commitment rather than crashing the checkpoint.
+        assert_eq!(
+            pending.checkpoint(Chain::Ethereum).cumulative_digest,
+            Checkpoint::empty_cumulative_digest()
+        );
+    }
+
+    #[test]
+    fn test_transition_to_bidirectional_response_updates_entry_atomically() {
+        let tx = create_test_tx(23);
+        let sign_id = SignId::new(tx.request_id);
+        let mut entry = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+        );
+        let phase = entry.consensus_phase();
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(23),
+            Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+
+        entry
+            .transition_to_bidirectional_response(response_request)
+            .unwrap();
+
+        assert!(matches!(
+            entry.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
+        assert_eq!(entry.status(), SignStatus::PendingGenerationBidirectional);
+        assert_eq!(entry.consensus_phase(), phase);
+    }
+
+    #[test]
+    fn test_transition_to_bidirectional_response_rejects_mismatched_request_id() {
+        let tx = create_test_tx(24);
+        let original_sign_id = SignId::new(tx.request_id);
+        let mut entry = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+        );
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            SignId::new([25; 32]),
+            create_test_args(25),
+            Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+
+        let err = entry
+            .transition_to_bidirectional_response(response_request)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BacklogError::InvalidBidirectionalResponseTransition
+        ));
+        assert_eq!(entry.request.id, original_sign_id);
+        assert!(matches!(
+            entry.status(),
+            SignStatus::PendingExecution { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_digest_ignores_target_execution_boundary() {
+        let tx = create_test_tx(22);
+        let sign_id = SignId::new(tx.request_id);
+
+        let mut awaiting_execution = PendingRequests::new();
+        awaiting_execution.insert(
+            sign_id,
+            create_execution_entry(
+                tx.clone(),
+                Chain::Ethereum,
+                pending_execution_status(&tx),
+                "ethereum",
+            ),
+        );
+        awaiting_execution.set_processed_block(100);
+
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(22),
+            Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+        let mut awaiting_final_response = PendingRequests::new();
+        awaiting_final_response.insert(
+            sign_id,
+            BacklogEntry::with_status(
+                response_request.clone(),
+                SignStatus::PendingGenerationBidirectional,
+            ),
+        );
+        awaiting_final_response.set_processed_block(100);
+
+        // Older nodes could checkpoint between rewriting the request kind and
+        // updating its status. Treat that recoverable state as completion too.
+        let mut legacy_transition = PendingRequests::new();
+        legacy_transition.insert(
+            sign_id,
+            BacklogEntry::with_status(
+                response_request,
+                SignStatus::PendingExecution { tx: tx.clone() },
+            ),
+        );
+        legacy_transition.set_processed_block(100);
+
+        let execution_digest = awaiting_execution.checkpoint(Chain::Ethereum).digest();
+        assert_eq!(
+            execution_digest,
+            awaiting_final_response.checkpoint(Chain::Ethereum).digest()
+        );
+        assert_eq!(
+            execution_digest,
+            legacy_transition.checkpoint(Chain::Ethereum).digest()
+        );
     }
 
     #[tokio::test]
@@ -1610,9 +1992,10 @@ mod tests {
         let deserialized: Checkpoint = serde_json::from_str(&json).unwrap();
 
         assert_eq!(checkpoint, deserialized);
+        // Guard the checkpoint digest wire format; update only for intentional changes.
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("0a516bf905dd18465b558748d84a9d14c2d36a32427252ea67b9218d1aaa263f")
+            digest_hex("12f5bc5c4f0fea1debafceb8879644ea545309775b3e2cc266335cd3247d5394")
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
