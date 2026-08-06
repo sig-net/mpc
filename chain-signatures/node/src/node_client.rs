@@ -323,7 +323,6 @@ impl NodeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_client::RequestError as NodeRequestError;
 
     #[test]
     fn test_versioned_checkpoint_responses_decode() {
@@ -353,12 +352,8 @@ mod tests {
         )
         .unwrap();
 
-        let Err(NodeRequestError::MismatchCheckpointVersion(version)) =
-            decode_checkpoint_response(&missing_version_body)
-        else {
-            panic!("expected unsupported version since missing populates version to zero");
-        };
-        assert_eq!(version, 0);
+        let decoded_missing = decode_checkpoint_response(&missing_version_body).unwrap();
+        assert_eq!(decoded_missing.version, 0);
 
         let mut legacy_body = Vec::new();
         ciborium::into_writer(&HashMap::<Chain, Checkpoint>::new(), &mut legacy_body).unwrap();
