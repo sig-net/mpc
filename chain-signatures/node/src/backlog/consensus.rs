@@ -1,6 +1,6 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::{NodeClient, RequestError as NodeRequestError};
+use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
@@ -77,41 +77,28 @@ async fn fetch_peer_checkpoint(
 ) -> Option<Checkpoint> {
     let checkpoint = node_client
         .fetch_checkpoint_by_digest(url, chain, target_digest)
-        .await;
-    match checkpoint {
-        Ok(Some(checkpoint)) => {
-            let digest = checkpoint.digest();
-            if digest == target_digest {
-                Some(checkpoint)
-            } else {
-                tracing::warn!(
-                    ?url,
-                    ?chain,
-                    ?digest,
-                    "peer checkpoint with mismatched digest; skipping"
-                );
-                None
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
-            None
-        }
-        Err(NodeRequestError::MismatchCheckpointVersion(version)) => {
-            tracing::warn!(
-                ?url,
-                ?chain,
-                peer_checkpoint_version = version,
-                supported_version = crate::CHECKPOINT_VERSION,
-                "peer returned mismatched checkpoint version; skipping peer"
-            );
-            None
-        }
-        Err(err) => {
+        .await
+        .inspect_err(|err| {
             tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
-            None
-        }
+        })
+        .ok()?;
+
+    let Some(checkpoint) = checkpoint else {
+        tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
+        return None;
+    };
+
+    let digest = checkpoint.digest();
+    if digest != target_digest {
+        tracing::warn!(
+            ?url,
+            ?chain,
+            ?digest,
+            "peer checkpoint returns mismatched digest"
+        );
+        return None;
     }
+    Some(checkpoint)
 }
 
 async fn query_peers_checkpoint(
