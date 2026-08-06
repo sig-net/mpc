@@ -66,6 +66,16 @@ impl Drop for MpcSignProtocol {
 pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
+    /// Fetch the given account's own candidacy from the contract's
+    /// `candidate_status` view: `None` if it is not a candidate, otherwise the
+    /// participants that have voted to admit it. Keyed by account id, so it
+    /// stays bounded no matter how many candidates exist (unlike the full
+    /// candidate set, which the `Running` state view no longer returns).
+    fn candidate_status(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<AccountId>>>> + Send;
+
     fn vote_reshared(
         &self,
         epoch: u64,

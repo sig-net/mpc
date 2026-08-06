@@ -39,7 +39,8 @@ use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
 pub use state::{
-    InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
+    InitializingContractState, ProtocolContractState, ProtocolContractStateView,
+    ResharingContractState, RunningContractState, RunningContractStateView,
 };
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
@@ -853,12 +854,41 @@ impl VersionedMpcContract {
         self.latest_checkpoints().get(&chain)
     }
 
+    /// The queried account's own admission status in the current `Running`
+    /// state: `None` if it is not a candidate, otherwise the participants that
+    /// have voted to admit it (possibly empty). Keyed by account id, so its
+    /// size is independent of the total candidate count.
+    ///
+    /// A joining node uses this to check whether its `join()` has registered and
+    /// how many participants have voted for it, without pulling the full
+    /// candidate set that the `Running` state view no longer exposes.
+    pub fn candidate_status(&self, account_id: AccountId) -> Option<Vec<AccountId>> {
+        match self.state() {
+            ProtocolContractState::Running(running)
+                if running.candidates.contains_key(&account_id) =>
+            {
+                let voters = running
+                    .join_votes
+                    .votes
+                    .get(&account_id)
+                    .map(|voters| voters.iter().cloned().collect())
+                    .unwrap_or_default();
+                Some(voters)
+            }
+            _ => None,
+        }
+    }
+
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
         let mut views = Vec::with_capacity(reads.len());
 
         for read in reads {
             let view = match read {
-                Read::State => View::State(self.state().clone()),
+                // Lean projection (see `ProtocolContractStateView`): the
+                // `Running` variant drops the unbounded, attacker-writable
+                // `candidates`/`join_votes` maps so a spam `join()` cannot
+                // inflate this payload past the RPC view-execution limit.
+                Read::State => View::State(self.state().into()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()

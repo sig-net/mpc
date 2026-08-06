@@ -815,7 +815,19 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                 })
             }
             ProtocolState::Running(contract_state) => {
-                let Some(_) = contract_state.candidates.find_candidate(&ctx.my_account_id) else {
+                // The `Running` state view no longer carries the (unbounded)
+                // candidate set, so fetch our own candidacy by key instead.
+                let candidacy = match gov.candidate_status(&ctx.my_account_id).await {
+                    Ok(candidacy) => candidacy,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            "joining(running): failed to fetch candidate status, retrying"
+                        );
+                        return NodeState::Joining(self);
+                    }
+                };
+                let Some(votes) = candidacy else {
                     tracing::info!(
                         "joining(running): sending a transaction to join the participant set"
                     );
@@ -824,11 +836,6 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     }
                     return NodeState::Joining(self);
                 };
-                let votes = contract_state
-                    .join_votes
-                    .get(&ctx.my_account_id)
-                    .cloned()
-                    .unwrap_or_default();
                 let pending_votes = contract_state
                     .participants
                     .iter()
@@ -932,6 +939,13 @@ mod tests {
             Ok(())
         }
 
+        async fn candidate_status(
+            &self,
+            _account_id: &near_account_id::AccountId,
+        ) -> anyhow::Result<Option<Vec<near_account_id::AccountId>>> {
+            Ok(None)
+        }
+
         async fn vote_reshared(&self, _epoch: u64) -> anyhow::Result<bool> {
             Ok(false)
         }
@@ -983,10 +997,6 @@ mod tests {
             participants,
             threshold,
             public_key: AffinePoint::default(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
-            threshold_votes: Default::default(),
         })
     }
 
@@ -1077,10 +1087,6 @@ mod tests {
             participants,
             threshold: 3,
             public_key: different_pk,
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
-            threshold_votes: Default::default(),
         });
 
         let mut uninit_ctx = std::mem::MaybeUninit::<MpcSignProtocol>::uninit();

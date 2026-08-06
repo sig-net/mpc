@@ -194,11 +194,7 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                candidates: Default::default(),
-                join_votes: Default::default(),
-                leave_votes: Default::default(),
                 threshold,
-                threshold_votes: Default::default(),
             }),
         )
     }
@@ -774,50 +770,47 @@ mod tests {
         );
         let governance = watcher.governance().unwrap();
 
-        let running = |epoch, join_votes| RunningContractState {
+        // Epoch bump: a real governance change is delivered.
+        let running = |epoch| RunningContractState {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes,
-            leave_votes: Default::default(),
             threshold: 1,
-            threshold_votes: Default::default(),
         };
-
-        // Vote churn: state changed, governance content did not.
-        let churn = crate::protocol::contract::primitives::Votes {
-            votes: [("p-1".parse().unwrap(), Default::default())].into(),
-        };
-        tx.send(Some(ProtocolState::Running(running(0, churn))))
-            .unwrap();
-        let pending = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            watcher.next_governance(governance.clone()),
-        )
-        .await;
-        assert!(pending.is_err(), "vote churn must not wake next_governance");
-
-        // Epoch bump: a real governance change is delivered.
-        tx.send(Some(ProtocolState::Running(running(1, Default::default()))))
-            .unwrap();
+        tx.send(Some(ProtocolState::Running(running(1)))).unwrap();
         let next = watcher.next_governance(governance.clone()).await.unwrap();
         assert_eq!(next.epoch, 1);
 
         // Leaving the running state is reported as is_running = false.
-        let resharing = ResharingContractState {
+        let resharing = |finished_votes| ResharingContractState {
             old_epoch: 1,
             old_participants: participants.clone(),
             new_participants: participants.clone(),
             threshold: 1,
             new_threshold: 1,
             public_key: k256::AffinePoint::default(),
-            finished_votes: Default::default(),
+            finished_votes,
             cancel_votes: Default::default(),
         };
-        tx.send(Some(ProtocolState::Resharing(resharing))).unwrap();
+        tx.send(Some(ProtocolState::Resharing(
+            resharing(Default::default()),
+        )))
+        .unwrap();
         let next = watcher.next_governance(next).await.unwrap();
         assert!(!next.is_running);
+
+        // Vote churn: `finished_votes` changed but governance content did not,
+        // so `next_governance` must not wake. (The `Running` state view carries
+        // no vote maps, so resharing is where non-governance churn can occur.)
+        let churn: std::collections::HashSet<AccountId> = ["p-1".parse().unwrap()].into();
+        tx.send(Some(ProtocolState::Resharing(resharing(churn))))
+            .unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            watcher.next_governance(next.clone()),
+        )
+        .await;
+        assert!(pending.is_err(), "vote churn must not wake next_governance");
 
         // Channel closed.
         drop(tx);
@@ -865,11 +858,7 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
             threshold: 2,
-            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(initial))).unwrap();
 
@@ -899,11 +888,7 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
             threshold: 2,
-            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 

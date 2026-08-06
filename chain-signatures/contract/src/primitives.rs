@@ -2,7 +2,7 @@ pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
-use crate::state::ProtocolContractState;
+use crate::state::ProtocolContractStateView;
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum Read {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub enum View {
-    State(ProtocolContractState),
+    State(ProtocolContractStateView),
     Config(Config),
     Checkpoints(HashMap<Chain, ConsensusCheckpointDigest>),
 }

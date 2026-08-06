@@ -4,12 +4,13 @@
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
 use crate::mpc_fixture::mock_chain::MockChain;
-use crate::mpc_fixture::mock_governance::MockGovernance;
+use crate::mpc_fixture::mock_governance::{MockGovernance, SharedThresholdVotes};
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
+use mpc_node::protocol::contract::primitives::ThresholdVotes;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
@@ -27,6 +28,10 @@ pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,
     pub redis_container: Redis,
     pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
+    /// Shared threshold-vote tally for the mock governance (see
+    /// [`SharedThresholdVotes`]); the node-side state mirror no longer carries
+    /// it, so the fixture holds it alongside the shared contract state.
+    pub shared_threshold_votes: SharedThresholdVotes,
     pub output: SharedOutput,
     pub mock_chain: Option<MockChain>,
 }
@@ -98,10 +103,12 @@ impl MpcFixture {
         let vote_futures = self.nodes.iter().map(|node| {
             let account_id = node.account_id.clone();
             let tx = self.shared_contract_state.clone();
+            let threshold_votes = self.shared_threshold_votes.clone();
             async move {
                 let gov = MockGovernance {
                     me: account_id,
                     protocol_state_tx: tx,
+                    threshold_votes,
                 };
                 gov.vote_threshold(new_threshold).await
             }
@@ -146,11 +153,11 @@ impl MpcFixture {
             // the threshold.
             threshold: resharing.new_threshold,
             public_key: resharing.public_key,
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
-            threshold_votes: Default::default(),
         };
+        // The real contract resets `threshold_votes` when it enters the new
+        // running epoch; mirror that by clearing the shared tally so a later
+        // threshold vote starts fresh.
+        *self.shared_threshold_votes.lock().unwrap() = ThresholdVotes::default();
         let _ = self
             .shared_contract_state
             .send(Some(ProtocolState::Running(running)));

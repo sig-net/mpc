@@ -1,9 +1,9 @@
 pub mod primitives;
 
-use self::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
+use self::primitives::{Candidates, Participants, PkVotes};
 use crate::{rpc::GovernanceInfo, util::NearPublicKeyExt as _};
 
-use mpc_contract::ProtocolContractState;
+use mpc_contract::ProtocolContractStateView;
 use mpc_crypto::PublicKey;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
@@ -26,29 +26,27 @@ impl From<mpc_contract::InitializingContractState> for InitializingContractState
     }
 }
 
+/// The node's model of the contract's `Running` state, mirroring the lean
+/// `RunningContractStateView` the contract exposes: only the fields a node
+/// consumes. The stored contract state additionally holds vote maps
+/// (`candidates`, `join_votes`, `leave_votes`, `threshold_votes`) that no node
+/// reads from the polled state, so they are not carried here — a joining node
+/// reads its own candidacy via the `candidate_status` view instead.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: Candidates,
-    pub join_votes: Votes,
-    pub leave_votes: Votes,
-    pub threshold_votes: ThresholdVotes,
 }
 
-impl From<mpc_contract::RunningContractState> for RunningContractState {
-    fn from(value: mpc_contract::RunningContractState) -> Self {
+impl From<mpc_contract::RunningContractStateView> for RunningContractState {
+    fn from(value: mpc_contract::RunningContractStateView) -> Self {
         RunningContractState {
             epoch: value.epoch,
             participants: value.participants.into(),
             threshold: value.threshold,
             public_key: value.public_key.into_affine_point(),
-            candidates: value.candidates.into(),
-            join_votes: value.join_votes.into(),
-            leave_votes: value.leave_votes.into(),
-            threshold_votes: value.threshold_votes,
         }
     }
 }
@@ -137,17 +135,19 @@ impl ProtocolState {
     }
 }
 
-impl TryFrom<ProtocolContractState> for ProtocolState {
+impl TryFrom<ProtocolContractStateView> for ProtocolState {
     type Error = ();
 
-    fn try_from(value: ProtocolContractState) -> Result<Self, Self::Error> {
+    fn try_from(value: ProtocolContractStateView) -> Result<Self, Self::Error> {
         match value {
-            ProtocolContractState::Initializing(state) => {
+            ProtocolContractStateView::Initializing(state) => {
                 Ok(ProtocolState::Initializing(state.into()))
             }
-            ProtocolContractState::Running(state) => Ok(ProtocolState::Running(state.into())),
-            ProtocolContractState::Resharing(state) => Ok(ProtocolState::Resharing(state.into())),
-            ProtocolContractState::NotInitialized => Err(()),
+            ProtocolContractStateView::Running(state) => Ok(ProtocolState::Running(state.into())),
+            ProtocolContractStateView::Resharing(state) => {
+                Ok(ProtocolState::Resharing(state.into()))
+            }
+            ProtocolContractStateView::NotInitialized => Err(()),
         }
     }
 }
