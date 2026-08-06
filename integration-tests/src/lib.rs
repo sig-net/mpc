@@ -26,6 +26,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_hydration::HydrationConfig;
+use mpc_node::web::CheckpointResponse;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
@@ -290,8 +291,9 @@ impl Nodes {
         let response = reqwest::get(&url).await?;
         let status = response.status();
         let body = response.bytes().await?;
-        let mut value: HashMap<Chain, Checkpoint> =
+        let response: CheckpointResponse =
             ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        let mut value = response.checkpoints;
         if let Ok(pretty) = serde_json::to_string(&value) {
             tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
         } else {
@@ -307,8 +309,9 @@ impl Nodes {
         let response = reqwest::get(&url).await?;
         let status = response.status();
         let body = response.bytes().await?;
-        let value: HashMap<Chain, Checkpoint> =
+        let response: CheckpointResponse =
             ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        let value = response.checkpoints;
         if let Ok(pretty) = serde_json::to_string(&value) {
             tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
         } else {
