@@ -74,15 +74,15 @@ async fn fetch_peer_checkpoint(
     url: &str,
     chain: Chain,
     target_digest: [u8; 32],
-) -> Result<Option<Checkpoint>, NodeRequestError> {
-    let result = node_client
+) -> Option<Checkpoint> {
+    let checkpoint = node_client
         .fetch_checkpoint_by_digest(url, chain, target_digest)
         .await;
-    match result {
+    match checkpoint {
         Ok(Some(checkpoint)) => {
             let digest = checkpoint.digest();
             if digest == target_digest {
-                Ok(Some(checkpoint))
+                Some(checkpoint)
             } else {
                 tracing::warn!(
                     ?url,
@@ -90,26 +90,26 @@ async fn fetch_peer_checkpoint(
                     ?digest,
                     "peer checkpoint with mismatched digest; skipping"
                 );
-                Ok(None)
+                None
             }
         }
         Ok(None) => {
             tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
-            Ok(None)
+            None
         }
-        err @ Err(NodeRequestError::MismatchCheckpointVersion(version)) => {
-            tracing::debug!(
+        Err(NodeRequestError::MismatchCheckpointVersion(version)) => {
+            tracing::warn!(
                 ?url,
                 ?chain,
-                checkpoint_version = version,
+                peer_checkpoint_version = version,
                 supported_version = crate::CHECKPOINT_VERSION,
-                "peer returned an unsupported checkpoint version; skipping peer"
+                "peer returned mismatched checkpoint version; skipping peer"
             );
-            err
+            None
         }
         Err(err) => {
-            tracing::debug!(?url, ?chain, ?err, "failed to query peer for checkpoint");
-            Ok(None)
+            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+            None
         }
     }
 }
@@ -122,25 +122,9 @@ async fn query_peers_checkpoint(
 ) -> Option<Checkpoint> {
     for (peer, info) in peers {
         tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-        let checkpoint =
-            match fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await {
-                Ok(checkpoint) => checkpoint,
-                Err(NodeRequestError::MismatchCheckpointVersion(version)) => {
-                    tracing::warn!(
-                        ?peer,
-                        ?chain,
-                        checkpoint_version = version,
-                        supported_version = crate::CHECKPOINT_VERSION,
-                        "peer returned an unsupported checkpoint version; skipping peer"
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    tracing::debug!(?err, ?peer, ?chain, "failed to query peer for checkpoint");
-                    continue;
-                }
-            };
-        if let Some(checkpoint) = checkpoint {
+        if let Some(checkpoint) =
+            fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await
+        {
             return Some(checkpoint);
         }
     }
