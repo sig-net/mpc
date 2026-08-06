@@ -40,21 +40,12 @@ pub async fn retry_until_ok<F, Fut>(
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            result = process() => match result {
-                Ok(()) => return,
-                Err(err) => tracing::warn!(?err, "{label} failed; retrying"),
-            },
-        }
-        if cancel.cancelled_within(delay).await {
-            return;
-        }
-    }
+    // `Ok(())` -> `Some(())` (done), `Err` retries with backoff.
+    retry_until_some(cancel, delay, label, || async { process().await.map(Some) }).await;
 }
 
-/// Same as `retry_until_ok`, but returns Option<T> when the operation returns `Ok(Some(T))`, and continues retrying on `Ok(None)`.
+/// Retries `poll` with `delay` backoff until it returns `Ok(Some(T))` or `cancel`
+/// fires. Each failure is logged at WARN with `label` identifying the operation.
 pub async fn retry_until_some<T, F, Fut>(
     cancel: &CancellationToken,
     delay: Duration,
@@ -71,7 +62,7 @@ where
             result = poll() => match result {
                 Ok(Some(value)) => return Some(value),
                 Ok(None) => {}
-                Err(err) => tracing::warn!(?err, "{label} not ready; retrying"),
+                Err(err) => tracing::warn!(?err, "{label} failed; retrying"),
             },
         }
         if cancel.cancelled_within(delay).await {
