@@ -38,6 +38,25 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
+    /// Project this status onto what is observable at a checkpoint's own chain height.
+    ///
+    /// Generation and publication are local attempts to reach an on-chain event: only
+    /// a signature's participants advance to publishing, so nodes cannot be required
+    /// to agree on which of the two a request is in. They collapse to one value.
+    ///
+    /// The two values are "awaiting the initial response on this chain" and "past it".
+    /// The remaining boundary — target-chain execution versus the final response — is
+    /// gated on target-chain progress, which a checkpoint does not commit to, so it
+    /// collapses as well.
+    pub fn checkpoint_consensus_byte(&self) -> u8 {
+        match self {
+            SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => 0,
+            SignStatus::PendingExecution { .. }
+            | SignStatus::PendingGenerationBidirectional
+            | SignStatus::PendingPublishBidirectional { .. } => 1,
+        }
+    }
+
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),

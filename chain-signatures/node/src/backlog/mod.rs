@@ -113,24 +113,21 @@ impl PendingRequests {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                let phase = entry.consensus_phase();
+                let status_consensus_byte = entry.status().checkpoint_consensus_byte();
                 (
                     PendingTx {
                         sign_id,
                         transaction,
                     },
-                    phase,
+                    status_consensus_byte,
                 )
             })
             .collect::<Vec<_>>();
         encoded.sort_by_key(|(pending, _)| pending.sign_id);
 
         let mut cumulative = sha3::Sha3_256::new();
-        for phase in encoded
-            .iter()
-            .filter_map(|(_, phase)| phase.map(BidirectionalAwaitingPhase::consensus_byte))
-        {
-            cumulative.update([phase]);
+        for (_, status_consensus_byte) in &encoded {
+            cumulative.update([*status_consensus_byte]);
         }
         let cumulative_digest = cumulative.finalize().into();
 
@@ -840,27 +837,6 @@ pub enum BacklogError {
     InvalidBidirectionalResponseTransition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BidirectionalAwaitingPhase {
-    /// Awaiting the initial response on the source chain.
-    InitialResponse,
-    /// Past the initial response and awaiting bidirectional completion.
-    ///
-    /// This covers both target-chain execution and the final source-chain response.
-    /// Their boundary is target-chain-gated, so nodes at the same source-chain height
-    /// must not be required to agree on it.
-    Completion,
-}
-
-impl BidirectionalAwaitingPhase {
-    pub(crate) const fn consensus_byte(self) -> u8 {
-        match self {
-            Self::InitialResponse => 0,
-            Self::Completion => 1,
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
     pub request: IndexedSignRequest,
@@ -914,54 +890,6 @@ impl BacklogEntry {
     #[cfg(any(test, feature = "test-feature"))]
     pub fn set_request(&mut self, request: IndexedSignRequest) {
         self.request = request;
-    }
-
-    /// Project this entry onto the phase committed to by `Checkpoint::cumulative_digest`.
-    ///
-    /// A plain signing request contributes nothing: its membership in the checkpoint
-    /// fully describes it until its response is indexed.
-    pub(crate) fn consensus_phase(&self) -> Option<BidirectionalAwaitingPhase> {
-        use BidirectionalAwaitingPhase::{Completion, InitialResponse};
-
-        match (&self.request.kind, &self.status) {
-            (SignKind::Sign, SignStatus::PendingGeneration | SignStatus::PendingPublish { .. }) => {
-                None
-            }
-            (
-                SignKind::SignBidirectional(_),
-                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
-            ) => Some(InitialResponse),
-            (SignKind::SignBidirectional(_), SignStatus::PendingExecution { .. }) => {
-                Some(Completion)
-            }
-            // `PendingExecution` here is the window the pre-atomic transition could
-            // checkpoint in: it rewrote the request kind before the status. Treat it
-            // as completion so recovered state agrees with the settled state.
-            (
-                SignKind::RespondBidirectional(_),
-                SignStatus::PendingGenerationBidirectional
-                | SignStatus::PendingPublishBidirectional { .. }
-                | SignStatus::PendingExecution { .. },
-            ) => Some(Completion),
-            // No local transition produces the remaining pairings, so this entry came
-            // from a peer's checkpoint payload. Omit it from the commitment rather than
-            // guessing: the resulting digest disagreement is recoverable, and this warn
-            // is what connects it to its cause.
-            (kind, status) => {
-                let kind = match kind {
-                    SignKind::Sign => "Sign",
-                    SignKind::SignBidirectional(_) => "SignBidirectional",
-                    SignKind::RespondBidirectional(_) => "RespondBidirectional",
-                };
-                tracing::warn!(
-                    sign_id = ?self.request.id,
-                    kind,
-                    ?status,
-                    "omitting consensus phase for incoherent backlog entry"
-                );
-                None
-            }
-        }
     }
 
     /// Rewrite this entry into the final-response request produced by a confirmed
@@ -1622,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_request_contributes_no_consensus_phase() {
+    fn test_plain_request_digest_ignores_generation_vs_publish() {
         let sign_id = SignId::new([20; 32]);
         let request = create_indexed_request(
             sign_id,
@@ -1650,35 +1578,28 @@ mod tests {
 
         let generation_checkpoint = pending_generation.checkpoint(Chain::Ethereum);
         let publish_checkpoint = pending_publish.checkpoint(Chain::Ethereum);
-        assert_eq!(
-            generation_checkpoint.cumulative_digest,
-            Checkpoint::empty_cumulative_digest()
-        );
-        assert_eq!(
-            publish_checkpoint.cumulative_digest,
-            Checkpoint::empty_cumulative_digest()
-        );
         assert_eq!(generation_checkpoint.digest(), publish_checkpoint.digest());
     }
 
     #[test]
-    fn test_bidirectional_awaiting_phase_ignores_publish_state() {
+    fn test_consensus_byte_ignores_publish_state() {
         let sign_id = SignId::new([21; 32]);
 
+        // Only a signature's participants advance to publishing, so the two statuses
+        // must be indistinguishable in both the initial and the final response phase.
         let mut initial_bidirectional = BacklogEntry::new(create_bidirectional_request(
             sign_id,
             Chain::Ethereum,
             "ethereum",
             0,
         ));
-        let initial_phase = initial_bidirectional.consensus_phase();
+        let initial_status_byte = initial_bidirectional.status().checkpoint_consensus_byte();
         initial_bidirectional
             .mark_publishing(test_publish_state(true))
             .unwrap();
-        assert_eq!(initial_bidirectional.consensus_phase(), initial_phase);
         assert_eq!(
-            initial_phase,
-            Some(BidirectionalAwaitingPhase::InitialResponse)
+            initial_bidirectional.status().checkpoint_consensus_byte(),
+            initial_status_byte
         );
 
         let response_request = IndexedSignRequest::respond_bidirectional(
@@ -1694,35 +1615,17 @@ mod tests {
         );
         let mut final_response =
             BacklogEntry::with_status(response_request, SignStatus::PendingGenerationBidirectional);
-        let final_phase = final_response.consensus_phase();
+        let final_status_byte = final_response.status().checkpoint_consensus_byte();
         final_response
             .mark_publishing(test_publish_state(true))
             .unwrap();
-        assert_eq!(final_response.consensus_phase(), final_phase);
-        assert_eq!(final_phase, Some(BidirectionalAwaitingPhase::Completion));
-    }
-
-    #[tokio::test]
-    async fn test_incoherent_entry_contributes_no_consensus_phase() {
-        let sign_id = SignId::new([26; 32]);
-
-        // No local transition pairs an un-advanced bidirectional request with a
-        // final-response status; this can only arrive by decoding a peer's payload.
-        let entry = BacklogEntry::with_status(
-            create_bidirectional_request(sign_id, Chain::Ethereum, "ethereum", 0),
-            SignStatus::PendingGenerationBidirectional,
-        );
-        assert_eq!(entry.consensus_phase(), None);
-
-        let mut pending = PendingRequests::new();
-        pending.insert(sign_id, entry);
-        pending.set_processed_block(100);
-
-        // It must be omitted from the commitment rather than crashing the checkpoint.
         assert_eq!(
-            pending.checkpoint(Chain::Ethereum).cumulative_digest,
-            Checkpoint::empty_cumulative_digest()
+            final_response.status().checkpoint_consensus_byte(),
+            final_status_byte
         );
+
+        // The initial response is observable at this height; the two phases differ.
+        assert_ne!(initial_status_byte, final_status_byte);
     }
 
     #[test]
@@ -1735,7 +1638,7 @@ mod tests {
             pending_execution_status(&tx),
             "ethereum",
         );
-        let phase = entry.consensus_phase();
+        let status_consensus_byte = entry.status().checkpoint_consensus_byte();
         let response_request = IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(23),
@@ -1757,7 +1660,10 @@ mod tests {
             SignKind::RespondBidirectional(_)
         ));
         assert_eq!(entry.status(), SignStatus::PendingGenerationBidirectional);
-        assert_eq!(entry.consensus_phase(), phase);
+        assert_eq!(
+            entry.status().checkpoint_consensus_byte(),
+            status_consensus_byte
+        );
     }
 
     #[test]

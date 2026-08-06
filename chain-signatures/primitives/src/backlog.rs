@@ -59,10 +59,10 @@ pub struct Checkpoint {
     /// `transaction`, which is the full recovery payload and may include
     /// node-local fields.
     ///
-    /// Plain signing requests contribute no phase bytes because their membership
-    /// fully represents whether they are still awaiting a response. For a
-    /// plain-only backlog this is the SHA3 digest of empty input; `digest`
-    /// separately commits to the sorted request IDs.
+    /// The phase distinguishes only "awaiting the initial response on this chain"
+    /// from "past it". Generation versus publication is local progress that only a
+    /// signature's participants make, and the target-execution boundary is gated on
+    /// another chain's height, so neither is committed to here.
     ///
     /// The phase encoding is a consensus wire format: nodes computing it differently
     /// cannot agree on a checkpoint even with identical backlogs. Changing it splits
