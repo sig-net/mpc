@@ -82,16 +82,31 @@ fn drop_entry(
     None
 }
 
-/// Names the one failure a retry never clears, so the restart it triggers is not
-/// mistaken for a transport blip. Callers hand in errors [`retry_until_cancelled`]
-/// already classified as unservable; recovering from a node that dropped the state is
-/// future work.
-fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
-    tracing::warn!(
-        reason = "state-unservable-restart",
+/// [`drop_entry`] at ERROR: the failure may be node-local, not the caller's.
+fn drop_entry_unattributed(
+    reason: &'static str,
+    height: u64,
+    request_id: Option<[u8; 32]>,
+    detail: &str,
+) -> Option<IndexedSignRequest> {
+    tracing::error!(
+        reason,
         height,
-        "midnight node cannot serve state at this height; restarting to re-anchor at the \
-         finalized head. Requests filed in the skipped range are given up"
+        request_id = request_id.map(hex::encode),
+        "midnight entry dropped: {detail}"
+    );
+    None
+}
+
+/// Names the one failure a retry never clears. The supervised restart resumes from
+/// the retained watermark and arrives back here, so the node holds at this height
+/// until its rpc node can serve the state.
+fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
+    tracing::error!(
+        reason = "state-unservable-hold",
+        height,
+        "midnight node cannot serve state at this height; holding until it can. If \
+         this persists, switch to an archive node"
     );
     err
 }
@@ -369,7 +384,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 // producer-supplied) halt the chain. Charged to the entry instead,
                 // the unservable answer included.
                 Some(ReadFailure::Unservable) | None => {
-                    return Ok(drop_entry(
+                    return Ok(drop_entry_unattributed(
                         "caller-state-unreadable",
                         height,
                         Some(rid),
