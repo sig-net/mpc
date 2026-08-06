@@ -77,9 +77,10 @@ Progress is guaranteed during a suﬃciently long synchronous interval, never at
 
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples / min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature). Presignature supply therefore rests on triple supply: the two are one property under diﬀerent input preconditions.  
-* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.
+* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline; see Appendix).  
+* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each node's active set within bounded time. This is what discharges the active-set preconditions of L1 and L2.
 
-Currently L3 is not met; L1 and L2 hold only while the node's local active set stays ≥ t (see Appendix).
+Currently L3 is not met, and L4 converges only after a blocking post-reconnect sync (up to 120 s per flap), so L1 and L2 hold only while the node's local active set stays ≥ t (see Appendix).
 
 ## 5\. Efficiency targets
 
@@ -179,6 +180,16 @@ For NEAR-originated requests this requires settling before the yielded promise's
 For other chains it requires the publisher to eventually (re)submit the signature until it lands.
 
 Currently not guaranteed, since there's no timer-based resubmit.
+
+*Deadline note (NEAR).* A hard deadline turns L1 \+ L3 into a joint time budget: the rounds a request burns, one generation round, and submission must together fit inside \~200 s. The round schedule does not enforce this: cumulative `round_timeout` crosses 200 s after roughly 20 rounds, and a single ceiling-length round (600 s) exceeds the deadline on its own. The node only observes a miss (a delayed-request watcher and the SIGN\_REQUEST\_DELAYED metric), it does not abort or prioritize. Whether the budget is met is therefore an emergent property of how few rounds a request needs, which is exactly what L1 bounds during synchrony.
+
+### L4. Mesh convergence
+
+*Property.* During a long-enough synchronous interval, every correct, reachable participant (re)enters each correct node's active set within bounded time.
+
+*Why it is a property, not an assumption.* L1 and L2 are conditioned on the local active set holding ≥ t peers, and the active set is this layer's own failure detector (§2), maintained by its own code. Its recovery is therefore something the layer must provide; without L4, nothing says the gate that L1 and L2 wait behind ever opens. The consumers of the gate do not bound the wait themselves: organizing waits for ≥ t active peers with no timeout of its own (`wait_for_active_participants`, request/organize.rs), and artifact generation is skipped entirely while the view is short (L2's local-active gate).
+
+*Current state.* Every transition into Active, including any reconnection, first forces a state sync (mesh/connection.rs): the peer is held in Syncing, outside the active set, until the sync completes or times out (`SYNC_RESPONSE_TIMEOUT` 60 s, `BROADCAST_TIMEOUT` 120 s, protocol/sync). Convergence after a single flap is thus bounded by \~120 s, far above the round floor; repeated flaps reset the clock, so the bound is not effective during instability, and while the resulting view is short every request on the node stalls (L1) and supply halts (L2). The sync's work is garbage collection of stale holder data, not a correctness gate: only owners initiate consumption (D4), so a stale view costs a MissingArtifact round at worst. Convergence time is log-derivable from the status-transition lines (mesh/connection.rs).
 
 ### Round-timeout precedents (§2)
 
