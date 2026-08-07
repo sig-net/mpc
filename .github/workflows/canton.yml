@@ -98,6 +98,7 @@ jobs:
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+          CANTON_LOG_PORTS: "1"
 
   canton-e2e:
     name: Canton E2E Tests
@@ -183,3 +184,4 @@ jobs:
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+          CANTON_LOG_PORTS: "1"

@@ -34,6 +34,22 @@ fn reserve_free_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
+fn log_listening_ports(label: &str) {
+    let out = match std::process::Command::new("ss").args(["-ltnp"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("127.0.0.1:") || l.contains("[::1]:"))
+        .collect();
+    tracing::info!(
+        "{label} — localhost listening sockets:\n{}",
+        lines.join("\n")
+    );
+}
+
 /// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
 const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
 
@@ -346,6 +362,16 @@ canton.sequencers.sequencer1.admin-api {{
                 tracing::debug!("waiting for canton (attempt {attempt})...");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if std::env::var("CANTON_LOG_PORTS").as_deref() == Ok("1") {
+            tracing::info!(
+                json_api_port,
+                ledger_api_port,
+                sequencer_admin_port,
+                "CANTON PORT DISCOVERY — dynamically reserved ports for this sandbox"
+            );
+            log_listening_ports("CANTON PORT DISCOVERY");
         }
 
         // Setup parties, runtime/app users, and contracts.
