@@ -1,7 +1,7 @@
 use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignCommand, SignId};
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

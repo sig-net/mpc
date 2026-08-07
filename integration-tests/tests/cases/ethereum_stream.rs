@@ -28,7 +28,7 @@ use mpc_primitives::{
     SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

@@ -28,8 +28,8 @@ use mpc_primitives::{
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::{
-    current_unix_timestamp,
     task::{retry_until_ok, AbortOnDrop},
+    time::current_unix_timestamp,
 };
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,

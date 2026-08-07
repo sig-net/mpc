@@ -7,7 +7,7 @@ use crate::daml::{
 use crate::ledger_api;
 use crate::signing::{parse_canton_signature, CantonSignBidirectionalRequestedEvent};
 use mpc_primitives::{Chain, ChainEvent, RespondBidirectionalEvent, SignatureRespondedEvent};
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 

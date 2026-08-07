@@ -20,7 +20,7 @@ use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
     ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
 };
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

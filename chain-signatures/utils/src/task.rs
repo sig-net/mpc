@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::time::Duration;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +70,104 @@ where
         }
         if cancel.cancelled_within(delay).await {
             return None;
+        }
+    }
+}
+
+/// A keyed set of spawned tasks: spawn/abort by key and join results tagged
+/// with the originating key. Backed by a [`tokio::task::JoinSet`].
+pub struct JoinMap<T, U> {
+    mapping: HashMap<T, AbortHandle>,
+    mapping_id: HashMap<tokio::task::Id, T>,
+    tasks: JoinSet<U>,
+}
+
+impl<T, U> Default for JoinMap<T, U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, U> JoinMap<T, U> {
+    pub fn new() -> Self {
+        Self {
+            mapping: HashMap::new(),
+            mapping_id: HashMap::new(),
+            tasks: JoinSet::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn abort_all(&mut self) {
+        for handle in self.mapping.values() {
+            handle.abort();
+        }
+        self.mapping.clear();
+        self.mapping_id.clear();
+    }
+}
+
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
+    pub fn contains_key(&self, key: &T) -> bool {
+        self.mapping.contains_key(key)
+    }
+
+    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
+        let handle = self.tasks.spawn(task);
+        let task_id = handle.id();
+        self.mapping.insert(key, handle);
+        self.mapping_id.insert(task_id, key);
+    }
+
+    pub fn abort(&mut self, key: T) -> bool {
+        if let Some(handle) = self.mapping.remove(&key) {
+            handle.abort();
+
+            if let Some(task_id) = self
+                .mapping_id
+                .iter()
+                .find_map(|(id, mapped_key)| (*mapped_key == key).then_some(*id))
+            {
+                self.mapping_id.remove(&task_id);
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
+        let outcome = self.tasks.join_next_with_id().await?;
+        let (id, outcome) = match outcome {
+            Ok((id, outcome)) => (id, Some(outcome)),
+            Err(err) => (err.id(), None),
+        };
+
+        let key = self.mapping_id.remove(&id)?;
+        self.mapping.remove(&key);
+        match outcome {
+            Some(outcome) => Some(Ok((key, outcome))),
+            None => Some(Err(key)),
+        }
+    }
+}
+
+impl<T, U> Drop for JoinMap<T, U> {
+    fn drop(&mut self) {
+        for handle in self.mapping.values() {
+            handle.abort();
         }
     }
 }

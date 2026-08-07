@@ -4,5 +4,3 @@
 pub mod retry;
 pub mod task;
 pub mod time;
-
-pub use time::current_unix_timestamp;

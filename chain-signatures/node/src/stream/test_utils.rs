@@ -17,7 +17,7 @@ use mpc_primitives::{
     RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     Signature, SignatureRespondedEvent,
 };
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use tokio::sync::{mpsc, watch};
 

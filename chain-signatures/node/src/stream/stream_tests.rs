@@ -15,7 +15,7 @@ use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
 };
-use mpc_utils::current_unix_timestamp;
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
