@@ -18,7 +18,7 @@ pub(crate) struct SignPositMessage {
 
 /// Mailbox holding the latest posit message per sending participant.
 ///
-/// A message for round N from sender P replaces messages from P for earlier rounds.
+/// A message for round N from sender P replaces messages from P for earlier or equal rounds.
 ///
 /// Only a single message per round and sender buffered. This is enough because:
 ///
