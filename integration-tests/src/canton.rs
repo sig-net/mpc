@@ -191,6 +191,7 @@ pub struct CantonSandbox {
     auth_conf_path: PathBuf,
     json_api_port: u16,
     ledger_api_port: u16,
+    sequencer_admin_port: u16,
     oidc_provider: OidcTestProvider,
     pub json_api_url: String,
     pub json_api_ws_url: String,
@@ -215,10 +216,12 @@ pub struct CantonSandbox {
 
 impl CantonSandbox {
     pub async fn run() -> Result<Self> {
-        // Reserve ephemeral ports for the sandbox's JSON-API and ledger-API so multiple
+        // Reserve ephemeral ports for the sandbox's JSON-API, ledger-API, and sequencer admin-API so multiple
         // sandboxes can run concurrently.
         let json_api_port = reserve_free_port().context("reserving JSON-API port")?;
         let ledger_api_port = reserve_free_port().context("reserving ledger-API port")?;
+        let sequencer_admin_port =
+            reserve_free_port().context("reserving sequencer admin-API port")?;
 
         // Two DARs: signer (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
@@ -278,6 +281,9 @@ canton.participants.sandbox.ledger-api {{
   ]
   admin-token-config.admin-claim = true
   jwt-timestamp-leeway.default = 10
+}}
+canton.sequencers.sequencer1.admin-api {{
+  port = {sequencer_admin_port}
 }}"#,
                 dar_path.display(),
                 fee_dar_path.display(),
@@ -508,6 +514,7 @@ canton.participants.sandbox.ledger-api {{
             auth_conf_path,
             json_api_port,
             ledger_api_port,
+            sequencer_admin_port,
             oidc_provider,
             json_api_url: base_url,
             json_api_ws_url: ws_url,
@@ -635,7 +642,11 @@ impl Drop for CantonSandbox {
             .args(["-9", "-f", &conf])
             .output();
         // Wait for ports to be released.
-        for port in [self.json_api_port, self.ledger_api_port] {
+        for port in [
+            self.json_api_port,
+            self.ledger_api_port,
+            self.sequencer_admin_port,
+        ] {
             for _ in 0..40 {
                 if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
                     break;
