@@ -281,8 +281,34 @@ impl PositPhase {
                         state.record_peer_round(peer_current);
                     }
 
-                    // Ignore messages for older rounds
+                    // Answer older rounds with StaleRound (as `wait_for_propose`
+                    // does) so a behind peer learns our round instead of
+                    // burning its full timeout in silence. Rejects are never
+                    // answered: replying would ping-pong rejects between nodes.
                     if state.round() > peer_round {
+                        if matches!(task_msg.action, PositAction::RejectWithReason(_)) {
+                            continue;
+                        }
+                        ctx.msg
+                            .send(
+                                ctx.governance.me,
+                                task_msg.from,
+                                PositMessage {
+                                    // The id echoes the rejected message so the
+                                    // sender knows which attempt we are answering.
+                                    id: PositProtocolId::Signature(
+                                        sign_id,
+                                        task_msg.presignature_id,
+                                        peer_round,
+                                    ),
+                                    from: ctx.governance.me,
+                                    action: PositAction::RejectWithReason(
+                                        PositRejectReason::StaleRound,
+                                    ),
+                                    stale_round: Some(state.round()),
+                                },
+                            )
+                            .await;
                         continue;
                     }
 
@@ -448,8 +474,8 @@ mod tests {
     use deadpool_redis::Runtime;
     use mpc_primitives::SignKind;
 
-    /// A `wait_for_propose` harness; the unused channel ends are held alive so
-    /// sends keep working.
+    /// A posit-phase harness; the unused channel ends are held alive so sends
+    /// keep working. The redis pool is lazy and never actually connected.
     struct TestSetup {
         ctx: SignTask,
         state: SignState,
@@ -459,11 +485,11 @@ mod tests {
         _mesh_tx: watch::Sender<MeshState>,
     }
 
-    fn setup(me: Participant, other: Participant) -> TestSetup {
+    fn setup(me: Participant, other: Participant, threshold: usize) -> TestSetup {
         let account_id: near_account_id::AccountId = "p-1".parse().unwrap();
         let governance = GovernanceInfo {
             me,
-            threshold: 1,
+            threshold,
             epoch: 0,
             public_key: k256::AffinePoint::default(),
             participants: [other, me].into_iter().collect(),
@@ -472,8 +498,6 @@ mod tests {
 
         let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
         let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        // These tests never touch presignatures, so the lazy pool is never
-        // actually connected.
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
@@ -518,16 +542,38 @@ mod tests {
         }
     }
 
+    /// The single message sitting in the outbox, which must be a posit from
+    /// `from` to `to`; returns its stamped round, action, and stale_round.
+    fn sent_posit(
+        outbox: &mut MessageOutbox,
+        from: Participant,
+        to: Participant,
+    ) -> (usize, PositAction, Option<usize>) {
+        let sent = outbox
+            .intercept_outgoing_messages()
+            .try_recv()
+            .expect("a posit message should have been sent");
+        assert_eq!(sent.from, from);
+        assert_eq!(sent.to, to);
+        let Message::Posit(posit) = sent.message else {
+            panic!("expected a posit message");
+        };
+        let PositProtocolId::Signature(_, _, round) = posit.id else {
+            panic!("expected a signature posit id");
+        };
+        (round, posit.action, posit.stale_round)
+    }
+
     /// A deliberator that rejects a Propose from a *behind* proposer echoes the
     /// rejected round in the id (so the reject reaches the sender's current
-    /// conversation) and carries its own round inside `StaleRound` — otherwise
-    /// the behind proposer never learns it is behind and climbs one round per
+    /// conversation) and carries its own round in `stale_round`. Otherwise the
+    /// behind proposer never learns it is behind and climbs one round per
     /// attempt instead of catching up in a single `bump_round`.
     #[tokio::test]
     async fn reject_of_older_round_carries_rejectors_round() {
         let me = Participant::from(1);
         let proposer = Participant::from(0);
-        let mut t = setup(me, proposer);
+        let mut t = setup(me, proposer, 1);
 
         // We are ahead of the proposer. Give the round a short budget so
         // `wait_for_propose` times out and returns shortly after emitting the
@@ -552,39 +598,26 @@ mod tests {
             PositPhase::wait_for_propose(&mut t.ctx, &mut t.state, &mailbox, proposer).await;
         assert!(matches!(phase, Err(SignPhase::Organizing(_))));
 
-        let sent = t
-            .outbox
-            .intercept_outgoing_messages()
-            .try_recv()
-            .expect("a reject should have been sent to the behind proposer");
-        assert_eq!(sent.from, me);
-        assert_eq!(sent.to, proposer);
-
-        let Message::Posit(posit) = sent.message else {
-            panic!("expected a posit message");
-        };
-        let PositProtocolId::Signature(_, _, reject_round) = posit.id else {
-            panic!("expected a signature posit id");
-        };
+        let (round, action, stale_round) = sent_posit(&mut t.outbox, me, proposer);
         // The id echoes the round of the message being rejected.
-        assert_eq!(reject_round, propose_round);
+        assert_eq!(round, propose_round);
         assert!(matches!(
-            posit.action,
+            action,
             PositAction::RejectWithReason(PositRejectReason::StaleRound)
         ));
         // Our round rides in `stale_round` so the sender can catch up in one bump.
-        assert_eq!(posit.stale_round, Some(our_round));
+        assert_eq!(stale_round, Some(our_round));
     }
 
-    /// Receiving side of the same contract: the rejector's round carried in
-    /// `StaleRound` is recorded and the reject itself never answered, so the
-    /// next bump jumps straight to that round instead of climbing one round
-    /// per attempt.
+    /// Receiving side of the same contract in `wait_for_propose`: the
+    /// rejector's round carried in `stale_round` is recorded and the reject
+    /// itself never answered, so the next bump jumps straight to that round
+    /// instead of climbing one round per attempt.
     #[tokio::test]
     async fn received_stale_round_reject_catches_up_in_one_bump() {
         let me = Participant::from(1);
         let peer = Participant::from(0);
-        let mut t = setup(me, peer);
+        let mut t = setup(me, peer, 1);
 
         // We are behind at round 2; a peer at round 5 rejected our message,
         // echoing our round in the id and carrying its own in the payload.
@@ -609,5 +642,90 @@ mod tests {
         assert_eq!(t.state.round(), 5);
         // A reject is never answered — replying would ping-pong rejects.
         assert!(t.outbox.intercept_outgoing_messages().try_recv().is_err());
+    }
+
+    /// The posit loop must answer stale-round messages the same way instead of
+    /// dropping them silently; a behind peer would otherwise burn its full
+    /// timeout without learning it is behind.
+    #[tokio::test]
+    async fn advance_rejects_older_round_with_stale_round() {
+        let proposer = Participant::from(0);
+        let behind = Participant::from(1);
+        // Threshold 2 keeps the proposer's own accept from starting generation.
+        let mut t = setup(proposer, behind, 2);
+
+        // We propose at round 5; a straggler Accept for round 2 sits in the
+        // mailbox. Short budget so the loop exits via its deadline.
+        t.state.set_round(5);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 2,
+            from: behind,
+            action: PositAction::Accept,
+            stale_round: None,
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, behind].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        let (round, action, stale_round) = sent_posit(&mut t.outbox, proposer, behind);
+        // The id echoes the rejected round; ours rides in `stale_round`.
+        assert_eq!(round, 2);
+        assert!(matches!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
+        assert_eq!(stale_round, Some(5));
+    }
+
+    /// The receive side inside `advance()`: a behind proposer harvests the
+    /// round carried by a StaleRound reject without answering it (even one
+    /// echoing an older round), then reorganizes straight to that round on
+    /// its deadline.
+    #[tokio::test]
+    async fn advance_harvests_rejectors_round() {
+        let proposer = Participant::from(0);
+        let rejector = Participant::from(1);
+        // Threshold 2 keeps the proposer's own accept from starting generation.
+        let mut t = setup(proposer, rejector, 2);
+
+        // We propose at round 3; a reject echoing our earlier round 2 arrives,
+        // carrying the rejector's round 5. Short budget so the loop exits via
+        // its deadline.
+        t.state.set_round(3);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 2,
+            from: rejector,
+            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+            stale_round: Some(5),
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, rejector].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        assert_eq!(t.state.round(), 5, "must catch up in one bump");
+        assert!(
+            t.outbox.intercept_outgoing_messages().try_recv().is_err(),
+            "a reject must never be answered"
+        );
     }
 }
