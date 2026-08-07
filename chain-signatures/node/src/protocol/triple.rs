@@ -434,6 +434,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action,
+                            stale_round: None,
                         },
                     )
                     .await;
@@ -462,6 +463,7 @@ impl TripleSpawner {
                         id: PositProtocolId::Triple(pair_id),
                         from: self.me,
                         action: PositAction::Propose,
+                        stale_round: None,
                     },
                 )
                 .await;
@@ -488,6 +490,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            stale_round: None,
                         },
                     )
                     .await;

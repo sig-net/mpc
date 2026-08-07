@@ -128,6 +128,7 @@ impl GeneratingPhase {
             round,
             from,
             action,
+            ..
         } = task_msg;
         if !matches!(action, PositAction::Propose) {
             return;
@@ -147,6 +148,7 @@ impl GeneratingPhase {
                     id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
                     from: me,
                     action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+                    stale_round: None,
                 },
             )
             .await;

@@ -88,6 +88,15 @@ impl SignState {
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 
+    /// Record a peer's round learned from a `StaleRound` reject so the next
+    /// bump catches up in one step.
+    pub fn record_peer_round(&mut self, peer_round: usize) {
+        if peer_round > self.highest_seen_round {
+            self.highest_seen_round = peer_round;
+            self.buffered_messages.clear();
+        }
+    }
+
     /// Buffer a posit message for a future round until that round is reached.
     pub fn buffer_future_posit_message(&mut self, msg: SignPositMessage) {
         let SignPositMessage {

@@ -279,6 +279,7 @@ impl SignatureSpawner {
         round: usize,
         from: Participant,
         action: PositAction,
+        stale_round: Option<usize>,
     ) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
@@ -293,6 +294,7 @@ impl SignatureSpawner {
                 round,
                 from,
                 action,
+                stale_round,
             });
     }
 
@@ -431,8 +433,8 @@ impl SignatureSpawner {
                     };
                     self.handle_sign(&governance, sign, &protocol);
                 }
-                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, presignature_id, round, from, action);
+                Some((sign_id, presignature_id, round, from, action, stale_round)) = posits.recv() => {
+                    self.handle_posit(sign_id, presignature_id, round, from, action, stale_round);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -654,7 +656,14 @@ mod tests {
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
         // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
-        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
+        spawner.handle_posit(
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+            None,
+        );
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
@@ -663,7 +672,14 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 5: Posit after re-spawn → accepted, mailbox re-created
-        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
+        spawner.handle_posit(
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+            None,
+        );
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 6: Governance respawn → task swapped in place, nothing retired,
