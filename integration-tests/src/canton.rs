@@ -34,7 +34,22 @@ fn reserve_free_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
-fn log_listening_ports(label: &str) {
+fn record_discovery(msg: &str) {
+    tracing::info!("{msg}");
+
+    if let Ok(path) = std::env::var("CANTON_PORT_DISCOVERY_FILE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
+fn log_listening_ports() {
     let out = match std::process::Command::new("ss").args(["-ltnp"]).output() {
         Ok(o) if o.status.success() => o,
         _ => return,
@@ -44,10 +59,10 @@ fn log_listening_ports(label: &str) {
         .lines()
         .filter(|l| l.contains("127.0.0.1:") || l.contains("[::1]:"))
         .collect();
-    tracing::info!(
-        "{label} — localhost listening sockets:\n{}",
+    record_discovery(&format!(
+        "CANTON PORT DISCOVERY — localhost listening sockets:\n{}",
         lines.join("\n")
-    );
+    ));
 }
 
 /// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
@@ -365,13 +380,11 @@ canton.sequencers.sequencer1.admin-api {{
         }
 
         if std::env::var("CANTON_LOG_PORTS").as_deref() == Ok("1") {
-            tracing::info!(
-                json_api_port,
-                ledger_api_port,
-                sequencer_admin_port,
-                "CANTON PORT DISCOVERY — dynamically reserved ports for this sandbox"
-            );
-            log_listening_ports("CANTON PORT DISCOVERY");
+            record_discovery(&format!(
+                "CANTON PORT DISCOVERY — reserved dynamic ports: \
+                 json_api={json_api_port} ledger_api={ledger_api_port} sequencer_admin={sequencer_admin_port}"
+            ));
+            log_listening_ports();
         }
 
         // Setup parties, runtime/app users, and contracts.
