@@ -479,17 +479,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Err(err) => match ReadFailure::of(&err) {
                     Some(ReadFailure::Unservable) => return Retried::Unservable(err),
                     Some(ReadFailure::ClientClosed) => return Retried::ClientClosed(err),
-                    // The central map only grows, so an oversized state is
-                    // permanent until the contract prunes or the node's cap rises.
-                    Some(ReadFailure::TooLarge) => {
-                        tracing::error!(
-                            reason = "central-state-too-large-hold",
-                            height = block.number,
-                            "midnight central contract state exceeds the rpc response \
-                             cap; holding until it is pruned or the cap is raised"
-                        );
-                        return Retried::Halted(err);
-                    }
                     None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
                         tracing::error!(
                             reason = "central-state-undecodable-hold",
@@ -1725,46 +1714,6 @@ mod tests {
         assert!(
             err.to_string().contains("cannot serve contract state"),
             "err: {err}"
-        );
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_surfaces_central_too_large_from_the_live_loop() {
-        // An oversized central state is permanent (the notification map only
-        // grows), so the block-level retry must not spin on it: the error ends
-        // the run and the supervised restart holds loudly.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, central_state(vec![]));
-        source.state_errors.insert(
-            (central.clone(), hash_of(10)),
-            ReadFailure::TooLarge.marker().to_string(),
-        );
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(10)).await.expect("send live block");
-
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() returns promptly instead of retrying an oversized state")
-            .expect("run task panicked")
-            .expect_err("an oversized central state must surface for the supervised hold");
-        assert_eq!(
-            ReadFailure::of(&err),
-            Some(ReadFailure::TooLarge),
-            "err: {err:#}"
         );
         drop(live_tx);
     }
