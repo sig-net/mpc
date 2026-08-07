@@ -27,6 +27,10 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 /// The central singleton's notification map ordinal, the only field the diff reads.
 const NOTIFICATION_MAP_FIELD: u8 = 1;
 
+/// Marker context on a central state the ledger deserializer refused: this build can
+/// no longer read the chain, so the block-level retry must halt on it, not spin.
+const CENTRAL_STATE_UNDECODABLE: &str = "the central contract's own state did not decode";
+
 /// Midnight indexer: `run()` owns the whole read path.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
@@ -131,6 +135,9 @@ enum Retried<T> {
     /// The client's connection is gone and every further call fails until `run()`
     /// is rebuilt: ends the run so the supervisor's restart reconnects.
     ClientClosed(anyhow::Error),
+    /// Permanent at this height and never the caller's; the ERROR is logged where
+    /// it is classified, so consumers just end the run and the restart holds.
+    Halted(anyhow::Error),
 }
 
 /// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
@@ -176,28 +183,33 @@ where
 }
 
 /// Retries a startup step every [`RETRY_DELAY`] until it succeeds or `cancel` fires
-/// (`None`). No unservable escape, unlike [`retry_until_cancelled`]: at startup a
-/// restart would only re-run backlog recovery to arrive back at the same step.
+/// (`Ok(None)`). No unservable escape, unlike [`retry_until_cancelled`]: at startup a
+/// restart would only re-run backlog recovery to arrive back at the same step. The
+/// dead-client class does escape (`Err`), since no in-place retry can revive a
+/// closed client and only the supervised restart rebuilds the connection.
 async fn retry_startup<T, F, Fut>(
     what: &'static str,
     cancel: &CancellationToken,
     mut attempt: F,
-) -> Option<T>
+) -> anyhow::Result<Option<T>>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     loop {
         let result = tokio::select! {
-            _ = cancel.cancelled() => return None,
+            _ = cancel.cancelled() => return Ok(None),
             result = attempt() => result,
         };
         match result {
-            Ok(value) => return Some(value),
+            Ok(value) => return Ok(Some(value)),
+            Err(err) if ReadFailure::of(&err) == Some(ReadFailure::ClientClosed) => {
+                return Err(err);
+            }
             Err(err) => tracing::warn!("midnight {what} failed: {err:#}; retrying"),
         }
         tokio::select! {
-            _ = cancel.cancelled() => return None,
+            _ = cancel.cancelled() => return Ok(None),
             _ = tokio::time::sleep(RETRY_DELAY) => {}
         }
     }
@@ -217,9 +229,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         {
             ContractState::Tree(tree) => Ok(Some(tree)),
             ContractState::Absent => Ok(None),
-            ContractState::Undecodable(err) => {
-                Err(err.context("the central contract's own state did not decode"))
-            }
+            ContractState::Undecodable(err) => Err(err.context(CENTRAL_STATE_UNDECODABLE)),
         }
     }
 
@@ -382,8 +392,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 // retries cannot be bounded per entry, so escalating would let one
                 // caller whose state cannot be served (`caller_address` is
                 // producer-supplied) halt the chain. Charged to the entry instead,
-                // the unservable answer included.
+                // the unservable answer included, but only once a head probe
+                // proves the node healthy: the node collapses transient faults
+                // into the same answer, and an ambient fault must hold, not drop.
                 Some(ReadFailure::Unservable) | None => {
+                    if let Err(probe_err) = source.finalized_head().await {
+                        return Err(err.context(format!(
+                            "caller state read failed and the head probe failed too \
+                             ({probe_err:#}): the fault is ambient, holding the block"
+                        )));
+                    }
                     return Ok(drop_entry_unattributed(
                         "caller-state-unreadable",
                         height,
@@ -461,6 +479,27 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Err(err) => match ReadFailure::of(&err) {
                     Some(ReadFailure::Unservable) => return Retried::Unservable(err),
                     Some(ReadFailure::ClientClosed) => return Retried::ClientClosed(err),
+                    // The central map only grows, so an oversized state is
+                    // permanent until the contract prunes or the node's cap rises.
+                    Some(ReadFailure::TooLarge) => {
+                        tracing::error!(
+                            reason = "central-state-too-large-hold",
+                            height = block.number,
+                            "midnight central contract state exceeds the rpc response \
+                             cap; holding until it is pruned or the cap is raised"
+                        );
+                        return Retried::Halted(err);
+                    }
+                    None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
+                        tracing::error!(
+                            reason = "central-state-undecodable-hold",
+                            height = block.number,
+                            "midnight central contract state does not decode with this \
+                             build's ledger crates; holding. If the chain upgraded, \
+                             upgrade mpc-node"
+                        );
+                        return Retried::Halted(err);
+                    }
                     _ => tracing::warn!(
                         reason = "retrying",
                         height = block.number,
@@ -492,7 +531,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Retried::Done(block) => block,
                 Retried::Cancelled => return Ok(Indexed::Cancelled),
                 Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                Retried::ClientClosed(err) => return Err(err),
+                Retried::ClientClosed(err) | Retried::Halted(err) => return Err(err),
             };
         self.index_block(source, cache, events_tx, &block, cancel)
             .await
@@ -518,7 +557,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
             Retried::Cancelled => Ok(Indexed::Cancelled),
             Retried::Unservable(err) => Err(note_unservable(err, block.number)),
-            Retried::ClientClosed(err) => Err(err),
+            Retried::ClientClosed(err) | Retried::Halted(err) => Err(err),
         }
     }
 
@@ -565,7 +604,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let Some(anchor) =
-            retry_startup("anchor sampling", &cancel, || source.finalized_head()).await
+            retry_startup("anchor sampling", &cancel, || source.finalized_head()).await?
         else {
             return Ok(());
         };
@@ -649,7 +688,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         let Some(source) = retry_startup("node connect", &cancel, || {
             LiveSource::connect(&self.config)
         })
-        .await
+        .await?
         else {
             return Ok(());
         };
@@ -717,7 +756,7 @@ mod tests {
         BlockRef {
             number,
             hash: hash_of(number),
-            parent_hash: hash_of(number - 1),
+            parent_hash: hash_of(number.saturating_sub(1)),
         }
     }
 
@@ -786,6 +825,9 @@ mod tests {
         /// `finalized_head` failures still owed before the read succeeds, the
         /// startup twin of `transient_state_errors`.
         transient_head_errors: std::sync::Mutex<usize>,
+        /// A permanent `finalized_head` failure (e.g. the dead-client marker),
+        /// checked before the transient debt.
+        sticky_head_error: Option<String>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         /// Deterministic suspension: the read named here announces itself on `reached`
         /// and then never resolves, so a test can cancel while a walk is PROVABLY
@@ -857,6 +899,9 @@ mod tests {
     #[async_trait]
     impl ChainSource for FixtureSource {
         async fn finalized_head(&self) -> anyhow::Result<BlockRef> {
+            if let Some(message) = &self.sticky_head_error {
+                anyhow::bail!("{message}");
+            }
             {
                 let mut owed = self
                     .transient_head_errors
@@ -1442,6 +1487,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_entry_holds_when_caller_read_and_node_probe_both_fail() {
+        // Charging `caller-state-unreadable` to an entry is only sound while the
+        // node is provably healthy: when even the head probe fails, the fault is
+        // ambient (node or transport), so the entry must abort the block into the
+        // lossless retry path rather than be destroyed.
+        let (_record, rid) = caller_record_and_rid();
+        let indexer = direct_indexer().await;
+        let entry = MapEntry {
+            key: signet_map_key(1, &rid),
+            value: notification_entry(1, &rid).1,
+        };
+
+        // Both persistent caller-read shapes that drop when the node is healthy:
+        // a generic fault and the unservable answer.
+        for unservable in [false, true] {
+            let mut source = FixtureSource::default();
+            if unservable {
+                source.set_unservable(&hex::encode(CALLER), 9);
+            } else {
+                source.state_errors.insert(
+                    (hex::encode(CALLER), hash_of(9)),
+                    "contract state read failed: connection reset by peer".to_string(),
+                );
+            }
+            source.transient_head_errors = std::sync::Mutex::new(usize::MAX);
+            let err = indexer
+                .process_entry(&source, &entry, &hash_of(9), 9, 0)
+                .await
+                .expect_err("an ambient fault must hold the block, never destroy the entry");
+            assert!(
+                format!("{err:#}").contains("probe"),
+                "the hold must name the failed probe: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn run_surfaces_a_dead_client_from_the_live_loop() {
         // A closed client fails every read until `run()` is rebuilt, so the
         // block-level retry must not spin on it: the error ends the run and the
@@ -1566,6 +1648,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_surfaces_a_dead_client_from_the_anchor_read() {
+        // `retry_startup` must not spin against a client that can never answer
+        // again: the dead-client class escapes so the supervised restart
+        // reconnects instead of the watchdog rescuing it minutes later.
+        let source = FixtureSource {
+            sticky_head_error: Some(ReadFailure::ClientClosed.marker().to_string()),
+            ..Default::default()
+        };
+        let harness = RunFixture::spawn(source, 8).await;
+        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
+            .await
+            .expect("run() returns promptly instead of retrying a dead client at startup")
+            .expect("run task panicked")
+            .expect_err("a dead client at the anchor read must surface for the reconnect");
+        assert_eq!(
+            ReadFailure::of(&err),
+            Some(ReadFailure::ClientClosed),
+            "err: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn run_retries_a_transient_anchor_read() {
         // A startup fault costs an in-place retry, never a supervised restart:
         // reaching CatchupCompleted proves the faulted sampling was re-attempted.
@@ -1621,6 +1725,82 @@ mod tests {
         assert!(
             err.to_string().contains("cannot serve contract state"),
             "err: {err}"
+        );
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_central_too_large_from_the_live_loop() {
+        // An oversized central state is permanent (the notification map only
+        // grows), so the block-level retry must not spin on it: the error ends
+        // the run and the supervised restart holds loudly.
+        let central = central_address();
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let mut source = FixtureSource {
+            head: 9,
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        source.set_state(&central, 8, central_state(vec![]));
+        source.set_state(&central, 9, central_state(vec![]));
+        source.state_errors.insert(
+            (central.clone(), hash_of(10)),
+            ReadFailure::TooLarge.marker().to_string(),
+        );
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(10)).await.expect("send live block");
+
+        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
+            .await
+            .expect("run() returns promptly instead of retrying an oversized state")
+            .expect("run task panicked")
+            .expect_err("an oversized central state must surface for the supervised hold");
+        assert_eq!(
+            ReadFailure::of(&err),
+            Some(ReadFailure::TooLarge),
+            "err: {err:#}"
+        );
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_central_undecodable_from_the_live_loop() {
+        // Bytes the ledger deserializer refuses on the CENTRAL contract mean this
+        // build can no longer read the chain (ledger drift): retrying cannot fix
+        // it, so the run must end with one loud error instead of a retry storm.
+        let central = central_address();
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let mut source = FixtureSource {
+            head: 9,
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        source.set_state(&central, 8, central_state(vec![]));
+        source.set_state(&central, 9, central_state(vec![]));
+        source.set_undecodable(&central, 10);
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert_block(&harness.next_event().await, 9);
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(10)).await.expect("send live block");
+
+        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
+            .await
+            .expect("run() returns promptly instead of retrying an undecodable state")
+            .expect("run task panicked")
+            .expect_err("an undecodable central state must surface for the supervised hold");
+        assert!(
+            err.to_string().contains("did not decode"),
+            "the hold must name the decode failure: {err:#}"
         );
         drop(live_tx);
     }
