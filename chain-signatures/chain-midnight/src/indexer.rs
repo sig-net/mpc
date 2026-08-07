@@ -1772,6 +1772,11 @@ mod tests {
             fn request_indexed(&self) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
+            fn bidirectional_extraction_failed(
+                &self,
+                _kind: mpc_chain_integration_core::ExtractionFailureKind,
+            ) {
+            }
         }
 
         let (record, rid) = caller_record_and_rid();

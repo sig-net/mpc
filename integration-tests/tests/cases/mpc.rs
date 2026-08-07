@@ -1352,9 +1352,11 @@ async fn test_non_participants_pause_posits() {
         "expected AlreadyGenerating to be sent to node 2, but count was {count}"
     );
 
-    // Node 2 still hasn't seen the signature. Wait until it proposes again.
-    // After the pause, node 2 may need up to (num_nodes+1) more rounds to get
-    // its turn as proposer. Each round lasts ORGANIZE_POSIT_TIMEOUT.
+    // Node 2 still hasn't seen the signature. Wait until it proposes again:
+    // one generation timeout for the pause to lapse, plus a few rounds for
+    // node 2's turn in the rotation. Generous rather than exact — a round can
+    // outlast ORGANIZE_POSIT_TIMEOUT if it blocks on the mesh gate or reaches
+    // Generating.
     let organize_timeout = mpc_node::protocol::request::organize_posit_timeout();
     let second_wait = Duration::from_millis(signature_timeout_ms) + 4 * organize_timeout;
     tokio::time::timeout(second_wait, async {

@@ -181,7 +181,6 @@ async fn test_channel_contention_multiple_blocks_at_once_delayed() {
 /// different rounds, proposals then arrive as future-round messages and are
 /// buffered instead of accepted, accepts never reach `threshold`, and the
 /// request never settles.
-#[ignore = "fails until proposer election stops reading the local active set; un-ignore together with that change"]
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_divergent_active_views_still_converge() {
     let num_nodes = 5;

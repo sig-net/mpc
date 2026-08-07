@@ -6,7 +6,10 @@ use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
 use alloy::rpc::types::{Block, Log};
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
+use mpc_chain_integration_core::{
+    ChainTelemetry, ExtractionFailureKind, MockStateManager, NoopChainTelemetry,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -123,6 +126,46 @@ pub struct WatcherHarness {
     pub state_manager: MockStateManager,
     pub config: IndexerConfig,
     gate: Mutex<WatcherGateState>,
+    pub telemetry: CountingChainTelemetry,
+}
+
+/// `ChainTelemetry` that counts bidirectional extraction failures by kind, so
+/// tests can assert how a failure was classified.
+#[derive(Clone, Default)]
+pub struct CountingChainTelemetry {
+    counts: Arc<ExtractionFailureCounts>,
+}
+
+#[derive(Default)]
+struct ExtractionFailureCounts {
+    retryable: AtomicUsize,
+    terminal: AtomicUsize,
+}
+
+impl CountingChainTelemetry {
+    pub fn retryable_failures(&self) -> usize {
+        self.counts.retryable.load(Ordering::Relaxed)
+    }
+
+    pub fn terminal_failures(&self) -> usize {
+        self.counts.terminal.load(Ordering::Relaxed)
+    }
+}
+
+impl ChainTelemetry for CountingChainTelemetry {
+    fn block_indexed(&self, _block_number: u64) {}
+    fn block_finalized(&self, _block_number: u64) {}
+    fn checkpoint_created(&self, _block_number: u64) {}
+    fn request_indexed_at(&self, _block_timestamp: u64) {}
+    fn request_indexed(&self) {}
+
+    fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {
+        let counter = match kind {
+            ExtractionFailureKind::Retryable => &self.counts.retryable,
+            ExtractionFailureKind::Terminal => &self.counts.terminal,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl WatcherHarness {
@@ -134,16 +177,18 @@ impl WatcherHarness {
             state_manager: MockStateManager::new(),
             config: IndexerConfig::default(),
             gate: Mutex::new(WatcherGateState::default()),
+            telemetry: CountingChainTelemetry::default(),
         }
     }
 
     /// Construct an [`ExecutionWatcher`] borrowing this harness's dependencies.
-    pub fn watcher(&self) -> ExecutionWatcher<'_, MockStateManager> {
+    pub fn watcher(&self) -> ExecutionWatcher<'_, MockStateManager, CountingChainTelemetry> {
         ExecutionWatcher::new(
             self.client.as_ref(),
             &self.state_manager,
             &self.config,
             &self.gate,
+            &self.telemetry,
         )
     }
 }
@@ -184,18 +229,6 @@ pub fn block_response(request_id: u64, number: u64) -> serde_json::Value {
             "transactions": []
         }
     })
-}
-
-/// Build a deserialized `Block` for a given block `number`, suitable for
-/// feeding directly into `process_catchup` / `process` as `CatchupItem::LiveBlock`.
-/// The hash is `0x{number:064x}` and the timestamp is `0x1`.
-pub fn live_block(number: u64) -> CatchupItem {
-    let value = block_response(1, number)
-        .get("result")
-        .expect("block_response has a result envelope")
-        .clone();
-    let block: Block = serde_json::from_value(value).expect("block fixture should deserialize");
-    CatchupItem::LiveBlock(block)
 }
 
 pub fn batch_block(number: u64, logs: Vec<Log>) -> CatchupItem {
