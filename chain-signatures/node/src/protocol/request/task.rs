@@ -163,6 +163,8 @@ pub struct SignTask {
     pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     pub is_proposer: Arc<AtomicBool>,
+    /// Posit round, shared with `SignEntry` so it survives a respawn.
+    pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,
     pub node_account_id: near_account_id::AccountId,
 }
@@ -178,7 +180,7 @@ impl SignTask {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(request, mesh_state);
+        let mut state = SignState::new(request, mesh_state, Arc::clone(&self.round));
         let mut phase = SignPhase::Organizing(OrganizingPhase);
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
