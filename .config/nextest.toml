@@ -1,10 +1,16 @@
 [test-groups]
 cluster = { max-threads = "num-cpus" }
 fixture = { max-threads = "num-cpus" }
+canton = { max-threads = 2 } # Limit to 2 threads because the Canton sandbox is resource-intensive
 
 [[profile.default.overrides]]
 filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
 test-group = 'fixture'
+
+# Routes both cases::canton (e2e) and cases::canton_stream to the capped group.
+[[profile.default.overrides]]
+filter = 'test(cases::canton)'
+test-group = 'canton'
 
 [[profile.default.overrides]]
 filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'

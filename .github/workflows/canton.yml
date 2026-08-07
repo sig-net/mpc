@@ -90,8 +90,11 @@ jobs:
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run Canton stream tests
-        run: cargo test -p integration-tests --test lib -- canton_stream --ignored --nocapture --test-threads 1
+        run: cargo nextest run -p integration-tests --test lib canton_stream --run-ignored all
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
@@ -172,8 +175,11 @@ jobs:
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run Canton E2E tests
-        run: cargo test -p integration-tests --test lib -- cases::canton --ignored --nocapture --test-threads 1
+        run: cargo nextest run -p integration-tests --test lib 'cases::canton::' --run-ignored all
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

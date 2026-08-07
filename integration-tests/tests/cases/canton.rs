@@ -20,7 +20,6 @@ use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
-use serial_test::serial;
 use std::time::Duration;
 use test_log::test;
 
@@ -46,7 +45,6 @@ fn encode_signed_eip1559(
 }
 
 #[ignore] // requires dpm + Docker (for Ethereum)
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     for case in test_evm_type2_anvil_cases() {
@@ -238,7 +236,6 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 // auth implementation tests. They verify the sandbox is actually enforcing the
 // OAuth bearer token signing configuration that the MPC integration relies on.
 #[ignore] // requires dpm
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
     let sandbox = integration_tests::canton::CantonSandbox::run().await?;
@@ -268,7 +265,6 @@ async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
 }
 
 #[ignore] // requires dpm
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_rejects_token_signed_by_untrusted_jwks_key() -> Result<()> {
     let sandbox = integration_tests::canton::CantonSandbox::run().await?;

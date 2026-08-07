@@ -82,7 +82,6 @@ mpc-primitives.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
-serial_test = "3"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]

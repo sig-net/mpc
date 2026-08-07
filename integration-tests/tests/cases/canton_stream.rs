@@ -14,7 +14,6 @@ use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
 use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
-use serial_test::serial;
 use std::collections::HashSet;
 use std::time::Duration;
 use test_log::test;
@@ -53,7 +52,6 @@ async fn wait_for_sign_request(
 }
 
 #[ignore] // requires dpm
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
@@ -102,7 +100,6 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 }
 
 #[ignore]
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_emits_blocks() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
@@ -133,7 +130,6 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
 }
 
 #[ignore]
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_concurrent_events() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
@@ -169,7 +165,6 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
 }
 
 #[ignore]
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_catchup_linear() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
@@ -228,7 +223,6 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
 }
 
 #[ignore]
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
     // Use interval=1 so every block produces a checkpoint. Canton generates
@@ -357,7 +351,6 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 }
 
 #[ignore]
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
@@ -436,7 +429,6 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
 /// Mirrors Solana's test_solana_stream_parse_sign_bidirectional — Canton always
 /// submits SignBidirectional, but we assert the structured inner fields here.
 #[ignore] // requires dpm
-#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
