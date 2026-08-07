@@ -2,12 +2,10 @@
 name = "mpc-utils"
 version.workspace = true
 edition = "2021"
-description = "Generic shared utilities (time, task, retry) for the MPC workspace."
+description = "Generic shared utilities (time, task) for the MPC workspace."
 
 [dependencies]
 anyhow.workspace = true
-backon.workspace = true
-rand.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

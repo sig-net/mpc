@@ -16,7 +16,6 @@ futures-util.workspace = true
 k256.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
-mpc-utils.workspace = true
 rand.workspace = true
 tracing.workspace = true
 tokio.workspace = true

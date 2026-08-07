@@ -7951,7 +7951,6 @@ dependencies = [
  "k256",
  "mpc-crypto",
  "mpc-primitives",
- "mpc-utils",
  "rand 0.8.5",
  "tokio",
  "tokio-util",
@@ -8170,8 +8169,6 @@ name = "mpc-utils"
 version = "1.16.8"
 dependencies = [
  "anyhow",
- "backon",
- "rand 0.8.5",
  "tokio",
  "tokio-util",
  "tracing",
