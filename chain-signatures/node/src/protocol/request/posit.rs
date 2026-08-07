@@ -687,4 +687,45 @@ mod tests {
         assert_eq!(stale_round, Some(5));
     }
 
+    /// The receive side inside `advance()`: a behind proposer harvests the
+    /// round carried by a StaleRound reject without answering it (even one
+    /// echoing an older round), then reorganizes straight to that round on
+    /// its deadline.
+    #[tokio::test]
+    async fn advance_harvests_rejectors_round() {
+        let proposer = Participant::from(0);
+        let rejector = Participant::from(1);
+        // Threshold 2 keeps the proposer's own accept from starting generation.
+        let mut t = setup(proposer, rejector, 2);
+
+        // We propose at round 3; a reject echoing our earlier round 2 arrives,
+        // carrying the rejector's round 5. Short budget so the loop exits via
+        // its deadline.
+        t.state.set_round(3);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 2,
+            from: rejector,
+            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+            stale_round: Some(5),
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, rejector].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        assert_eq!(t.state.round(), 5, "must catch up in one bump");
+        assert!(
+            t.outbox.intercept_outgoing_messages().try_recv().is_err(),
+            "a reject must never be answered"
+        );
+    }
 }
