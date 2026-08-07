@@ -129,8 +129,6 @@ impl Default for PublisherConfig {
 pub struct IndexerConfig {
     /// Blocks per catchup batch (`eth_getBlockByNumber` JSON-RPC batch)
     pub catchup_block_batch_size: u64,
-    /// Capacity of the live-block channel
-    pub live_block_buffer: usize,
     /// Consecutive `get_block(Finalized)` failures after which the finalized-head
     /// watcher escalates its retry warning (it never gives up)
     pub max_finalized_failures: u32,
@@ -147,7 +145,6 @@ impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
             catchup_block_batch_size: 32,
-            live_block_buffer: 16384,
             max_finalized_failures: 20,
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
