@@ -23,9 +23,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-signer-v1-0.0.1.dar";
 const DEFAULT_FEE_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-fee-amulet-0.0.1.dar";
+
+/// Reserve an ephemeral port from the OS
+fn reserve_free_port() -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
 
 /// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
 const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
@@ -182,6 +189,8 @@ pub fn test_sign_request_event(
 pub struct CantonSandbox {
     process: Child,
     auth_conf_path: PathBuf,
+    json_api_port: u16,
+    ledger_api_port: u16,
     oidc_provider: OidcTestProvider,
     pub json_api_url: String,
     pub json_api_ws_url: String,
@@ -206,24 +215,10 @@ pub struct CantonSandbox {
 
 impl CantonSandbox {
     pub async fn run() -> Result<Self> {
-        // Ensure Canton ports are free (previous sandbox may still be shutting down).
-        for port in [CANTON_JSON_API_PORT, 6868] {
-            for _ in 0..40 {
-                if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            anyhow::ensure!(
-                tokio::net::TcpStream::connect(("127.0.0.1", port))
-                    .await
-                    .is_err(),
-                "port {port} still in use — previous Canton did not exit"
-            );
-        }
+        // Reserve ephemeral ports for the sandbox's JSON-API and ledger-API so multiple
+        // sandboxes can run concurrently.
+        let json_api_port = reserve_free_port().context("reserving JSON-API port")?;
+        let ledger_api_port = reserve_free_port().context("reserving ledger-API port")?;
 
         // Two DARs: signer (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
@@ -277,6 +272,7 @@ canton.participants.sandbox.alpha-dynamic {{
   ]
 }}
 canton.participants.sandbox.ledger-api {{
+  port = {ledger_api_port}
   auth-services = [
     {{ type = jwt-jwks, url = "{}", target-audience = "{}" }}
   ]
@@ -294,14 +290,14 @@ canton.participants.sandbox.ledger-api {{
         let process = Command::new("dpm")
             .arg("sandbox")
             .arg("--json-api-port")
-            .arg(CANTON_JSON_API_PORT.to_string())
+            .arg(json_api_port.to_string())
             .arg("-c")
             .arg(&auth_conf_path)
             .spawn()
             .context("failed to start dpm sandbox")?;
 
-        let base_url = format!("http://127.0.0.1:{CANTON_JSON_API_PORT}");
-        let ws_url = format!("ws://127.0.0.1:{CANTON_JSON_API_PORT}");
+        let base_url = format!("http://127.0.0.1:{json_api_port}");
+        let ws_url = format!("ws://127.0.0.1:{json_api_port}");
 
         // Wait for synchronizer readiness (covers HTTP not up + auth loading + synchronizer).
         let admin_client = CantonTestClient::new(canton_test_client_config(
@@ -510,6 +506,8 @@ canton.participants.sandbox.ledger-api {{
         Ok(CantonSandbox {
             process,
             auth_conf_path,
+            json_api_port,
+            ledger_api_port,
             oidc_provider,
             json_api_url: base_url,
             json_api_ws_url: ws_url,
@@ -637,7 +635,7 @@ impl Drop for CantonSandbox {
             .args(["-9", "-f", &conf])
             .output();
         // Wait for ports to be released.
-        for port in [CANTON_JSON_API_PORT, 6868] {
+        for port in [self.json_api_port, self.ledger_api_port] {
             for _ in 0..40 {
                 if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
                     break;
