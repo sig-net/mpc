@@ -1,6 +1,3 @@
-use mpc_chain_integration_core::utils::{stream::chain_event_channel, task::retry_until_ok};
-use mpc_chain_integration_core::NoopPublisherTelemetry;
-
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
 use std::str::FromStr;
@@ -20,15 +17,19 @@ use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
     utils::{
         hashing::{compute_request_id, hash_payload},
-        task::AbortOnDrop,
+        stream::chain_event_channel,
     },
-    ChainIndexer, ChainTelemetry, StateManager,
+    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
+};
+use mpc_utils::{
+    current_unix_timestamp,
+    task::{retry_until_ok, AbortOnDrop},
 };
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
@@ -48,7 +49,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::SolanaCatchupBlock;
-use crate::utils::current_unix_timestamp;
 use crate::{SolConfig, SolanaClient};
 
 const CPI_EVENT_HINTS: &[&str] = &[

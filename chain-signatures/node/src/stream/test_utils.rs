@@ -7,7 +7,6 @@ use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{supervisor::run_supervised, StreamContext};
-use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
@@ -18,6 +17,7 @@ use mpc_primitives::{
     RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     Signature, SignatureRespondedEvent,
 };
+use mpc_utils::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use tokio::sync::{mpsc, watch};
 

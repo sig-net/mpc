@@ -6526,6 +6526,7 @@ dependencies = [
  "mpc-keys",
  "mpc-node",
  "mpc-primitives",
+ "mpc-utils",
  "near-account-id",
  "near-crypto",
  "near-fetch",
@@ -7895,6 +7896,7 @@ dependencies = [
  "mpc-chain-integration-core",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-utils",
  "oauth2",
  "reqwest 0.11.27",
  "serde",
@@ -7925,6 +7927,7 @@ dependencies = [
  "mpc-chain-integration-core",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-utils",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -7948,6 +7951,7 @@ dependencies = [
  "k256",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-utils",
  "rand 0.8.5",
  "tokio",
  "tokio-util",
@@ -7966,6 +7970,7 @@ dependencies = [
  "mpc-chain-integration-core",
  "mpc-contract",
  "mpc-primitives",
+ "mpc-utils",
  "near-account-id",
  "near-crypto",
  "near-fetch",
@@ -7991,6 +7996,7 @@ dependencies = [
  "mpc-chain-integration-core",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-utils",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -8103,6 +8109,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-primitives",
+ "mpc-utils",
  "near-account-id",
  "near-crypto",
  "near-fetch",
@@ -8156,6 +8163,18 @@ dependencies = [
  "serde_bytes",
  "sha3 0.10.8",
  "signet-primitives",
+]
+
+[[package]]
+name = "mpc-utils"
+version = "1.16.8"
+dependencies = [
+ "anyhow",
+ "backon",
+ "rand 0.8.5",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

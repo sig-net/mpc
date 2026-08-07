@@ -7,17 +7,9 @@ use crate::daml::{
 use crate::ledger_api;
 use crate::signing::{parse_canton_signature, CantonSignBidirectionalRequestedEvent};
 use mpc_primitives::{Chain, ChainEvent, RespondBidirectionalEvent, SignatureRespondedEvent};
+use mpc_utils::current_unix_timestamp;
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-
-// TODO: this is a duplicate of the same function in `mpc-node`, consider moving to shared crate like `mpc-utils` or something.
-pub fn current_unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
-}
 
 /// Process a single Canton event from a WebSocket transaction update.
 ///

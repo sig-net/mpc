@@ -4,5 +4,4 @@
 pub mod hashing;
 pub mod retry;
 pub mod stream;
-pub mod task;
 pub mod test;

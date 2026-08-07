@@ -8,7 +8,6 @@ use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
     test_rpc_channel, test_sign_args,
 };
-use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
@@ -16,6 +15,7 @@ use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
 };
+use mpc_utils::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

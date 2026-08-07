@@ -6,6 +6,7 @@ use mpc_primitives::{
     BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
+use mpc_utils::current_unix_timestamp;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -112,7 +113,7 @@ impl CompletedTx {
                 key_version: self.tx.key_version,
             },
             chain,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,

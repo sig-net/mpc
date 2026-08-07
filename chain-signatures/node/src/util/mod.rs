@@ -76,13 +76,6 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     }
 }
 
-pub fn current_unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
-}
-
 /// Calculate elapsed time from a unix timestamp to now
 pub fn unix_elapsed(unix_timestamp: u64) -> Duration {
     let now = SystemTime::now()

@@ -79,6 +79,7 @@ mpc-node = { path = "../chain-signatures/node", default-features = false, featur
     "debug-page",
 ] }
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
