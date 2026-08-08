@@ -12,8 +12,6 @@ use crate::stream::test_utils::{
     test_bidirectional_tx, test_canton_sign_bidirectional_request, test_indexed_request,
     test_sign_args,
 };
-use crate::util::current_unix_timestamp;
-
 use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
@@ -22,6 +20,7 @@ use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
     ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
 };
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
