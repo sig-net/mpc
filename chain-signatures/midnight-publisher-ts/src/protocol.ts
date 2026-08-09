@@ -67,40 +67,33 @@ function toBadRequest(error: z.ZodError): PublisherError {
   return new PublisherError("bad_request", `invalid request: ${path.length === 0 ? "" : `\`${path}\` `}${issue.message}`);
 }
 
-function parseBuild(body: Record<string, unknown>): BuildRequest {
-  const parsed = BuildSchema.safeParse(body);
-  if (!parsed.success) throw toBadRequest(parsed.error);
-  return parsed.data;
-}
-
-function parseSubmit(body: Record<string, unknown>): SubmitRequest {
-  const parsed = SubmitSchema.safeParse(body);
-  if (!parsed.success) throw toBadRequest(parsed.error);
-  return parsed.data;
-}
-
-// Read before either schema, so an unknown operation is named rather than a missing `circuit`.
-function readOp(body: Record<string, unknown>): "build" | "submit" {
-  const op = body["op"];
-  if (op === undefined || op === "build") return "build";
-  if (op === "submit") return "submit";
-  throw new PublisherError("bad_request", `invalid request: \`op\` ${MUST_BE_AN_OP}`);
-}
-
 function readId(body: Record<string, unknown>): number | null {
   const id = body["id"];
   return typeof id === "number" && Number.isSafeInteger(id) ? id : null;
 }
 
+// Absent `op` is `build`: the request predates the discriminator and the Rust client
+// sends none. An unknown op hits `default` before either schema can blame a missing field.
 async function answer(config: Config, body: Record<string, unknown>): Promise<Response> {
-  if (readOp(body) === "submit") {
-    const request = parseSubmit(body);
-    const landed = await handleSubmit(config, request.id, Buffer.from(request.intent, "hex"));
-    return { id: request.id, ok: true, txId: landed.txId, blockHash: landed.blockHash };
+  switch (body["op"]) {
+    case undefined:
+    case "build": {
+      const parsed = BuildSchema.safeParse(body);
+      if (!parsed.success) throw toBadRequest(parsed.error);
+      const request: BuildRequest = parsed.data;
+      const intent = await buildIntent(config.managedDir, request);
+      return { id: request.id, ok: true, intent: Buffer.from(intent).toString("hex") };
+    }
+    case "submit": {
+      const parsed = SubmitSchema.safeParse(body);
+      if (!parsed.success) throw toBadRequest(parsed.error);
+      const request: SubmitRequest = parsed.data;
+      const landed = await handleSubmit(config, request.id, Buffer.from(request.intent, "hex"));
+      return { id: request.id, ok: true, txId: landed.txId, blockHash: landed.blockHash };
+    }
+    default:
+      throw new PublisherError("bad_request", `invalid request: \`op\` ${MUST_BE_AN_OP}`);
   }
-  const request = parseBuild(body);
-  const intent = await buildIntent(config.managedDir, request);
-  return { id: request.id, ok: true, intent: Buffer.from(intent).toString("hex") };
 }
 
 /** Answers one request line with one reply line; never throws and never writes stdout. */
