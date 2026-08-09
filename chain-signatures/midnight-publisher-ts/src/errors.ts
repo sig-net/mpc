@@ -5,9 +5,6 @@ export type ErrorCode =
   | "wallet_unsynced"
   | "wallet_busy"
   | "wallet_unfunded"
-  | "balance_failed"
-  | "prove_failed"
-  | "submit_rejected"
   | "state_conflict"
   | "internal";
 

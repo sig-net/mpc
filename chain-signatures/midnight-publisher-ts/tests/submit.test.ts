@@ -206,21 +206,6 @@ describe("handleSubmit: the flow", () => {
     expect(refusal.message).toContain("MIDNIGHT_PUB_NODE_URL");
   });
 
-  it("keeps the three spending steps apart, so a failure names the one that failed", async () => {
-    const steps: [Edges, string][] = [
-      [{ proveTx: failing("prove", "proof server refused") }, "prove_failed"],
-      [{ balanceTx: failing("balance", "dust actions rejected") }, "balance_failed"],
-      [{ finalizeTx: failing("finalize", "proof server refused the balancing") }, "prove_failed"],
-      [{ submitTx: failing("submit", "transaction rejected") as Edges["submitTx"] }, "submit_rejected"],
-    ];
-
-    for (const [edges, code] of steps) {
-      await closePublisher();
-      primeStub(edges);
-      expect((await refused(5)).code, code).toBe(code);
-    }
-  });
-
   it("refines a dust shortfall into wallet_unfunded, which means back off rather than retry", async () => {
     // The wallet SDK raises the tagged error and the balancer raises the sentence.
     for (const spelling of ["Wallet.InsufficientFunds", "could not balance dust"]) {
@@ -306,7 +291,7 @@ describe("handleSubmit: the busy gate", () => {
 
   it("does not let a refused submit leave the gate claimed", async () => {
     primeStub({ submitTx: failing("submit", "transaction rejected") as Edges["submitTx"] });
-    expect((await refused(1)).code).toBe("submit_rejected");
+    expect((await refused(1)).code).toBe("internal");
 
     await closePublisher();
     primeStub();

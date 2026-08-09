@@ -91,39 +91,30 @@ export async function closePublisher(): Promise<void> {
   await pending.then((ready) => ready.wallet.close()).catch(() => undefined);
 }
 
-type Refinement = readonly [pattern: string, code: ErrorCode];
-
-// Either spelling means back off, not that the request was wrong.
-const DUST_SHORTFALL: readonly Refinement[] = [
+// The only place this process matches on dependency error text; both wallet_unfunded
+// spellings mean back off, ReadMismatch means rebuild against fresh state.
+const REFINEMENTS: readonly (readonly [pattern: string, code: ErrorCode])[] = [
   ["Wallet.InsufficientFunds", "wallet_unfunded"],
   ["could not balance dust", "wallet_unfunded"],
+  ["ReadMismatch", "state_conflict"],
 ];
 
-const LOST_THE_RACE: readonly Refinement[] = [["ReadMismatch", "state_conflict"]];
-
-// The refinements are the only place this process matches on dependency error text.
-async function step<T>(code: ErrorCode, run: () => Promise<T>, refine: readonly Refinement[] = []): Promise<T> {
+async function post(config: Config, intent: UnprovenIntent): Promise<Landed> {
   try {
-    return await run();
+    const ready = await publisher(config);
+    // No Zswap offer: a respond moves no coins, the wallet adds the fee inputs next.
+    const proven = await ready.proveTx(Transaction.fromParts(config.networkId, undefined, undefined, intent));
+    const recipe = await ready.wallet.balanceTx(proven);
+    const finalized = await ready.wallet.finalizeTx(recipe);
+    return await ready.wallet.submitTx(finalized);
   } catch (error) {
     if (error instanceof PublisherError) throw error;
     const described = describeFailure(error);
     // Matched against a wider haystack than the answered message: Effect hides the real
     // cause on a Symbol that only `String` renders.
-    const sharpened = refine.find(([pattern]) => `${described}\n${String(error)}`.includes(pattern))?.[1];
-    throw new PublisherError(sharpened ?? code, described, { cause: error });
+    const code = REFINEMENTS.find(([pattern]) => `${described}\n${String(error)}`.includes(pattern))?.[1];
+    throw new PublisherError(code ?? "internal", described, { cause: error });
   }
-}
-
-async function post(config: Config, intent: UnprovenIntent): Promise<Landed> {
-  const ready = await step("wallet_unsynced", () => publisher(config));
-  // No Zswap offer: a respond moves no coins, the wallet adds the fee inputs next.
-  const proven = await step("prove_failed", () =>
-    ready.proveTx(Transaction.fromParts(config.networkId, undefined, undefined, intent)),
-  );
-  const recipe = await step("balance_failed", () => ready.wallet.balanceTx(proven), DUST_SHORTFALL);
-  const finalized = await step("prove_failed", () => ready.wallet.finalizeTx(recipe), DUST_SHORTFALL);
-  return step("submit_rejected", () => ready.wallet.submitTx(finalized), LOST_THE_RACE);
 }
 
 let inFlightId: number | undefined;
