@@ -24,7 +24,7 @@ export interface Landed {
 }
 
 export interface FundingWallet {
-  balanceTx(tx: UnboundTransaction, ttl?: Date): Promise<BalancingRecipe>;
+  balanceTx(tx: UnboundTransaction): Promise<BalancingRecipe>;
   finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTransaction>;
   submitTx(tx: FinalizedTransaction): Promise<Landed>;
   close(): Promise<void>;
@@ -44,21 +44,11 @@ export function parseFundingSeed(seed: string): Uint8Array {
   throw new Error("MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted");
 }
 
-export function deriveFundingKeys(seed: string, networkId: string): AccountKeys {
+function deriveFundingKeys(seed: string, networkId: string): AccountKeys {
   // Not redundant: `deriveAccountKeys` also accepts a BIP-39 mnemonic and PBKDF2s it
   // into a different, unfunded wallet.
   parseFundingSeed(seed);
   return deriveAccountKeys(seed, networkId);
-}
-
-export function nodeConfig(networkId: string, endpoints: Endpoints): MidnightNodeConfig {
-  return {
-    indexerUrl: endpoints.indexerUrl,
-    indexerWsUrl: endpoints.indexerWsUrl,
-    nodeUrl: endpoints.nodeUrl,
-    proofServerUrl: endpoints.proofServerUrl,
-    networkId,
-  };
 }
 
 async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
@@ -68,10 +58,10 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
   await facade.waitForSyncedState();
 
   return {
-    async balanceTx(tx, ttl) {
+    async balanceTx(tx) {
       const secretKeys = { shieldedSecretKeys: keys.shieldedSecretKeys, dustSecretKey: keys.dustSecretKey };
       const recipe = await facade.balanceUnboundTransaction(tx, secretKeys, {
-        ttl: ttl ?? new Date(Date.now() + RECIPE_TTL_MS),
+        ttl: new Date(Date.now() + RECIPE_TTL_MS),
       });
       return facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
     },
@@ -97,5 +87,11 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
 }
 
 export async function openFundingWallet(networkId: string, endpoints: Endpoints): Promise<FundingWallet> {
-  return openFacade(deriveFundingKeys(fundingSeed(), networkId), nodeConfig(networkId, endpoints));
+  return openFacade(deriveFundingKeys(fundingSeed(), networkId), {
+    indexerUrl: endpoints.indexerUrl,
+    indexerWsUrl: endpoints.indexerWsUrl,
+    nodeUrl: endpoints.nodeUrl,
+    proofServerUrl: endpoints.proofServerUrl,
+    networkId,
+  });
 }

@@ -10,20 +10,13 @@ import { openFundingWallet, type FundingWallet, type Landed } from "./wallet.js"
 
 // The Rust half writes these bytes with its own ledger crate; the tag is where a version split surfaces.
 const INTENT_TAG = "midnight:intent[v9]";
-const INTENT_TAG_FAMILY = "midnight:intent[v";
 
 const TAG_WINDOW = 64;
 
 export function decodeIntent(bytes: Uint8Array): UnprovenIntent {
   const head = Buffer.from(bytes.subarray(0, TAG_WINDOW)).toString("latin1");
   if (!head.includes(INTENT_TAG)) {
-    throw head.includes(INTENT_TAG_FAMILY)
-      ? new PublisherError(
-          "ledger_mismatch",
-          `\`intent\` is not a ${INTENT_TAG} blob (leading bytes: ${JSON.stringify(head.slice(0, 32))}); ` +
-            `the caller serialized it with a different ledger than this build links`,
-        )
-      : new PublisherError("bad_request", `invalid request: \`intent\` is not a ${INTENT_TAG} blob`);
+    throw new PublisherError("bad_request", `invalid request: \`intent\` is not a ${INTENT_TAG} blob`);
   }
 
   try {
@@ -119,18 +112,6 @@ async function post(config: Config, intent: UnprovenIntent): Promise<Landed> {
 
 let inFlightId: number | undefined;
 
-// Nothing below is cancellable, so a submit past its deadline keeps spending; the
-// caller has to learn its post may land anyway.
-class DeadlineExceeded extends PublisherError {
-  constructor(id: number) {
-    super(
-      "internal",
-      `submit exceeded the ${SUBMIT_TIMEOUT.ms} ms deadline; if it had reached submit the transaction ` +
-        `may still land, so check the chain for request ${id} before retrying`,
-    );
-  }
-}
-
 /**
  * One at a time: the wallet has a single dust UTXO, so a second concurrent submit could
  * only burn a prove and fail at balance ~35s later.
@@ -154,5 +135,16 @@ export async function handleSubmit(config: Config, id: number, intent: Uint8Arra
   };
   void work.then(release, release);
 
-  return withDeadline(work, SUBMIT_TIMEOUT.ms, () => new DeadlineExceeded(id));
+  // Nothing below the wallet is cancellable, so a submit past its deadline keeps
+  // spending; the caller has to learn its post may land anyway.
+  return withDeadline(
+    work,
+    SUBMIT_TIMEOUT.ms,
+    () =>
+      new PublisherError(
+        "internal",
+        `submit exceeded the ${SUBMIT_TIMEOUT.ms} ms deadline; if it had reached submit the transaction ` +
+          `may still land, so check the chain for request ${id} before retrying`,
+      ),
+  );
 }

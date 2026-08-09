@@ -49,13 +49,14 @@ const respondInput = (overrides: Partial<BuildIntentInput> = {}): BuildIntentInp
 });
 
 describe("buildIntent", () => {
-  it("carries exactly one respond call for the address it was asked about", async () => {
+  it("carries exactly one tagged respond call for the address it was asked about", async () => {
     const bytes = await buildIntent(managedDir(), respondInput());
 
     const intent = decodeIntent(bytes);
     expect(intent.actions).toHaveLength(1);
     expect(String(intent.actions[0])).toContain(SINGLETON);
     expect(calledEntryPoint(bytes)).toBe("respond");
+    expect(Buffer.from(bytes.slice(0, 20)).toString("utf8")).toContain("midnight:intent[v9]");
   });
 
   it("puts the signature in the call in the order the contract declared it", async () => {
@@ -105,12 +106,6 @@ describe("buildIntent", () => {
   it("is NOT byte-deterministic, because the communication commitment is sampled", async () => {
     const input = respondInput();
     expect(await buildIntent(managedDir(), input)).not.toEqual(await buildIntent(managedDir(), input));
-  });
-
-  it("produces bytes the ledger's own tagged reader accepts", async () => {
-    const bytes = await buildIntent(managedDir(), respondInput());
-
-    expect(Buffer.from(bytes.slice(0, 20)).toString("utf8")).toContain("midnight:intent[v9]");
   });
 });
 

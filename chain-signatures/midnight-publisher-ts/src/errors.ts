@@ -1,7 +1,6 @@
 export type ErrorCode =
   | "bad_request"
   | "contract_mismatch"
-  | "ledger_mismatch"
   | "wallet_unsynced"
   | "wallet_busy"
   | "wallet_unfunded"

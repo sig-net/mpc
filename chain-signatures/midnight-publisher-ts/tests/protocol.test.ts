@@ -9,9 +9,17 @@ import { LedgerParameters } from "@midnightntwrk/ledger-v9";
 import { ContractState } from "@midnight-ntwrk/compact-runtime";
 
 import { handleLine } from "../src/protocol.js";
-import { closePublisher, primePublisher, type Publisher } from "../src/submit.js";
-import type { FundingWallet } from "../src/wallet.js";
-import { calledEntryPoint, initialSingletonStateHex, pushedCallArgs, testConfig, toHex } from "./support.js";
+import { closePublisher } from "../src/submit.js";
+import {
+  calledEntryPoint,
+  initialSingletonStateHex,
+  primeStub,
+  pushedCallArgs,
+  STUB_BLOCK_HASH,
+  STUB_TX_ID,
+  testConfig,
+  toHex,
+} from "./support.js";
 
 const CONFIG = testConfig();
 
@@ -40,43 +48,21 @@ const request = (overrides: Record<string, unknown> = {}): string =>
 
 const answer = async (line: string) => JSON.parse(await handleLine(CONFIG, line));
 
-const TX_ID = "ab".repeat(32);
-const BLOCK_HASH = "cd".repeat(32);
-
-function primeStub(): void {
-  primePublisher(
-    Promise.resolve({
-      proveTx: async (tx: unknown) => tx,
-      wallet: {
-        balanceTx: async (tx: unknown) => tx,
-        finalizeTx: async (recipe: unknown) => recipe,
-        submitTx: async () => ({ txId: TX_ID, blockHash: BLOCK_HASH }),
-        close: async () => undefined,
-      } as unknown as FundingWallet,
-    } as unknown as Publisher),
-  );
-}
-
 afterEach(() => closePublisher());
 
 describe("handleLine", () => {
-  it("answers a valid request with hex intent bytes and the same id", async () => {
+  it("answers a valid request with a tagged intent and the same id", async () => {
     const reply = await answer(request());
 
     expect(reply.id).toBe(7);
     expect(reply.ok).toBe(true);
     expect(reply.intent).toMatch(/^(?:[0-9a-f]{2})+$/);
+    expect(Buffer.from(reply.intent, "hex").subarray(0, 20).toString("utf8")).toContain("midnight:intent[v9]");
   });
 
   it("answers a line, never a fragment: a reply carries no raw newline", async () => {
     expect(await handleLine(CONFIG, request())).not.toContain("\n");
     expect(await handleLine(CONFIG, "{not json")).not.toContain("\n");
-  });
-
-  it("carries the intent the ledger's own tagged reader accepts", async () => {
-    const reply = await answer(request());
-
-    expect(Buffer.from(reply.intent, "hex").subarray(0, 20).toString("utf8")).toContain("midnight:intent[v9]");
   });
 
   it("delivers the wire's own signature to the circuit, in the wire's own order", async () => {
@@ -202,7 +188,7 @@ describe("handleLine: the operation discriminator", () => {
 
     const reply = await answer(JSON.stringify({ id: 21, op: "submit", intent: built.intent }));
 
-    expect(reply).toEqual({ id: 21, ok: true, txId: TX_ID, blockHash: BLOCK_HASH });
+    expect(reply).toEqual({ id: 21, ok: true, txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH });
   });
 
   it("names `intent` when it is not the hex the wire admits", async () => {

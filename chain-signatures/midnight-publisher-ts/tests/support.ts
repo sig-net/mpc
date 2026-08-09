@@ -11,6 +11,8 @@ import {
 } from "@sig-net/midnight-contract";
 
 import type { Config } from "../src/config.js";
+import { primePublisher, type Publisher } from "../src/submit.js";
+import type { FundingWallet, Landed } from "../src/wallet.js";
 
 export const toHex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 
@@ -27,6 +29,31 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
   endpoints: undefined,
   ...overrides,
 });
+
+export const STUB_TX_ID = "ab".repeat(32);
+export const STUB_BLOCK_HASH = "cd".repeat(32);
+
+export interface StubEdges {
+  readonly proveTx?: (tx: unknown) => Promise<unknown>;
+  readonly balanceTx?: (tx: unknown) => Promise<unknown>;
+  readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
+  readonly submitTx?: (tx: unknown) => Promise<Landed>;
+}
+
+// Identity by default, so a sentinel passed in at one edge is observable at the next.
+export function primeStub(edges: StubEdges = {}): void {
+  primePublisher(
+    Promise.resolve({
+      proveTx: edges.proveTx ?? (async (tx: unknown) => tx),
+      wallet: {
+        balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
+        finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
+        submitTx: edges.submitTx ?? (async () => ({ txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH })),
+        close: async () => undefined,
+      } as unknown as FundingWallet,
+    } as unknown as Publisher),
+  );
+}
 
 export const decodeIntent = (bytes: Uint8Array) => Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
 

@@ -17,18 +17,23 @@ import {
   primePublisher,
   SUBMIT_TIMEOUT,
   withDeadline,
-  type Publisher,
 } from "../src/submit.js";
-import type { FundingWallet, Landed } from "../src/wallet.js";
-import { initialSingletonStateHex, managedDir, testConfig, toHex } from "./support.js";
+import type { Landed } from "../src/wallet.js";
+import {
+  initialSingletonStateHex,
+  managedDir,
+  primeStub,
+  STUB_BLOCK_HASH,
+  STUB_TX_ID,
+  testConfig,
+  toHex,
+  type StubEdges,
+} from "./support.js";
 
 const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
 const CONFIG = testConfig();
-
-const TX_ID = "ab".repeat(32);
-const BLOCK_HASH = "cd".repeat(32);
 
 let intent: Uint8Array;
 
@@ -45,30 +50,6 @@ beforeAll(async () => {
   });
 }, 120_000);
 
-interface Edges {
-  readonly proveTx?: (tx: unknown) => Promise<unknown>;
-  readonly balanceTx?: (tx: unknown) => Promise<unknown>;
-  readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
-  readonly submitTx?: (tx: unknown) => Promise<Landed>;
-}
-
-// Identity by default, so a sentinel passed in at one edge is observable at the next.
-function primeStub(edges: Edges = {}): void {
-  const wallet = {
-    balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
-    finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
-    submitTx: edges.submitTx ?? (async () => ({ txId: TX_ID, blockHash: BLOCK_HASH })),
-    close: async () => undefined,
-  } as unknown as FundingWallet;
-
-  primePublisher(
-    Promise.resolve({
-      proveTx: edges.proveTx ?? (async (tx: unknown) => tx),
-      wallet,
-    } as unknown as Publisher),
-  );
-}
-
 const PRODUCTION_TIMEOUT = SUBMIT_TIMEOUT.ms;
 
 afterEach(async () => {
@@ -76,8 +57,7 @@ afterEach(async () => {
   SUBMIT_TIMEOUT.ms = PRODUCTION_TIMEOUT;
 });
 
-const failing = (code: string, message: string) => async (): Promise<never> => {
-  void code;
+const failing = (message: string) => async (): Promise<never> => {
   throw new Error(message);
 };
 
@@ -101,14 +81,6 @@ describe("decodeIntent", () => {
     expect(() => decodeIntent(Uint8Array.of(1, 2, 3))).toThrowError(
       expect.objectContaining({ code: "bad_request" }) as Error,
     );
-  });
-
-  it("calls a different version of the same tag a ledger mismatch, not a bad request", () => {
-    // Nothing the caller sends can fix a seam built against two different ledger crates.
-    const skewed = Uint8Array.from(intent);
-    skewed[Buffer.from(skewed).indexOf("midnight:intent[v") + "midnight:intent[v".length] = "8".charCodeAt(0);
-
-    expect(() => decodeIntent(skewed)).toThrowError(expect.objectContaining({ code: "ledger_mismatch" }) as Error);
   });
 
   it("answers bad_request when the tag is right and the body is not", () => {
@@ -151,7 +123,7 @@ describe("handleSubmit: the flow", () => {
   it("answers the transaction id and the block it landed in", async () => {
     primeStub();
 
-    await expect(handleSubmit(CONFIG, 1, intent)).resolves.toEqual({ txId: TX_ID, blockHash: BLOCK_HASH });
+    await expect(handleSubmit(CONFIG, 1, intent)).resolves.toEqual({ txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH });
   });
 
   it("wraps the intent into a transaction that carries it, and proves that one", async () => {
@@ -186,7 +158,7 @@ describe("handleSubmit: the flow", () => {
       },
       submitTx: async (tx) => {
         submitted = tx;
-        return { txId: TX_ID, blockHash: BLOCK_HASH };
+        return { txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH };
       },
     });
 
@@ -210,7 +182,7 @@ describe("handleSubmit: the flow", () => {
     // The wallet SDK raises the tagged error and the balancer raises the sentence.
     for (const spelling of ["Wallet.InsufficientFunds", "could not balance dust"]) {
       await closePublisher();
-      primeStub({ balanceTx: failing("balance", spelling) });
+      primeStub({ balanceTx: failing(spelling) });
 
       expect((await refused(6)).code, spelling).toBe("wallet_unfunded");
     }
@@ -218,7 +190,7 @@ describe("handleSubmit: the flow", () => {
 
   it("refines an optimistic-concurrency loss into state_conflict", async () => {
     primeStub({
-      submitTx: failing("submit", "Transcript(Execution(ReadMismatch { expected: 06 }))") as Edges["submitTx"],
+      submitTx: failing("Transcript(Execution(ReadMismatch { expected: 06 }))") as StubEdges["submitTx"],
     });
 
     expect((await refused(7)).code).toBe("state_conflict");
@@ -226,7 +198,7 @@ describe("handleSubmit: the flow", () => {
 
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
     // Every node error is wrapped in a constant-message SubmissionError; matching only
-    // the rendered message would classify every rejection as a plain `submit_rejected`.
+    // the rendered message would classify every rejection as a plain `internal`.
     class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
     class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{ message: string }> {}
     primeStub({
@@ -277,25 +249,25 @@ describe("handleSubmit: the busy gate", () => {
     expect(refusal.message).toContain("request 1");
 
     release();
-    await expect(first).resolves.toMatchObject({ txId: TX_ID });
+    await expect(first).resolves.toMatchObject({ txId: STUB_TX_ID });
 
-    await expect(handleSubmit(CONFIG, 3, intent)).resolves.toMatchObject({ txId: TX_ID });
+    await expect(handleSubmit(CONFIG, 3, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
   it("never claims the gate for a request that fails validation", async () => {
     primeStub();
 
     await expect(handleSubmit(CONFIG, 1, Uint8Array.of(1, 2, 3))).rejects.toMatchObject({ code: "bad_request" });
-    await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: TX_ID });
+    await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
   it("does not let a refused submit leave the gate claimed", async () => {
-    primeStub({ submitTx: failing("submit", "transaction rejected") as Edges["submitTx"] });
+    primeStub({ submitTx: failing("transaction rejected") as StubEdges["submitTx"] });
     expect((await refused(1)).code).toBe("internal");
 
     await closePublisher();
     primeStub();
-    await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: TX_ID });
+    await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
   it("keeps the gate claimed while an abandoned submit is still spending", async () => {
