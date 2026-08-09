@@ -1,10 +1,6 @@
 // The submit path against stubbed paid edges: the intent, the transaction it becomes
-// and `Transaction.fromParts` are all real, and only the proof server and the funding
-// wallet are stood in for. What these prove is the flow, which is everything a live run
-// would not tell you twice: deadline, busy gate, classification, wire shape.
-//
-// NOT covered here, and only a live stack can cover it: real proving, real balancing,
-// real submission. Nothing in this file spends anything.
+// and `Transaction.fromParts` are real; only the proof server and the funding wallet
+// are stood in for. Real proving, balancing and submission are live-stack territory.
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -34,8 +30,6 @@ const CONFIG = testConfig();
 const TX_ID = "ab".repeat(32);
 const BLOCK_HASH = "cd".repeat(32);
 
-// One real circuit run for the whole file: the bytes are what a `build` reply carries,
-// so every test below starts from the exact thing the caller sends back.
 let intent: Uint8Array;
 
 beforeAll(async () => {
@@ -103,7 +97,6 @@ describe("decodeIntent", () => {
   });
 
   it("names the field when the bytes are not a tagged intent at all", () => {
-    // The one shape the caller can fix, so it must say which field to fix.
     expect(() => decodeIntent(Uint8Array.of(1, 2, 3))).toThrowError(/`intent` is not a midnight:intent\[v9\] blob/);
     expect(() => decodeIntent(Uint8Array.of(1, 2, 3))).toThrowError(
       expect.objectContaining({ code: "bad_request" }) as Error,
@@ -111,9 +104,7 @@ describe("decodeIntent", () => {
   });
 
   it("calls a different version of the same tag a ledger mismatch, not a bad request", () => {
-    // Nothing the caller sends can fix this: the two halves of the seam were built
-    // against different ledger crates, and `bad_request` would send them looking at
-    // the request instead of at the build.
+    // Nothing the caller sends can fix a seam built against two different ledger crates.
     const skewed = Uint8Array.from(intent);
     skewed[Buffer.from(skewed).indexOf("midnight:intent[v") + "midnight:intent[v".length] = "8".charCodeAt(0);
 
@@ -121,8 +112,6 @@ describe("decodeIntent", () => {
   });
 
   it("answers bad_request when the tag is right and the body is not", () => {
-    // Tagged, so it got past the prefix check; truncated, so the deserializer is what
-    // rejects it. Still the caller's field, and still named.
     const truncated = intent.subarray(0, 40);
 
     expect(() => decodeIntent(truncated)).toThrowError(/`intent` did not deserialize/);
@@ -143,8 +132,7 @@ describe("withDeadline", () => {
   });
 
   it("leaves the abandoned attempt's late failure handled", async () => {
-    // An unhandled rejection from the losing side would kill a process holding a hot
-    // wallet; `Promise.race` is what makes it not one.
+    // An unhandled rejection from the losing side would kill a process holding a hot wallet.
     const unhandled: unknown[] = [];
     const record = (reason: unknown): void => void unhandled.push(reason);
     process.on("unhandledRejection", record);
@@ -167,8 +155,6 @@ describe("handleSubmit: the flow", () => {
   });
 
   it("wraps the intent into a transaction that carries it, and proves that one", async () => {
-    // The whole seam in one assertion: whatever `Transaction.fromParts` produced is
-    // what reaches the prover, and it still holds the call the caller built.
     let proved: unknown;
     primeStub({
       proveTx: async (tx) => {
@@ -184,8 +170,6 @@ describe("handleSubmit: the flow", () => {
   });
 
   it("carries the proven transaction through balance and finalize into submit", async () => {
-    // The stubs are identity functions, so only a sentinel notices the proven
-    // transaction being dropped for the unproven one somewhere along the chain.
     const proven = { proven: true } as unknown as UnboundTransaction;
     let balanced: unknown;
     let finalized: unknown;
@@ -214,8 +198,6 @@ describe("handleSubmit: the flow", () => {
   });
 
   it("refuses a submit on a deployment that configured no wallet", async () => {
-    // The build-only deployment. It must answer rather than dial an address it was
-    // never given, and the answer has to say which variables turn submitting on.
     await closePublisher();
     const refusal = await refused(4);
 
@@ -240,9 +222,7 @@ describe("handleSubmit: the flow", () => {
   });
 
   it("refines a dust shortfall into wallet_unfunded, which means back off rather than retry", async () => {
-    // Both spellings, each on its own: the wallet SDK raises the tagged error and the
-    // balancer raises the sentence, and a run that quotes both would hide a dropped
-    // pattern behind the other one.
+    // The wallet SDK raises the tagged error and the balancer raises the sentence.
     for (const spelling of ["Wallet.InsufficientFunds", "could not balance dust"]) {
       await closePublisher();
       primeStub({ balanceTx: failing("balance", spelling) });
@@ -260,9 +240,8 @@ describe("handleSubmit: the flow", () => {
   });
 
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
-    // Every node error is wrapped in a constant-message SubmissionError whose cause
-    // Effect stores out of `describeFailure`'s reach. Matching only the rendered
-    // message would classify every rejection as a plain `submit_rejected`.
+    // Every node error is wrapped in a constant-message SubmissionError; matching only
+    // the rendered message would classify every rejection as a plain `submit_rejected`.
     class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
     class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{ message: string }> {}
     primeStub({
@@ -310,14 +289,11 @@ describe("handleSubmit: the busy gate", () => {
 
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");
-    // Names the submit that holds it, so the caller can tell a queue from a wedge.
     expect(refusal.message).toContain("request 1");
 
     release();
     await expect(first).resolves.toMatchObject({ txId: TX_ID });
 
-    // Released by COMPLETION, not only on the error path: a gate that opens only when
-    // something fails strands the wallet after the first successful submit.
     await expect(handleSubmit(CONFIG, 3, intent)).resolves.toMatchObject({ txId: TX_ID });
   });
 
@@ -338,9 +314,6 @@ describe("handleSubmit: the busy gate", () => {
   });
 
   it("keeps the gate claimed while an abandoned submit is still spending", async () => {
-    // Releasing on the answer would admit a second submit onto the one dust UTXO the
-    // first has not finished with. Nothing here is cancellable, so the abandoned work
-    // keeps the gate until it ends on its own.
     SUBMIT_TIMEOUT.ms = 50;
     primeStub({ balanceTx: () => new Promise(() => undefined) });
     expect((await refused(1)).code).toBe("internal");
@@ -352,7 +325,6 @@ describe("handleSubmit: the busy gate", () => {
   });
 
   it("never lets two submits balance at once, even across a blown deadline", async () => {
-    // The invariant the gate is FOR, measured rather than argued.
     let live = 0;
     let peak = 0;
     primeStub({
@@ -375,8 +347,7 @@ describe("handleSubmit: the busy gate", () => {
   });
 
   it("tells the caller its abandoned submit may still land, rather than that it failed", async () => {
-    // The one answer that is not a verdict. A caller that reads it as "did not land"
-    // and retries posts the same signature twice.
+    // A caller that reads this as "did not land" and retries posts the same signature twice.
     SUBMIT_TIMEOUT.ms = 30;
     primeStub({ balanceTx: () => new Promise(() => undefined) });
 

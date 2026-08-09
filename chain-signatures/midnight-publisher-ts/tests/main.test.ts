@@ -1,7 +1,6 @@
-// The entry point, as the Rust client will actually run it: a real `node dist/main.js`
-// on a real pipe. The two invariants the whole design rests on, stdout carries nothing
-// but reply lines and requests are answered one at a time, live in `main.ts` and are
-// unreachable from `handleLine`, so nothing else can pin them.
+// The entry point as the Rust client runs it: a real `node dist/main.js` on a real
+// pipe. The two invariants that live only in `main.ts`, stdout carries nothing but
+// reply lines and requests are answered one at a time, are unreachable from `handleLine`.
 
 import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
@@ -22,8 +21,6 @@ const CONTRACT_STATE = await initialSingletonStateHex();
 const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
-// Five is enough to expose an out-of-order reply and cheap enough to spend a circuit
-// run on each. They go down the pipe in one burst, before the child answers any.
 const BURST = 5;
 
 const request = (id: number): string =>
@@ -62,8 +59,7 @@ function drive(lines: readonly string[]): Promise<Run> {
   });
 }
 
-// Built here rather than assumed present, so the suite can never pass by testing a
-// stale `dist/` or by quietly skipping.
+// Built here rather than assumed present, so the suite can never pass on a stale `dist/`.
 beforeAll(() => {
   const { resolve } = createRequire(import.meta.url);
   execFileSync(process.execPath, [resolve("typescript/bin/tsc"), "-p", `${ROOT}tsconfig.build.json`], {
@@ -78,14 +74,11 @@ describe("dist/main.js over a pipe", () => {
 
     expect(run.code).toBe(0);
 
-    // Every stdout line parses. A stray `console.log` anywhere in `src/` breaks this
-    // before it breaks anything subtler, which is the point.
     const replies = run.stdout.split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
 
     // The blank line is skipped, the bad line is answered: BURST + 1.
     expect(replies).toHaveLength(BURST + 1);
-    // Order, not just presence: replies are matched by position downstream and a
-    // concurrent read would let a fast request overtake a slow one.
+    // Order, not just presence: replies are matched by position downstream.
     expect(replies.map((reply) => reply.id)).toEqual([...Array.from({ length: BURST }, (_, i) => i + 1), null]);
     expect(replies.slice(0, BURST).every((reply) => reply.ok === true)).toBe(true);
     expect(replies.slice(0, BURST).every((reply) => /^(?:[0-9a-f]{2})+$/.test(reply.intent))).toBe(true);
@@ -93,11 +86,8 @@ describe("dist/main.js over a pipe", () => {
   }, 120_000);
 
   it("answers a submit on a build-only deployment instead of dying on it", async () => {
-    // `drive` configures no wallet, which is the indexer-only deployment: it builds
-    // intents and cannot pay for one. The child must stay in step with its reader
-    // anyway, one line in and one line out, and keep answering afterwards. Exiting
-    // would cost the caller the next request too, because a dead child is a respawn
-    // and a retry on its side.
+    // A dead child costs the caller a respawn and a retry, so the child must answer and
+    // keep answering.
     const built = JSON.parse((await drive([request(1)])).stdout.trim()) as { intent: string };
 
     const run = await drive([
@@ -115,8 +105,6 @@ describe("dist/main.js over a pipe", () => {
   }, 120_000);
 
   it("keeps every diagnostic off the wire", async () => {
-    // The startup line and any failure evidence go to stderr. A reply appearing there
-    // instead would mean stdout and the log had been swapped somewhere.
     const run = await drive([request(1), JSON.stringify({ id: 2, circuit: "respond" })]);
 
     expect(run.stderr.length).toBeGreaterThan(0);

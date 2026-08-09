@@ -1,18 +1,6 @@
-// NOT PART OF THE INTENT BUILDER, and `src/` must never import it: a test asserts
-// exactly that. Nothing under `devtools/` ships or reaches `dist/`. It is the deploy
-// path, kept because recapturing `tests/fixtures/` on a fresh chain starts with a
-// fresh singleton deploy and this is the only thing that can do it. Unlike the
-// publisher process, which takes its funding seed from `MIDNIGHT_PUB_FUNDING_SEED`,
-// this script reads `DEPLOYER_SEED` directly because it provisions the deployment.
-//
-// Live-tier bootstrap: make the deployer wallet fee-ready and deploy a fresh
-// signet singleton. The LAST line printed is the contract address; feed it to
-// the pinned addresses in `tests/fixtures/regenerate.ts` when recapturing on a
-// fresh chain, or take it with `... | tail -1`.
-//
-// Config comes from the environment with local-stack defaults, the deployer
-// from `DEPLOYER_SEED`. Dust registration is idempotent, so this runs the same
-// against a fresh chain and a long-lived local one.
+// Deploy path, never shipped: `src/` must not import it, and a test asserts that. Makes
+// the deployer wallet fee-ready and deploys a fresh signet singleton; the LAST line
+// printed is the contract address.
 
 import {
   deploySignetContract,

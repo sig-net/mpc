@@ -1,7 +1,5 @@
-// The wire, end to end: a request line in, a reply line out, against the real
-// compiled contract and the singleton's synthesized initial state. `handleLine`
-// is the whole process minus stdin, so what passes here is what the Rust client
-// will see.
+// The wire end to end: `handleLine` is the whole process minus stdin, so what passes
+// here is what the Rust client will see.
 
 import { readFileSync } from "node:fs";
 
@@ -19,12 +17,9 @@ const CONFIG = testConfig();
 
 const CONTRACT_STATE = await initialSingletonStateHex();
 
-// Same address and request id as the intent tests: the synthesized state's
-// operation table is what the entry-point lookup matches against, by name.
 const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
-// All different, so a field that arrives in the wrong slot cannot look correct.
 const X = "11".repeat(32);
 const Y = "22".repeat(32);
 const S = "33".repeat(32);
@@ -45,8 +40,6 @@ const request = (overrides: Record<string, unknown> = {}): string =>
 
 const answer = async (line: string) => JSON.parse(await handleLine(CONFIG, line));
 
-// The submit half's paid edges, so the round trip below exercises the wire and not the
-// chain. Everything before them, including the transaction the intent becomes, is real.
 const TX_ID = "ab".repeat(32);
 const BLOCK_HASH = "cd".repeat(32);
 
@@ -76,8 +69,6 @@ describe("handleLine", () => {
   });
 
   it("answers a line, never a fragment: a reply carries no raw newline", async () => {
-    // stdout is the wire and `main.ts` frames it with "\n", so a reply holding one
-    // would split into two unparseable halves at the reader.
     expect(await handleLine(CONFIG, request())).not.toContain("\n");
     expect(await handleLine(CONFIG, "{not json")).not.toContain("\n");
   });
@@ -89,9 +80,8 @@ describe("handleLine", () => {
   });
 
   it("delivers the wire's own signature to the circuit, in the wire's own order", async () => {
-    // Field names cross the wire as strings, so nothing but this checks that the JSON
-    // `signature.bigR.x` is the value the circuit received as x. The type system pins
-    // the names; only the decoded call pins the values.
+    // Field names cross as strings; only the decoded call pins that JSON `bigR.x` is
+    // the value the circuit received as x.
     const reply = await answer(request());
 
     const bytes = Buffer.from(reply.intent, "hex");
@@ -138,8 +128,7 @@ describe("handleLine", () => {
       [{ ttlSeconds: 0 }, "ttlSeconds"],
       [{ contractAddress: "AB".repeat(32) }, "contractAddress"],
       [{ contractState: "ZZ" }, "contractState"],
-      // `Buffer.from` truncates an odd digit silently, so the schema is the only thing between
-      // a mistyped blob and a deserializer failing on bytes nobody sent.
+      // `Buffer.from` truncates an odd digit silently, so the schema is the only guard.
       [{ ledgerParameters: "abc" }, "ledgerParameters"],
     ];
 
@@ -151,13 +140,10 @@ describe("handleLine", () => {
   });
 
   it("reports the FIRST invalid field in declaration order, which is what makes that order a contract", async () => {
-    // Only one issue is ever surfaced, so reordering the schema silently changes which
-    // failure a caller is told about. Two bad fields at once is the only way to see it.
     const both = await answer(request({ contractAddress: "00", requestId: "00" }));
     expect(both.message).toContain("contractAddress");
     expect(both.message).not.toContain("requestId");
 
-    // And `id` outranks everything, so a reply can always name its post.
     const withBadId = await answer(request({ id: 1.5, contractAddress: "00" }));
     expect(withBadId.message).toContain("`id`");
     expect(withBadId.message).not.toContain("contractAddress");
@@ -165,7 +151,6 @@ describe("handleLine", () => {
 
   it("rejects an id JSON cannot round-trip, rather than echoing a different one", async () => {
     // 2^53+1 parses to 2^53, so echoing it would answer a post the caller never sent.
-    // The Rust client has to keep its ids below 2^53 for the same reason.
     const tooBig = await answer(request().replace('"id":7', '"id":9007199254740993'));
     expect(tooBig).toMatchObject({ id: null, ok: false, code: "bad_request" });
     expect(tooBig.message).toContain("`id`");
@@ -180,8 +165,6 @@ describe("handleLine", () => {
   });
 
   it("surfaces a builder failure as its own code, not as a throw", async () => {
-    // A managed dir pointed at a different build than what is deployed reaches the
-    // caller by name. Stands in here as a contract with no operations at all.
     const reply = await answer(request({ contractState: toHex(new ContractState().serialize()) }));
 
     expect(reply).toMatchObject({ id: 7, ok: false, code: "contract_mismatch" });
@@ -189,8 +172,7 @@ describe("handleLine", () => {
   });
 
   it("answers `internal` when the request is well formed but the bytes are not", async () => {
-    // Valid hex of the wrong thing: the failure comes out of the ledger's own
-    // deserializer, so it is ours to classify rather than the caller's to fix.
+    // Valid hex of the wrong thing: the failure comes out of the ledger's own deserializer.
     const reply = await answer(request({ contractState: "00".repeat(64) }));
 
     expect(reply).toMatchObject({ id: 7, ok: false, code: "internal" });
@@ -198,8 +180,6 @@ describe("handleLine", () => {
   });
 });
 
-// Two operations on one wire. `op` is optional and absent means `build`, which is the
-// only reason the request above still parses.
 describe("handleLine: the operation discriminator", () => {
   it("treats an absent op and an explicit build as the same request", async () => {
     const implicit = await answer(request());
@@ -210,8 +190,6 @@ describe("handleLine: the operation discriminator", () => {
   });
 
   it("names `op` when it is neither, rather than reporting a missing circuit", async () => {
-    // A request with an unknown op has no `circuit` either; blaming that would send the
-    // caller looking at the wrong field.
     const reply = await answer(JSON.stringify({ id: 7, op: "publish", intent: "00" }));
 
     expect(reply).toMatchObject({ id: 7, ok: false, code: "bad_request" });
@@ -245,7 +223,6 @@ describe("handleLine: the operation discriminator", () => {
   });
 
   it("refuses a submit on a deployment that only builds, naming what to configure", async () => {
-    // `testConfig` carries no endpoints, which is the indexer-only deployment.
     const built = await answer(request());
 
     const reply = await answer(JSON.stringify({ id: 24, op: "submit", intent: built.intent }));

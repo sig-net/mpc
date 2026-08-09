@@ -1,10 +1,5 @@
-// The half that spends: take the finished Intent the caller built, wrap it into a
-// transaction, prove it, pay for it, post it.
-//
-// MECHANISM, NEVER AUTHORITY. The signature inside the intent was computed by the MPC
-// threshold, and the call was decided by the caller against chain state it read and
-// pinned. Nothing here chooses what to sign or who may write. The worst a bug here can
-// do is drop a post or pay for one twice.
+// Mechanism, never authority: the signature was computed by the MPC threshold and the
+// call decided by the caller, so the worst a bug here can do is drop a post or pay twice.
 
 import { Intent, Transaction, type UnprovenIntent, type UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 
@@ -13,25 +8,15 @@ import { describeFailure, PublisherError, type ErrorCode } from "./errors.js";
 import { proveTransaction, type UnboundTransaction } from "./prover.js";
 import { openFundingWallet, type FundingWallet, type Landed } from "./wallet.js";
 
-// The ledger this build links. The Rust half writes these same bytes with its own
-// ledger crate, so the tag is where a version split between the two halves surfaces.
+// The Rust half writes these bytes with its own ledger crate; the tag is where a version split surfaces.
 const INTENT_TAG = "midnight:intent[v9]";
 const INTENT_TAG_FAMILY = "midnight:intent[v";
 
-// Long enough to read a tag that sits in the first few bytes, short enough to quote back.
 const TAG_WINDOW = 64;
 
-/**
- * The intent the caller built, read back with the ledger's own tagged reader.
- *
- * The markers are the instance tags, not classes, and they are the same three the
- * builder serialized under: a signature-enabled, pre-proof, pre-binding intent.
- */
 export function decodeIntent(bytes: Uint8Array): UnprovenIntent {
   const head = Buffer.from(bytes.subarray(0, TAG_WINDOW)).toString("latin1");
   if (!head.includes(INTENT_TAG)) {
-    // A different version of the right tag is the two halves of the seam disagreeing
-    // about the ledger, which no request can fix; anything else is a malformed field.
     throw head.includes(INTENT_TAG_FAMILY)
       ? new PublisherError(
           "ledger_mismatch",
@@ -48,16 +33,12 @@ export function decodeIntent(bytes: Uint8Array): UnprovenIntent {
   }
 }
 
-/** The two edges that need an endpoint, so priming one seam primes everything paid for. */
 export interface Publisher {
-  /** The proof server, carrying the managed dir's key material for the contract call. */
   readonly proveTx: (tx: UnprovenTransaction) => Promise<UnboundTransaction>;
   readonly wallet: FundingWallet;
 }
 
-// Every dependency here waits forever by default: a dead indexer never finishes wallet
-// sync, the node client queues across reconnects, and the submission service waits for
-// finality. Unbounded, any of them holds the busy gate silently and answers nobody.
+// Every dependency below waits forever by default; unbounded, one would hold the busy gate silently.
 export const SUBMIT_TIMEOUT = { ms: 6 * 60 * 1000 };
 
 // `Promise.race` handles the loser, so the abandoned attempt's own late failure surfaces nowhere.
@@ -89,7 +70,7 @@ async function buildPublisher(config: Config): Promise<Publisher> {
   };
 }
 
-// Memoized even while PENDING, so a hung indexer costs one wallet facade, not one per retry.
+// Memoized even while pending, so a hung indexer costs one wallet facade, not one per retry.
 function publisher(config: Config): Promise<Publisher> {
   publisherPromise ??= buildPublisher(config).catch((error: unknown) => {
     publisherPromise = undefined;
@@ -98,7 +79,6 @@ function publisher(config: Config): Promise<Publisher> {
   return publisherPromise;
 }
 
-/** The test seam: stand in for everything that would need an endpoint. */
 export function primePublisher(ready: Promise<Publisher>): void {
   publisherPromise = ready;
 }
@@ -119,17 +99,16 @@ const DUST_SHORTFALL: readonly Refinement[] = [
   ["could not balance dust", "wallet_unfunded"],
 ];
 
-// Best-effort: the submission service flattens node errors, so this surfaces only in the cause chain.
 const LOST_THE_RACE: readonly Refinement[] = [["ReadMismatch", "state_conflict"]];
 
-// The refinements are the ONLY place this process matches on dependency error text.
+// The refinements are the only place this process matches on dependency error text.
 async function step<T>(code: ErrorCode, run: () => Promise<T>, refine: readonly Refinement[] = []): Promise<T> {
   try {
     return await run();
   } catch (error) {
     if (error instanceof PublisherError) throw error;
     const described = describeFailure(error);
-    // Matched against a WIDER haystack than the answered message: Effect hides the real
+    // Matched against a wider haystack than the answered message: Effect hides the real
     // cause on a Symbol that only `String` renders.
     const sharpened = refine.find(([pattern]) => `${described}\n${String(error)}`.includes(pattern))?.[1];
     throw new PublisherError(sharpened ?? code, described, { cause: error });
@@ -138,10 +117,7 @@ async function step<T>(code: ErrorCode, run: () => Promise<T>, refine: readonly 
 
 async function post(config: Config, intent: UnprovenIntent): Promise<Landed> {
   const ready = await step("wallet_unsynced", () => publisher(config));
-  // `fromParts`, not `addCalls`: the intent arrives already partitioned, with its
-  // transcripts split and its communication commitment sampled, so there is nothing
-  // left to place and no ledger parameters left to price it against. No Zswap offer
-  // either, because a respond moves no coins; the wallet adds the fee inputs next.
+  // No Zswap offer: a respond moves no coins, the wallet adds the fee inputs next.
   const proven = await step("prove_failed", () =>
     ready.proveTx(Transaction.fromParts(config.networkId, undefined, undefined, intent)),
   );
@@ -152,12 +128,8 @@ async function post(config: Config, intent: UnprovenIntent): Promise<Landed> {
 
 let inFlightId: number | undefined;
 
-// Nothing in the chain below is cancellable, so a submit past its deadline keeps
-// spending. Answering is still right: the caller has to learn that its post may land
-// anyway rather than wait on a dependency that will never answer.
-//
-// The process must not exit here: its caller replaces a dead child and retries, so
-// exiting would turn one abandoned post into two.
+// Nothing below is cancellable, so a submit past its deadline keeps spending; the
+// caller has to learn its post may land anyway.
 class DeadlineExceeded extends PublisherError {
   constructor(id: number) {
     super(
@@ -169,12 +141,8 @@ class DeadlineExceeded extends PublisherError {
 }
 
 /**
- * Balances, proves and submits one intent, and answers where it landed.
- *
- * ONE AT A TIME, NOT QUEUED: the wallet has a single dust UTXO, so a second concurrent
- * submit could only burn a prove and fail at balance ~35s later. The reader loop already
- * serializes requests; this gate is what still holds when a submit is abandoned at its
- * deadline and keeps running behind the answer.
+ * One at a time: the wallet has a single dust UTXO, so a second concurrent submit could
+ * only burn a prove and fail at balance ~35s later.
  */
 export async function handleSubmit(config: Config, id: number, intent: Uint8Array): Promise<Landed> {
   // Before the gate: a malformed intent must not cost the next caller its turn.
@@ -189,9 +157,7 @@ export async function handleSubmit(config: Config, id: number, intent: Uint8Arra
   inFlightId = id;
 
   const work = post(config, decoded);
-  // The gate follows the WORK, not the answer: an abandoned submit is still spending,
-  // and releasing on the answer would put a second balance on the coin it has not
-  // finished with.
+  // The gate follows the WORK, not the answer: an abandoned submit is still spending.
   const release = (): void => {
     inFlightId = undefined;
   };
