@@ -1,0 +1,47 @@
+# The midnight intent builder's gate. The package is a stdio codec: one JSON
+# request line in, one serialized ledger `Intent` out. It reaches no endpoint and
+# holds no key, so typecheck and the vitest suite need no stack at all, running
+# the real circuit over a synthesized singleton state.
+#
+# The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
+# is not on this branch yet; its `intent_seam` differential test and the Rust
+# toolchain steps that run it return in the PR that restores the Rust client, and
+# the `chain-midnight` path filter below is kept so that PR only has to re-add
+# the steps, not the triggers.
+#
+# The live end-to-end path (boot the dockerized stack, deploy a singleton,
+# balance/prove/submit, confirm on chain) is deliberately NOT automated here.
+name: midnight-publisher-ts
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
+  push:
+    branches: [develop]
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-publisher-ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # `dist/main.js` is what the Rust client spawns, and `tsconfig.json` sets
+      # `noEmit`, so the build config is the only thing that produces it.
+      - run: npm run build
+      - run: npx vitest run
