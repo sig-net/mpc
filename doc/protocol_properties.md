@@ -102,17 +102,17 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* No presignature yields signature shares for more than one sign request (and no triple pair for more than one presignature).
 
-*Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (../chain-signatures/node/src/protocol/signature.rs, keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
+*Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
 
 *How it is enforced.* Three *local* mechanisms (no distributed agreement involved):
 
-1. Single writer. Only the artifact's owner initiates consumption (../chain-signatures/node/src/storage/protocol\_storage.rs). Every holder enforces this, not just the owner: its take is keyed on the claimed owner and fails if that node is not the recorded owner of the artifact.
+1. Single writer. Only the artifact's owner initiates consumption. Every holder enforces this, not just the owner: its take is keyed on the claimed owner and fails if that node is not the recorded owner of the artifact.
 2. Delete-on-first-use at every holder. When generation starts, the proposer commits (removes from storage) and every deliberator takes its local share; a further use attempt fails at any holder that already used it. Durability rule: the removal must be persisted *before* any protocol message derived from the artifact is sent; otherwise a crash-and-recover holder resurrects the share and honestly serves a second request.   
-3. Instance binding. Every signature posit message carries (sign\_id, presignature\_id, round) and mismatches are rejected; generation messages carry (sign\_id, presignature\_id) and a node feeds each one only to the instance with those identifiers (../chain-signatures/node/src/protocol/signature.rs).
+3. Instance binding. Every signature posit message carries (sign\_id, presignature\_id, round) and mismatches are rejected; generation messages carry (sign\_id, presignature\_id) and a node feeds each one only to the instance with those identifiers.
 
 Together these give the property *per node*: no honest node ever serves the same artifact twice.
 
-*Gap: per node is not per artifact.* Burning the artifact at each holder stops one node serving one presignature twice; it does not stop two **disjoint** sets of honest holders each serving their own first request on it. Both instances need a participant list of at least t (posit.rs gates on `enough_accepts(threshold)`), and an honest holder can appear in only one of them, but a corrupt holder can serve both. The two lists must therefore overlap only in corrupt nodes: 2t − f holders in total, i.e. 2(t − f) honest ones alongside the f corrupt. Opening either instance requires being the recorded owner (mechanism 1), so the owner must be corrupt too, one node and well inside f \< t.
+*Gap: per node is not per artifact.* Burning the artifact at each holder stops one node serving one presignature twice; it does not stop two **disjoint** sets of honest holders each serving their own first request on it. Both instances need a participant list of at least t (the posit phase starts an instance only once at least t peers have accepted), and an honest holder can appear in only one of them, but a corrupt holder can serve both. The two lists must therefore overlap only in corrupt nodes: 2t − f holders in total, i.e. 2(t − f) honest ones alongside the f corrupt. Opening either instance requires being the recorded owner (mechanism 1), so the owner must be corrupt too, one node and well inside f \< t.
 
 The honest-holder cost falls as f grows: at f \= t − 1 it is two. Holders are all accepters of the artifact's generation, so a presignature can have up to n of them, and sets that large arise in normal operation, not only under attack.
 
@@ -122,15 +122,15 @@ The honest-holder cost falls as f grows: at f \= t − 1 it is two. Holders are 
 
 *Property.* An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.
 
-Currently enforced by: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered (request/mod.rs). Note that the contracts (except near) accept any response without verifying submitted signatures. I.e., the burden of signature verification is put on clients.
+Currently enforced by: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. Note that the contracts (except near) accept any response without verifying submitted signatures. I.e., the burden of signature verification is put on clients.
 
 ### S3. Membership and epochs change only on-chain
 
 *Property.* No honest node adopts a participant set, threshold, or epoch other than a finalized contract state, and no node processes requests under a non-Running state.
 
-The contract's ProtocolState is Initializing, Running, or Resharing (`contract/mod.rs`); only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
+The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
 
-Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running (`../chain-signatures/node/src/protocol/request/task.rs`).
+Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running.
 
 ### S4. Instance-local agreement
 
@@ -167,8 +167,7 @@ then a node holding fewer artifacts than its floor (min\_triples / min\_presigna
 
 Presignature supply therefore depends on triple supply; the two are the same property under diﬀerent input preconditions.
 
-Mechanism: re-proposes every 100ms if a node is below its floor (triple.rs:549, presignature.rs:535); concurrency  
-counters free themselves as tasks finish (ongoing.join\_next()) and proposals expire (expire\_and\_start).  
+Mechanism: re-proposes every 100 ms while a node is below its floor; concurrency counters free themselves as generation tasks finish and as proposals expire.  
 Local-active gate: generation is skipped entirely while active.len() \< threshold, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement
@@ -186,9 +185,9 @@ Currently not guaranteed, since there's no timer-based resubmit.
 
 *Property.* During a long-enough synchronous interval, every correct, reachable participant (re)enters each correct node's active set within bounded time.
 
-*Why it is a property, not an assumption.* L1 and L2 are conditioned on the local active set holding ≥ t peers, and the active set is this layer's own failure detector (§2), maintained by its own code. Its recovery is therefore something the layer must provide; without L4, nothing says the gate that L1 and L2 wait behind ever opens. The consumers of the gate do not bound the wait themselves: organizing waits for ≥ t active peers with no timeout of its own (`wait_for_active_participants`, request/organize.rs), and artifact generation is skipped entirely while the view is short (L2's local-active gate).
+*Why it is a property, not an assumption.* L1 and L2 are conditioned on the local active set holding ≥ t peers, and the active set is this layer's own failure detector (§2), maintained by its own code. Its recovery is therefore something the layer must provide; without L4, nothing says the gate that L1 and L2 wait behind ever opens. The consumers of the gate do not bound the wait themselves: organizing waits for ≥ t active peers with no timeout of its own (`wait_for_active_participants`), and artifact generation is skipped entirely while the view is short (L2's local-active gate).
 
-*Current state.* Every transition into Active, including any reconnection, first forces a state sync (mesh/connection.rs): the peer is held in Syncing, outside the active set, until a sync round-trip to it succeeds *and* its stale holder entries are pruned locally; only that success path flips it to Active (`report_node_synced`, protocol/sync). There is no fallback activation on failure: the peer stays queued and is retried, so convergence is one round-trip on the happy path but unbounded when syncs keep failing. Broadcasts are also serialized with a 120 s deadline (`BROADCAST_TIMEOUT`), so a single unresponsive peer stretches every broadcast cycle to the full deadline and delays the activation of healthy reconnectors behind it. While the resulting view is short, every request on the node stalls (L1) and supply halts (L2). The sync's work is garbage collection of stale holder data, not a correctness gate: only owners initiate consumption (D3), so a stale view costs a MissingArtifact round at worst. Convergence time is log-derivable from the status-transition lines (mesh/connection.rs).
+*Current state.* Every transition into Active, including any reconnection, first forces a state sync: the peer is held in Syncing, outside the active set, until a sync round-trip to it succeeds *and* its stale holder entries are pruned locally; only that success path flips it to Active. There is no fallback activation on failure: the peer stays queued and is retried, so convergence is one round-trip on the happy path but unbounded when syncs keep failing. Broadcasts are also serialized with a 120 s deadline (`BROADCAST_TIMEOUT`), so a single unresponsive peer stretches every broadcast cycle to the full deadline and delays the activation of healthy reconnectors behind it. While the resulting view is short, every request on the node stalls (L1) and supply halts (L2). The sync's work is garbage collection of stale holder data, not a correctness gate: only owners initiate consumption (D3), so a stale view costs a MissingArtifact round at worst. Convergence time is log-derivable from the status-transition lines.
 
 ### Round-timeout precedents (§2)
 
