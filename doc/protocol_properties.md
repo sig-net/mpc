@@ -12,39 +12,36 @@ Protocol properties defined below are separated into
 * liveness (every request eventually completes), and  
 * efficiency (we try not to waste artifacts or rounds doing it, but it’s not the end of the world if we do create some waste (ideally bounded)).
 
-The coordination layer neither achieves nor requires consensus; safety-critical agreement is delegated to the on-chain contract or avoided via single-writer ownership, and per-instance coordination is leader-dictated agreement with abort, never consensus.
 
 ## 1\. Request lifecycle and its objects
 
 * Sign request flow  
-  finalized on-chain → indexed by each node's own indexer, assign request\_id  
-  → a per-node task organizes rounds (attempts) until one generation instance produces a signature  
-  → the proposer submits it on chain  
-  → the contract settles the request and emits events (NEAR verifies the submitted signature via check\_ec\_signature; other chains accept any response as-is)  
-  → downstream process is responsible for event verification and exactly once semantics (on non-NEAR chains this includes signature verification)
+  1. request is finalized on-chain 
+  2. indexed by each node's own indexer, assigned an request\_id  
+  3. a per-node task organizes rounds (attempts) until one generation instance produces a signature  
+  4. the successful generation's proposer submits it on chain  
+  5. the contract emits settlement events (NEAR verifies the submitted signature via check\_ec\_signature; other chains accept any response as-is)  
+  6. downstream process is responsible for event verification and exactly once semantics 
 
 * Triple (artifact)
-
   * secret-shared random values produced in the background, consumed in pairs to build presignature,  
   * unique owner (node that coordinated its generation, for easier statesync and coordination in signature generation) and a set of holders (nodes storing its shares).  
-* Presignature (artifact)
 
+* Presignature (artifact)
   * pre-computed, secret-shared ECDSA nonce (big\_r, and shares k, sigma)  
   * unique owner (node that coordinated its generation) and a set of holders (nodes storing its shares).  
-* Posit  
-  prepare phase leading up to an instance
 
-  * proposer sends Propose to each peer  
+* Posit: prepare phase leading up to an instance
+  * proposer sends Propose message to each peer  
   * peers answer Accept/Reject  
   * proposer sends Start carrying the final participant list to each peer .  
-* Instance  
-  one attempt to run protocol to completion over a specific artifact and participant list
 
+* Instance : one attempt to run protocol to completion over a specific artifact and participant list
   * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
   * Triple/presignature: identified by artifact id for triple/presignature generation  
     (picked by proposer uniformly at random for triple pair)  
 
-  A request's round attempts to establish an instance; since the artifact tentatively picked for this round (peeked, not yet committed) can differ round to round, different rounds are generally different instances.
+  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, different rounds are  different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes)
 
 ## 2\. System model
 
@@ -53,55 +50,55 @@ The coordination layer neither achieves nor requires consensus; safety-critical 
   * (ii) nodes act only on finalized state (finalization definition may differ per chain).  
 * Hybrid fault model.  
   * Liveness is argued under crash-recovery: correct nodes may halt and restart (otherwise never deviating). After restart the node's durable storage is assumed to be intact.  
-  * Safety of S1–S4 should hold up against up to f ≤ t-1 arbitrarily corrupted nodes; with f ≥ t the adversary holds a signing quorum of key shares and all bets are off.  
+  * Safety of S1–S4 must hold up against up to f < t arbitrarily corrupted nodes; with f ≥ t the adversary holds a signing quorum of key shares and all bets are off.  
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
-    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T ≤ b reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming δ never exceeds that ceiling; liveness is therefore argued for δ up to the ceiling, not for arbitrary finite δ (cf. L1 in the Appendix)  
-  * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is eﬀectively reliable and timely (caveat: currently not guaranteed due to message queue implementation).  
+    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming δ never exceeds that ceiling; liveness is therefore argued for δ up to the ceiling, not for arbitrary finite δ (more details in Appendix)  
+  * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is eﬀectively reliable and timely.
   * Channels are authenticated and encrypted.  
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active): a subset of the participant set, never a substitute for it.  It may be wrong, and no two nodes ever need the same guess (§D3). A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
+* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the participant set. It may be wrong, and no two nodes ever need the same guess; §6 D3 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 
-* **S1  One-shot artifacts are consumed once:** No presignature yields signature shares for more than one sign request, and no triple pair for more than one presignature. (Today enforced only per node; see Appendix.)  
+* **S1  One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
-* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state reported by RPC service provider.  
+* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state reported by RPC service provider. 
 * **S4 Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
 Violating any of these is unacceptable in any execution with fewer than t corrupted nodes.  See Appendix for more details.
 
 ## 4\. Liveness
 
-Progress is guaranteed during a suﬃciently long synchronous interval, never at a fixed time. The precise bounds, the two regimes behind L1, and the enforcing mechanisms are in the Appendix.
+Progress is guaranteed during a suﬃciently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.  
-* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples / min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature). Presignature supply therefore rests on triple supply: the two are one property under diﬀerent input preconditions.  
-* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline; see Appendix).  
-* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each node's active set within bounded time. This is what discharges the active-set preconditions of L1 and L2.
-
-Currently L3 is not met, and L4 holds only on the sync happy path (the blocking post-reconnect sync has no bound on its failure path), so L1 and L2 hold only while the node's local active set stays ≥ t (see Appendix).
+* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature).   
+* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).  
+* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each node's active set within bounded time. 
 
 ## 5\. Efficiency targets
 
-E1. Amortized ≈ 1 presignature consumed per settled signature. (Currently violated on any failed generation)
+E1. Amortized ≈ 1 presignature consumed per settled signature. 
 
-E2. ≈ 1 generation instance per request at a time. Best-effort via deterministic rotation (`proposer_per_round`), the posit round, and the AlreadyGenerating back-off (request/posit.rs).
+E2. ≈ 1 generation instance per request at a time. 
+
+Mechanisms striving towards these targets are deterministic proposer rotation, the posit round, and backoff if a a nodes is already generating.
 
 Duplicate instances, duplicate on-chain responses, and wasted rounds are correct but wasteful: the contract settles a request on the first valid response and the rest are harmless. Consequently, any mechanism that serves only E-properties may be lossy, heuristic, or deleted; it must be judged on cost, not correctness.
 
 ## 6\. Design Invariants
 
-These are design invariants: the *how* that keeps the properties (the *what*) true.
-
-* D1. The chain is the sole arbiter. Request settlement and membership live on-chain. The off-chain layer must remain safe under arbitrary duplication, reordering, loss, and retry of its own actions. *Serves S2, S3 (safety-critical agreement is delegated to the chain) and underwrites D2.*  
-* D2. Abort anywhere, retry fresh. Every phase must be abortable without cleanup obligations on peers, and retried with fresh resources (or resources provably safe to reuse). No step may assume any peer observed a previous attempt. *Serves L1, L2 (retry drives progress) and protects S1 on retry.*  
-* D3. Peer-identical values come from shared inputs only. Anything two nodes must compute identically (e.g. "who proposes in round r") may depend only on contract state, request data (e.g. the entropy, which is chain-fixed per request, the transaction hash on Ethereum), and the round number, never on the local failure detector or local clocks. The active set may steer *scheduling* (what to attempt, whom to include as candidates), never the *identity* of a coordination role. Rationale: local views differ by design; deriving shared roles from them silently reintroduces the agreement problem this layer avoids. *Serves L1.*  
-* D4. One-shot resources are single-writer. Consumption is initiated only by the owner; every holder deletes on first use, durably before emitting anything derived from the artifact (§S1). Losing an artifact (owner crash) is acceptable; reusing one is not. *Serves S1.*
+Incomplete list of general, implementation-independent rules (the *how*) that keep the properties above (the *what*) true.
+ 
+* D1. The chain is the sole arbiter. Request settlement and membership live on-chain. The off-chain layer must remain safe under arbitrary duplication, reordering, loss, and retry of its own actions. *Serves S2, S3 (safety-critical agreement is delegated to the chain) and is necessary for D2.*  
+* D2. Abort anywhere, retry fresh. Every phase must be abortable without cleanup obligations on peers, and retried with fresh resources (or resources provably safe to reuse TODO: what does that mean?). No step may assume any peer observed a previous attempt. *Serves L1, L2 and protects S1 on retry.*  
+* D3. Anything two nodes must compute identically (e.g. "who proposes in round r") may depend only on contract state, request data (e.g. the entropy, which is chain-fixed per request, the transaction hash on Ethereum), and the round number, never on the local failure detector or local clocks. The active set may steer *scheduling* (what to attempt, whom to include as candidates), never the *identity* of a coordination role. Rationale: local views differ by design; deriving shared roles from them silently reintroduces the agreement problem this layer avoids. *Serves L1.*  
+* D4. One-shot resources are single-writer. Consumption is initiated only by the recorded owner; see §S1 for the enforcing mechanisms. Losing an artifact (owner crash) is acceptable; reusing one is not. *Serves S1.*
 
 # **Protocol Appendix: Property Details and Precedents**
 
-### S1. One-shot artifacts are consumed once
+### S1. One-shot artifacts are consumed at most once
 
 *Property.* No presignature yields signature shares for more than one sign request (and no triple pair for more than one presignature).
 
@@ -131,7 +128,7 @@ Currently enforced by: signature tasks are spawned exclusively from local indexe
 
 The contract's ProtocolState is Initializing, Running, or Resharing (`contract/mod.rs`); only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
 
-Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running (`../chain-signatures/node/src/protocol/request/task.rs`). The mesh active set is a subset of membership, never a substitute for membership (§D3).
+Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running (`../chain-signatures/node/src/protocol/request/task.rs`).
 
 ### S4. Instance-local agreement
 
