@@ -87,6 +87,9 @@ midnight-base-crypto = "1.1.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
+midnight-transient-crypto = "3.0.0"
+midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-node-ledger-helpers = { git = "https://github.com/midnightntwrk/midnight-node", tag = "node-2.0.0-rc.4", features = ["can-panic"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -123,6 +126,11 @@ midnight-transient-crypto     = { git = "https://github.com/midnightntwrk/midnig
 midnight-transient-crypto-old = { package = "midnight-transient-crypto", git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1" }
 midnight-onchain-state        = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-state-4.0.0-rc.3" }
 midnight-serialize            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "serialize-1.2.0-rc.1" }
+midnight-ledger-v9            = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "crate-ledger-9.1.0.0-rc.3" }
+midnight-zswap                = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zswap-9.0.0-rc.3" }
+midnight-onchain-vm           = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-vm-4.0.0-rc.2" }
+midnight-onchain-runtime      = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-runtime-4.0.0-rc.2" }
+midnight-zkir                 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zkir-2.2.0-rc.3" }
 
 
 # big optimization even in test builds for math heavy crates

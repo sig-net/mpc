@@ -90,6 +90,22 @@ pub fn try_create_counter_vec_with_node_and_version(
     Ok(counter)
 }
 
+pub fn try_create_int_gauge_vec_with_node_and_version(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::IntGaugeVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = Opts::new(name, help);
+    opts = opts
+        .const_label("node_account_id".to_string(), node_account_id().to_string())
+        .const_label("version".to_string(), version().to_string())
+        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string());
+    let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
+    prometheus::register(Box::new(gauge.clone()))?;
+    Ok(gauge)
+}
+
 pub fn try_create_counter_vec_with_node_account_id(
     name: &str,
     help: &str,

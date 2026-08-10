@@ -56,11 +56,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
+pub(crate) fn unix_now() -> anyhow::Result<u64> {
+    Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .context("the system clock is before the unix epoch")?
+        .as_secs())
 }
 
 /// One entry of a central map, keyed by the composite `SignetMapKey`.
@@ -287,7 +287,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
         let mut requests = Vec::new();
         if !new_entries.is_empty() {
-            let indexed_ts = unix_now();
+            let indexed_ts = unix_now().unwrap_or(0);
             for entry in new_entries {
                 if let Some(request) = self
                     .process_entry(source, entry, &block.hash, block.number, indexed_ts)
@@ -732,6 +732,8 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:1".to_string(),
             central_address: central_address(),
+            network_id: "undeployed".to_string(),
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -2096,6 +2098,8 @@ mod tests {
         let config = MidnightConfig {
             node_ws_url: String::new(),
             central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };

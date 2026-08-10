@@ -3,10 +3,9 @@
 # circuit and local HTTP boundary without requiring a full Midnight stack.
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
-# is not on this branch yet; its `intent_seam` differential test and the Rust
-# toolchain steps that run it return in the PR that restores the Rust client, and
-# the `chain-midnight` path filter below is kept so that PR only has to re-add
-# the steps, not the triggers.
+# runs here too: the `intent_seam` differential drives the freshly built entry point
+# with the real client, which is what catches the two sides drifting apart, and is
+# why the `chain-midnight` path filter below is among the triggers.
 #
 # The live end-to-end path (boot the dockerized stack, deploy a singleton,
 # balance/prove/submit, confirm on chain) is deliberately NOT automated here.
@@ -52,3 +51,25 @@ jobs:
 
       - name: Run TypeScript tests
         run: npx vitest run
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-seam
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      # The filter names the test binary: the seam tests live in
+      # `tests/intent_seam.rs` and are `#[ignore]`d, so `--run-ignored all` plus
+      # `binary(intent_seam)` runs exactly them, while a `test(intent_seam)` filter
+      # matches against test names and selects nothing.
+      - name: Rust intent seam differential
+        working-directory: .
+        run: cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'

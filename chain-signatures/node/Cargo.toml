@@ -98,6 +98,8 @@ secrecy = "0.10.3"
 mockito.workspace = true
 tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
+# test-util enables paused tokio time so retry-backoff tests run instantly
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

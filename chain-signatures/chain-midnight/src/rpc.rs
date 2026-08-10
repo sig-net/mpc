@@ -23,6 +23,15 @@ use crate::config::MidnightConfig;
 
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 
+/// `MidnightRuntimeApi::get_ledger_parameters`, spelled the way `sp_api` names a
+/// runtime entry point on the wire (`Trait_method`). Confirmed against node
+/// 2.0.0-rc.4 metadata; a rename upstream fails loudly as "function not found".
+const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
+/// `MidnightRuntimeApi::get_zswap_chain_state`, from the same metadata read.
+const ZSWAP_CHAIN_STATE_ENTRY: &str = "MidnightRuntimeApi_get_zswap_chain_state";
+/// How the legacy backend renders a `state_call` at a hash the node cannot serve.
+const UNKNOWN_BLOCK_MSG: &str = "UnknownBlock";
+
 /// The classified read failures, travelling as marker text because `retry_rpc!`
 /// flattens error chains to their message; when the retry layer preserves sources,
 /// [`of`](Self::of) becomes a downcast and call sites stay put.
@@ -93,6 +102,18 @@ impl BlockRef {
 
 fn hex_0x(hash: H256) -> String {
     format!("0x{}", hex::encode(hash.as_bytes()))
+}
+
+/// The `0x`-prefixed 32-byte block hash every pinned read is addressed by.
+fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
+    let bare = at_block_hash_0x
+        .strip_prefix("0x")
+        .context("block hash is not 0x-prefixed")?;
+    let bytes: [u8; 32] = hex::decode(bare)
+        .context("block hash is not hex")?
+        .try_into()
+        .map_err(|got: Vec<u8>| anyhow::anyhow!("block hash is {} bytes, not 32", got.len()))?;
+    Ok(H256(bytes))
 }
 
 pub struct MidnightRpc {
@@ -214,6 +235,47 @@ impl MidnightRpc {
             .await
     }
 
+    /// The finalized head as the `0x`-prefixed hash string every pinned read takes.
+    pub async fn finalized_head_0x(&self) -> anyhow::Result<String> {
+        Ok(hex_0x(self.reads.finalized_head().await?))
+    }
+
+    /// The ledger parameters at `at_block_hash_0x`. Fees drift per block, so a
+    /// caller proving against a state must read these at that state's own hash.
+    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
+        let at = parse_block_hash(at_block_hash_0x)?;
+        self.reads
+            .runtime_api_bytes(LEDGER_PARAMETERS_ENTRY, Vec::new(), at)
+            .await?
+            .with_context(|| {
+                format!("midnight node has no ledger parameters at {at_block_hash_0x}")
+            })
+    }
+
+    /// The zswap ledger state at `at_block_hash_0x`: the whole chain's, not one
+    /// contract's. The entry point declares an address argument and ignores it, so
+    /// unlike `contract_state` there is no absent case to report.
+    pub async fn zswap_chain_state(
+        &self,
+        address_64hex: &str,
+        at_block_hash_0x: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        use subxt::ext::codec::Encode as _;
+        // The entry point declares a `Vec<u8>`, so the address goes on the wire
+        // SCALE encoded, length prefix and all: the bare 32 bytes trap the runtime
+        // wasm on an `unreachable` instruction rather than failing legibly.
+        let call_parameters = hex::decode(address_64hex)
+            .context("contract address is not hex")?
+            .encode();
+        let at = parse_block_hash(at_block_hash_0x)?;
+        self.reads
+            .runtime_api_bytes(ZSWAP_CHAIN_STATE_ENTRY, call_parameters, at)
+            .await?
+            .with_context(|| {
+                format!("midnight node has no zswap chain state at {at_block_hash_0x}")
+            })
+    }
+
     /// The finalized head as a [`BlockRef`]: the head hash, then its header for the
     /// number and parent, each read on the ordinary retry budget.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
@@ -247,6 +309,30 @@ impl MidnightRpc {
             hash: hex_0x(hash),
             parent_hash: hex_0x(header.parent_hash),
         })
+    }
+}
+
+/// The bare payload of a `Result<Vec<u8>, _>` runtime-API answer, the shape both entry
+/// points read here answer in at `MidnightRuntimeApi` version 2 (node 2.0.0-rc.4). `None`
+/// is the `Err` variant: only its discriminant is decoded, so an unseen ledger error stays `Err`.
+fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    use subxt::ext::codec::Decode as _;
+    let (variant, mut payload) = answer
+        .split_first()
+        .context("runtime api returned an empty Result envelope")?;
+    match *variant {
+        0 => {
+            let value = Vec::<u8>::decode(&mut payload)
+                .context("runtime api Ok payload is not a SCALE Vec<u8>")?;
+            anyhow::ensure!(
+                payload.is_empty(),
+                "runtime api Ok payload has {} trailing bytes",
+                payload.len()
+            );
+            Ok(Some(value))
+        }
+        1 => Ok(None),
+        other => anyhow::bail!("runtime api returned Result variant {other}"),
     }
 }
 
@@ -413,6 +499,31 @@ impl Reads {
         )?;
         Self::resolve(fetched)
     }
+
+    /// One `MidnightRuntimeApi` read: a `state_call` at `at`, unwrapped to the bare
+    /// payload. Whatever the runtime itself answers is definitive (Err envelope
+    /// included); only transport faults spend the retry budget.
+    async fn runtime_api_bytes(
+        &self,
+        entry_point: &'static str,
+        call_parameters: Vec<u8>,
+        at: H256,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let fetched = retry_rpc!(self.request_timeout, self.retry, "midnight_state_call", {
+            match self
+                .legacy
+                .state_call(entry_point, Some(&call_parameters), Some(at))
+                .await
+            {
+                Ok(answer) => unwrap_runtime_api_result(&answer).map(Fetched::Value),
+                Err(err) if err.to_string().contains(UNKNOWN_BLOCK_MSG) => {
+                    Err(ReadFailure::Unservable.err(err))
+                }
+                Err(err) => self.classify(Err(err), entry_point),
+            }
+        })?;
+        Self::resolve(fetched)
+    }
 }
 
 fn spawn_runtime_updater(client: OnlineClient<SubstrateConfig>) -> AbortOnDrop {
@@ -440,6 +551,8 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
+            network_id: "undeployed".to_string(),
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -779,5 +892,28 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(node.calls_to("midnight_contractState").len(), 3);
+    }
+
+    #[test]
+    fn runtime_api_result_envelope_unwraps_ok_err_and_garbage() {
+        use subxt::ext::codec::Encode as _;
+        // Ok(vec![0xaa, 0xbb]): discriminant 0, then a SCALE Vec<u8>.
+        let mut ok = vec![0u8];
+        ok.extend(vec![0xaau8, 0xbb].encode());
+        assert_eq!(
+            unwrap_runtime_api_result(&ok).unwrap(),
+            Some(vec![0xaa, 0xbb])
+        );
+        // Err(anything): discriminant 1; the error payload is never decoded.
+        assert_eq!(unwrap_runtime_api_result(&[1u8, 0xff]).unwrap(), None);
+        // An empty answer and an unknown discriminant are decode faults, not values.
+        assert!(unwrap_runtime_api_result(&[]).is_err());
+        assert!(unwrap_runtime_api_result(&[2u8]).is_err());
+        // Trailing bytes after the Ok payload are a fault: the envelope must consume
+        // the whole answer or the read is not what this decoder thinks it is.
+        let mut trailing = vec![0u8];
+        trailing.extend(vec![0xaau8].encode());
+        trailing.push(0x99);
+        assert!(unwrap_runtime_api_result(&trailing).is_err());
     }
 }
