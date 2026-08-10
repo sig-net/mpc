@@ -503,6 +503,7 @@ async fn wait_node_checkpoint(
 ) -> anyhow::Result<Checkpoint> {
     match tokio::time::timeout(timeout, async {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
+        
         loop {
             interval.tick().await;
 
