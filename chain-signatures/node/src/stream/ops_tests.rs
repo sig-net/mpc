@@ -570,6 +570,70 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 }
 
 #[tokio::test]
+async fn process_sign_request_duplicate_is_idempotent() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([9u8; 32]);
+    let request = test_indexed_request(
+        sign_id,
+        Chain::Ethereum,
+        test_sign_args(9),
+        current_unix_timestamp(),
+        SignKind::Sign,
+    );
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+
+    // First emission inserts a new entry.
+    let was_new = process_sign_request(request.clone(), &ctx)
+        .await
+        .expect("first sign request should be accepted");
+    assert!(was_new, "first insert must report a new entry");
+    assert_eq!(backlog.len(), 1);
+
+    // Replay: the indexer re-emitted the same SignId
+    // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
+    let is_new = process_sign_request(request.clone(), &ctx)
+        .await
+        .expect("replayed sign request should be accepted");
+    assert!(!is_new, "replayed insert must report an existing entry");
+    assert_eq!(
+        backlog.len(),
+        1,
+        "replaying the same SignId must not grow the backlog"
+    );
+
+    // No sign command was enqueued during catchup
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err(),
+        "no sign command should be enqueued during catchup"
+    );
+
+    // After catchup, the backlog is re-queued to the sign queue.
+    requeue_pending_sign_requests(&ctx, Chain::Ethereum)
+        .await
+        .expect("requeue should succeed");
+
+    // The re-queued request should be sent to the sign queue.
+    match timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .expect("requeue should enqueue the pending request")
+        .expect("sign channel open")
+    {
+        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        other => panic!("expected a single requeued request, got {other:?}"),
+    }
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err(),
+        "the replayed duplicate must not produce a second command"
+    );
+}
+
+#[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([15u8; 32]);
