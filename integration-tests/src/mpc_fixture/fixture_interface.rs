@@ -218,6 +218,13 @@ impl MpcFixture {
         result.expect("should produce enough signatures")
     }
 
+    /// Send the same `SignCommand` to every node's `sign_tx`.
+    pub async fn broadcast(&self, request: &SignCommand) {
+        for node in &self.nodes {
+            node.sign_tx.send(request.clone()).await.unwrap();
+        }
+    }
+
     pub async fn print_triples(&self) {
         for node in &self.nodes {
             let id = node.me;
