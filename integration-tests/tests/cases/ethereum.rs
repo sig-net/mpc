@@ -519,6 +519,7 @@ async fn wait_node_checkpoint(
         Ok(inner) => inner,
         Err(_elapsed) => {
             let detail = snapshot_checkpoint(nodes, node_idx, chain).await;
+            
             panic!(
                 "timed out after {timeout:?} waiting for node {node_idx} {chain:?} checkpoint >= {min_block_height}; {detail}"
             );
