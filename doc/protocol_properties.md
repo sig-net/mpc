@@ -104,17 +104,19 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (../chain-signatures/node/src/protocol/signature.rs, keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
 
-*Gap.* The mechanisms below are per node: each holder burns the artifact on first use. That stops one node serving the same presignature twice; it does not stop two **disjoint** honest quorums each serving their own first request on it. A presignature's holders are all accepters of its generation, so there can be up to n of them; with ≥ 2t honest holders the two quorums exist. Opening an instance requires being the recorded owner (mechanism 1), so this needs a Byzantine owner: one node, well inside f \< t.
-
-Closing the gap needs the artifact bound to its first *consumer*, not merely deleted: on first use persist presignature\_id → sign\_id and reject that presignature under any other sign\_id, retaining the tombstone at least as long as the request can be retried. Still local, still single-writer, no agreement involved. Until then the property holds only for presignatures with fewer than 2t honest holders.
-
-*Corollary, once the above holds.* With f \< t corrupted nodes, fewer than t shares ever exist for a second request, so no second signature can be formed.
-
-Currently enforced by three *local* mechanisms (no distributed agreement involved):
+*How it is enforced.* Three *local* mechanisms (no distributed agreement involved):
 
 1. Single writer. Only the artifact's owner initiates consumption (../chain-signatures/node/src/storage/protocol\_storage.rs). Every holder enforces this, not just the owner: its take is keyed on the claimed owner and fails if that node is not the recorded owner of the artifact. This pins each instance to one opener; it constrains nothing about an opener that is itself corrupt.  
-2. Delete-on-first-use at every holder. When generation starts, the proposer commits (removes from storage) and every deliberator takes its local share (../chain-signatures/node/src/protocol/signature.rs); a further use attempt fails at any holder that already used it (MissingArtifact reject), and only there, which is the gap above. Durability rule: the removal must be persisted *before* any protocol message derived from the artifact is sent; otherwise a crash-and-recover holder resurrects the share and honestly serves a second request. (Today the store is Redis and the take precedes generation; whether the removal is durable at send time is a deployment property of Redis persistence.)  
+2. Delete-on-first-use at every holder. When generation starts, the proposer commits (removes from storage) and every deliberator takes its local share (../chain-signatures/node/src/protocol/signature.rs); a further use attempt fails at any holder that already used it (MissingArtifact reject), and only there. Durability rule: the removal must be persisted *before* any protocol message derived from the artifact is sent; otherwise a crash-and-recover holder resurrects the share and honestly serves a second request. (Today the store is Redis and the take precedes generation; whether the removal is durable at send time is a deployment property of Redis persistence.)  
 3. Instance binding. Every signature posit message carries (sign\_id, presignature\_id, round) and mismatches are rejected; generation messages carry (sign\_id, presignature\_id) and are only ever delivered to the matching instance's inbox (../chain-signatures/node/src/protocol/signature.rs).
+
+Together these give the property *per node*: no honest node ever serves the same artifact twice.
+
+*Gap: per node is not per artifact.* Burning the artifact at each holder stops one node serving one presignature twice; it does not stop two **disjoint** sets of honest holders each serving their own first request on it. Both instances need a participant list of at least t (posit.rs gates on `enough_accepts(threshold)`), and an honest holder can appear in only one of them, but a corrupt holder can serve both. The two lists must therefore overlap only in corrupt nodes: 2t − f holders in total, i.e. 2(t − f) honest ones alongside the f corrupt. Opening either instance requires being the recorded owner (mechanism 1), so the owner must be corrupt too, one node and well inside f \< t.
+
+The honest-holder cost falls as f grows: at f \= t − 1 it is two. Holders are all accepters of the artifact's generation, so a presignature can have up to n of them, and sets that large arise in normal operation, not only under attack.
+
+*Closing it.* Bind the artifact to its first *consumer* rather than merely deleting it: on first use persist presignature\_id → sign\_id and reject that presignature under any other sign\_id, retaining the tombstone at least as long as the request can be retried. Still local, still single-writer, no agreement involved. An honest holder then refuses the second instance whichever quorum asks, so with f \< t corrupted nodes fewer than t shares ever exist for a second request and no second signature can be formed. Until that lands, the property holds only for artifacts with fewer than 2t − f holders.
 
 ### S2. Only indexed requests are signed
 
