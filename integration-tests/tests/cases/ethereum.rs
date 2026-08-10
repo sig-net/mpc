@@ -478,6 +478,22 @@ async fn produce_empty_eth_blocks_for_duration(
     Ok(())
 }
 
+/// On a timeout, snapshot a node's current checkpoint for CI diagnostics
+async fn snapshot_checkpoint(nodes: &Cluster, idx: usize, chain: Chain) -> String {
+    match tokio::time::timeout(Duration::from_secs(5), nodes.fetch_checkpoints(idx)).await {
+        Ok(Ok(all)) => match all.get(&chain) {
+            Some(c) => format!(
+                "{chain:?} checkpoint height={}, digest=0x{}",
+                c.block_height,
+                hex::encode(c.digest())
+            ),
+            None => format!("no {chain:?} checkpoint"),
+        },
+        Ok(Err(e)) => format!("/checkpoint fetch failed: {e}"),
+        Err(_) => format!("/checkpoint fetch timed out (node may be wedged)"),
+    }
+}
+
 async fn wait_node_checkpoint(
     nodes: &Cluster,
     node_idx: usize,
@@ -485,7 +501,7 @@ async fn wait_node_checkpoint(
     min_block_height: u64,
     timeout: Duration,
 ) -> anyhow::Result<Checkpoint> {
-    tokio::time::timeout(timeout, async {
+    match tokio::time::timeout(timeout, async {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
@@ -499,9 +515,15 @@ async fn wait_node_checkpoint(
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!("timed out waiting for node {node_idx} checkpoint >= {min_block_height}")
-    })
+    {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            let detail = snapshot_checkpoint(nodes, node_idx, chain).await;
+            panic!(
+                "timed out after {timeout:?} waiting for node {node_idx} {chain:?} checkpoint >= {min_block_height}; {detail}"
+            );
+        }
+    }
 }
 
 async fn wait_matching_node_checkpoints(
@@ -512,7 +534,7 @@ async fn wait_matching_node_checkpoints(
     min_block_height: u64,
     timeout: Duration,
 ) -> anyhow::Result<(Checkpoint, Checkpoint)> {
-    tokio::time::timeout(timeout, async {
+    match tokio::time::timeout(timeout, async {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
@@ -539,9 +561,14 @@ async fn wait_matching_node_checkpoints(
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "timed out waiting for nodes {left_idx} and {right_idx} to converge on checkpoint >= {min_block_height}"
-        )
-    })
+    {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            let left_detail = snapshot_checkpoint(nodes, left_idx, chain).await;
+            let right_detail = snapshot_checkpoint(nodes, right_idx, chain).await;
+            panic!(
+                "timed out after {timeout:?} waiting for nodes {left_idx} and {right_idx} to converge on {chain:?} checkpoint >= {min_block_height}; node {left_idx}: {left_detail}; node {right_idx}: {right_detail}"
+            );
+        }
+    }
 }
