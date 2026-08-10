@@ -13,6 +13,7 @@ use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
     SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
+use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
 
 /// Whether a transaction's calldata represents a contract call.
@@ -148,7 +149,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
             key_version: event.key_version,
         },
         Chain::Ethereum,
-        crate::util::current_unix_timestamp(),
+        current_unix_timestamp(),
     ))
 }
 

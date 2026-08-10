@@ -14,7 +14,10 @@ use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
 use crate::storage::PresignatureStorage;
-use crate::util::{JoinMap, TimeoutBudget};
+use mpc_utils::{
+    task::JoinMap,
+    time::{unix_elapsed, TimeoutBudget},
+};
 
 use cait_sith::protocol::Participant;
 use lru::LruCache;
@@ -178,14 +181,14 @@ impl SignatureSpawner {
         let chain = request.chain;
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
-        let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
+        let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         let is_proposer = Arc::clone(&is_proposer);
         if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
-                let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
+                let elapsed = unix_elapsed(unix_timestamp_indexed);
                 tracing::warn!(
                     ?sign_id,
                     ?chain,

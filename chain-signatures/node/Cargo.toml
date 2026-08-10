@@ -88,6 +88,7 @@ mpc-chain-near.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 
 alloy-dyn-abi.workspace = true
 alloy-json-abi.workspace = true

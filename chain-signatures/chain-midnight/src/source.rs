@@ -7,7 +7,7 @@ use crate::state::decode_contract_state;
 
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
-use mpc_chain_integration_core::utils::task::AbortOnDrop;
+use mpc_utils::task::AbortOnDrop;
 use tokio::sync::mpsc;
 
 /// What a contract-state read found.

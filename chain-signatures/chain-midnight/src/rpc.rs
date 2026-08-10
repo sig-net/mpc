@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use futures_util::{Stream, StreamExt};
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
-use mpc_chain_integration_core::utils::task::AbortOnDrop;
+use mpc_utils::task::AbortOnDrop;
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::RpcClient;

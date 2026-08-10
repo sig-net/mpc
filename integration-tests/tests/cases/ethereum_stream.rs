@@ -23,12 +23,12 @@ use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
-use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs,
     SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

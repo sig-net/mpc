@@ -1,14 +1,7 @@
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
 
-use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
-use tokio::task::{AbortHandle, JoinSet};
-
-use std::collections::HashMap;
-use std::future::Future;
-use std::hash::Hash;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -62,36 +55,6 @@ impl NearPublicKeyFromAffineExt for AffinePoint {
     }
 }
 
-pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool {
-    if let LocalResult::Single(msg_timestamp) = Utc.timestamp_opt(timestamp_sec as i64, 0) {
-        let timeout = Duration::from_millis(timeout);
-        let now_datetime: DateTime<Utc> = Utc::now();
-        // Calculate the difference in seconds
-        let elapsed_duration = now_datetime.signed_duration_since(msg_timestamp);
-        let timeout = chrono::Duration::seconds(timeout.as_secs() as i64)
-            + chrono::Duration::nanoseconds(timeout.subsec_nanos() as i64);
-        elapsed_duration > timeout
-    } else {
-        false
-    }
-}
-
-pub fn current_unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
-}
-
-/// Calculate elapsed time from a unix timestamp to now
-pub fn unix_elapsed(unix_timestamp: u64) -> Duration {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Duration::from_secs(now.saturating_sub(unix_timestamp))
-}
-
 pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
     let mut output = [0u8; 8];
     let mut i = 0;
@@ -100,134 +63,6 @@ pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
         i += 1;
     }
     output
-}
-
-pub struct JoinMap<T, U> {
-    mapping: HashMap<T, AbortHandle>,
-    mapping_id: HashMap<tokio::task::Id, T>,
-    tasks: JoinSet<U>,
-}
-
-impl<T, U> Default for JoinMap<T, U> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T, U> JoinMap<T, U> {
-    pub fn new() -> Self {
-        Self {
-            mapping: HashMap::new(),
-            mapping_id: HashMap::new(),
-            tasks: JoinSet::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.mapping.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
-    }
-
-    pub fn abort_all(&mut self) {
-        for handle in self.mapping.values() {
-            handle.abort();
-        }
-        self.mapping.clear();
-        self.mapping_id.clear();
-    }
-}
-
-impl<T, U> JoinMap<T, U>
-where
-    T: Copy + Hash + Eq,
-    U: Send + 'static,
-{
-    pub fn contains_key(&self, key: &T) -> bool {
-        self.mapping.contains_key(key)
-    }
-
-    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
-        let handle = self.tasks.spawn(task);
-        let task_id = handle.id();
-        self.mapping.insert(key, handle);
-        self.mapping_id.insert(task_id, key);
-    }
-
-    pub fn abort(&mut self, key: T) -> bool {
-        if let Some(handle) = self.mapping.remove(&key) {
-            handle.abort();
-
-            if let Some(task_id) = self
-                .mapping_id
-                .iter()
-                .find_map(|(id, mapped_key)| (*mapped_key == key).then_some(*id))
-            {
-                self.mapping_id.remove(&task_id);
-            }
-
-            true
-        } else {
-            false
-        }
-    }
-
-    pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
-        let outcome = self.tasks.join_next_with_id().await?;
-        let (id, outcome) = match outcome {
-            Ok((id, outcome)) => (id, Some(outcome)),
-            Err(err) => (err.id(), None),
-        };
-
-        let key = self.mapping_id.remove(&id)?;
-        self.mapping.remove(&key);
-        match outcome {
-            Some(outcome) => Some(Ok((key, outcome))),
-            None => Some(Err(key)),
-        }
-    }
-}
-
-impl<T, U> Drop for JoinMap<T, U> {
-    fn drop(&mut self) {
-        for handle in self.mapping.values() {
-            handle.abort();
-        }
-    }
-}
-
-/// Tracks the remaining time budget for a signature attempt.
-/// When the budget is exhausted, the attempt fails and we reorganize.
-pub struct TimeoutBudget {
-    started: Instant,
-    timeout: Duration,
-}
-
-impl TimeoutBudget {
-    pub fn new(timeout: Duration) -> Self {
-        Self {
-            started: Instant::now(),
-            timeout,
-        }
-    }
-
-    /// Returns the remaining time in the budget, or Duration::ZERO if exhausted.
-    pub fn remaining(&self) -> Duration {
-        self.timeout.saturating_sub(self.started.elapsed())
-    }
-
-    /// Returns true if the budget is exhausted.
-    pub fn is_exhausted(&self) -> bool {
-        self.started.elapsed() >= self.timeout
-    }
-
-    /// Resets the budget with a new timeout (used when starting a new attempt).
-    pub fn reset(&mut self, timeout: Duration) {
-        self.started = Instant::now();
-        self.timeout = timeout;
-    }
 }
 
 pub fn channel_len(tx: &tokio::sync::mpsc::Sender<impl Sized>) -> usize {

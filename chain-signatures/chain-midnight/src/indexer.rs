@@ -702,8 +702,8 @@ mod tests {
         trim,
     };
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
-    use mpc_chain_integration_core::utils::task::AbortOnDrop;
     use mpc_primitives::SignId;
+    use mpc_utils::task::AbortOnDrop;
     use std::collections::HashMap;
 
     /// A record with a distinguishing nonce, and the id it files itself under.

@@ -2,6 +2,7 @@ use mpc_chain_integration_core::{
     ChainTelemetry, ExtractionFailureKind, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{Chain, ChainConfig as _};
+use mpc_utils::time::unix_elapsed;
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER},
@@ -23,8 +24,7 @@ impl NodeTelemetry {
 impl PublisherTelemetry for NodeTelemetry {
     fn record_publish_metrics(&self, action: &PublishAction) {
         let chain = action.request.chain;
-        let elapsed_secs =
-            crate::util::unix_elapsed(action.request.unix_timestamp_indexed).as_secs();
+        let elapsed_secs = unix_elapsed(action.request.unix_timestamp_indexed).as_secs();
 
         if elapsed_secs <= chain.expected_response_time_secs() {
             record_request_latency_since(

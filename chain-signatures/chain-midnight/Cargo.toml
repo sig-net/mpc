@@ -19,6 +19,7 @@ midnight-storage.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 # Cargo unifies features across this crate and `node` in a workspace build, so
 # nothing here may rely on `unstable-light-client` (node's addition) being absent.
 subxt = { workspace = true, features = ["jsonrpsee", "native"] }
