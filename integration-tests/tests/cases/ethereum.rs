@@ -490,7 +490,7 @@ async fn snapshot_checkpoint(nodes: &Cluster, idx: usize, chain: Chain) -> Strin
             None => format!("no {chain:?} checkpoint"),
         },
         Ok(Err(e)) => format!("/checkpoint fetch failed: {e}"),
-        Err(_) => format!("/checkpoint fetch timed out (node may be wedged)"),
+        Err(_) => "/checkpoint fetch timed out (node may be wedged)".to_string(),
     }
 }
 
