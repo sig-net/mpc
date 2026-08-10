@@ -14,7 +14,7 @@ use mpc_primitives::{
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
     ctx: &StreamContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
     }
@@ -33,11 +33,12 @@ pub(crate) async fn process_sign_request(
         }
     }
 
-    ctx.backlog.insert(sign_request.clone()).await;
+    // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
+    let is_new = ctx.backlog.insert(sign_request.clone()).await.is_none();
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
-    Ok(())
+    Ok(is_new)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
