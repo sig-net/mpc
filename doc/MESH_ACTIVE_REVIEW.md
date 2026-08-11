@@ -72,10 +72,28 @@ must be what reaches storage.
 `/sync` sets `DefaultBodyLimit::max(20 * 1024 * 1024)`
 ([web/mod.rs:75](chain-signatures/node/src/web/mod.rs:75)). Anyone can post 20 MB
 of CBOR ids and make the node run a Redis Lua script over all of them, with no
-rate limit and no concurrency bound. Fixed as a side effect of S1 (the envelope
-must decrypt and verify before any work happens), but the limit should also be
-sized to the real maximum (participants x per-owner artifact cap) rather than a
-round 20 MB.
+rate limit and no concurrency bound.
+
+**Partly addressed by S1.** The expensive half is closed: the handler decrypts and
+verifies the envelope before it touches storage, so an unauthenticated caller can
+no longer drive the Lua script over an attacker-chosen id list.
+
+The buffering half is not, because authentication happens strictly *after* the
+body is read. `sync()` takes `WithRejection<Cbor<SignedMessage>, Error>`, so the
+extractor runs first; `Cbor::from_request` calls `Bytes::from_request`, which
+reads the whole body into memory bounded only by the 20 MB limit; only then can
+the handler decrypt and reject the caller. So an unauthenticated caller can still
+make a node allocate up to 20 MB per in-flight request, and there is no
+concurrency cap on the axum server bounding how many are in flight at once.
+
+Lower severity than S1: it costs the attacker equivalent bandwidth and leaves no
+lasting damage. Still open, and still remotely reachable per the load balancer
+note in S1.
+
+Remaining work: size the limit to the real maximum (participants x per-owner
+artifact cap) rather than a round 20 MB, and bound in-flight `/sync` requests.
+Both change behaviour under load, so they want their own change with a stated
+rationale for the numbers.
 
 ### S3 (high) — lost connection updates are silently swallowed
 
@@ -222,11 +240,12 @@ clean termination condition rather than a panic.
 
 Shipped:
 
-- **S1, S2** — `/sync` carries a `SignedMessage` in both directions; storage keys
-  off the verified signer, and a response is rejected unless signed by the peer
-  we contacted. `PROTOCOL_VERSION` bumped to 2. The body limit is kept at 20 MB
-  and documented: derived from the artifact caps, it is a real ceiling, and the
-  security property comes from the envelope, not the limit.
+- **S1** — `/sync` carries a `SignedMessage` in both directions; storage keys off
+  the verified signer, and a response is rejected unless signed by the peer we
+  contacted. `PROTOCOL_VERSION` bumped to 2.
+- **S2, partly** — authentication now gates the storage work, which was the
+  expensive half. The body is still buffered before the caller is authenticated,
+  and in-flight requests are still unbounded; see S2 for why and what is left.
 - **S3, S4, S8** — connection set published over a `watch` channel; `MeshUpdate`
   makes drops unrepresentable as fake status updates; the updater's death is
   surfaced and stops the mesh instead of freezing it.
@@ -242,6 +261,10 @@ Shipped:
 
 Deferred, with reasons:
 
+- **S2, the remainder** (body buffered before authentication, in-flight requests
+  unbounded) — sizing the limit to participants x per-owner artifact cap, and
+  capping concurrent `/sync` requests. Both change behaviour under load, and the
+  numbers want a stated rationale rather than being chosen in passing.
 - **S6** (self exempt from liveness checks) — the fix is to drive self status from
   `NodeStateWatcher`. Confirmed non-circular: `wait_threshold_active` only gates
   indexer hydration and backlog recovery, and `cryptography.rs` reads
