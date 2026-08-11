@@ -106,8 +106,16 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
     > {
         let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
+            tracing::info!(anchor_slot = anchor_height, "solana catchup not required");
             return Ok(Box::pin(stream::empty()));
         };
+
+        tracing::info!(
+            anchor_slot = anchor_height,
+            start_slot,
+            end_slot,
+            "solana catchup started"
+        );
 
         let newest_first_pages =
             Self::paginate_slots(self.client.clone(), self.program_id, start_slot, end_slot);
@@ -430,6 +438,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             anchor = anchor_rx => anchor.context("solana live subscription ended before resolving anchor slot")?,
         };
 
+        let catchup_started_at = Instant::now();
         let mut catchup_iter = self.catchup_blocks(anchor).await?;
         loop {
             let item = tokio::select! {
@@ -442,6 +451,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
                 .await;
         }
+
+        tracing::info!(
+            anchor_slot = anchor,
+            elapsed = ?catchup_started_at.elapsed(),
+            "solana catchup complete"
+        );
 
         events_tx
             .send(ChainEvent::CatchupCompleted)
