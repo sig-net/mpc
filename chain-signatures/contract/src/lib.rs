@@ -26,8 +26,8 @@ use near_sdk::{
     PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
-    PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants,
+    PendingRequest, PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
@@ -39,8 +39,9 @@ use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
 pub use state::{
-    InitializingContractState, ProtocolContractState, ProtocolContractStateView,
-    ResharingContractState, RunningContractState, RunningContractStateView,
+    InitializingContractState, InitializingContractStateView, ProtocolContractState,
+    ProtocolContractStateView, ResharingContractState, RunningContractState,
+    RunningContractStateView,
 };
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
@@ -86,6 +87,13 @@ pub struct MpcContract {
     config: Config,
     latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
+    /// Candidate registry (open-`join()` pool + genesis founding set), each
+    /// entry folding in the participants that voted to admit it. Stored as an
+    /// `IterableMap` so its entries live under their own storage keys rather
+    /// than inline in the `STATE` blob — `sign`/`vote_checkpoint` and every
+    /// other `&mut` call would otherwise re-serialize the whole (unbounded) set
+    /// on each invocation.
+    candidates: IterableMap<AccountId, CandidateEntry>,
 }
 
 impl MpcContract {
@@ -117,9 +125,18 @@ impl MpcContract {
         candidates: BTreeMap<AccountId, CandidateInfo>,
         config: Option<Config>,
     ) -> Self {
+        let mut candidate_map = IterableMap::new(StorageKey::Candidates);
+        for (account_id, info) in candidates {
+            candidate_map.insert(
+                account_id,
+                CandidateEntry {
+                    info,
+                    join_votes: HashSet::new(),
+                },
+            );
+        }
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: Candidates { candidates },
                 threshold,
                 pk_votes: PkVotes::new(),
             }),
@@ -128,6 +145,7 @@ impl MpcContract {
             config: config.unwrap_or_default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
+            candidates: candidate_map,
         }
     }
 }
@@ -338,13 +356,9 @@ impl VersionedMpcContract {
             cipher_pk,
             sign_pk
         );
-        let protocol_state = self.mutable_state();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
         match protocol_state {
-            ProtocolContractState::Running(RunningContractState {
-                participants,
-                ref mut candidates,
-                ..
-            }) => {
+            ProtocolContractState::Running(RunningContractState { participants, .. }) => {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
                     return Err(JoinError::JoinAlreadyParticipant.into());
@@ -358,11 +372,14 @@ impl VersionedMpcContract {
                 }
                 candidates.insert(
                     signer_account_id.clone(),
-                    CandidateInfo {
-                        account_id: signer_account_id,
-                        url,
-                        cipher_pk,
-                        sign_pk,
+                    CandidateEntry {
+                        info: CandidateInfo {
+                            account_id: signer_account_id,
+                            url,
+                            cipher_pk,
+                            sign_pk,
+                        },
+                        join_votes: HashSet::new(),
                     },
                 );
                 Ok(())
@@ -374,25 +391,16 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn remove_candidacy(&mut self) -> Result<(), Error> {
         log!("remove_candidacy: signer={}", env::signer_account_id());
-        let protocol_state = self.mutable_state();
+        let signer_account_id = env::signer_account_id();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
 
         match protocol_state {
-            ProtocolContractState::Running(RunningContractState {
-                candidates,
-                join_votes,
-                ..
-            }) => {
-                let signer_account_id = env::signer_account_id();
-                if candidates.get(&signer_account_id).is_none() {
+            ProtocolContractState::Running(_) => {
+                // Removing the entry drops the candidate and its folded join
+                // votes together.
+                if candidates.remove(&signer_account_id).is_none() {
                     return Err(JoinError::RevokeNotCandidate.into());
                 }
-
-                // cleanup the existing votes
-                join_votes.remove(&signer_account_id);
-
-                // remove from candidates
-                candidates.remove(&signer_account_id);
-
                 Ok(())
             }
             _ => Err(InvalidState::ProtocolStateNotRunning.into()),
@@ -407,25 +415,23 @@ impl VersionedMpcContract {
             candidate
         );
         let voter = self.voter()?;
-        let protocol_state = self.mutable_state();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 epoch,
                 participants,
                 threshold,
                 public_key,
-                candidates,
-                join_votes,
                 ..
             }) => {
-                let candidate_info = candidates
-                    .get(&candidate)
+                let entry = candidates
+                    .get_mut(&candidate)
                     .ok_or(VoteError::JoinNotCandidate)?;
-                let voted = join_votes.entry(candidate.clone());
-                voted.insert(voter);
-                if voted.len() >= *threshold {
+                entry.join_votes.insert(voter);
+                if entry.join_votes.len() >= *threshold {
+                    let candidate_info = entry.info.clone();
                     let mut new_participants = participants.clone();
-                    new_participants.insert(candidate, candidate_info.clone().into());
+                    new_participants.insert(candidate, candidate_info.into());
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
@@ -436,6 +442,8 @@ impl VersionedMpcContract {
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
                     });
+                    // Admission triggers resharing; wipe the pending pool.
+                    candidates.clear();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -453,7 +461,7 @@ impl VersionedMpcContract {
             kick
         );
         let voter = self.voter()?;
-        let protocol_state = self.mutable_state();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 epoch,
@@ -484,6 +492,8 @@ impl VersionedMpcContract {
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
                     });
+                    // Leaving triggers resharing; wipe the pending pool.
+                    candidates.clear();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -507,7 +517,7 @@ impl VersionedMpcContract {
             new_threshold
         );
         let voter = self.voter()?;
-        let protocol_state = self.mutable_state();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 epoch,
@@ -542,6 +552,8 @@ impl VersionedMpcContract {
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
                     });
+                    // Threshold change triggers resharing; wipe the pending pool.
+                    candidates.clear();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -559,26 +571,27 @@ impl VersionedMpcContract {
             public_key
         );
         let voter = self.voter()?;
-        let protocol_state = self.mutable_state();
+        let (protocol_state, candidates) = self.state_and_candidates_mut();
         match protocol_state {
             ProtocolContractState::Initializing(InitializingContractState {
-                candidates,
                 threshold,
                 pk_votes,
             }) => {
                 let voted = pk_votes.entry(public_key.clone());
                 voted.insert(voter);
                 if voted.len() >= *threshold {
+                    // The founding candidate set becomes the participant set;
+                    // then clear it so the `Running` candidate pool starts empty.
+                    let participants = Self::participants_from_candidates(candidates);
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: 0,
-                        participants: candidates.clone().into(),
+                        participants,
                         threshold: *threshold,
                         public_key,
-                        candidates: Candidates::new(),
-                        join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                     });
+                    candidates.clear();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -621,8 +634,6 @@ impl VersionedMpcContract {
                         participants: new_participants.clone(),
                         threshold: *new_threshold,
                         public_key: public_key.clone(),
-                        candidates: Candidates::new(),
-                        join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                     });
@@ -663,8 +674,6 @@ impl VersionedMpcContract {
                         participants: old_participants.clone(),
                         threshold: *threshold,
                         public_key: public_key.clone(),
-                        candidates: Candidates::new(),
-                        join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                     });
@@ -810,8 +819,6 @@ impl VersionedMpcContract {
                 participants,
                 threshold,
                 public_key,
-                candidates: Candidates::new(),
-                join_votes: Votes::new(),
                 leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
             }),
@@ -820,6 +827,7 @@ impl VersionedMpcContract {
             config: config.unwrap_or_default(),
             latest_checkpoints,
             checkpoint_votes: CheckpointVotes::new(),
+            candidates: IterableMap::new(StorageKey::Candidates),
         }))
     }
 
@@ -863,19 +871,42 @@ impl VersionedMpcContract {
     /// how many participants have voted for it, without pulling the full
     /// candidate set that the `Running` state view no longer exposes.
     pub fn candidate_status(&self, account_id: AccountId) -> Option<Vec<AccountId>> {
+        self.candidates_ref()
+            .get(&account_id)
+            .map(|entry| entry.join_votes.iter().cloned().collect())
+    }
+
+    /// Paginated candidate listing (operators/monitoring). The full candidate
+    /// set is no longer returned by `state()`; this reads the top-level map in
+    /// bounded chunks so a single call can't exceed the RPC view limit.
+    pub fn get_candidates(&self, from_index: u64, limit: u64) -> Vec<(AccountId, CandidateInfo)> {
+        self.candidates_ref()
+            .iter()
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|(account_id, entry)| (account_id.clone(), entry.info.clone()))
+            .collect()
+    }
+
+    /// Lean protocol-state view for external reads. The `Running` variant drops
+    /// the vote maps; the `Initializing` variant is assembled with the founding
+    /// candidate set read from the top-level map (bounded genesis set).
+    fn view_state(&self) -> ProtocolContractStateView {
         match self.state() {
-            ProtocolContractState::Running(running)
-                if running.candidates.contains_key(&account_id) =>
-            {
-                let voters = running
-                    .join_votes
-                    .votes
-                    .get(&account_id)
-                    .map(|voters| voters.iter().cloned().collect())
-                    .unwrap_or_default();
-                Some(voters)
+            ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
+            ProtocolContractState::Initializing(state) => {
+                ProtocolContractStateView::Initializing(InitializingContractStateView {
+                    candidates: self.candidates_snapshot(),
+                    threshold: state.threshold,
+                    pk_votes: state.pk_votes.clone(),
+                })
             }
-            _ => None,
+            ProtocolContractState::Running(state) => {
+                ProtocolContractStateView::Running(state.into())
+            }
+            ProtocolContractState::Resharing(state) => {
+                ProtocolContractStateView::Resharing(state.clone())
+            }
         }
     }
 
@@ -886,9 +917,9 @@ impl VersionedMpcContract {
             let view = match read {
                 // Lean projection (see `ProtocolContractStateView`): the
                 // `Running` variant drops the unbounded, attacker-writable
-                // `candidates`/`join_votes` maps so a spam `join()` cannot
-                // inflate this payload past the RPC view-execution limit.
-                Read::State => View::State(self.state().into()),
+                // candidate maps so a spam `join()` cannot inflate this payload
+                // past the RPC view-execution limit.
+                Read::State => View::State(self.view_state()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
@@ -1134,6 +1165,49 @@ impl VersionedMpcContract {
         }
     }
 
+    /// Disjoint mutable borrows of the protocol state and the top-level
+    /// candidate map, so a governance method can transition the state and clear
+    /// or update candidates in one body.
+    fn state_and_candidates_mut(
+        &mut self,
+    ) -> (
+        &mut ProtocolContractState,
+        &mut IterableMap<AccountId, CandidateEntry>,
+    ) {
+        match self {
+            Self::V0(c) => (&mut c.protocol_state, &mut c.candidates),
+        }
+    }
+
+    fn candidates_ref(&self) -> &IterableMap<AccountId, CandidateEntry> {
+        match self {
+            Self::V0(c) => &c.candidates,
+        }
+    }
+
+    /// Builds a `Participants` set from the current candidate registry (used at
+    /// genesis and when a candidate is admitted). Takes each entry's `info`;
+    /// join votes are irrelevant to participant construction.
+    fn participants_from_candidates(
+        candidates: &IterableMap<AccountId, CandidateEntry>,
+    ) -> Participants {
+        let mut participants = Participants::new();
+        for (account_id, entry) in candidates.iter() {
+            participants.insert(account_id.clone(), entry.info.clone().into());
+        }
+        participants
+    }
+
+    /// Snapshot the candidate registry as a `Candidates` value for the
+    /// `Initializing` view (genesis founding set — bounded).
+    fn candidates_snapshot(&self) -> Candidates {
+        let mut snapshot = Candidates::new();
+        for (account_id, entry) in self.candidates_ref().iter() {
+            snapshot.insert(account_id.clone(), entry.info.clone());
+        }
+        snapshot
+    }
+
     fn contains_request(&self, id: &SignId) -> bool {
         match self {
             Self::V0(mpc_contract) => mpc_contract.pending_requests.contains_key(id),
@@ -1190,8 +1264,8 @@ impl VersionedMpcContract {
         let voter = env::signer_account_id();
         match self {
             Self::V0(contract) => match &contract.protocol_state {
-                ProtocolContractState::Initializing(state) => {
-                    if !state.candidates.contains_key(&voter) {
+                ProtocolContractState::Initializing(_) => {
+                    if !contract.candidates.contains_key(&voter) {
                         return Err(VoteError::VoterNotParticipant.into());
                     }
                 }

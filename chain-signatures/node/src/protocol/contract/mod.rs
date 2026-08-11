@@ -16,8 +16,8 @@ pub struct InitializingContractState {
     pub pk_votes: PkVotes,
 }
 
-impl From<mpc_contract::InitializingContractState> for InitializingContractState {
-    fn from(value: mpc_contract::InitializingContractState) -> Self {
+impl From<mpc_contract::InitializingContractStateView> for InitializingContractState {
+    fn from(value: mpc_contract::InitializingContractStateView) -> Self {
         InitializingContractState {
             candidates: value.candidates.into(),
             threshold: value.threshold,

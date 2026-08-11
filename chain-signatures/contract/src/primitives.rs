@@ -21,6 +21,7 @@ pub enum StorageKey {
     ProposedUpdatesEntries,
     LatestCheckpoints,
     LatestCheckpointDigests,
+    Candidates,
 }
 
 #[derive(
@@ -129,6 +130,16 @@ pub struct CandidateInfo {
     pub cipher_pk: hpke::PublicKey,
     /// The public key used for verifying messages.
     pub sign_pk: PublicKey,
+}
+
+/// A candidate together with the participants that have voted to admit it,
+/// stored as one value in the top-level `candidates` map. Folding the votes
+/// into the entry keeps the candidate and its `join_votes` in a single storage
+/// slot so they can never desync (they are inserted/removed as a unit).
+#[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]
+pub struct CandidateEntry {
+    pub info: CandidateInfo,
+    pub join_votes: HashSet<AccountId>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]

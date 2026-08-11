@@ -4,6 +4,31 @@ use common::init_env;
 use serde_json::json;
 
 use near_workspaces::types::NearToken;
+use near_workspaces::{AccountId, Contract};
+
+/// Candidacy of `account_id` via the `candidate_status` view: `None` if not a
+/// candidate, otherwise the list of participants that voted to admit it.
+async fn candidate_status(contract: &Contract, account_id: &AccountId) -> Option<Vec<AccountId>> {
+    contract
+        .view("candidate_status")
+        .args_json(json!({ "account_id": account_id }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+/// Number of candidates currently registered (via the paginated view).
+async fn candidates_len(contract: &Contract) -> usize {
+    let candidates: Vec<(AccountId, serde_json::Value)> = contract
+        .view("get_candidates")
+        .args_json(json!({ "from_index": 0, "limit": 10_000 }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    candidates.len()
+}
 
 #[tokio::test]
 async fn test_join() -> anyhow::Result<()> {
@@ -24,14 +49,10 @@ async fn test_join() -> anyhow::Result<()> {
 
     assert!(execution.is_success());
 
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(r.candidates.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    assert!(
+        candidate_status(&contract, alice.id()).await.is_some(),
+        "alice should be a candidate"
+    );
 
     // try join again, still ok, because not become participant yet
     let execution = alice
@@ -152,14 +173,10 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify alice is in candidates
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(r.candidates.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    assert!(
+        candidate_status(&contract, alice.id()).await.is_some(),
+        "alice should be a candidate"
+    );
 
     // Vote for alice to join
     let execution = accounts[0]
@@ -172,16 +189,10 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify votes exist for alice
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(state) => {
-            assert!(state.candidates.contains_key(alice.id()));
-            assert!(state.join_votes.contains_key(alice.id()));
-            assert_eq!(state.join_votes.votes.get(alice.id()).unwrap().len(), 1);
-        }
-        _ => panic!("should be in running state"),
-    };
+    let votes = candidate_status(&contract, alice.id())
+        .await
+        .expect("alice should be a candidate");
+    assert_eq!(votes.len(), 1, "alice should have exactly one join vote");
 
     // Alice revokes her join request
     let execution = alice
@@ -191,15 +202,10 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify alice is no longer in candidates and votes are cleaned up
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(!r.candidates.contains_key(alice.id()));
-            assert!(!r.join_votes.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    assert!(
+        candidate_status(&contract, alice.id()).await.is_none(),
+        "alice should no longer be a candidate"
+    );
 
     // Try to revoke again, should fail (not a candidate anymore)
     let execution = alice
@@ -652,12 +658,12 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
                 initial_state.participants.participants
             );
             // the rest should be reset to empty
-            assert!(running_state.candidates.is_empty());
-            assert!(running_state.join_votes.is_empty());
             assert!(running_state.leave_votes.is_empty());
         }
         _ => panic!("should be back in running state"),
     }
+    // The candidate pool is wiped when leaving the running state.
+    assert_eq!(candidates_len(&contract).await, 0);
 
     Ok(())
 }
