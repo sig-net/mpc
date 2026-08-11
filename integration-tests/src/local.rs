@@ -8,7 +8,7 @@ use anyhow::Context;
 use async_process::Child;
 use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
@@ -85,6 +85,7 @@ impl Node {
             sol,
             hydration,
             canton,
+            midnight: MidnightArgs::from_config(None),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -185,6 +186,7 @@ impl Node {
             sol,
             hydration,
             canton,
+            midnight: MidnightArgs::from_config(None),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
