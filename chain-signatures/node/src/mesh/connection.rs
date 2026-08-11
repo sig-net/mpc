@@ -16,10 +16,16 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::state::NodeStatus as OtherNodeStatus;
 use crate::protocol::{ParticipantInfo, ProtocolState};
 
+/// Status of a single connection, as seen by this node.
+///
+/// See the [module docs](crate::mesh) for how these map onto the two
+/// [`MeshState`](crate::mesh::MeshState) sets and what drives each transition.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
     /// The connected node responds and is actively participating in the MPC
     /// network.
+    ///
+    /// Reachable only via [`Pool::report_node_synced`]; no ping sets this.
     Active,
     /// State sync is running for node in this state.
     ///

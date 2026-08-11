@@ -4,6 +4,13 @@ use crate::mesh::connection::NodeStatus;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
 
+/// This node's view of which participants are usable right now.
+///
+/// A participant is in at most one of the two sets. See the [module
+/// docs](crate::mesh) for the states, the transitions between them, and which
+/// component drives each one.
+///
+/// Only [`active()`](Self::active) may be used to select peers for a protocol.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshState {
     /// Participants that are active in the network; synced and responsive to pings.

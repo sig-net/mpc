@@ -235,7 +235,9 @@ Shipped:
 - **S10, S11** — mesh set-size gauges, a status-transition counter, and an offline
   counter split by `unreachable` vs `version_mismatch`.
 - **S12** — `report_node_synced` no longer `async`; `Pool::connect` takes
-  `&ProtocolState`.
+  `&ProtocolState`; the state machine is documented in the `mesh` module docs
+  (states, transitions, which component drives each, and the liveness dependency
+  on the sync task draining `need_sync()`).
 - **S13** — sleeps replaced with condition waits, `test_pool_update` now asserts
   the set it was silently ignoring, plus new coverage for drops, `retain`,
   `clear`, re-add under a new index, and the offline/inactive sync-eviction path.

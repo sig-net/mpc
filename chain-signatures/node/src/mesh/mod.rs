@@ -1,3 +1,96 @@
+//! Which participants this node considers usable right now.
+//!
+//! The mesh answers one question for the rest of the node: of the participants
+//! the contract recognizes, which ones are reachable, running a compatible
+//! protocol version, and synced with us. That answer is [`MeshState`], published
+//! over a `watch` channel and read by signing, triple and presignature
+//! generation, indexer hydration and backlog recovery.
+//!
+//! Everything here is one node's local view. Two nodes will disagree about who
+//! is active, and that is expected: the view is built from this node's own pings
+//! and its own sync progress. Anything that needs agreement across nodes (such
+//! as electing a proposer) must not be derived from it, see `#907`.
+//!
+//! # States
+//!
+//! [`NodeStatus`] is per connection. [`MeshState`] keeps two sets, and the
+//! status decides which one a participant lands in:
+//!
+//! | [`NodeStatus`] | set in [`MeshState`] | meaning |
+//! |----------------|----------------------|---------|
+//! | `Active`       | `active()`           | reachable, running, synced with us |
+//! | `Syncing`      | `need_sync()`        | reachable and running, sync outstanding |
+//! | `Inactive`     | neither              | reachable, but not running the protocol |
+//! | `Offline`      | neither              | unreachable, or on a different protocol version |
+//!
+//! Only `active()` may be used to pick peers for a protocol. `need_sync()` is
+//! the work queue the sync task consumes, not a set of usable peers.
+//!
+//! # Transitions
+//!
+//! The graph is close to complete, so the rules are clearer than a drawing.
+//! Each ping outcome determines the next status from the current one:
+//!
+//! | current | ping fails, or version differs | peer not `Running` | peer `Running` |
+//! |---------|-------------------------------|--------------------|----------------|
+//! | `Offline`  | `Offline`  | `Inactive` | **`Syncing`** |
+//! | `Inactive` | `Offline`  | `Inactive` | **`Syncing`** |
+//! | `Syncing`  | `Offline`  | `Inactive` | `Syncing`     |
+//! | `Active`   | `Offline`  | `Inactive` | `Active`      |
+//!
+//! Plus the one transition no ping performs:
+//!
+//! ```text
+//!   Syncing ──[ sync task reports success ]──> Active
+//! ```
+//!
+//! A new connection starts `Offline` and is promoted only once a ping succeeds.
+//!
+//! Two things are worth reading off that table. First, the missing edge: no ping
+//! moves a peer to `Active`. A peer reporting `Running` from `Offline`,
+//! `Inactive` or `Syncing` is written as `Syncing`, because a reachable peer is
+//! not yet a peer holding the same view of the artifacts we own. `Active` is
+//! reachable only through [`connection::Pool::report_node_synced`]. Second, an
+//! `Active` peer that keeps reporting `Running` stays put, so the sync cost is
+//! paid on entry rather than on every ping.
+//!
+//! Any momentary drop to `Offline` or `Inactive` therefore costs a full re-sync
+//! before the peer counts toward threshold again.
+//!
+//! # Who drives them
+//!
+//! Four writers, and they are the whole story:
+//!
+//! 1. **The per-peer ping loop** (`NodeConnection::run`) polls `/status` every
+//!    `ping_interval`. It sets `Offline`, `Inactive` and `Syncing`. It never
+//!    sets `Active`.
+//! 2. **The sync task**, via `synced_peer_rx` into
+//!    [`connection::Pool::report_node_synced`], performs the single
+//!    `Syncing -> Active` transition. It is deliberately conditional: a peer
+//!    that fell out of `Syncing` in the meantime is left alone rather than
+//!    activated on the strength of a stale success. A report for a participant
+//!    with no connection is a no-op.
+//! 3. **The contract**, through [`Mesh::run`], sets this node's own status and
+//!    reconciles the whole set with [`MeshState::retain`]. The contract is the
+//!    authority on membership.
+//! 4. **The pool**, through [`connection::Pool::connect`], adds and drops
+//!    connections, publishing the set that [`connection::ConnectionWatcher`]
+//!    turns into [`connection::MeshUpdate::Dropped`] for departed peers.
+//!
+//! There is a liveness dependency in (2) that is easy to miss: `Syncing` is not
+//! a state a peer leaves on its own. If the sync task stops draining
+//! `need_sync()`, peers stay there forever, `active()` shrinks below threshold,
+//! and signing stalls with every peer looking reachable.
+//!
+//! # This node
+//!
+//! A node does not ping itself. [`Mesh::run`] writes its own entry directly from
+//! the contract state: `Active` under a `Running` contract, `Inactive` under
+//! `Initializing` or `Resharing`. So the local entry in `active()` reflects what
+//! the contract says this node should be doing, not whether it is in fact
+//! able to do it, and unlike every peer it is never gated on sync. See S6 in
+//! `doc/MESH_ACTIVE_REVIEW.md`.
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
