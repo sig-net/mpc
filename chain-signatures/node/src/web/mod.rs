@@ -8,13 +8,26 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
+use crate::protocol::message::SignedMessage;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
+
+/// Upper bound on a `/sync` body.
+///
+/// A sync update carries one id per artifact the sender owns. With the contract
+/// defaults (`max_triples` = 1024 * 32 * 128, `max_presignatures` half that,
+/// ids being CBOR-encoded `u64`s) a single owner holding the entire network-wide
+/// pool lands in the tens of megabytes, so this is a real ceiling rather than a
+/// tight bound. It is only a backstop against oversized bodies: authenticity is
+/// enforced by the signed envelope in [`sync`], not by this limit.
+const MAX_SYNC_BODY_BYTES: usize = 20 * 1024 * 1024;
 
 use anyhow::Context;
 use axum::body::Body;
@@ -45,6 +58,8 @@ struct AxumState {
     #[allow(dead_code)] // used by debug-page
     my_account_id: AccountId,
     backlog: Backlog,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -57,6 +72,8 @@ pub async fn run(
     sync_channel: SyncChannel,
     my_account_id: AccountId,
     backlog: Backlog,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -67,12 +84,16 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
+        contract,
+        network,
     };
 
-    // Sync can be a large payload, so we set a higher limit for payload.
+    // A sync update carries one id per artifact we own, so the payload scales
+    // with the artifact cap rather than being bounded by a fixed guess. The
+    // limit is the last line before decryption, so keep it tight.
     let sync = Router::new()
         .route("/sync", post(sync))
-        .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
+        .layer(DefaultBodyLimit::max(MAX_SYNC_BODY_BYTES));
 
     let mut router = Router::new()
         // healthcheck endpoint
@@ -304,17 +325,57 @@ async fn bench_metrics() -> Json<BenchMetrics> {
     })
 }
 
+/// Peer state sync.
+///
+/// The request is a [`SignedMessage`]: sealed to our `cipher_pk` and signed by
+/// the sender, so the sender is authenticated against the contract's participant
+/// set before any storage work happens. This is load-bearing, not defence in
+/// depth. The handler feeds `remove_outdated`, which deletes every artifact we
+/// hold for the owner it is given; trusting a `from` taken from the payload
+/// would make this endpoint a remote "delete all presignatures owned by P"
+/// primitive for any unauthenticated caller.
+///
+/// The response is sealed and signed the same way, so the peer can likewise
+/// verify it is acting on our answer and not an interposed one.
+///
+/// [`SignedMessage`]: crate::protocol::message::SignedMessage
 #[tracing::instrument(level = "debug", skip_all)]
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
-) -> Result<Cbor<SyncUpdate>> {
+    WithRejection(Cbor(sealed), _): WithRejection<Cbor<Ciphered>, Error>,
+) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
-    let response = state.sync_channel.request_update(update).await?;
+
+    let participants = state.contract.participant_map().await;
+    let (from, update) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+        &sealed,
+        &state.network.cipher_sk,
+        &participants,
+        |_| Ok(()),
+    )
+    .map_err(|err| {
+        tracing::warn!(?err, "rejecting unverified sync request");
+        Error::Unauthorized
+    })?;
+
+    let response = state.sync_channel.request_update(from, update).await?;
+
+    // `SyncRequest::process` stamps the response with our own participant id.
+    let me = response.from;
+    let peer = participants.get(&from).ok_or_else(|| {
+        tracing::warn!(?from, "no participant info to seal sync response to");
+        Error::Unauthorized
+    })?;
+    let sealed = SignedMessage::encrypt(&response, me, &state.network.sign_sk, &peer.cipher_pk)
+        .map_err(|err| {
+            tracing::warn!(?err, ?from, "failed to seal sync response");
+            Error::Unauthorized
+        })?;
+
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);
-    Ok(Cbor(response))
+    Ok(Cbor(sealed))
 }
 
 type ChainAndDigest = (Chain, Option<[u8; 32]>);

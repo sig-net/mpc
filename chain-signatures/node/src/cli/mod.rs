@@ -293,12 +293,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
             let chains = ChainConfigs::from_args(eth, sol, hydration, canton, midnight)?;
+            // Cloned into the sync task and the web server: both ends of `/sync`
+            // seal and sign with these keys.
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
                 _ => unreachable!(),
             };
 
+            let web_network = network.clone();
             let RpcHandles {
                 near_client,
                 near_governance_client,
@@ -321,6 +324,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 contract_watcher.clone(),
                 synced_peer_tx,
+                network.clone(),
             );
 
             log_startup(
@@ -380,6 +384,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sync_channel,
                 account_id,
                 backlog.clone(),
+                contract_watcher.clone(),
+                web_network,
             ));
 
             spawn_indexers(
