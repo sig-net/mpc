@@ -12,6 +12,8 @@ pub struct RpcConfig {
     pub timeout: Duration,
     /// Timeout for batched RPC requests
     pub batch_timeout: Duration,
+    /// Timeout for `debug_traceTransaction` (slower than other RPC calls)
+    pub trace_timeout: Duration,
     /// Retry strategy shared by all RPC calls
     pub retry: RetryConfig,
 }
@@ -21,6 +23,7 @@ impl Default for RpcConfig {
         Self {
             timeout: Duration::from_secs(2),
             batch_timeout: Duration::from_secs(5),
+            trace_timeout: Duration::from_secs(30),
             retry: RetryConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
