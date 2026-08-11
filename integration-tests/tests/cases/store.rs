@@ -366,3 +366,46 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test(tokio::test)]
+async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::{Chain, Checkpoint};
+
+    let spawner = ClusterSpawner::default()
+        .network("test-pending-checkpoint-persistence")
+        .init_network()
+        .await?;
+    let redis = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis.pool(), account_id);
+    let checkpoint = |height| Checkpoint {
+        chain: Chain::Solana,
+        block_height: height,
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+    };
+
+    let first = checkpoint(10);
+    let second = checkpoint(20);
+    storage.persist_pending(&first).await?;
+    storage.persist_pending(&second).await?;
+
+    let restarted = storage.clone();
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![first.clone(), second.clone()]
+    );
+
+    restarted.promote_pending(&first).await?;
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+
+    restarted.reset_to_latest(&second).await?;
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
+    assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
+    Ok(())
+}

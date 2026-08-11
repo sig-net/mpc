@@ -55,14 +55,8 @@ pub async fn align_backlog_with_consensus(
 
     let height = fetched_checkpoint.block_height;
 
-    // Persist the recovered checkpoint as the latest consensus checkpoint
-    // before overwriting the local backlog, so the node has a fallback on restart.
-    if let Err(err) = backlog.storage.persist(&fetched_checkpoint).await {
-        tracing::warn!(?chain, %err, "failed to persist regressed checkpoint");
-    }
-
-    if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
+    if let Err(err) = backlog.regress(fetched_checkpoint).await {
+        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 

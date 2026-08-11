@@ -644,8 +644,7 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain.
     ///
-    /// Returns `None` if the pending checkpoint cap has been reached (stalling).
-    /// Persists only when a consensus confirmation arrives via `on_consensus_confirmed`.
+    /// Returns `None` if the pending checkpoint cap has been reached or persistence fails.
     pub async fn checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
         let pending = self.pending_checkpoints(&chain).read().await;
         if pending.len() >= MAX_PENDING_CHECKPOINTS {
@@ -660,6 +659,11 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
+        if let Err(err) = self.storage.persist_pending(&checkpoint).await {
+            tracing::warn!(?chain, %err, "failed to persist pending checkpoint");
+            return None;
+        }
+
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
             pending.insert(checkpoint.block_height, checkpoint.clone());
@@ -671,8 +675,13 @@ impl Backlog {
     }
 
     /// Called when consensus confirms a checkpoint (via the watcher).
-    /// Removes it from pending and persists to storage as the latest consensus checkpoint.
+    /// Promotes it to the latest checkpoint before removing it from memory.
     pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
+        if let Err(err) = self.storage.promote_pending(checkpoint).await {
+            tracing::warn!(?chain, %err, "failed to promote consensus checkpoint");
+            return;
+        }
+
         // Remove from pending checkpoints (frees a slot for future checkpoints)
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
@@ -681,16 +690,53 @@ impl Backlog {
         };
         self.observe_pending_checkpoints(chain, len);
 
-        // Persist as the latest consensus checkpoint
-        if let Err(err) = self.storage.persist(checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to persist consensus checkpoint");
-        }
-
         tracing::info!(
             ?chain,
             height = checkpoint.block_height,
-            "consensus checkpoint confirmed and persisted"
+            "consensus checkpoint confirmed"
         );
+    }
+
+    /// Load the durable checkpoint state and return the newest checkpoint.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        let latest = self.storage.load_latest(chain).await?;
+        let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
+        let pending = self
+            .storage
+            .load_pending(chain)
+            .await?
+            .into_iter()
+            .filter(|checkpoint| {
+                latest_height.is_none_or(|height| checkpoint.block_height > height)
+            })
+            .collect::<Vec<_>>();
+
+        let len = {
+            let mut local = self.pending_checkpoints(&chain).write().await;
+            local.clear();
+            local.extend(
+                pending
+                    .iter()
+                    .cloned()
+                    .map(|checkpoint| (checkpoint.block_height, checkpoint)),
+            );
+            local.len()
+        };
+        self.observe_pending_checkpoints(chain, len);
+
+        Ok(pending.into_iter().next_back().or(latest))
+    }
+
+    async fn clear_pending_checkpoints(&self, chain: Chain) {
+        self.pending_checkpoints(&chain).write().await.clear();
+        self.observe_pending_checkpoints(chain, 0);
+    }
+
+    /// Replace the local backlog with a consensus checkpoint after divergence.
+    pub(crate) async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        self.storage.reset_to_latest(&checkpoint).await?;
+        self.clear_pending_checkpoints(checkpoint.chain).await;
+        self.recover_by_checkpoint(checkpoint).await
     }
 
     /// Get the latest checkpoint for a specific chain.
@@ -748,11 +794,6 @@ impl Backlog {
             num_pending = checkpoint.pending_requests.len(),
             "recovering backlog to checkpoint"
         );
-
-        // Clear all pending (unconfirmed) checkpoints for this chain.
-        // Any checkpoint that was waiting for consensus is now obsolete.
-        self.pending_checkpoints(&chain).write().await.clear();
-        self.observe_pending_checkpoints(chain, 0);
 
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
@@ -2747,7 +2788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recovery_clears_pending_checkpoints() {
+    async fn test_recovery_keeps_pending_checkpoints() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
         let interval = chain.checkpoint_interval().unwrap();
@@ -2764,7 +2805,8 @@ mod tests {
             "two checkpoints should be pending"
         );
 
-        // Recover to a new checkpoint (simulating regression)
+        // Recover the request backlog without discarding checkpoints that may
+        // still be needed to match an on-chain consensus digest.
         let fresh = Backlog::new();
         let recovery_cp = fresh.set_processed_block(chain, interval / 2).await;
         // interval/2 is not a multiple of interval → no auto-checkpoint
@@ -2773,17 +2815,54 @@ mod tests {
         let fresh_cp = fresh.checkpoint(chain).await.unwrap();
         assert_eq!(fresh_cp.block_height, interval / 2);
 
-        backlog.storage.persist(&fresh_cp).await.unwrap();
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
-            0,
-            "pending checkpoints should be completely cleared"
+            2,
+            "pending checkpoints should remain available for consensus matching"
         );
+    }
+
+    #[tokio::test]
+    async fn load_local_hydrates_pending_checkpoint_after_restart() {
+        let storage = CheckpointStorage::in_memory();
+        let first = Backlog::persisted(storage.clone());
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+        let checkpoint = first.set_processed_block(chain, interval).await.unwrap();
+
+        let restarted = Backlog::persisted(storage);
+        let recovered = restarted.load_local(chain).await.unwrap().unwrap();
+        assert_eq!(recovered, checkpoint);
+        assert_eq!(restarted.pending_checkpoint_count(chain).await, 1);
         assert_eq!(
-            backlog.latest_checkpoint(chain).await.unwrap().block_height,
-            interval / 2,
-            "latest should be the recovered checkpoint"
+            restarted
+                .find_checkpoint_by_digest(chain, checkpoint.digest())
+                .await,
+            Some(checkpoint)
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_resets_checkpoint_state() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+        backlog.set_processed_block(chain, interval).await.unwrap();
+        backlog
+            .set_processed_block(chain, 2 * interval)
+            .await
+            .unwrap();
+
+        let source = Backlog::new();
+        source.set_processed_block(chain, interval / 2).await;
+        let checkpoint = source.checkpoint(chain).await.unwrap();
+        backlog.regress(checkpoint.clone()).await.unwrap();
+
+        assert_eq!(backlog.pending_checkpoint_count(chain).await, 0);
+        assert_eq!(
+            backlog.storage.load_latest(chain).await.unwrap(),
+            Some(checkpoint)
         );
     }
 
