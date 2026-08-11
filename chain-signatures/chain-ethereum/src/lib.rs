@@ -16,6 +16,7 @@ pub mod publisher;
 mod respond_bidirectional;
 #[cfg(test)]
 mod test_utils;
+pub mod utils;
 
 pub use client::{CatchupItem, MaybeBlock};
 pub use config::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};

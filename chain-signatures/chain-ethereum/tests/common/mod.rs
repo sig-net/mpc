@@ -2,22 +2,23 @@
 //! deploys the real `ChainSignatures` contract bytecode, so the publisher's
 //! publish path can be exercised end-to-end against a real EVM.
 
-use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
+use alloy::network::EthereumWallet;
 use alloy::node_bindings::{Anvil, AnvilInstance};
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
 };
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::request::TransactionRequest;
+use alloy::rpc::types::Filter;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
-use alloy::sol_types::SolValue;
+use alloy::sol_types::SolEvent;
 use anyhow::{Context, Result};
-use mpc_chain_ethereum::abi::ChainSignaturesConstructor;
+use mpc_chain_ethereum::abi::ChainSignatures;
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
+pub use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_chain_ethereum::{EthConfig, PublisherConfig};
-use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type AnvilWalletProvider = FillProvider<
     JoinFill<
@@ -62,8 +63,7 @@ impl EthTestEnv {
             .connect_http(endpoint.parse()?);
 
         let contract_address =
-            deploy_chain_signatures(provider.clone(), address, address, U256::from(1_u64))
-                .await?;
+            deploy_chain_signatures(provider.clone(), address, address, U256::from(1_u64)).await?;
 
         let eth_config = EthConfig {
             account_sk: signer.clone(),
@@ -95,57 +95,35 @@ impl EthTestEnv {
     }
 
     /// Fresh contract instance bound to this env's provider.
-    pub fn contract(
-        &self,
-    ) -> ChainSignatures::ChainSignaturesInstance<AnvilWalletProvider> {
+    pub fn contract(&self) -> ChainSignatures::ChainSignaturesInstance<AnvilWalletProvider> {
         ChainSignatures::new(self.contract_address, self.provider.clone())
     }
 }
 
-/// Deploy `ChainSignatures` (uninitialized) via raw bytecode + constructor args.
-///
-/// Ported from `integration-tests/src/eth.rs`. The manual create-tx path is used
-/// because `alloy::sol!` on a JSON artifact generates an interface (not a
-/// contract) on 1.0.38, so the idiomatic `deploy()`/`deploy_builder()` are not
-/// available.
-pub async fn deploy_chain_signatures<P>(
-    provider: P,
-    deployer: Address,
-    mpc_address: Address,
-    signature_deposit: U256,
-) -> Result<Address>
-where
-    P: Provider + Clone + 'static,
-{
-    let artifact: Value = serde_json::from_slice(include_bytes!(
-        "../../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-    ))?;
-
-    let bytecode = artifact
-        .get("bytecode")
-        .and_then(Value::as_str)
-        .context("bytecode missing from artifact")?;
-    let mut deployment = hex::decode(bytecode.trim_start_matches("0x"))?;
-
-    let constructor_args = ChainSignaturesConstructor {
-        mpcNetwork: mpc_address,
-        signatureDeposit: signature_deposit,
-    };
-    deployment.extend_from_slice(&constructor_args.abi_encode());
-
-    let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_input(
-        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
-            <TransactionRequest as TransactionBuilder<Ethereum>>::into_create(
-                TransactionRequest::default(),
-            ),
-            deployer,
-        ),
-        Bytes::from(deployment),
-    );
-
-    let pending = provider.send_transaction(tx).await?;
-    let receipt = pending.get_receipt().await?;
-    Ok(receipt
-        .contract_address
-        .context("deployment receipt missing contract address")?)
+/// Poll for the `SignatureResponded` log matching `request_id`, returning the
+/// responder address.
+pub async fn wait_for_responded(
+    env: &EthTestEnv,
+    request_id: B256,
+    timeout: Duration,
+) -> Result<Address> {
+    let filter = Filter::new()
+        .address(env.contract_address)
+        .event_signature(ChainSignatures::SignatureResponded::SIGNATURE_HASH)
+        .topic1(request_id);
+    let deadline = Instant::now() + timeout;
+    loop {
+        let logs = env.provider.get_logs(&filter).await.context("get_logs")?;
+        if let Some(log) = logs.into_iter().next() {
+            let event = ChainSignatures::SignatureResponded::decode_log_data(log.data())
+                .context("decode SignatureResponded")?;
+            return Ok(event.responder);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "SignatureResponded for request_id {request_id:?} not mined within {timeout:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
