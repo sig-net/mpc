@@ -817,7 +817,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
             ProtocolState::Running(contract_state) => {
                 // The `Running` state view no longer carries the (unbounded)
                 // candidate set, so fetch our own candidacy by key instead.
-                let candidacy = match gov.candidate_status(&ctx.my_account_id).await {
+                let candidacy = match gov.candidate_info(&ctx.my_account_id).await {
                     Ok(candidacy) => candidacy,
                     Err(err) => {
                         tracing::warn!(
@@ -827,7 +827,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                         return NodeState::Joining(self);
                     }
                 };
-                let Some(votes) = candidacy else {
+                let Some(candidate) = candidacy else {
                     tracing::info!(
                         "joining(running): sending a transaction to join the participant set"
                     );
@@ -840,7 +840,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     .participants
                     .iter()
                     .map(|(_, info)| &info.account_id)
-                    .filter(|id| !votes.contains(*id))
+                    .filter(|id| !candidate.join_votes.contains(*id))
                     .collect::<Vec<_>>();
                 if !pending_votes.is_empty() {
                     tracing::info!(
@@ -939,10 +939,10 @@ mod tests {
             Ok(())
         }
 
-        async fn candidate_status(
+        async fn candidate_info(
             &self,
             _account_id: &near_account_id::AccountId,
-        ) -> anyhow::Result<Option<Vec<near_account_id::AccountId>>> {
+        ) -> anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>> {
             Ok(None)
         }
 

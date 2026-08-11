@@ -862,30 +862,15 @@ impl VersionedMpcContract {
         self.latest_checkpoints().get(&chain)
     }
 
-    /// The queried account's own admission status in the current `Running`
-    /// state: `None` if it is not a candidate, otherwise the participants that
-    /// have voted to admit it (possibly empty). Keyed by account id, so its
-    /// size is independent of the total candidate count.
+    /// The queried account's candidate information and admission votes, or
+    /// `None` if it is not a candidate. Keyed by account id, so its size is
+    /// independent of the total candidate count.
     ///
     /// A joining node uses this to check whether its `join()` has registered and
     /// how many participants have voted for it, without pulling the full
     /// candidate set that the `Running` state view no longer exposes.
-    pub fn candidate_status(&self, account_id: AccountId) -> Option<Vec<AccountId>> {
-        self.candidates_ref()
-            .get(&account_id)
-            .map(|entry| entry.join_votes.iter().cloned().collect())
-    }
-
-    /// Paginated candidate listing (operators/monitoring). The full candidate
-    /// set is no longer returned by `state()`; this reads the top-level map in
-    /// bounded chunks so a single call can't exceed the RPC view limit.
-    pub fn get_candidates(&self, from_index: u64, limit: u64) -> Vec<(AccountId, CandidateInfo)> {
-        self.candidates_ref()
-            .iter()
-            .skip(from_index as usize)
-            .take(limit as usize)
-            .map(|(account_id, entry)| (account_id.clone(), entry.info.clone()))
-            .collect()
+    pub fn candidate_info(&self, account_id: AccountId) -> Option<CandidateEntry> {
+        self.candidates_ref().get(&account_id).cloned()
     }
 
     /// Lean protocol-state view for external reads. The `Running` variant drops
@@ -1457,6 +1442,7 @@ mod tests {
             config: Config::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
+            candidates: IterableMap::new(StorageKey::Candidates),
         });
 
         // Prove the test setup matches production: direct lookup sees the

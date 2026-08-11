@@ -136,7 +136,7 @@ pub struct CandidateInfo {
 /// stored as one value in the top-level `candidates` map. Folding the votes
 /// into the entry keeps the candidate and its `join_votes` in a single storage
 /// slot so they can never desync (they are inserted/removed as a unit).
-#[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Debug)]
 pub struct CandidateEntry {
     pub info: CandidateInfo,
     pub join_votes: HashSet<AccountId>,

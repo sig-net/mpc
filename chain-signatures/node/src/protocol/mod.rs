@@ -67,14 +67,16 @@ pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
     /// Fetch the given account's own candidacy from the contract's
-    /// `candidate_status` view: `None` if it is not a candidate, otherwise the
-    /// participants that have voted to admit it. Keyed by account id, so it
-    /// stays bounded no matter how many candidates exist (unlike the full
-    /// candidate set, which the `Running` state view no longer returns).
-    fn candidate_status(
+    /// `candidate_info` view: `None` if it is not a candidate, otherwise its
+    /// stored identity information and admission votes. Keyed by account id,
+    /// so it stays bounded no matter how many candidates exist (unlike the
+    /// full candidate set, which the `Running` state view no longer returns).
+    fn candidate_info(
         &self,
         account_id: &AccountId,
-    ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<AccountId>>>> + Send;
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send;
 
     fn vote_reshared(
         &self,

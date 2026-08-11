@@ -3,31 +3,19 @@ use common::init_env;
 
 use serde_json::json;
 
+use mpc_contract::primitives::CandidateEntry;
 use near_workspaces::types::NearToken;
 use near_workspaces::{AccountId, Contract};
 
-/// Candidacy of `account_id` via the `candidate_status` view: `None` if not a
-/// candidate, otherwise the list of participants that voted to admit it.
-async fn candidate_status(contract: &Contract, account_id: &AccountId) -> Option<Vec<AccountId>> {
+/// Candidacy of `account_id` via the keyed `candidate_info` view.
+async fn candidate_info(contract: &Contract, account_id: &AccountId) -> Option<CandidateEntry> {
     contract
-        .view("candidate_status")
+        .view("candidate_info")
         .args_json(json!({ "account_id": account_id }))
         .await
         .unwrap()
         .json()
         .unwrap()
-}
-
-/// Number of candidates currently registered (via the paginated view).
-async fn candidates_len(contract: &Contract) -> usize {
-    let candidates: Vec<(AccountId, serde_json::Value)> = contract
-        .view("get_candidates")
-        .args_json(json!({ "from_index": 0, "limit": 10_000 }))
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    candidates.len()
 }
 
 #[tokio::test]
@@ -50,9 +38,16 @@ async fn test_join() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     assert!(
-        candidate_status(&contract, alice.id()).await.is_some(),
+        candidate_info(&contract, alice.id()).await.is_some(),
         "alice should be a candidate"
     );
+
+    let candidate = candidate_info(&contract, alice.id())
+        .await
+        .expect("alice should be a candidate");
+    assert_eq!(candidate.info.account_id, *alice.id());
+    assert_eq!(candidate.info.url, "127.0.0.1");
+    assert!(candidate.join_votes.is_empty());
 
     // try join again, still ok, because not become participant yet
     let execution = alice
@@ -174,7 +169,7 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
 
     // Verify alice is in candidates
     assert!(
-        candidate_status(&contract, alice.id()).await.is_some(),
+        candidate_info(&contract, alice.id()).await.is_some(),
         "alice should be a candidate"
     );
 
@@ -189,10 +184,15 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify votes exist for alice
-    let votes = candidate_status(&contract, alice.id())
+    let candidate = candidate_info(&contract, alice.id())
         .await
         .expect("alice should be a candidate");
-    assert_eq!(votes.len(), 1, "alice should have exactly one join vote");
+    assert_eq!(
+        candidate.join_votes.len(),
+        1,
+        "alice should have exactly one join vote"
+    );
+    assert!(candidate.join_votes.contains(accounts[0].id()));
 
     // Alice revokes her join request
     let execution = alice
@@ -203,7 +203,7 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
 
     // Verify alice is no longer in candidates and votes are cleaned up
     assert!(
-        candidate_status(&contract, alice.id()).await.is_none(),
+        candidate_info(&contract, alice.id()).await.is_none(),
         "alice should no longer be a candidate"
     );
 
@@ -662,8 +662,6 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
         }
         _ => panic!("should be back in running state"),
     }
-    // The candidate pool is wiped when leaving the running state.
-    assert_eq!(candidates_len(&contract).await, 0);
 
     Ok(())
 }

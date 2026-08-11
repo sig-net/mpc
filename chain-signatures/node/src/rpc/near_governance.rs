@@ -177,20 +177,22 @@ impl Governance for NearGovernanceClient {
         }
     }
 
-    fn candidate_status(
+    fn candidate_info(
         &self,
         account_id: &AccountId,
-    ) -> impl std::future::Future<Output = anyhow::Result<Option<Vec<AccountId>>>> + Send {
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send {
         let account_id = account_id.clone();
         async move {
             retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
-                "governance_candidate_status",
+                "governance_candidate_info",
                 {
-                    let candidacy: Option<Vec<AccountId>> = self
+                    let candidacy = self
                         .client
-                        .view(&self.contract_id, "candidate_status")
+                        .view(&self.contract_id, "candidate_info")
                         .args_json(json!({ "account_id": account_id }))
                         .await?
                         .json()?;

@@ -31,7 +31,7 @@ impl From<mpc_contract::InitializingContractStateView> for InitializingContractS
 /// consumes. The stored contract state additionally holds vote maps
 /// (`candidates`, `join_votes`, `leave_votes`, `threshold_votes`) that no node
 /// reads from the polled state, so they are not carried here — a joining node
-/// reads its own candidacy via the `candidate_status` view instead.
+/// reads its own candidacy via the `candidate_info` view instead.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RunningContractState {
     pub epoch: u64,

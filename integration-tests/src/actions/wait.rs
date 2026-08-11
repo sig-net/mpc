@@ -275,15 +275,14 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
         match &state {
             ContractState::Candidate(candidate, present) => {
                 // Candidates are no longer part of the running state view; query
-                // the keyed `candidate_status` view instead (None => not a
-                // candidate, Some(voters) => a candidate).
-                let status: Option<Vec<AccountId>> = nodes
+                // the keyed `candidate_info` view instead.
+                let info: Option<mpc_contract::primitives::CandidateEntry> = nodes
                     .contract()
-                    .view("candidate_status")
+                    .view("candidate_info")
                     .args_json(serde_json::json!({ "account_id": candidate }))
                     .await?
                     .json()?;
-                if *present != status.is_some() {
+                if *present != info.is_some() {
                     anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
                 }
             }

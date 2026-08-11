@@ -76,7 +76,7 @@ impl ProtocolContractState {
 /// omitted here — the attacker-writable `candidates`/`join_votes` could inflate
 /// this payload past the RPC view-execution limit, and no node reads any vote
 /// map from the polled state. A joining node reads its own candidacy through
-/// the `candidate_status` view instead.
+/// the `candidate_info` view instead.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractStateView {
     pub epoch: u64,

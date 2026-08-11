@@ -32,10 +32,10 @@ impl Governance for MockGovernance {
         Ok(())
     }
 
-    async fn candidate_status(
+    async fn candidate_info(
         &self,
         _account_id: &AccountId,
-    ) -> anyhow::Result<Option<Vec<AccountId>>> {
+    ) -> anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>> {
         // The mock does not simulate the candidate registry, so no account is
         // ever a candidate. Returning `None` matches the real contract's answer
         // for a non-candidate account.
