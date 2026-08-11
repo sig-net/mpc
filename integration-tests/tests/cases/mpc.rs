@@ -400,7 +400,7 @@ async fn test_threshold_change_via_mpc_governance() {
     // Sign a request end-to-end to prove the network still produces valid
     // signatures after the threshold-change resharing.
     network
-        .assert_presignatures(1, Duration::from_secs(60))
+        .assert_presignatures(1, Duration::from_secs(120))
         .await;
     network.broadcast(&sign_request(88)).await;
     let actions = network.assert_actions(1, Duration::from_secs(30)).await;

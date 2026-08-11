@@ -51,13 +51,23 @@ pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
     pub pending_requests: Vec<PendingTx>,
-    /// Commitment to each pending request's checkpoint-consensus status.
+    /// Commitment to each pending request's checkpoint-consensus phase.
     ///
-    /// This is computed by hashing each request's checkpoint-consensus status
+    /// This is computed by hashing each request's checkpoint-consensus phase
     /// in the same sorted order as `pending_requests`. It lets the checkpoint
     /// digest commit to cross-node request progress without hashing
     /// `transaction`, which is the full recovery payload and may include
     /// node-local fields.
+    ///
+    /// The phase distinguishes only "awaiting the initial response on this chain"
+    /// from "past it". Generation versus publication is local progress that only a
+    /// signature's participants make, and the target-execution boundary is gated on
+    /// another chain's height, so neither is committed to here.
+    ///
+    /// The phase encoding is a consensus wire format: nodes computing it differently
+    /// cannot agree on a checkpoint even with identical backlogs. Changing it splits
+    /// the network into pre- and post-change groups for the duration of a rolling
+    /// upgrade, so treat any change as a coordinated release.
     #[serde(default, with = "serde_bytes")]
     pub cumulative_digest: [u8; 32],
 }
