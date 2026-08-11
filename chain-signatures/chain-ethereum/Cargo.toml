@@ -32,6 +32,7 @@ tracing.workspace = true
 [features]
 helios = ["dep:helios"]
 bench = []
+integration = ["alloy/provider-anvil-node"]
 
 [dev-dependencies]
 mockito.workspace = true
