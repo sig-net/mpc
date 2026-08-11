@@ -1,7 +1,7 @@
 use anyhow::Context;
 
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
+use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
@@ -14,7 +14,7 @@ use mpc_primitives::{
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
     ctx: &StreamContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
     }
@@ -33,11 +33,12 @@ pub(crate) async fn process_sign_request(
         }
     }
 
-    ctx.backlog.insert(sign_request.clone()).await;
+    // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
+    let is_new = ctx.backlog.insert(sign_request.clone()).await.is_none();
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
-    Ok(())
+    Ok(is_new)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -312,8 +313,9 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    ctx.backlog
-        .set_request(
+    let updated_tx = ctx
+        .backlog
+        .transition_to_bidirectional_response(
             pending_tx.source_chain,
             &unwatched_sign_id,
             sign_request.clone(),
@@ -321,25 +323,10 @@ pub async fn process_execution_confirmed(
         .await
         .with_context(|| {
             format!(
-                "failed to persist completion request on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+                "failed to transition pending tx to final response for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
-
-    let set_res = ctx
-        .backlog
-        .set_status(
-            pending_tx.source_chain,
-            &unwatched_sign_id,
-            SignStatus::PendingGenerationBidirectional,
-        )
-        .await;
-    let updated_tx = set_res.ok_or_else(|| {
-        anyhow::anyhow!(
-            "failed to set status on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {:?}",
-            pending_tx.source_chain
-        )
-    })?;
-    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
+    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "transitioned transaction to final response");
 
     let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up

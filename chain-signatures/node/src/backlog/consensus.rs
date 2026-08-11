@@ -75,33 +75,30 @@ async fn fetch_peer_checkpoint(
     chain: Chain,
     target_digest: [u8; 32],
 ) -> Option<Checkpoint> {
-    let result = node_client
+    let checkpoint = node_client
         .fetch_checkpoint_by_digest(url, chain, target_digest)
-        .await;
-    match result {
-        Ok(Some(checkpoint)) => {
-            let digest = checkpoint.digest();
-            if digest == target_digest {
-                Some(checkpoint)
-            } else {
-                tracing::warn!(
-                    ?url,
-                    ?chain,
-                    ?digest,
-                    "peer checkpoint with mismatched digest; skipping"
-                );
-                None
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
-            None
-        }
-        Err(err) => {
-            tracing::debug!(?url, ?chain, ?err, "failed to query peer for checkpoint");
-            None
-        }
+        .await
+        .inspect_err(|err| {
+            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+        })
+        .ok()?;
+
+    let Some(checkpoint) = checkpoint else {
+        tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
+        return None;
+    };
+
+    let digest = checkpoint.digest();
+    if digest != target_digest {
+        tracing::warn!(
+            ?url,
+            ?chain,
+            ?digest,
+            "peer checkpoint returns mismatched digest"
+        );
+        return None;
     }
+    Some(checkpoint)
 }
 
 async fn query_peers_checkpoint(
@@ -112,8 +109,9 @@ async fn query_peers_checkpoint(
 ) -> Option<Checkpoint> {
     for (peer, info) in peers {
         tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-        let checkpoint = fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await;
-        if let Some(checkpoint) = checkpoint {
+        if let Some(checkpoint) =
+            fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await
+        {
             return Some(checkpoint);
         }
     }
@@ -184,10 +182,8 @@ pub(crate) async fn find_consensus_checkpoint(
             ) => {
                 let Some(checkpoint) = checkpoint else {
                     // this should not happen in normal circumstances, but just in case
-                    // all nodes do not have the checkpoint, we will retry in 3 seconds.
-                    // In that span of time, either the consensus digest must have changed
-                    // or one of the nodes should have set the digest checkpoint.
-                    tracing::warn!("all peers do not have the checkpoint, retrying in 3 seconds");
+                    // all nodes do not have the checkpoint.
+                    tracing::warn!("all nodes do not have the checkpoint, retrying in 3 seconds");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 };
@@ -205,7 +201,6 @@ mod tests {
     use crate::node_client::Options as NodeClientOptions;
 
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
-    use sha3::Digest;
     use std::collections::HashMap;
 
     struct AlignFixture {
@@ -397,15 +392,11 @@ mod tests {
                 } else {
                     vec![]
                 };
-                let mut cumulative = sha3::Sha3_256::new();
-                if case.peer_checkpoint_has_pending_tx {
-                    cumulative.update([0u8]);
-                }
                 let peer_checkpoint = Checkpoint {
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,
-                    cumulative_digest: cumulative.finalize().into(),
+                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
                 };
                 peer_digest = peer_checkpoint.digest();
 
@@ -414,8 +405,12 @@ mod tests {
 
                 let mut response_map = HashMap::new();
                 response_map.insert(chain, peer_checkpoint);
+                let response = crate::web::CheckpointResponse {
+                    version: crate::CHECKPOINT_VERSION,
+                    checkpoints: response_map,
+                };
                 let mut body = Vec::new();
-                ciborium::into_writer(&response_map, &mut body).unwrap();
+                ciborium::into_writer(&response, &mut body).unwrap();
 
                 let mock = s
                     .mock("GET", "/checkpoint")
@@ -506,6 +501,74 @@ mod tests {
             // Keep the mock server alive until iteration finishes
             drop(server);
         }
+    }
+
+    #[tokio::test]
+    async fn test_skips_newer_checkpoint_peer() {
+        let chain = Chain::Ethereum;
+        let checkpoint = Checkpoint::empty(chain);
+        let digest = checkpoint.digest();
+        let mut newer_server = mockito::Server::new_async().await;
+        let mut newer_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION + 1,
+                checkpoints: [(chain, checkpoint.clone())].into_iter().collect(),
+            },
+            &mut newer_body,
+        )
+        .unwrap();
+        let newer_mock = newer_server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(newer_body)
+            .create_async()
+            .await;
+
+        let mut current_server = mockito::Server::new_async().await;
+        let mut current_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION,
+                checkpoints: [(chain, checkpoint)].into_iter().collect(),
+            },
+            &mut current_body,
+        )
+        .unwrap();
+        let current_mock = current_server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(current_body)
+            .create_async()
+            .await;
+
+        let peers = [
+            (cait_sith::protocol::Participant::from(0u32), {
+                let mut info = ParticipantInfo::new(0);
+                info.url = newer_server.url();
+                info
+            }),
+            (cait_sith::protocol::Participant::from(1u32), {
+                let mut info = ParticipantInfo::new(1);
+                info.url = current_server.url();
+                info
+            }),
+        ];
+        let result = query_peers_checkpoint(
+            &peers,
+            &NodeClient::new(&NodeClientOptions::default()),
+            chain,
+            digest,
+        )
+        .await;
+
+        assert!(result.is_some());
+        newer_mock.assert_async().await;
+        current_mock.assert_async().await;
     }
 
     #[tokio::test]

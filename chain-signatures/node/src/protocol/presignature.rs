@@ -10,8 +10,8 @@ use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage
 use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
-use crate::util::JoinMap;
 use mpc_chain_near::AffinePointExt as _;
+use mpc_utils::task::JoinMap;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
@@ -469,6 +469,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action,
+                            stale_round: None,
                         },
                     )
                     .await;
@@ -534,6 +535,7 @@ impl PresignatureSpawner {
                         id: PositProtocolId::Presignature(id),
                         from: self.me,
                         action: PositAction::Propose,
+                        stale_round: None,
                     },
                 )
                 .await;
@@ -697,6 +699,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            stale_round: None,
                         },
                     )
                     .await;

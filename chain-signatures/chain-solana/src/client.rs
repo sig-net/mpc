@@ -31,7 +31,8 @@ use std::time::Duration;
 
 use crate::{config::SolConfig, utils::mpc_to_sol_signature};
 
-const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
+/// Shared upper bound for signature pages and globally ordered slot chunks.
+pub(crate) const CATCHUP_PAGE_SIZE: usize = 1_000;
 
 /// The max amount of batches to fetch concurrently
 const MAX_CONCURRENT_FETCH: usize = 5;
@@ -346,7 +347,7 @@ impl SolanaClient {
                 let config = GetConfirmedSignaturesForAddress2Config {
                     before,
                     until: None,
-                    limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
+                    limit: Some(CATCHUP_PAGE_SIZE),
                     commitment: Some(CommitmentConfig::confirmed()),
                 };
                 self.rpc_client

@@ -1,6 +1,3 @@
-use mpc_chain_integration_core::utils::{stream::chain_event_channel, task::retry_until_ok};
-use mpc_chain_integration_core::NoopPublisherTelemetry;
-
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
 use std::str::FromStr;
@@ -20,15 +17,19 @@ use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
     utils::{
         hashing::{compute_request_id, hash_payload},
-        task::AbortOnDrop,
+        stream::chain_event_channel,
     },
-    ChainIndexer, ChainTelemetry, StateManager,
+    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
+};
+use mpc_utils::{
+    task::{retry_until_ok, AbortOnDrop},
+    time::current_unix_timestamp,
 };
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
@@ -47,8 +48,7 @@ use solana_transaction_status::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::SolanaCatchupBlock;
-use crate::utils::current_unix_timestamp;
+use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::{SolConfig, SolanaClient};
 
 const CPI_EVENT_HINTS: &[&str] = &[
@@ -109,9 +109,77 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             return Ok(Box::pin(stream::empty()));
         };
 
-        let pages =
+        let newest_first_pages =
             Self::paginate_slots(self.client.clone(), self.program_id, start_slot, end_slot);
-        Ok(Self::fetch_blocks_for_pages(self.client.clone(), pages))
+        let ordered_pages = Self::order_and_chunk_pages(
+            newest_first_pages,
+            start_slot,
+            end_slot,
+            CATCHUP_PAGE_SIZE,
+        );
+
+        Ok(Self::fetch_blocks_for_pages(
+            self.client.clone(),
+            ordered_pages,
+        ))
+    }
+
+    /// Collect newest-first signature pages and emit globally ascending,
+    /// deduplicated slot chunks. Keeping this as a lazy stream lets the caller
+    /// cancel catchup while signature pagination is still in progress.
+    fn order_and_chunk_pages(
+        pages: impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static,
+        start_slot: u64,
+        end_slot: u64,
+        chunk_size: usize,
+    ) -> impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static {
+        stream::once(async move {
+            futures_util::pin_mut!(pages);
+
+            let started_at = Instant::now();
+            let mut signature_pages = 0usize;
+            let mut ordered_slots = BTreeSet::new();
+            while let Some(page) = pages.next().await {
+                signature_pages += 1;
+                ordered_slots.extend(page?);
+            }
+
+            tracing::info!(
+                start_slot,
+                end_slot,
+                signature_pages,
+                unique_slots = ordered_slots.len(),
+                elapsed = ?started_at.elapsed(),
+                "solana catchup signature pagination complete"
+            );
+
+            Ok::<_, anyhow::Error>(Self::chunk_slots(ordered_slots, chunk_size))
+        })
+        .flat_map(|result| {
+            let chunks: Vec<anyhow::Result<BTreeSet<u64>>> = match result {
+                Ok(chunks) => chunks.into_iter().map(Ok).collect(),
+                Err(err) => vec![Err(err)],
+            };
+            stream::iter(chunks)
+        })
+    }
+
+    /// Split globally ordered slots into bounded, ascending chunks. Collecting
+    /// all slot numbers first is necessary because Solana signature pages are
+    /// returned newest-to-oldest, while request lifecycle events must be
+    /// replayed oldest-to-newest.
+    fn chunk_slots(slots: BTreeSet<u64>, chunk_size: usize) -> Vec<BTreeSet<u64>> {
+        debug_assert!(chunk_size > 0, "catchup slot chunk size must be positive");
+
+        slots.into_iter().fold(Vec::new(), |mut chunks, slot| {
+            match chunks.last_mut() {
+                Some(chunk) if chunk.len() < chunk_size => {
+                    chunk.insert(slot);
+                }
+                _ => chunks.push(BTreeSet::from([slot])),
+            }
+            chunks
+        })
     }
 
     /// Range of slots that still need to be caught up, inclusive on both ends.
@@ -208,6 +276,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                     Err(e) => Some(Err(e)),
                 }
             })
+            // This must remain sequential and order-preserving: lifecycle
+            // events in older slots must reach the backlog before newer ones.
+            // Using buffer_unordered here would undo global slot ordering.
             .then(move |res| {
                 let client = client.clone();
                 async move {
@@ -220,7 +291,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                             (s, block)
                         })
                         .collect();
-                    Ok(items)
+                    Ok::<_, anyhow::Error>(items)
                 }
             })
             .map(|res| match res {
@@ -1188,6 +1259,11 @@ mod tests {
         })
     }
 
+    /// Match a JSON-RPC block batch whose first `getBlock` request is for `slot`.
+    fn block_batch_starting_at(slot: u64) -> mockito::Matcher {
+        mockito::Matcher::Regex(format!(r#""params"\s*:\s*\[\s*{slot}\s*,"#))
+    }
+
     #[test]
     fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
@@ -1237,6 +1313,23 @@ mod tests {
 
         let slots: Vec<_> = from_signatures.into_keys().collect();
         assert_eq!(slots, vec![8, 9, 10, 12]);
+    }
+
+    #[test]
+    fn globally_ordered_slots_are_split_into_bounded_chunks() {
+        let chunks = SolanaIndexer::<MockStateManager, NoopChainTelemetry>::chunk_slots(
+            BTreeSet::from([5, 1, 4, 2, 3]),
+            2,
+        );
+
+        assert_eq!(
+            chunks,
+            vec![
+                BTreeSet::from([1, 2]),
+                BTreeSet::from([3, 4]),
+                BTreeSet::from([5]),
+            ]
+        );
     }
 
     /// Check we can still parse the old format for failed transactions.
@@ -1352,7 +1445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_processes_slots_in_order() {
+    async fn single_page_catchup_processes_slots_in_order() {
         let mut server = mockito::Server::new_async().await;
 
         // Signatures walk back from the anchor: slots 9..=6 are in range,
@@ -1410,6 +1503,142 @@ mod tests {
                 "expected Block({expected}), got {event:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn block_fetch_pages_preserve_slot_order() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Delay the older page. Sequential fetching must still emit it before
+        // the immediately available newer page.
+        let _older_blocks = server
+            .mock("POST", "/")
+            .match_body(block_batch_starting_at(1))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_chunked_body(|writer| {
+                std::thread::sleep(Duration::from_millis(100));
+                writer.write_all(b"[]")
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let _newer_blocks = server
+            .mock("POST", "/")
+            .match_body(block_batch_starting_at(3))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let pages = stream::iter([Ok(BTreeSet::from([1, 2])), Ok(BTreeSet::from([3, 4]))]);
+        let mut blocks =
+            SolanaIndexer::<MockStateManager, NoopChainTelemetry>::fetch_blocks_for_pages(
+                indexer.client,
+                pages,
+            );
+
+        let mut slots = Vec::new();
+        while let Some(item) = blocks.next().await {
+            slots.push(item.unwrap().0);
+        }
+
+        assert_eq!(slots, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn multipage_catchup_does_not_lose_response_before_older_request() {
+        let mut server = mockito::Server::new_async().await;
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        // getSignaturesForAddress paginates newest-to-oldest. The response is
+        // in the first (newer) page, while its request is in the second (older)
+        // page. Slot 5 is below the catchup start and terminates pagination.
+        let newest_page: Vec<_> = [9, 8].into_iter().map(signature_entry).collect();
+        // Slot 8 appears on both pages to verify global deduplication at a page
+        // boundary. Fetching its block once still discovers every transaction
+        // in that slot.
+        let older_page: Vec<_> = [8, 7, 6, 5].into_iter().map(signature_entry).collect();
+        let before_cursor = newest_page
+            .last()
+            .and_then(|entry| entry["signature"].as_str())
+            .expect("newest page should have a cursor signature");
+
+        let _newest_page = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "method": "getSignaturesForAddress",
+                "params": [indexer.program_id.to_string(), { "before": null }],
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&newest_page))
+            .expect(1)
+            .create_async()
+            .await;
+        let _older_page = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "method": "getSignaturesForAddress",
+                "params": [indexer.program_id.to_string(), { "before": before_cursor }],
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&older_page))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let ordered_blocks = serde_json::json!([
+            block_response(0, 6),
+            block_response(1, 7),
+            block_response(2, 8),
+            block_response(3, 9),
+        ])
+        .to_string();
+
+        let _ordered_blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ordered_blocks)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut catchup = indexer.catchup_blocks(10).await.unwrap();
+
+        let mut replayed_slots = Vec::new();
+        let mut request_pending = false;
+        let mut response_applied = false;
+
+        while let Some(item) = catchup.next().await {
+            let (slot, _block) = item.unwrap();
+            replayed_slots.push(slot);
+            match slot {
+                // The request is created in the older block.
+                7 => request_pending = true,
+                // This mirrors process_respond_event: if the request is not
+                // in the backlog yet, the response is skipped permanently.
+                8 if request_pending => {
+                    request_pending = false;
+                    response_applied = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(replayed_slots, vec![6, 7, 8, 9]);
+        assert!(
+            response_applied && !request_pending,
+            "catchup replayed slots as {replayed_slots:?}; the response was processed before its request and lost"
+        );
     }
 
     #[tokio::test]

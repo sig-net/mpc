@@ -1,0 +1,28 @@
+[package]
+name = "mpc-chain-midnight"
+edition = "2021"
+version.workspace = true
+description = "Midnight chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+k256.workspace = true
+midnight-base-crypto.workspace = true
+midnight-onchain-state.workspace = true
+midnight-serialize.workspace = true
+midnight-storage.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+# Cargo unifies features across this crate and `node` in a workspace build, so
+# nothing here may rely on `unstable-light-client` (node's addition) being absent.
+subxt = { workspace = true, features = ["jsonrpsee", "native"] }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

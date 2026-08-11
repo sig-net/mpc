@@ -67,8 +67,10 @@ async fn test_web_server_serves_checkpoint() {
     );
 
     let body = resp.bytes().await.unwrap();
-    let checkpoints: std::collections::HashMap<Chain, mpc_primitives::Checkpoint> =
+    let response: mpc_node::web::CheckpointResponse =
         ciborium::from_reader(body.as_ref()).expect("should deserialize checkpoint");
+    assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
+    let checkpoints = response.checkpoints;
 
     let retrieved = checkpoints
         .get(&chain)
@@ -127,10 +129,11 @@ async fn test_consensus_alignment_peer_fetch() {
         let query_url = format!("{url}/checkpoint?query=Ethereum:0x{hex_digest}");
         let resp = client.get(&query_url).send().await.unwrap();
         let body = resp.bytes().await.unwrap();
-        let checkpoints: std::collections::HashMap<Chain, mpc_primitives::Checkpoint> =
+        let response: mpc_node::web::CheckpointResponse =
             ciborium::from_reader(body.as_ref()).unwrap();
+        assert_eq!(response.version, mpc_node::CHECKPOINT_VERSION);
         assert!(
-            checkpoints.contains_key(&chain),
+            response.checkpoints.contains_key(&chain),
             "web server should serve the checkpoint"
         );
     }

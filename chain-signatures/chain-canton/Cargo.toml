@@ -17,6 +17,7 @@ k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
 reqwest.workspace = true
 serde.workspace = true

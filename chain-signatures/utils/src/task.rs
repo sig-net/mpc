@@ -1,0 +1,332 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
+use std::time::Duration;
+use tokio::task::{AbortHandle, JoinSet};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+
+/// Aborts the wrapped task on drop, preventing a leaked background task when
+/// the owner (e.g. an indexer `run()` loop) is dropped or cancelled.
+pub struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Extension methods on [`CancellationToken`] for cancellation-aware waiting.
+pub trait CancellationTokenExt {
+    /// Waits up to `dur`, returning early if the token is cancelled.
+    /// Returns `true` if cancellation occurred during the wait.
+    fn cancelled_within(&self, dur: Duration) -> impl Future<Output = bool> + Send;
+}
+
+impl CancellationTokenExt for CancellationToken {
+    async fn cancelled_within(&self, dur: Duration) -> bool {
+        tokio::select! {
+            _ = self.cancelled() => true,
+            _ = sleep(dur) => false,
+        }
+    }
+}
+
+/// Retries `process` with `delay` backoff until it returns `Ok(())` or `cancel`
+/// fires. Each failure is logged at WARN with `label` identifying the operation.
+pub async fn retry_until_ok<F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    label: &str,
+    process: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    // `Ok(())` -> `Some(())` (done), `Err` retries with backoff.
+    retry_until_some(cancel, delay, label, || async { process().await.map(Some) }).await;
+}
+
+/// Retries `poll` with `delay` backoff until it returns `Ok(Some(T))` or `cancel`
+/// fires. Each failure is logged at WARN with `label` identifying the operation.
+pub async fn retry_until_some<T, F, Fut>(
+    cancel: &CancellationToken,
+    delay: Duration,
+    label: &str,
+    poll: F,
+) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<Option<T>>>,
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return None,
+            result = poll() => match result {
+                Ok(Some(value)) => return Some(value),
+                Ok(None) => {}
+                Err(err) => tracing::warn!(?err, "{label} failed; retrying"),
+            },
+        }
+        if cancel.cancelled_within(delay).await {
+            return None;
+        }
+    }
+}
+
+/// A keyed set of spawned tasks: spawn/abort by key and join results tagged
+/// with the originating key. Backed by a [`tokio::task::JoinSet`].
+pub struct JoinMap<T, U> {
+    mapping: HashMap<T, AbortHandle>,
+    mapping_id: HashMap<tokio::task::Id, T>,
+    tasks: JoinSet<U>,
+}
+
+impl<T, U> Default for JoinMap<T, U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, U> JoinMap<T, U> {
+    pub fn new() -> Self {
+        Self {
+            mapping: HashMap::new(),
+            mapping_id: HashMap::new(),
+            tasks: JoinSet::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn abort_all(&mut self) {
+        for handle in self.mapping.values() {
+            handle.abort();
+        }
+        self.mapping.clear();
+        self.mapping_id.clear();
+    }
+}
+
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
+    pub fn contains_key(&self, key: &T) -> bool {
+        self.mapping.contains_key(key)
+    }
+
+    pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
+        let handle = self.tasks.spawn(task);
+        let task_id = handle.id();
+        self.mapping.insert(key, handle);
+        self.mapping_id.insert(task_id, key);
+    }
+
+    pub fn abort(&mut self, key: T) -> bool {
+        if let Some(handle) = self.mapping.remove(&key) {
+            handle.abort();
+
+            if let Some(task_id) = self
+                .mapping_id
+                .iter()
+                .find_map(|(id, mapped_key)| (*mapped_key == key).then_some(*id))
+            {
+                self.mapping_id.remove(&task_id);
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
+        let outcome = self.tasks.join_next_with_id().await?;
+        let (id, outcome) = match outcome {
+            Ok((id, outcome)) => (id, Some(outcome)),
+            Err(err) => (err.id(), None),
+        };
+
+        let key = self.mapping_id.remove(&id)?;
+        self.mapping.remove(&key);
+        match outcome {
+            Some(outcome) => Some(Ok((key, outcome))),
+            None => Some(Err(key)),
+        }
+    }
+}
+
+impl<T, U> Drop for JoinMap<T, U> {
+    fn drop(&mut self) {
+        for handle in self.mapping.values() {
+            handle.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn retry_until_some_retries_on_none_then_yields_value() {
+        let cancel = CancellationToken::new();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        let val = retry_until_some(&cancel, Duration::from_millis(1), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                if count.fetch_add(1, Ordering::Relaxed) < 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(7u64))
+                }
+            }
+        })
+        .await;
+        assert_eq!(val, Some(7));
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_until_some_retries_on_error() {
+        let cancel = CancellationToken::new();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        let val = retry_until_some(&cancel, Duration::from_millis(1), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                if count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("boom"))
+                } else {
+                    Ok(Some(1u64))
+                }
+            }
+        })
+        .await;
+        assert_eq!(val, Some(1));
+    }
+
+    #[tokio::test]
+    async fn retry_until_some_returns_none_on_cancel() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_clone.cancel();
+        });
+        let val = retry_until_some(&cancel, Duration::from_millis(50), "test", || async {
+            Ok::<_, anyhow::Error>(None::<u64>)
+        })
+        .await;
+        assert!(val.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_retries_on_error_then_succeeds() {
+        let cancel = CancellationToken::new();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        retry_until_ok(&cancel, Duration::from_millis(1), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                if count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Err(anyhow::anyhow!("boom"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_until_ok_stops_on_cancel() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_clone.cancel();
+        });
+        retry_until_ok(&cancel, Duration::from_millis(50), "test", move || {
+            let count = count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Err::<(), anyhow::Error>(anyhow::anyhow!("always fails"))
+            }
+        })
+        .await;
+        // The task should have been retried at least once before cancellation.
+        assert!(count.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_within_returns_false_when_duration_elapses() {
+        let cancel = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let cancelled = cancel.cancelled_within(Duration::from_millis(30)).await;
+        assert!(!cancelled);
+        // `sleep` never returns early, so the full duration must have elapsed.
+        assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn cancelled_within_returns_true_when_cancelled_during_wait() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel_clone.cancel();
+        });
+        let started = std::time::Instant::now();
+        let cancelled = cancel.cancelled_within(Duration::from_millis(500)).await;
+        assert!(cancelled);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn abort_on_drop_aborts_the_wrapped_task() {
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        {
+            let guard = AbortOnDrop(handle);
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            assert!(
+                count.load(Ordering::Relaxed) >= 2,
+                "task should have incremented before drop"
+            );
+            drop(guard);
+        }
+
+        // After dropping the guard, the wrapped task must stop running.
+        let after_drop = count.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            after_drop,
+            "wrapped task kept running after AbortOnDrop was dropped"
+        );
+    }
+}

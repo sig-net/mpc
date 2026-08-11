@@ -4,8 +4,8 @@ use crate::config::IndexerConfig;
 use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::BlockId;
-use mpc_chain_integration_core::utils::task::{AbortOnDrop, CancellationTokenExt};
 use mpc_primitives::{Chain, ChainConfig as _};
+use mpc_utils::task::{AbortOnDrop, CancellationTokenExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -95,11 +95,11 @@ impl FinalizedHeadTracker {
 
     /// Construct a finalized-head tracker for unit tests, with a short refresh interval and no optimistic mode.
     #[cfg(test)]
-    pub(crate) fn new_for_test() -> Self {
+    fn new_for_test() -> Self {
         let indexer = IndexerConfig::default();
         Self {
             head: watch::channel(0).0,
-            optimistic: false,
+            optimistic: false, // existing unit tests assume finalized mode
             refresh_interval: Duration::from_millis(100),
             max_failures: indexer.max_finalized_failures,
             stall_rewarn_secs: indexer.stall_rewarn_secs,
@@ -117,10 +117,11 @@ impl FinalizedHeadTracker {
         self.head.send_replace(n);
     }
 
-    /// Blocks until the cached finalized head covers `block_number`. Returns
-    /// immediately in optimistic mode (dev chains never report finality).
+    /// Blocks until the cached head covers `block_number`. In production the
+    /// head tracks the finalized block; in optimistic mode it tracks the latest
+    /// tip (the watcher polls `Latest`).
     pub async fn wait_for(&self, block_number: u64) -> anyhow::Result<()> {
-        if self.optimistic || *self.head.borrow() >= block_number {
+        if *self.head.borrow() >= block_number {
             return Ok(());
         }
 
@@ -138,39 +139,37 @@ impl FinalizedHeadTracker {
         }
     }
 
-    /// Spawn the background finalized-head watcher that maintains the cached
-    /// head. Returns a guard whose drop aborts the task, or `None` in
-    /// optimistic mode (dev chains never report a finalized head).
+    /// Spawn the background watcher that maintains the cached head. Returns a guard whose drop aborts the task.
     pub fn spawn_watcher(
         &self,
         client: Arc<EthereumClient>,
         cancel: CancellationToken,
-    ) -> Option<AbortOnDrop> {
-        if self.optimistic {
-            return None;
-        }
-        Some(AbortOnDrop(tokio::spawn(Self::watch_finalized_head(
+    ) -> AbortOnDrop {
+        AbortOnDrop(tokio::spawn(Self::watch_head(
             client,
             self.head.clone(),
             self.refresh_interval,
             self.max_failures,
             self.stall_rewarn_secs,
+            self.optimistic,
             cancel,
-        ))))
+        )))
     }
 
     // TODO: Currently if this dies silently we have to wait 35 min for the stream supervisor to restart it. Implement faster failure detection and restart.
-    /// Background task maintaining the cached finalized head.
+    /// Background task maintaining the cached head.
     ///
-    /// Polls `eth_getBlockByNumber(Finalized)` on the configured interval and
-    /// publishes advances over the `watch` channel. Retries forever; the stream
-    /// supervisor watchdog remains the escape hatch.
-    async fn watch_finalized_head(
+    /// Polls `eth_getBlockByNumber(Finalized)` (production) or `(Latest)`
+    /// (optimistic dev mode) on the configured interval and publishes advances
+    /// over the `watch` channel. Retries forever; the stream supervisor
+    /// watchdog remains the escape hatch.
+    async fn watch_head(
         client: Arc<EthereumClient>,
         head: watch::Sender<u64>,
         refresh_interval: Duration,
         max_failures: u32,
         stall_rewarn_secs: u64,
+        optimistic: bool,
         cancel: CancellationToken,
     ) {
         let mut stall = FinalizedHeadStall::new(
@@ -179,13 +178,15 @@ impl FinalizedHeadTracker {
         );
         let mut failures = 0u32;
 
-        tracing::info!("ethereum finalized-head watcher started");
+        tracing::info!(optimistic, "ethereum head watcher started");
 
         loop {
-            match client
-                .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
-                .await
-            {
+            let block_id = BlockId::Number(if optimistic {
+                BlockNumberOrTag::Latest
+            } else {
+                BlockNumberOrTag::Finalized
+            });
+            match client.get_block(block_id).await {
                 Ok(Some(block)) => {
                     failures = 0;
                     let new_final = block.header.number;
@@ -201,7 +202,7 @@ impl FinalizedHeadTracker {
                 }
                 Ok(None) => {
                     tracing::warn!(
-                        "ethereum get_block(Finalized) returned no block; watcher keeps retrying"
+                        "ethereum get_block(head) returned no block; watcher keeps retrying"
                     );
                 }
                 Err(err) => {
@@ -210,7 +211,7 @@ impl FinalizedHeadTracker {
                         ?err,
                         failures,
                         max_failures,
-                        "ethereum get_block(Finalized) failed; watcher keeps retrying"
+                        "ethereum get_block(head) failed; watcher keeps retrying"
                     );
                 }
             }
