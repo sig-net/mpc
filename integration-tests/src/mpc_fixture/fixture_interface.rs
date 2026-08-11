@@ -50,6 +50,10 @@ pub struct MpcFixtureNode {
 
     pub sync_channel: mpc_node::protocol::sync::SyncChannel,
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Needed by the web interface to authenticate `/sync` peers.
+    pub contract: mpc_node::rpc::ContractStateWatcher,
+    pub network: mpc_node::config::NetworkConfig,
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.
@@ -308,8 +312,9 @@ impl MpcFixtureNode {
             triples,
             presignatures,
         };
+        // Stands in for the sender the web layer authenticates from the envelope.
         self.sync_channel
-            .request_update(update)
+            .request_update(from, update)
             .await
             .expect("sync_channel request_update failed")
     }
@@ -386,6 +391,8 @@ impl MpcFixtureNode {
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
+            self.contract.clone(),
+            self.network.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
         Some(web_port)

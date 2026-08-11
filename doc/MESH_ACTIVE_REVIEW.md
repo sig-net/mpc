@@ -197,21 +197,68 @@ is not. Operators cannot tell them apart from the mesh state.
 - `MeshState` has a single unit test. `remove`, `clear`, and re-adding a
   participant under a different `Participant` index are untested.
 
-## Implementation plan
+## What was done
 
-Ordered so that each step is independently reviewable and shippable.
+Two things changed after a second pass over the plan, both worth recording
+because they are the parts that could have caused an outage.
 
-1. **S1 + S2** — authenticate `/sync` with the existing `SignedMessage` envelope.
-   Storage must key off the verified sender, not the payload's `from`.
-2. **S3 + S4** — make `ConnectionWatcher` lag-aware and panic-free; supervise the
-   mesh updater task.
-3. **S5 + S6** — reconcile `MeshState` against the contract participant set on
-   every contract update, and derive self status from `NodeStateWatcher`.
-4. **S8 + S12** — tighten the update type so drops carry no fabricated info; drop
-   the spurious `async`; take `&ProtocolState`; document the state machine.
-5. **S10 + S11** — add mesh metrics, splitting version mismatch from unreachable.
-6. **S13** — replace sleeps with condition waits, fix the vacuous assertions, and
-   cover the untested `MeshState` transitions.
-7. **S7 + S9** — design work, not covered by the steps above: bound how much a
-   single peer's sync response can prune per round, and replace the global
-   broadcast slot with per-peer sync tasks.
+**A `/sync` wire change needs a `PROTOCOL_VERSION` bump, and that is not
+optional.** The first plan treated the envelope as a self-contained fix. It is
+not: a new node sending a sealed envelope to an old node would fail to decode on
+every round, the peer would never leave `need_sync`, and it would sit outside
+`active()` indefinitely with nothing but a decode warning. Because the mesh
+already marks version-mismatched peers `Offline`, bumping the version makes a
+mixed-version deployment cleanly partitioned instead of subtly half-broken. That
+is an existing, understood behaviour rather than a new one.
+
+**S3 and S4 have one root cause, and patching them separately would have been
+the wrong fix.** The plan proposed making the watcher lag-aware and adding
+supervision. The real problem is that a *set* was being described by a stream of
+add/remove events, so any lost event caused permanent divergence. Replacing the
+broadcast channel with a `watch` of the connection set removes lag as a failure
+mode by construction, makes drops fall out of a set difference (so S8's
+fabricated `ParticipantInfo` disappears with it), and leaves the loop with a
+clean termination condition rather than a panic.
+
+Shipped:
+
+- **S1, S2** — `/sync` carries a `SignedMessage` in both directions; storage keys
+  off the verified signer, and a response is rejected unless signed by the peer
+  we contacted. `PROTOCOL_VERSION` bumped to 2. The body limit is kept at 20 MB
+  and documented: derived from the artifact caps, it is a real ceiling, and the
+  security property comes from the envelope, not the limit.
+- **S3, S4, S8** — connection set published over a `watch` channel; `MeshUpdate`
+  makes drops unrepresentable as fake status updates; the updater's death is
+  surfaced and stops the mesh instead of freezing it.
+- **S5** — `MeshState::retain` reconciles against the contract participant set on
+  every contract update.
+- **S10, S11** — mesh set-size gauges, a status-transition counter, and an offline
+  counter split by `unreachable` vs `version_mismatch`.
+- **S12** — `report_node_synced` no longer `async`; `Pool::connect` takes
+  `&ProtocolState`.
+- **S13** — sleeps replaced with condition waits, `test_pool_update` now asserts
+  the set it was silently ignoring, plus new coverage for drops, `retain`,
+  `clear`, re-add under a new index, and the offline/inactive sync-eviction path.
+
+Deferred, with reasons:
+
+- **S6** (self exempt from liveness checks) — the fix is to drive self status from
+  `NodeStateWatcher`. Confirmed non-circular: `wait_threshold_active` only gates
+  indexer hydration and backlog recovery, and `cryptography.rs` reads
+  `mesh_state.active()` for logging only, so gating self on local `Running` cannot
+  deadlock the state machine. Left out of this pass because it changes when a node
+  considers itself usable during startup, which deserves its own change and its
+  own soak.
+- **S7** (byzantine peers drive pruning) and **S9** (broadcast head-of-line
+  blocking) — design work. S7 wants a bound on how much one peer's response may
+  prune per round plus an alert on prune volume; S9 wants per-peer sync tasks
+  instead of one global broadcast slot.
+
+## Verification
+
+`cargo test -p mpc-node --lib` passes (185 tests), clippy is clean on
+`--all-targets`. The `integration-tests` crate could not be compiled while making
+these changes: `near-workspaces` fails its build script on `x86_64-apple-darwin`,
+which is a pre-existing platform limitation unrelated to this work. Its call
+sites were updated and checked against the type definitions by hand, so they need
+a CI run on a supported platform before this is trusted.

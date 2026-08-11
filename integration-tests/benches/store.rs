@@ -129,6 +129,13 @@ fn env() -> (Runtime, SyncEnv) {
             mesh.watch(),
             contract_watcher,
             synced_peer_tx,
+            mpc_node::config::NetworkConfig {
+                sign_sk: near_crypto::SecretKey::from_seed(
+                    near_crypto::KeyType::ED25519,
+                    "bench-sync",
+                ),
+                cipher_sk: mpc_keys::hpke::SecretKey::from_bytes(&[0u8; 32]),
+            },
         );
 
         SyncEnv {
