@@ -45,8 +45,8 @@ Protocol properties defined below are separated into
 
 ## 2\. System model
 
-* n nodes; membership, threshold t, and epoch are fixed by the contract. Changing them (join/leave/resharing) is real consensus, and it happens on-chain only (§S3).  
-  * (i) all nodes observe the same finalized sequence of requests and governance states, possibly at different times;  
+* n nodes; membership, threshold t, and epoch are fixed by the contract. Together with the public key and whether the contract is Running, they form the **committee** a node operates under (`GovernanceInfo` in code, reached as `ctx.governance`); each node holds its own local, read-only snapshot of it, refreshed on every contract update. The committee decides nothing itself, the contract does; the separate `Governance` trait in code is the client that casts on-chain votes. Changing membership, threshold, or epoch (join/leave/resharing) is real consensus, and it happens on-chain only (§S3).  
+  * (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
   * (ii) nodes act only on finalized state (finalization definition may differ per chain).  
 * Hybrid fault model.  
   * Liveness is argued under crash-recovery: correct nodes may halt and restart (otherwise never deviating). After restart the node's durable storage is assumed to be intact.  
@@ -63,7 +63,7 @@ Protocol properties defined below are separated into
 
 * **S1  One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
-* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state, and no node processes requests under a non-Running state. 
+* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than from finalized contract state, and no node processes requests under a non-Running state. 
 * **S4 Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
 Violating any of these is unacceptable in any execution within §2's fault bound.  See Appendix for more details.
@@ -105,7 +105,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
 
-*How it is enforced.* Three local rules:
+*Enforcement* Three local rules:
 
 1. Single writer. Only the artifact's recorded owner initiates consumption, checked by every holder rather than trusted from the opener.
 2. Delete-on-first-use at every holder. The proposer removes the artifact from storage and every deliberator takes its local share, so a later attempt fails at any holder that already used it. The removal must reach durable storage *before* any message derived from the artifact is sent, or a holder that crashes and recovers resurrects the share and honestly serves a second request.
@@ -119,15 +119,16 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.
 
-Currently enforced by: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. That buffer is only partly bounded (D5): posits for ids already completed or aborted are dropped against a 4096-entry LRU of retired ids, but a mailbox created by a peer's posit is freed only when a task for that id retires, so ids this node never indexes accumulate, as do ids whose entry has since aged out of the LRU. Note that the contracts (except near) accept any response without verifying submitted signatures. I.e., the burden of signature verification is put on clients.
+*Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. 
 
 ### S3. Membership and epochs change only on-chain
 
-*Property.* No honest node adopts a participant set, threshold, or epoch other than a finalized contract state, and no node processes requests under a non-Running state.
+*Property.* No honest node adopts a participant set, threshold, or epoch other than from finalized contract state, and no node processes requests under a non-Running state.
 
-The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState as reported by the chain's RPC provider, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
+*Enforcement*: 
+The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. A node's committee (§2) is its local snapshot of that state as reported by the chain's RPC provider, with the three variants flattened to a single Running flag. It is not agreed on directly: a node's committee is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
 
-Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running.
+Currently enforced by: the committee is a snapshot of contract state; tasks pause whenever the contract is not Running.
 
 ### S4. Instance-local agreement
 
@@ -135,7 +136,7 @@ Currently enforced by: governance is a snapshot of contract state; tasks pause w
 
 An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation.
 
-Currently enforced by dictation, not negotiation: the instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the dictator per instance follows from S1's single-writer rule: only the presignature's owner can open an instance on it. No agreement *across* instances is claimed anywhere. Two rounds of the same request may overlap, and safety must not (and does not) depend on that never happening.
+*Enforcement*: The instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the dictator per instance follows from S1's single-writer rule: only the presignature's owner can open an instance on it. No agreement *across* instances is claimed anywhere. Two rounds of the same request may overlap, and safety must not (and does not) depend on that never happening.
 
 This holds even against a Byzantine proposer, at a liveness cost. A malicious proposer can send divergent lists to different honest accepters, but each honest node scales its signature share by the Lagrange coeﬃcients of *its own* list, so mismatched lists never reconstruct a valid signature: the combine fails and the instance aborts. The forbidden event (two honest nodes proceeding to completion on different lists) is therefore unreachable; the worst outcome is an abort, never a bad signature. That is why S4 is enforced by detect-and-abort rather than prevention (§2).
 
