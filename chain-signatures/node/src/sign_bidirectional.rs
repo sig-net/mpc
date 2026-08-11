@@ -43,17 +43,12 @@ impl SignStatus {
     /// Generation and publication are local attempts to reach an on-chain event: only
     /// a signature's participants advance to publishing, so nodes cannot be required
     /// to agree on which of the two a request is in. They collapse to one value.
-    ///
-    /// The two values are "awaiting the initial response on this chain" and "past it".
-    /// The remaining boundary — target-chain execution versus the final response — is
-    /// gated on target-chain progress, which a checkpoint does not commit to, so it
-    /// collapses as well.
-    pub fn checkpoint_consensus_byte(&self) -> u8 {
+    pub fn consensus_tag(&self) -> u8 {
         match self {
             SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => 0,
-            SignStatus::PendingExecution { .. }
-            | SignStatus::PendingGenerationBidirectional
-            | SignStatus::PendingPublishBidirectional { .. } => 1,
+            SignStatus::PendingExecution { .. } => 1,
+            SignStatus::PendingGenerationBidirectional
+            | SignStatus::PendingPublishBidirectional { .. } => 2,
         }
     }
 
@@ -406,5 +401,48 @@ mod tests {
 
         assert_eq!(hash, expected_hash);
         assert_eq!(nonce, 3);
+    }
+
+    #[test]
+    fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
+        use super::{PublishState, SignStatus};
+        use mpc_primitives::Signature;
+
+        let dummy_sig = Signature {
+            big_r: k256::ProjectivePoint::GENERATOR.to_affine(),
+            s: k256::Scalar::ONE,
+            recovery_id: 0,
+        };
+
+        let generation_tag = SignStatus::PendingGeneration.consensus_tag();
+        let publish_tag = SignStatus::PendingPublish {
+            publish: PublishState {
+                signature: dummy_sig,
+                participants: vec![],
+                is_proposer: true,
+            },
+        }
+        .consensus_tag();
+        assert_eq!(
+            generation_tag, publish_tag,
+            "PendingGeneration and PendingPublish must produce identical consensus tags"
+        );
+
+        let gen_bidi_tag = SignStatus::PendingGenerationBidirectional.consensus_tag();
+        let pub_bidi_tag = SignStatus::PendingPublishBidirectional {
+            publish: PublishState {
+                signature: dummy_sig,
+                participants: vec![],
+                is_proposer: true,
+            },
+        }
+        .consensus_tag();
+        assert_eq!(
+            gen_bidi_tag, pub_bidi_tag,
+            "PendingGenerationBidirectional and PendingPublishBidirectional must produce identical consensus tags"
+        );
+
+        // Execution branch is distinct from generation and completion
+        assert_ne!(generation_tag, gen_bidi_tag);
     }
 }

@@ -113,21 +113,21 @@ impl PendingRequests {
                 let mut transaction = Vec::new();
                 ciborium::ser::into_writer(entry, &mut transaction)
                     .expect("serialize backlog entry for checkpoint");
-                let status_consensus_byte = entry.status().checkpoint_consensus_byte();
+                let consensus_tag = entry.status().consensus_tag();
                 (
                     PendingTx {
                         sign_id,
                         transaction,
                     },
-                    status_consensus_byte,
+                    consensus_tag,
                 )
             })
             .collect::<Vec<_>>();
         encoded.sort_by_key(|(pending, _)| pending.sign_id);
 
         let mut cumulative = sha3::Sha3_256::new();
-        for (_, status_consensus_byte) in &encoded {
-            cumulative.update([*status_consensus_byte]);
+        for (_, consensus_tag) in &encoded {
+            cumulative.update([*consensus_tag]);
         }
         let cumulative_digest = cumulative.finalize().into();
 
@@ -1415,7 +1415,7 @@ mod tests {
         // Guard the checkpoint digest wire format; update only for intentional changes.
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("884b11ef5550724b788b7e29e9a07e7a6fd46f94d604e6d38bae71a36816b65e")
+            digest_hex("6512dd0dcc0adf84fdad988c04a24f320c8116ee4c194d8e4165f6bccb694017")
         );
     }
 
@@ -1593,13 +1593,13 @@ mod tests {
             "ethereum",
             0,
         ));
-        let initial_status_byte = initial_bidirectional.status().checkpoint_consensus_byte();
+        let initial_consensus_tag = initial_bidirectional.status().consensus_tag();
         initial_bidirectional
             .mark_publishing(test_publish_state(true))
             .unwrap();
         assert_eq!(
-            initial_bidirectional.status().checkpoint_consensus_byte(),
-            initial_status_byte
+            initial_bidirectional.status().consensus_tag(),
+            initial_consensus_tag
         );
 
         let response_request = IndexedSignRequest::respond_bidirectional(
@@ -1615,17 +1615,14 @@ mod tests {
         );
         let mut final_response =
             BacklogEntry::with_status(response_request, SignStatus::PendingGenerationBidirectional);
-        let final_status_byte = final_response.status().checkpoint_consensus_byte();
+        let final_consensus_tag = final_response.status().consensus_tag();
         final_response
             .mark_publishing(test_publish_state(true))
             .unwrap();
-        assert_eq!(
-            final_response.status().checkpoint_consensus_byte(),
-            final_status_byte
-        );
+        assert_eq!(final_response.status().consensus_tag(), final_consensus_tag);
 
         // The initial response is observable at this height; the two phases differ.
-        assert_ne!(initial_status_byte, final_status_byte);
+        assert_ne!(initial_consensus_tag, final_consensus_tag);
     }
 
     #[test]
@@ -1638,7 +1635,6 @@ mod tests {
             pending_execution_status(&tx),
             "ethereum",
         );
-        let status_consensus_byte = entry.status().checkpoint_consensus_byte();
         let response_request = IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(23),
@@ -1660,10 +1656,6 @@ mod tests {
             SignKind::RespondBidirectional(_)
         ));
         assert_eq!(entry.status(), SignStatus::PendingGenerationBidirectional);
-        assert_eq!(
-            entry.status().checkpoint_consensus_byte(),
-            status_consensus_byte
-        );
     }
 
     #[test]
@@ -1701,67 +1693,6 @@ mod tests {
             entry.status(),
             SignStatus::PendingExecution { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_digest_ignores_target_execution_boundary() {
-        let tx = create_test_tx(22);
-        let sign_id = SignId::new(tx.request_id);
-
-        let mut awaiting_execution = PendingRequests::new();
-        awaiting_execution.insert(
-            sign_id,
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                pending_execution_status(&tx),
-                "ethereum",
-            ),
-        );
-        awaiting_execution.set_processed_block(100);
-
-        let response_request = IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            create_test_args(22),
-            Chain::Ethereum,
-            0,
-            RespondBidirectionalTx {
-                tx_id: tx.id,
-                output: vec![],
-                chain_ctx: None,
-            },
-        );
-        let mut awaiting_final_response = PendingRequests::new();
-        awaiting_final_response.insert(
-            sign_id,
-            BacklogEntry::with_status(
-                response_request.clone(),
-                SignStatus::PendingGenerationBidirectional,
-            ),
-        );
-        awaiting_final_response.set_processed_block(100);
-
-        // Older nodes could checkpoint between rewriting the request kind and
-        // updating its status. Treat that recoverable state as completion too.
-        let mut legacy_transition = PendingRequests::new();
-        legacy_transition.insert(
-            sign_id,
-            BacklogEntry::with_status(
-                response_request,
-                SignStatus::PendingExecution { tx: tx.clone() },
-            ),
-        );
-        legacy_transition.set_processed_block(100);
-
-        let execution_digest = awaiting_execution.checkpoint(Chain::Ethereum).digest();
-        assert_eq!(
-            execution_digest,
-            awaiting_final_response.checkpoint(Chain::Ethereum).digest()
-        );
-        assert_eq!(
-            execution_digest,
-            legacy_transition.checkpoint(Chain::Ethereum).digest()
-        );
     }
 
     #[tokio::test]
@@ -1874,6 +1805,10 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
         assert_ne!(checkpoint1.digest(), checkpoint2.digest());
+        assert_eq!(
+            checkpoint1.digest(),
+            digest_hex("a31e0d66f5b4fb860cc62e809cc29918b9138550b5cd62e1c752fc40ce6c2779")
+        );
     }
 
     #[tokio::test]
