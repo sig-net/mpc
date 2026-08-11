@@ -259,6 +259,50 @@ mod tests {
         }
     }
 
+    /// Keep reporting `peers` synced until `cond` holds.
+    ///
+    /// A single report races the first ping. `report_node_synced` only promotes
+    /// a peer that is already `Syncing`, so a report arriving while the peer is
+    /// still `Offline` is dropped, and nothing re-sends it: the peer then sits in
+    /// `need_sync` forever. Waiting for the peer to reach `need_sync` first
+    /// narrows that window but does not close it, because a ping that fails under
+    /// load knocks it back to `Offline` before the report lands.
+    ///
+    /// `SyncTask` does not have this problem: it re-reads `need_sync()` every
+    /// 200ms and re-broadcasts, so a dropped report costs one round rather than
+    /// the peer. Tests have to drive it the same way to be testing the real
+    /// behaviour.
+    async fn sync_until(
+        state: &watch::Receiver<MeshState>,
+        sync_tx: &mpsc::Sender<Participant>,
+        peers: &[Participant],
+        what: &str,
+        cond: impl Fn(&MeshState) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            {
+                let current = state.borrow();
+                if cond(&current) {
+                    return;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    panic!(
+                        "timed out waiting for {what}; active={:?} need_sync={:?}",
+                        current.active().keys_vec(),
+                        current.need_sync().keys_vec(),
+                    );
+                }
+            }
+            for &peer in peers {
+                // A full channel means the mesh has not drained yet; the next
+                // iteration retries anyway, so dropping this report is harmless.
+                let _ = sync_tx.try_send(peer);
+            }
+            tokio::time::sleep(PING_INTERVAL).await;
+        }
+    }
+
     async fn expect_status(
         watcher: &mut connection::ConnectionWatcher,
         participant: Participant,
@@ -401,12 +445,19 @@ mod tests {
             })
             .await;
 
-            for idx in 0..num_nodes {
-                sync_tx.send(servers[idx].id()).await.unwrap();
-            }
-            wait_until(&mesh_state, "all nodes to be active", |state| {
-                state.active().len() == num_nodes && state.need_sync().is_empty()
-            })
+            // Note this says nothing about the peers: self is marked active by
+            // the contract arm, not by a ping, so it lands before the peers'
+            // first ping has even completed.
+            let peers = (0..num_nodes)
+                .map(|idx| servers[idx].id())
+                .collect::<Vec<_>>();
+            sync_until(
+                &mesh_state,
+                &sync_tx,
+                &peers,
+                "all nodes to be active",
+                |state| state.active().len() == num_nodes && state.need_sync().is_empty(),
+            )
             .await;
 
             let state = mesh_state.borrow();
@@ -441,10 +492,13 @@ mod tests {
             .await;
             assert!(!mesh_state.borrow().active().contains_key(&servers[1].id()));
 
-            sync_tx.send(servers[1].id()).await.unwrap();
-            wait_until(&mesh_state, "synced node to become active", |state| {
-                state.active().len() == num_nodes && state.need_sync().is_empty()
-            })
+            sync_until(
+                &mesh_state,
+                &sync_tx,
+                &[servers[1].id()],
+                "synced node to become active",
+                |state| state.active().len() == num_nodes && state.need_sync().is_empty(),
+            )
             .await;
 
             let state = mesh_state.borrow();
@@ -504,13 +558,15 @@ mod tests {
                 state.active().len() + state.need_sync().len() == num_nodes
             })
             .await;
-            for i in 0..num_nodes {
-                sync_tx.send(servers[i].id()).await.unwrap();
-            }
 
-            wait_until(&mesh_state, "new participant to become active", |state| {
-                state.active().len() == num_nodes && state.need_sync().is_empty()
-            })
+            let peers = (0..num_nodes).map(|i| servers[i].id()).collect::<Vec<_>>();
+            sync_until(
+                &mesh_state,
+                &sync_tx,
+                &peers,
+                "new participant to become active",
+                |state| state.active().len() == num_nodes && state.need_sync().is_empty(),
+            )
             .await;
             let state = mesh_state.borrow();
 
