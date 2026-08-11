@@ -171,18 +171,15 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     fn chunk_slots(slots: BTreeSet<u64>, chunk_size: usize) -> Vec<BTreeSet<u64>> {
         debug_assert!(chunk_size > 0, "catchup slot chunk size must be positive");
 
-        let mut chunks = Vec::new();
-        let mut chunk = BTreeSet::new();
-        for slot in slots {
-            chunk.insert(slot);
-            if chunk.len() == chunk_size {
-                chunks.push(std::mem::take(&mut chunk));
+        slots.into_iter().fold(Vec::new(), |mut chunks, slot| {
+            match chunks.last_mut() {
+                Some(chunk) if chunk.len() < chunk_size => {
+                    chunk.insert(slot);
+                }
+                _ => chunks.push(BTreeSet::from([slot])),
             }
-        }
-        if !chunk.is_empty() {
-            chunks.push(chunk);
-        }
-        chunks
+            chunks
+        })
     }
 
     /// Range of slots that still need to be caught up, inclusive on both ends.
