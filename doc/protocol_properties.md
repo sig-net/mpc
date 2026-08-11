@@ -119,7 +119,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.
 
-Currently enforced by: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. Note that the contracts (except near) accept any response without verifying submitted signatures. I.e., the burden of signature verification is put on clients.
+Currently enforced by: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. That buffer is only partly bounded (D5): posits for ids already completed or aborted are dropped against a 4096-entry LRU of retired ids, but a mailbox created by a peer's posit is freed only when a task for that id retires, so ids this node never indexes accumulate, as do ids whose entry has since aged out of the LRU. Note that the contracts (except near) accept any response without verifying submitted signatures. I.e., the burden of signature verification is put on clients.
 
 ### S3. Membership and epochs change only on-chain
 
