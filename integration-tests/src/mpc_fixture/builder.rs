@@ -543,6 +543,7 @@ impl MpcFixtureNodeBuilder {
         let (rpc_tx, rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         let rpc_channel = RpcChannel { tx: rpc_tx };
         let (mesh_tx, mesh_rx) = watch::channel(context.init_mesh.clone());
+        let network = self.config.local.network.clone();
         let (config_tx, config_rx) = watch::channel(self.config);
 
         let channels = protocol::test_setup::TestProtocolChannels {
@@ -618,12 +619,15 @@ impl MpcFixtureNodeBuilder {
             triple_storage.clone(),
             presignature_storage.clone(),
             mesh_rx.clone(),
-            context.contract_state,
+            context.contract_state.clone(),
             mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
+            network.clone(),
         );
         tokio::spawn(sync_task.run());
 
         let mut node = MpcFixtureNode {
+            contract: context.contract_state,
+            network,
             me: self.me,
             account_id: self.participant_info.account_id.clone(),
             state: node_state,
