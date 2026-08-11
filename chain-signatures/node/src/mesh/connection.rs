@@ -1,14 +1,16 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{StreamExt, StreamMap};
 
+use crate::metrics::mesh as metrics;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::state::NodeStatus as OtherNodeStatus;
@@ -110,9 +112,13 @@ impl NodeConnection {
                         Ok(status) => status,
                         Err(err) => {
                             tracing::warn!(?node, ?err, "checking /status failed");
-                            status_tx.send_if_modified(|(status, _)| {
+                            if status_tx.send_if_modified(|(status, _)| {
                                 std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
-                            });
+                            }) {
+                                metrics::MESH_PEER_OFFLINE
+                                    .with_label_values(&[metrics::OFFLINE_UNREACHABLE])
+                                    .inc();
+                            }
                             continue;
                         }
                     };
@@ -124,9 +130,13 @@ impl NodeConnection {
                             peer_version = resp.protocol_version,
                             "protocol version mismatch"
                         );
-                        status_tx.send_if_modified(|(status, _)| {
+                        if status_tx.send_if_modified(|(status, _)| {
                             std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
-                        });
+                        }) {
+                            metrics::MESH_PEER_OFFLINE
+                                .with_label_values(&[metrics::OFFLINE_VERSION_MISMATCH])
+                                .inc();
+                        }
                         continue;
                     }
 
@@ -173,6 +183,14 @@ impl Drop for NodeConnection {
     }
 }
 
+/// Snapshot of the pool's current connections, keyed by participant.
+///
+/// Published as a whole rather than as a stream of add/remove events. The set is
+/// state, not a sequence: a watcher only ever needs the latest version of it, and
+/// publishing the set means a slow watcher converges on the truth instead of
+/// missing an event and diverging from it permanently.
+type ConnectionSet = Arc<HashMap<Participant, watch::Receiver<(NodeStatus, ParticipantInfo)>>>;
+
 /// Pool that manages connections to nodes in the network. It is responsible for
 /// connecting to nodes, checking their status, and dropping connections that are
 /// no longer within the network.
@@ -189,30 +207,27 @@ pub struct Pool {
     /// Account id of this node. Used to avoid creating self connections.
     node_account_id: AccountId,
 
-    conn_update_tx: broadcast::Sender<ConnectionUpdate>,
-    conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
+    conns_tx: watch::Sender<ConnectionSet>,
 }
 
 impl Pool {
     pub fn new(client: &NodeClient, node_account_id: &AccountId, ping_interval: Duration) -> Self {
         tracing::info!("creating new connection pool");
-        let (conn_update_tx, conn_update_rx) = broadcast::channel(256);
+        let (conns_tx, _) = watch::channel(Arc::new(HashMap::new()));
         Self {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
             node_account_id: node_account_id.clone(),
-
-            conn_update_tx,
-            conn_update_rx,
+            conns_tx,
         }
     }
 
-    pub async fn connect(&mut self, contract: ProtocolState) {
+    pub async fn connect(&mut self, contract: &ProtocolState) {
         let mut seen = HashSet::new();
         match contract {
             ProtocolState::Initializing(init) => {
-                let participants: Participants = init.candidates.into();
+                let participants: Participants = init.candidates.clone().into();
                 self.connect_nodes(&participants, &mut seen).await;
             }
             ProtocolState::Running(running) => {
@@ -241,17 +256,11 @@ impl Pool {
         participants: &Participants,
         seen: &mut HashSet<Participant>,
     ) {
+        let mut changed = false;
         for (&participant, info) in participants.iter() {
             if info.account_id == self.node_account_id {
                 tracing::debug!(?participant, "skipping self connection");
-                if self.connections.remove(&participant).is_some()
-                    && self
-                        .conn_update_tx
-                        .send(ConnectionUpdate::Drop(participant))
-                        .is_err()
-                {
-                    tracing::warn!(?participant, "unable to send drop for self connection");
-                }
+                changed |= self.connections.remove(&participant).is_some();
                 continue;
             }
 
@@ -267,51 +276,47 @@ impl Pool {
                 }
                 Entry::Vacant(conn) => {
                     tracing::info!(?node, "node connection created");
-                    let conn = conn.insert(NodeConnection::spawn(
+                    conn.insert(NodeConnection::spawn(
                         &self.client,
                         participant,
                         info,
                         self.ping_interval,
                     ));
-
-                    let watcher = conn.status_rx.clone();
-                    if self
-                        .conn_update_tx
-                        .send(ConnectionUpdate::New(participant, watcher))
-                        .is_err()
-                    {
-                        tracing::warn!(?node, "failed to send new connection");
-                    }
+                    changed = true;
                 }
             }
+        }
+
+        if changed {
+            self.publish();
         }
     }
 
     /// Drop connections that are not in the active connections list. Dropped connections
     /// are no longer polled for their status.
     fn drop_connections(&mut self, active_conn: HashSet<Participant>) {
-        let mut remove = Vec::new();
-        for participant in self.connections.keys() {
-            if !active_conn.contains(participant) {
-                remove.push(*participant);
-            }
-        }
-
-        for participant in remove {
-            let removed = self.connections.remove(&participant).is_some();
-            if removed
-                && self
-                    .conn_update_tx
-                    .send(ConnectionUpdate::Drop(participant))
-                    .is_err()
-            {
-                tracing::warn!(?participant, "unable to send update for drop participant");
-            }
+        let before = self.connections.len();
+        self.connections
+            .retain(|participant, _| active_conn.contains(participant));
+        if self.connections.len() != before {
+            self.publish();
         }
     }
 
+    /// Publish the current connection set to all watchers.
+    fn publish(&self) {
+        let set: ConnectionSet = Arc::new(
+            self.connections
+                .iter()
+                .map(|(p, conn)| (*p, conn.status_rx.clone()))
+                .collect(),
+        );
+        // No receivers is normal: the mesh may not be watching yet.
+        let _ = self.conns_tx.send(set);
+    }
+
     /// Update the node state after synchronization was successful.
-    pub async fn report_node_synced(&self, participant: Participant) {
+    pub fn report_node_synced(&self, participant: Participant) {
         if let Some(conn) = self.connections.get(&participant) {
             tracing::info!(?participant, "reporting node synced");
             conn.status_tx.send_if_modified(|(status, _)| {
@@ -326,56 +331,93 @@ impl Pool {
     }
 
     pub fn watch(&self) -> ConnectionWatcher {
-        ConnectionWatcher::new(self.conn_update_rx.resubscribe())
+        ConnectionWatcher::new(self.conns_tx.subscribe())
     }
 }
 
-#[derive(Clone)]
-pub enum ConnectionUpdate {
-    New(Participant, watch::Receiver<(NodeStatus, ParticipantInfo)>),
-    Drop(Participant),
+/// A change observed by a [`ConnectionWatcher`].
+pub enum MeshUpdate {
+    /// A connection reported a new status.
+    Status(Participant, NodeStatus, ParticipantInfo),
+    /// The participant left the connection set and is no longer polled.
+    ///
+    /// Carries no [`ParticipantInfo`]: there is none to report, and inventing a
+    /// placeholder only works for as long as every consumer happens to ignore it.
+    Dropped(Participant),
 }
 
 pub struct ConnectionWatcher {
-    /// Watch for new connections and dropped connections from the pool. This
-    /// is so that we can update our watchers when the pool changes.
-    // NOTE: this is a broadcast channel so that we can get a series of updates, and
-    // not just the latest entry with watcher channel.
-    conn_update: broadcast::Receiver<ConnectionUpdate>,
-    /// Set of active connections that we are watching.
+    /// Latest connection set published by the pool.
+    conns: watch::Receiver<ConnectionSet>,
+    /// Per-connection status streams, kept in step with `conns`.
     watchers: StreamMap<Participant, WatchStream<(NodeStatus, ParticipantInfo)>>,
+    /// Drops found by the last reconcile, still to be reported.
+    dropped: Vec<Participant>,
 }
 
 impl ConnectionWatcher {
-    fn new(conn_update: broadcast::Receiver<ConnectionUpdate>) -> Self {
+    fn new(conns: watch::Receiver<ConnectionSet>) -> Self {
         Self {
-            conn_update,
+            conns,
             watchers: StreamMap::new(),
+            dropped: Vec::new(),
         }
     }
 
-    pub async fn next(&mut self) -> (Participant, NodeStatus, ParticipantInfo) {
+    /// Next change, or `None` once the pool is gone and no further updates can
+    /// arrive. Callers must treat `None` as terminal: continuing to use the last
+    /// mesh state would be acting on a snapshot that can no longer be corrected.
+    pub async fn next(&mut self) -> Option<MeshUpdate> {
         loop {
+            if let Some(participant) = self.dropped.pop() {
+                return Some(MeshUpdate::Dropped(participant));
+            }
+
             tokio::select! {
-                // Update our watchers if the connections changed.
-                Ok(update) = self.conn_update.recv() => {
-                    match update {
-                        ConnectionUpdate::New(participant, rx) => {
-                            tracing::debug!(?participant, "adding new watcher");
-                            self.watchers.insert(participant, WatchStream::new(rx));
-                        }
-                        ConnectionUpdate::Drop(participant) => {
-                            tracing::debug!(?participant, "dropping watcher");
-                            self.watchers.remove(&participant);
-                            return (participant, NodeStatus::Offline, ParticipantInfo::new(u32::MAX));
-                        }
+                // Both branches are cancel-safe, and `changed()` erroring is the
+                // only way out, so this select can never end up with every branch
+                // disabled.
+                changed = self.conns.changed() => {
+                    if changed.is_err() {
+                        tracing::warn!("connection pool dropped; connection watcher stopping");
+                        return None;
                     }
+                    self.reconcile();
                 }
-                // NOTE: if watchers.next() return None, it means that the connection is dropped
-                // or that the StreamMap is empty. In that case, we should just continue
+                // `watchers.next()` yields `None` while the map is empty, which
+                // just disables this branch until the set changes.
                 Some((p, (status, info))) = self.watchers.next() => {
-                    return (p, status, info);
+                    return Some(MeshUpdate::Status(p, status, info));
                 }
+            }
+        }
+    }
+
+    /// Bring the status streams in line with the latest published set.
+    ///
+    /// Re-inserted connections re-emit their current status, because
+    /// `WatchStream` yields the present value on creation. That is what makes a
+    /// missed intermediate state self-correcting rather than permanent.
+    fn reconcile(&mut self) {
+        let set = self.conns.borrow_and_update().clone();
+
+        let gone: Vec<Participant> = self
+            .watchers
+            .keys()
+            .filter(|p| !set.contains_key(p))
+            .copied()
+            .collect();
+        for participant in gone {
+            tracing::debug!(?participant, "dropping watcher");
+            self.watchers.remove(&participant);
+            self.dropped.push(participant);
+        }
+
+        for (participant, rx) in set.iter() {
+            if !self.watchers.contains_key(participant) {
+                tracing::debug!(?participant, "adding new watcher");
+                self.watchers
+                    .insert(*participant, WatchStream::new(rx.clone()));
             }
         }
     }
