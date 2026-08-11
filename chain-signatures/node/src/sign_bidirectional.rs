@@ -266,7 +266,7 @@ pub fn sign_and_hash_legacy_from_unsigned(
     out.append_uint_bytes(s);
 
     let signed_bytes = out.into_vec();
-    let hash = alloy_primitives::keccak256(&signed_bytes);
+    let hash = alloy::primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
 }
 

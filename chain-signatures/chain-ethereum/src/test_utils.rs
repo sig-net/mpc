@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Dummy signer for tests; the read-side client never signs.
-fn test_signer() -> alloy_signer_local::PrivateKeySigner {
+fn test_signer() -> alloy::signers::local::PrivateKeySigner {
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         .parse()
         .unwrap()
