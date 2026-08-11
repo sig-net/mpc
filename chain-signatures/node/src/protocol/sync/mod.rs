@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
 
-use super::contract::primitives::ParticipantInfo;
+use super::contract::primitives::{ParticipantInfo, ParticipantMap};
+use super::message::SignedMessage;
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
@@ -66,6 +68,11 @@ impl SyncUpdate {
 }
 
 pub struct SyncRequest {
+    /// Sender proven by the envelope signature. This, and never the payload's
+    /// `from`, is what may reach storage: `remove_outdated` deletes every
+    /// artifact we hold for the owner it is given, so an unverified owner is a
+    /// remote delete primitive.
+    pub from: Participant,
     pub update: SyncUpdate,
     pub response_tx: oneshot::Sender<Result<SyncUpdate, StorageError>>,
 }
@@ -80,7 +87,7 @@ impl SyncRequest {
         let start = Instant::now();
 
         let outdated_triples = match triples
-            .remove_outdated(self.update.from, &self.update.triples)
+            .remove_outdated(self.from, &self.update.triples)
             .await
         {
             Ok(result) => result,
@@ -90,7 +97,7 @@ impl SyncRequest {
             }
         };
         let outdated_presignatures = match presignatures
-            .remove_outdated(self.update.from, &self.update.presignatures)
+            .remove_outdated(self.from, &self.update.presignatures)
             .await
         {
             Ok(result) => result,
@@ -131,6 +138,7 @@ pub struct SyncTask {
     contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
     synced_peer_tx: mpsc::Sender<Participant>,
+    network: NetworkConfig,
 }
 
 // TODO: add a watch channel for mesh active participants.
@@ -142,6 +150,7 @@ impl SyncTask {
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
         synced_peer_tx: mpsc::Sender<Participant>,
+        network: NetworkConfig,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -152,6 +161,7 @@ impl SyncTask {
             contract,
             requests,
             synced_peer_tx,
+            network,
         };
         (channel, task)
     }
@@ -200,6 +210,8 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         me,
+                        self.network.clone(),
+                        self.contract.participant_map().await,
                     ));
                     broadcast = Some((start, task));
                 }
@@ -346,27 +358,65 @@ impl SyncTask {
 /// Broadcast an update to all participants specified by `receivers`.
 /// Returns results for all peers that complete within BROADCAST_TIMEOUT.
 /// Peers that don't respond are not included in results and will be retried later.
+///
+/// Each update is sealed to the recipient's `cipher_pk` and signed with our
+/// `sign_sk`, and each response is verified to be signed by the peer we actually
+/// contacted. A response drives `remove_holder_and_prune` locally, so accepting
+/// one from an unverified sender would let any host prune our artifacts.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     me: Participant,
+    network: NetworkConfig,
+    participants: ParticipantMap,
 ) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
+    let participants = Arc::new(participants);
 
     for (p, info) in receivers {
         let client = client.clone();
         let update = update.clone();
+        let network = network.clone();
+        let participants = participants.clone();
         let url = info.url;
         tasks.spawn(async move {
-            let sync_result = if p != me {
-                match client.sync(&url, &update).await {
-                    Ok(response) => SyncPeerResponse::Success(response),
-                    Err(err) => SyncPeerResponse::Failed(err.to_string()),
+            if p == me {
+                return (p, SyncPeerResponse::SelfPeer);
+            }
+
+            let sealed =
+                match SignedMessage::encrypt(&*update, me, &network.sign_sk, &info.cipher_pk) {
+                    Ok(sealed) => sealed,
+                    Err(err) => {
+                        return (
+                            p,
+                            SyncPeerResponse::Failed(format!("encrypt failed: {err}")),
+                        )
+                    }
+                };
+
+            let sync_result = match client.sync(&url, &sealed).await {
+                Ok(sealed) => {
+                    match SignedMessage::decrypt_with::<SyncUpdate, _>(
+                        &sealed,
+                        &network.cipher_sk,
+                        &participants,
+                        |_| Ok(()),
+                    ) {
+                        // A peer must not be able to answer for another peer:
+                        // the pruning below is applied against `p`.
+                        Ok((signer, _)) if signer != p => SyncPeerResponse::Failed(format!(
+                            "response signed by {signer:?}, expected {p:?}"
+                        )),
+                        Ok((_, response)) => SyncPeerResponse::Success(response),
+                        Err(err) => {
+                            SyncPeerResponse::Failed(format!("response verify failed: {err}"))
+                        }
+                    }
                 }
-            } else {
-                SyncPeerResponse::SelfPeer
+                Err(err) => SyncPeerResponse::Failed(err.to_string()),
             };
             (p, sync_result)
         });
@@ -424,10 +474,17 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) -> Result<SyncUpdate, SyncError> {
+    /// `from` must be the sender authenticated by the transport envelope, not a
+    /// value taken from the payload.
+    pub async fn request_update(
+        &self,
+        from: Participant,
+        update: SyncUpdate,
+    ) -> Result<SyncUpdate, SyncError> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = SyncRequest {
-            update: update.clone(),
+            from,
+            update,
             response_tx,
         };
 
@@ -450,5 +507,94 @@ impl SyncChannel {
             tracing::debug!(?err, "sync processing failed in storage layer");
             SyncError::ResponseFailed
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::Participants;
+    use crate::protocol::ParticipantInfo;
+
+    fn keyed_participant(id: u32, seed: &str) -> (ParticipantInfo, near_crypto::SecretKey) {
+        let sign_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, seed);
+        let (_, cipher_pk) = mpc_keys::hpke::generate();
+        let mut info = ParticipantInfo::new(id);
+        info.sign_pk = sign_sk.public_key();
+        info.cipher_pk = cipher_pk;
+        (info, sign_sk)
+    }
+
+    /// The `/sync` handler feeds `remove_outdated`, which deletes every artifact
+    /// we hold for the owner it is handed. That owner must come from the
+    /// envelope signature, never from the payload, or any caller could name a
+    /// victim. Lock in that the two are distinguishable: a forged payload `from`
+    /// does not change who the envelope proves sent it.
+    #[test]
+    fn payload_from_cannot_impersonate_another_participant() {
+        let attacker = Participant::from(1u32);
+        let victim = Participant::from(2u32);
+
+        let (attacker_info, attacker_sk) = keyed_participant(1, "sync-attacker");
+        let (victim_info, _victim_sk) = keyed_participant(2, "sync-victim");
+        let (recipient_cipher_sk, recipient_cipher_pk) = mpc_keys::hpke::generate();
+
+        let mut participants = Participants::default();
+        participants.insert(&attacker, attacker_info);
+        participants.insert(&victim, victim_info);
+        let participants = ParticipantMap::One(participants);
+
+        // The attacker signs with its own key but claims to be the victim in
+        // the payload, which is what would reach storage if it were trusted.
+        let forged = SyncUpdate {
+            from: victim,
+            triples: Vec::new(),
+            presignatures: Vec::new(),
+        };
+        let sealed =
+            SignedMessage::encrypt(&forged, attacker, &attacker_sk, &recipient_cipher_pk).unwrap();
+
+        let (signer, update) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+            &sealed,
+            &recipient_cipher_sk,
+            &participants,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            signer, attacker,
+            "the authenticated sender must be the signer"
+        );
+        assert_eq!(
+            update.from, victim,
+            "the payload still carries the forged claim, so it must never be used as the owner"
+        );
+        assert_ne!(signer, update.from);
+    }
+
+    /// A participant absent from the contract set cannot be authenticated at all,
+    /// so an outside caller never reaches storage.
+    #[test]
+    fn unknown_sender_is_rejected() {
+        let outsider = Participant::from(9u32);
+        let (_outsider_info, outsider_sk) = keyed_participant(9, "sync-outsider");
+        let (recipient_cipher_sk, recipient_cipher_pk) = mpc_keys::hpke::generate();
+
+        let update = SyncUpdate {
+            from: outsider,
+            triples: Vec::new(),
+            presignatures: Vec::new(),
+        };
+        let sealed =
+            SignedMessage::encrypt(&update, outsider, &outsider_sk, &recipient_cipher_pk).unwrap();
+
+        let result = SignedMessage::decrypt_with::<SyncUpdate, _>(
+            &sealed,
+            &recipient_cipher_sk,
+            &ParticipantMap::One(Participants::default()),
+            |_| Ok(()),
+        );
+        assert!(result.is_err(), "unknown participant must not authenticate");
     }
 }

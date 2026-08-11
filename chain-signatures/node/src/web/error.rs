@@ -26,6 +26,11 @@ pub enum Error {
     Sync(#[from] SyncError),
     #[error("invalid parameters: {0}")]
     InvalidParameters(String),
+    /// Sender could not be authenticated against the contract participant set.
+    /// Deliberately carries no detail: the caller is unauthenticated, so the
+    /// reason is only logged server-side.
+    #[error("unauthorized")]
+    Unauthorized,
 }
 
 impl Error {
@@ -38,6 +43,7 @@ impl Error {
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
             Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,
             Error::Sync(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Unauthorized => StatusCode::UNAUTHORIZED,
         }
     }
 }
