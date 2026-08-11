@@ -137,44 +137,62 @@ impl CheckpointStorage {
         }
     }
 
-    /// Promote a pending checkpoint and prune all older pending checkpoints.
+    /// Promote the durable pending checkpoint and prune all older pending checkpoints.
     pub async fn promote_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        let value = serde_json::to_string(checkpoint)
+        let expected = serde_json::to_string(checkpoint)
             .context("failed to serialize checkpoint persistence")?;
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 const PROMOTE: &str = r#"
-                    redis.call('SET', KEYS[1], ARGV[1])
+                    local pending = redis.call('HGET', KEYS[2], ARGV[2])
+                    if pending and pending ~= ARGV[1] then
+                        return 0
+                    end
+                    redis.call('SET', KEYS[1], pending or ARGV[1])
                     local entries = redis.call('HGETALL', KEYS[2])
                     for i = 1, #entries, 2 do
                         if tonumber(entries[i]) <= tonumber(ARGV[2]) then
                             redis.call('HDEL', KEYS[2], entries[i])
                         end
                     end
+                    return 1
                 "#;
-                let _: () = redis::Script::new(PROMOTE)
+                let promoted: i32 = redis::Script::new(PROMOTE)
                     .key(self.checkpoint_key(checkpoint.chain))
                     .key(self.pending_checkpoint_key(checkpoint.chain))
-                    .arg(value)
+                    .arg(expected)
                     .arg(checkpoint.block_height)
                     .invoke_async(&mut conn)
                     .await
                     .context("failed to promote pending checkpoint")?;
+                if promoted == 0 {
+                    anyhow::bail!(
+                        "pending checkpoint changed before promotion at height {}",
+                        checkpoint.block_height
+                    );
+                }
             }
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
-                pending
-                    .write()
-                    .await
-                    .entry(checkpoint.chain)
-                    .or_default()
-                    .retain(|height, _| *height > checkpoint.block_height);
-                latest
-                    .write()
-                    .await
-                    .insert(checkpoint.chain, checkpoint.clone());
+                let promoted = {
+                    let mut pending = pending.write().await;
+                    let checkpoints = pending.entry(checkpoint.chain).or_default();
+                    if let Some(stored) = checkpoints.get(&checkpoint.block_height) {
+                        anyhow::ensure!(
+                            stored == checkpoint,
+                            "pending checkpoint changed before promotion at height {}",
+                            checkpoint.block_height
+                        );
+                    }
+                    let promoted = checkpoints
+                        .remove(&checkpoint.block_height)
+                        .unwrap_or_else(|| checkpoint.clone());
+                    checkpoints.retain(|height, _| *height > checkpoint.block_height);
+                    promoted
+                };
+                latest.write().await.insert(checkpoint.chain, promoted);
             }
         }
         Ok(())
@@ -305,6 +323,28 @@ mod tests {
         storage.reset_to_latest(&replacement).await?;
         assert_eq!(storage.load_latest(chain).await?, Some(replacement));
         assert!(storage.load_pending(chain).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn promotion_rejects_stale_checkpoint() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoint = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 10,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        };
+        let mut conflicting = checkpoint.clone();
+        conflicting.cumulative_digest[0] = 1;
+
+        storage.persist_pending(&checkpoint).await?;
+        storage.persist_pending(&conflicting).await?;
+        assert!(storage.promote_pending(&checkpoint).await.is_err());
+        assert_eq!(
+            storage.load_pending(Chain::Solana).await?,
+            vec![conflicting]
+        );
         Ok(())
     }
 }
