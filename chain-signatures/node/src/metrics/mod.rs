@@ -8,6 +8,7 @@ use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 
 pub mod hardware;
 pub mod indexers;
+pub mod mesh;
 pub mod messaging;
 pub mod nodes;
 pub mod protocols;
