@@ -63,7 +63,7 @@ Protocol properties defined below are separated into
 
 * **S1  One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
-* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state reported by RPC service provider. 
+* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than a finalized contract state, and no node processes requests under a non-Running state. 
 * **S4 Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
 Violating any of these is unacceptable in any execution within §2's fault bound.  See Appendix for more details.
@@ -75,7 +75,7 @@ Progress is guaranteed during a suﬃciently long synchronous interval, never at
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature).   
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).  
-* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each node's active set within bounded time. 
+* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each correct node's active set within bounded time. 
 
 ## 5\. Efficiency targets
 
@@ -100,11 +100,11 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 ### S1. One-shot artifacts are consumed at most once
 
-*Property.* No presignature yields signature shares for more than one sign request (and no triple pair for more than one presignature).
+*Property.* No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 
 *Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
 
-*How it is enforced.* Three local rules, with no distributed agreement involved:
+*How it is enforced.* Three local rules:
 
 1. Single writer. Only the artifact's recorded owner initiates consumption, checked by every holder rather than trusted from the opener.
 2. Delete-on-first-use at every holder. The proposer removes the artifact from storage and every deliberator takes its local share, so a later attempt fails at any holder that already used it. The removal must reach durable storage *before* any message derived from the artifact is sent, or a holder that crashes and recovers resurrects the share and honestly serves a second request.
@@ -124,13 +124,15 @@ Currently enforced by: signature tasks are spawned exclusively from local indexe
 
 *Property.* No honest node adopts a participant set, threshold, or epoch other than a finalized contract state, and no node processes requests under a non-Running state.
 
-The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
+The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. Governance is this document's name for that triple as observed by one node: a local, read-only snapshot of the contract's current ProtocolState as reported by the chain's RPC provider, refreshed on every contract update. It is not itself agreed on directly; a node's governance is correct exactly when its snapshot matches the finalized contract state (§2's linearizability assumption).
 
 Currently enforced by: governance is a snapshot of contract state; tasks pause whenever the contract is not Running.
 
 ### S4. Instance-local agreement
 
-*Property.* An instance is identified by (sign\_id, presignature\_id) (for signing; analogously by artifact id for triple/presignature generation). Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
+*Property.* Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
+
+An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation.
 
 Currently enforced by dictation, not negotiation: the instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the dictator per instance follows from S1's single-writer rule: only the presignature's owner can open an instance on it. No agreement *across* instances is claimed anywhere. Two rounds of the same request may overlap, and safety must not (and does not) depend on that never happening.
 
@@ -138,7 +140,9 @@ This holds even against a Byzantine proposer, at a liveness cost. A malicious pr
 
 ### L1. Signature progress.
 
-Given a
+*Property.* During a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.
+
+Spelled out, given a
 
 * δ-synchronous interval long enough,  
 * ≥ t correct participants online throughout,  
@@ -154,7 +158,9 @@ Mechanisms: election is a pure function of shared inputs (`proposer_per_round` o
 
 ### L2. Artifact supply.
 
-If
+*Property.* During a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature).
+
+Spelled out, if
 
 * the network is synchronous for a suﬃciently long interval and  
 * ≥ t peers are in the node's active set,
@@ -168,7 +174,7 @@ Local-active gate: generation is skipped entirely while active.len() \< threshol
 
 ### L3. Settlement
 
-Once a signature is produced with a correct and online owner, it is eventually accepted on-chain.
+*Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).
 
 For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline outside our control, 200 blocks \~= 200s)  
 For other chains it requires the publisher to eventually (re)submit the signature until it lands.
