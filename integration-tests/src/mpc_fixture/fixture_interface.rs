@@ -274,11 +274,14 @@ impl MpcFixture {
 
 impl MpcFixtureNode {
     pub async fn wait_for_running(&self) {
+        let mut watcher = self.state.clone();
         loop {
-            if matches!(self.state.status(), NodeStatus::Running { .. }) {
+            if matches!(watcher.status(), NodeStatus::Running { .. }) {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if watcher.changed().await.is_err() {
+                return;
+            }
         }
     }
 
