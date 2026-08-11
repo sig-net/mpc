@@ -276,6 +276,7 @@ impl MpcFixtureNode {
     pub async fn wait_for_running(&self) {
         let mut watcher = self.state.clone();
         loop {
+            // watcher.status() parks the task until the status changes, so this only resumes when the status changes.
             if matches!(watcher.status(), NodeStatus::Running { .. }) {
                 return;
             }
