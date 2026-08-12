@@ -68,33 +68,17 @@ async fn detect_regression(
         return false;
     };
 
-    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
-    // creating a new checkpoint as a side-effect during regression detection.
-    let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await else {
+    if backlog.latest_checkpoint(chain).await.is_none() {
         tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
-    };
-
-    // Consensus matches our latest local checkpoint → confirm it.
-    if current_checkpoint.digest() == checkpoint_digest.digest
-        && backlog
-            .confirm_consensus(chain, checkpoint_digest.digest)
-            .await
-    {
         return false;
     }
 
-    // Consensus matches an older checkpoint in our history → confirm it.
+    // A consensus digest can match either the latest checkpoint or a retained
+    // pending checkpoint while this node is ahead of consensus.
     if backlog
         .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        tracing::info!(
-            ?chain,
-            local_height = current_checkpoint.block_height,
-            consensus_height = checkpoint_digest.height,
-            "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
-        );
         return false;
     }
 
