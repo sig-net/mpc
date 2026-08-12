@@ -25,6 +25,19 @@ pub enum CheckpointError {
     },
 }
 
+enum CheckpointKind {
+    Pending(Checkpoint),
+    Latest(Checkpoint),
+}
+
+impl From<CheckpointKind> for Checkpoint {
+    fn from(checkpoint_kind: CheckpointKind) -> Self {
+        match checkpoint_kind {
+            CheckpointKind::Pending(checkpoint) | CheckpointKind::Latest(checkpoint) => checkpoint,
+        }
+    }
+}
+
 impl Checkpoints {
     pub(super) fn new(storage: CheckpointStorage) -> Self {
         let pending = Chain::iter()
@@ -134,15 +147,11 @@ impl Checkpoints {
     }
 
     pub(super) async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> bool {
-        let Some(checkpoint) = self.find(chain, digest).await else {
+        let Some(checkpoint_kind) = self.find_kind(chain, digest).await else {
             return false;
         };
-        let is_pending = self
-            .pending(chain)
-            .read()
-            .await
-            .get(&checkpoint.block_height)
-            .is_some_and(|pending| pending.digest() == digest);
+        let is_pending = matches!(&checkpoint_kind, CheckpointKind::Pending(_));
+        let checkpoint = Checkpoint::from(checkpoint_kind);
 
         if !is_pending {
             self.update_pending(chain, checkpoint.block_height).await;
@@ -235,6 +244,10 @@ impl Checkpoints {
     }
 
     pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
+        self.find_kind(chain, digest).await.map(Checkpoint::from)
+    }
+
+    async fn find_kind(&self, chain: Chain, digest: [u8; 32]) -> Option<CheckpointKind> {
         if let Some(checkpoint) = self
             .pending(chain)
             .read()
@@ -243,7 +256,7 @@ impl Checkpoints {
             .find(|checkpoint| checkpoint.digest() == digest)
             .cloned()
         {
-            return Some(checkpoint);
+            return Some(CheckpointKind::Pending(checkpoint));
         }
         self.storage
             .load_latest(chain)
@@ -251,6 +264,7 @@ impl Checkpoints {
             .ok()
             .flatten()
             .filter(|checkpoint| checkpoint.digest() == digest)
+            .map(CheckpointKind::Latest)
     }
 
     #[cfg(test)]
