@@ -53,9 +53,7 @@ impl Checkpoints {
 
     /// Returns the pending-checkpoint map for `chain`.
     fn pending(&self, chain: Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
-        self.pending
-            .get(&chain)
-            .unwrap_or_default()
+        &self.pending[&chain]
     }
 
     /// Updates the pending-checkpoint metric for `chain`.
