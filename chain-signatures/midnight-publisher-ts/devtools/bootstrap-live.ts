@@ -27,4 +27,3 @@ await withSyncedWalletFacade(keys, config, async (facade, state) => {
 const { contractAddress, txId } = await deploySignetContract({ ...env, DEPLOYER_SEED: seed });
 console.log(`deployed singleton in tx ${txId}`);
 console.log(contractAddress);
-process.exit(0);

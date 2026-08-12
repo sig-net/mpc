@@ -3,7 +3,7 @@
 
 import { Effect, Layer } from "effect";
 import { NodeContext } from "@effect/platform-node";
-import { ContractExecutable } from "@midnight-ntwrk/compact-js";
+import { ContractExecutable, hashVerifierKey } from "@midnight-ntwrk/compact-js";
 import { ZKFileConfiguration } from "@midnight-ntwrk/compact-js-node";
 // onchain-runtime-v4's ContractState, not ledger-v9's: different WASM classes, and the
 // executor refuses the wrong one.
@@ -20,6 +20,7 @@ import {
 import {
   Contract as SignetContract,
   createSignetContractPrivateState,
+  expectedVk,
   type SignetContractCircuitId,
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
@@ -82,13 +83,26 @@ function executionContext(managedDir: string, coinPublicKey: string) {
 export async function buildIntent(managedDir: string, input: BuildIntentInput): Promise<Uint8Array> {
   const contractState = ContractState.deserialize(fromHex(input.contractState));
 
-  // By NAME only: matching names over moved-on verifier keys passes here, and the
-  // chain rejects the proof instead.
   const operation = contractState.operation(input.circuit);
   if (operation === undefined) {
     throw new PublisherError(
       "contract_mismatch",
       `the contract deployed at ${input.contractAddress} exposes no operation \`${input.circuit}\``,
+    );
+  }
+  const deployedVerifierKey = operation.verifierKey;
+  // Both publisher entry points are provable, so a same-named proofless operation
+  // cannot be the implementation this process was compiled to call.
+  if (deployedVerifierKey === undefined || deployedVerifierKey.length === 0) {
+    throw new PublisherError(
+      "contract_mismatch",
+      `the contract deployed at ${input.contractAddress} has no verifier key for \`${input.circuit}\``,
+    );
+  }
+  if (hashVerifierKey(deployedVerifierKey) !== expectedVk[input.circuit]) {
+    throw new PublisherError(
+      "contract_mismatch",
+      `the contract deployed at ${input.contractAddress} has a different verifier key for \`${input.circuit}\``,
     );
   }
 

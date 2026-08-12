@@ -20,13 +20,23 @@ export interface Config {
 
 const FUNDING_SEED_VAR = "MIDNIGHT_PUB_FUNDING_SEED";
 
+const optionalUrl = (protocols: readonly string[]) =>
+  z
+    .string()
+    .refine(
+      (value) => value.length === 0 || (URL.canParse(value) && protocols.includes(new URL(value).protocol)),
+      `must be an absolute ${protocols.join(" or ")} URL`,
+    )
+    .transform((value) => (value.length === 0 ? value : new URL(value).toString()))
+    .optional();
+
 const EnvSchema = z.object({
   MIDNIGHT_PUB_MANAGED_DIR: z.string().min(1),
   MIDNIGHT_PUB_NETWORK_ID: z.literal(NETWORK_IDS, `must be one of ${NETWORK_IDS.join(", ")}`),
-  MIDNIGHT_PUB_NODE_URL: z.string().optional(),
-  MIDNIGHT_PUB_PROOF_SERVER_URL: z.string().optional(),
-  MIDNIGHT_PUB_INDEXER_URL: z.string().optional(),
-  MIDNIGHT_PUB_INDEXER_WS_URL: z.string().optional(),
+  MIDNIGHT_PUB_NODE_URL: optionalUrl(["http:", "https:", "ws:", "wss:"]),
+  MIDNIGHT_PUB_PROOF_SERVER_URL: optionalUrl(["http:", "https:"]),
+  MIDNIGHT_PUB_INDEXER_URL: optionalUrl(["http:", "https:"]),
+  MIDNIGHT_PUB_INDEXER_WS_URL: optionalUrl(["ws:", "wss:"]),
   [FUNDING_SEED_VAR]: z.string().optional(),
 });
 

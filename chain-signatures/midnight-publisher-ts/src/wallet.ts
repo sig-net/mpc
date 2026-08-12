@@ -20,7 +20,6 @@ export type BalancingRecipe = Awaited<ReturnType<WalletFacade["signRecipe"]>>;
 
 export interface Landed {
   readonly txId: string;
-  readonly blockHash: string;
 }
 
 export interface FundingWallet {
@@ -54,8 +53,13 @@ function deriveFundingKeys(seed: string, networkId: string): AccountKeys {
 async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
   const facade = await initialiseWalletFacade(keys, config);
 
-  await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
-  await facade.waitForSyncedState();
+  try {
+    await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
+    await facade.waitForSyncedState();
+  } catch (error) {
+    await facade.stop().catch(() => undefined);
+    throw error;
+  }
 
   return {
     async balanceTx(tx) {
@@ -66,21 +70,13 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
       return facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
     },
     finalizeTx: (recipe) => facade.finalizeRecipe(recipe),
-    // The submission service, not `facade.submitTransaction`: that discards the landing
-    // block, which is half of what this process owes its caller.
     async submitTx(tx) {
-      const txId = tx.identifiers().at(-1);
-      if (txId === undefined) throw new Error("the finalized transaction carries no identifier");
-      // `facade.validateTransaction` is deliberately not called: it checks against a
-      // blank ledger state and fails every contract call.
-      try {
-        const landed = await facade.submissionService.submitTransaction(tx, "Finalized");
-        return { txId, blockHash: landed.blockHash.replace(/^0x/, "") };
-      } catch (error) {
-        // Undo the optimistic spend, so the next balance does not skip this coin.
-        await facade.revert(tx);
-        throw error;
+      if (tx.identifiers().at(-1) === undefined) {
+        throw new Error("the finalized transaction carries no identifier");
       }
+      const txId = await facade.submitTransaction(tx);
+      if (txId === undefined) throw new Error("the finalized transaction carries no identifier");
+      return { txId };
     },
     close: () => facade.stop(),
   };

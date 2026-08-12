@@ -26,12 +26,14 @@ describe("configFromEnv", () => {
   });
 
   it("starts a deployment that submits, with every endpoint the wallet needs", () => {
-    expect(configFromEnv(SUBMITTER).endpoints).toEqual({
-      nodeUrl: "ws://127.0.0.1:9944",
-      proofServerUrl: "http://127.0.0.1:6300",
+    const config = configFromEnv(SUBMITTER);
+    expect(config.endpoints).toEqual({
+      nodeUrl: "ws://127.0.0.1:9944/",
+      proofServerUrl: "http://127.0.0.1:6300/",
       indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
       indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
     });
+    expect(JSON.stringify(config)).not.toContain(SUBMITTER.MIDNIGHT_PUB_FUNDING_SEED);
   });
 
   it("reads a blank seed as no wallet, because the parent always sets the variable", () => {
@@ -62,5 +64,23 @@ describe("configFromEnv", () => {
 
   it("refuses a missing managed dir, which both operations need", () => {
     expect(() => configFromEnv({ MIDNIGHT_PUB_NETWORK_ID: "undeployed" })).toThrowError(/MIDNIGHT_PUB_MANAGED_DIR/);
+  });
+
+  it("refuses malformed endpoint URLs at startup", () => {
+    for (const name of SUBMIT_VAR_NAMES.slice(0, 4)) {
+      expect(() => configFromEnv({ ...SUBMITTER, [name]: "not-a-url" }), name).toThrowError(name);
+    }
+  });
+
+  it("refuses unsupported endpoint schemes at startup", () => {
+    for (const name of SUBMIT_VAR_NAMES.slice(0, 4)) {
+      expect(() => configFromEnv({ ...SUBMITTER, [name]: "file:///tmp/socket" }), name).toThrowError(name);
+    }
+  });
+
+  it("canonicalizes endpoint schemes before passing them to the wallet SDK", () => {
+    const config = configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_NODE_URL: "HTTP://127.0.0.1:9944" });
+
+    expect(config.endpoints?.nodeUrl).toBe("http://127.0.0.1:9944/");
   });
 });

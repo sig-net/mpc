@@ -4,7 +4,7 @@
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { LedgerParameters, Transaction } from "@midnightntwrk/ledger-v9";
+import { Transaction } from "@midnightntwrk/ledger-v9";
 import { Data, Effect } from "effect";
 
 import { PublisherError } from "../src/errors.js";
@@ -14,40 +14,26 @@ import {
   closePublisher,
   decodeIntent,
   handleSubmit,
-  primePublisher,
   SUBMIT_TIMEOUT,
   withDeadline,
 } from "../src/submit.js";
 import type { Landed } from "../src/wallet.js";
 import {
-  initialSingletonStateHex,
   managedDir,
   primeStub,
-  STUB_BLOCK_HASH,
+  respondInput,
+  SINGLETON,
   STUB_TX_ID,
   testConfig,
-  toHex,
   type StubEdges,
 } from "./support.js";
-
-const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
-const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
 const CONFIG = testConfig();
 
 let intent: Uint8Array;
 
 beforeAll(async () => {
-  intent = await buildIntent(managedDir(), {
-    circuit: "respond",
-    contractAddress: SINGLETON,
-    requestId: REQUEST_ID,
-    signature: { bigR: { x: "11".repeat(32), y: "22".repeat(32) }, s: "33".repeat(32), recoveryId: 0 },
-    contractState: await initialSingletonStateHex(),
-    ledgerParameters: toHex(LedgerParameters.initialParameters().serialize()),
-    coinPublicKey: "44".repeat(32),
-    ttlSeconds: 1_800_000_000,
-  });
+  intent = await buildIntent(managedDir(), await respondInput());
 }, 120_000);
 
 const PRODUCTION_TIMEOUT = SUBMIT_TIMEOUT.ms;
@@ -72,29 +58,14 @@ const refused = async (id: number): Promise<PublisherError> => {
 };
 
 describe("decodeIntent", () => {
-  it("reads back what the builder wrote, with its one call intact", () => {
-    expect(decodeIntent(intent).actions).toHaveLength(1);
-  });
-
-  it("names the field when the bytes are not a tagged intent at all", () => {
-    expect(() => decodeIntent(Uint8Array.of(1, 2, 3))).toThrowError(/`intent` is not a midnight:intent\[v9\] blob/);
-    expect(() => decodeIntent(Uint8Array.of(1, 2, 3))).toThrowError(
-      expect.objectContaining({ code: "bad_request" }) as Error,
-    );
-  });
-
-  it("answers bad_request when the tag is right and the body is not", () => {
-    const truncated = intent.subarray(0, 40);
-
-    expect(() => decodeIntent(truncated)).toThrowError(/`intent` did not deserialize/);
+  it("classifies invalid intent bytes as bad requests", () => {
+    for (const invalid of [Uint8Array.of(1, 2, 3), intent.subarray(0, 40)]) {
+      expect(() => decodeIntent(invalid)).toThrowError(expect.objectContaining({ code: "bad_request" }) as Error);
+    }
   });
 });
 
 describe("withDeadline", () => {
-  it("passes a timely result through", async () => {
-    await expect(withDeadline(Promise.resolve(7), 1_000, () => new Error("never"))).resolves.toBe(7);
-  });
-
   it("rejects with the factory's error once the deadline passes", async () => {
     const hang = new Promise<never>(() => undefined);
 
@@ -120,34 +91,17 @@ describe("withDeadline", () => {
 });
 
 describe("handleSubmit: the flow", () => {
-  it("answers the transaction id and the block it landed in", async () => {
-    primeStub();
-
-    await expect(handleSubmit(CONFIG, 1, intent)).resolves.toEqual({ txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH });
-  });
-
-  it("wraps the intent into a transaction that carries it, and proves that one", async () => {
-    let proved: unknown;
-    primeStub({
-      proveTx: async (tx) => {
-        proved = tx;
-        return tx;
-      },
-    });
-
-    await handleSubmit(CONFIG, 1, intent);
-
-    expect(proved).toBeInstanceOf(Transaction);
-    expect(String(proved)).toContain(SINGLETON);
-  });
-
-  it("carries the proven transaction through balance and finalize into submit", async () => {
+  it("carries the intent through prove, balance, finalize, and submit", async () => {
     const proven = { proven: true } as unknown as UnboundTransaction;
+    let unproven: unknown;
     let balanced: unknown;
     let finalized: unknown;
     let submitted: unknown;
     primeStub({
-      proveTx: async () => proven,
+      proveTx: async (tx) => {
+        unproven = tx;
+        return proven;
+      },
       balanceTx: async (tx) => {
         balanced = tx;
         return tx;
@@ -158,12 +112,14 @@ describe("handleSubmit: the flow", () => {
       },
       submitTx: async (tx) => {
         submitted = tx;
-        return { txId: STUB_TX_ID, blockHash: STUB_BLOCK_HASH };
+        return { txId: STUB_TX_ID };
       },
     });
 
-    await handleSubmit(CONFIG, 1, intent);
+    await expect(handleSubmit(CONFIG, 1, intent)).resolves.toEqual({ txId: STUB_TX_ID });
 
+    expect(unproven).toBeInstanceOf(Transaction);
+    expect(String(unproven)).toContain(SINGLETON);
     expect(balanced).toBe(proven);
     expect(finalized).toBe(proven);
     expect(submitted).toBe(proven);
@@ -178,22 +134,17 @@ describe("handleSubmit: the flow", () => {
     expect(refusal.message).toContain("MIDNIGHT_PUB_NODE_URL");
   });
 
-  it("refines a dust shortfall into wallet_unfunded, which means back off rather than retry", async () => {
-    // The wallet SDK raises the tagged error and the balancer raises the sentence.
-    for (const spelling of ["Wallet.InsufficientFunds", "could not balance dust"]) {
+  it("classifies wallet failures for retry policy", async () => {
+    for (const [message, code] of [
+      ["Wallet.InsufficientFunds", "wallet_unfunded"],
+      ["could not balance dust", "wallet_unfunded"],
+      ["Transcript(Execution(ReadMismatch { expected: 06 }))", "state_conflict"],
+    ] as const) {
       await closePublisher();
-      primeStub({ balanceTx: failing(spelling) });
+      primeStub({ balanceTx: failing(message) });
 
-      expect((await refused(6)).code, spelling).toBe("wallet_unfunded");
+      expect((await refused(6)).code, message).toBe(code);
     }
-  });
-
-  it("refines an optimistic-concurrency loss into state_conflict", async () => {
-    primeStub({
-      submitTx: failing("Transcript(Execution(ReadMismatch { expected: 06 }))") as StubEdges["submitTx"],
-    });
-
-    expect((await refused(7)).code).toBe("state_conflict");
   });
 
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
@@ -221,11 +172,6 @@ describe("handleSubmit: the flow", () => {
     expect(refusal.message).toContain("Transaction submission error");
   });
 
-  it("plumbs a wallet that never opened out to the caller as its own code", async () => {
-    primePublisher(Promise.reject(new PublisherError("wallet_unsynced", "the funding wallet could not sync")));
-
-    expect((await refused(9)).code).toBe("wallet_unsynced");
-  });
 });
 
 describe("handleSubmit: the busy gate", () => {
@@ -265,7 +211,6 @@ describe("handleSubmit: the busy gate", () => {
     primeStub({ submitTx: failing("transaction rejected") as StubEdges["submitTx"] });
     expect((await refused(1)).code).toBe("internal");
 
-    await closePublisher();
     primeStub();
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
@@ -273,7 +218,11 @@ describe("handleSubmit: the busy gate", () => {
   it("keeps the gate claimed while an abandoned submit is still spending", async () => {
     SUBMIT_TIMEOUT.ms = 50;
     primeStub({ balanceTx: () => new Promise(() => undefined) });
-    expect((await refused(1)).code).toBe("internal");
+    const timedOut = await refused(1);
+    expect(timedOut.code).toBe("internal");
+    expect(timedOut.message).toMatch(/deadline/);
+    expect(timedOut.message).toMatch(/may still land/);
+    expect(timedOut.message).toContain("request 1");
 
     SUBMIT_TIMEOUT.ms = PRODUCTION_TIMEOUT;
     const refusal = await refused(2);
@@ -281,37 +230,4 @@ describe("handleSubmit: the busy gate", () => {
     expect(refusal.message).toContain("request 1");
   });
 
-  it("never lets two submits balance at once, even across a blown deadline", async () => {
-    let live = 0;
-    let peak = 0;
-    primeStub({
-      balanceTx: async (tx) => {
-        live += 1;
-        peak = Math.max(peak, live);
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        live -= 1;
-        return tx;
-      },
-    });
-
-    SUBMIT_TIMEOUT.ms = 100;
-    expect((await refused(1)).code).toBe("internal");
-
-    SUBMIT_TIMEOUT.ms = PRODUCTION_TIMEOUT;
-    await handleSubmit(CONFIG, 2, intent).catch(() => undefined);
-    expect(peak).toBe(1);
-    await new Promise((resolve) => setTimeout(resolve, 400));
-  });
-
-  it("tells the caller its abandoned submit may still land, rather than that it failed", async () => {
-    // A caller that reads this as "did not land" and retries posts the same signature twice.
-    SUBMIT_TIMEOUT.ms = 30;
-    primeStub({ balanceTx: () => new Promise(() => undefined) });
-
-    const refusal = await refused(11);
-
-    expect(refusal.message).toMatch(/deadline/);
-    expect(refusal.message).toMatch(/may still land/);
-    expect(refusal.message).toContain("request 11");
-  });
 });

@@ -14,7 +14,7 @@ export type SubmitRequest = { readonly id: number; readonly intent: string };
 
 export type Response =
   | { readonly id: number; readonly ok: true; readonly intent: string }
-  | { readonly id: number; readonly ok: true; readonly txId: string; readonly blockHash: string }
+  | { readonly id: number; readonly ok: true; readonly txId: string }
   | { readonly id: number | null; readonly ok: false; readonly code: ErrorCode; readonly message: string };
 
 const MUST_BE_AN_OBJECT = "must be an object";
@@ -48,7 +48,6 @@ const wireId = z
 
 const SubmitSchema = wireObject({ id: wireId, intent: ledgerHex });
 
-// Field order is wire contract: zod surfaces only the first issue, in declaration order.
 const BuildSchema = wireObject({
   id: wireId,
   contractAddress: hex32,
@@ -69,7 +68,7 @@ function toBadRequest(error: z.ZodError): PublisherError {
 
 function readId(body: Record<string, unknown>): number | null {
   const id = body["id"];
-  return typeof id === "number" && Number.isSafeInteger(id) ? id : null;
+  return typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? id : null;
 }
 
 // Absent `op` is `build`: the request predates the discriminator and the Rust client
@@ -89,7 +88,7 @@ async function answer(config: Config, body: Record<string, unknown>): Promise<Re
       if (!parsed.success) throw toBadRequest(parsed.error);
       const request: SubmitRequest = parsed.data;
       const landed = await handleSubmit(config, request.id, Buffer.from(request.intent, "hex"));
-      return { id: request.id, ok: true, txId: landed.txId, blockHash: landed.blockHash };
+      return { id: request.id, ok: true, txId: landed.txId };
     }
     default:
       throw new PublisherError("bad_request", `invalid request: \`op\` ${MUST_BE_AN_OP}`);

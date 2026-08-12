@@ -11,7 +11,7 @@ const config = configFromEnv();
 
 console.error(
   `midnight-publisher started managed_dir=${config.managedDir} network=${config.networkId} ` +
-    `node=${config.endpoints === undefined ? "none (builds intents only)" : config.endpoints.nodeUrl}`,
+    `node=${config.endpoints === undefined ? "none (builds intents only)" : new URL(config.endpoints.nodeUrl).origin}`,
 );
 
 // Awaited per line, so a slow circuit run's reply cannot be overtaken by the next request's.

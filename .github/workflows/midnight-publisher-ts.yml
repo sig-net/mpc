@@ -1,7 +1,6 @@
-# The midnight intent builder's gate. The package is a stdio codec: one JSON
-# request line in, one serialized ledger `Intent` out. It reaches no endpoint and
-# holds no key, so typecheck and the vitest suite need no stack at all, running
-# the real circuit over a synthesized singleton state.
+# The midnight intent builder's gate. The TypeScript package builds intents and
+# submits them through a funding wallet. Its deterministic suite runs the real
+# circuit and local HTTP boundary without requiring a full Midnight stack.
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
 # is not on this branch yet; its `intent_seam` differential test and the Rust

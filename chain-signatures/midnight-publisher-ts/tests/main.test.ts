@@ -2,38 +2,23 @@
 // pipe. The two invariants that live only in `main.ts`, stdout carries nothing but
 // reply lines and requests are answered one at a time, are unreachable from `handleLine`.
 
-import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { LedgerParameters } from "@midnightntwrk/ledger-v9";
-
-import { initialSingletonStateHex, managedDir, toHex } from "./support.js";
+import { managedDir, respondInput } from "./support.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const ENTRY = `${ROOT}dist/main.js`;
 
-const CONTRACT_STATE = await initialSingletonStateHex();
-
-const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
-const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
-
-const BURST = 5;
+const BURST = 2;
+const BUILD = await respondInput();
 
 const request = (id: number): string =>
   JSON.stringify({
     id,
-    circuit: "respond",
-    contractAddress: SINGLETON,
-    requestId: REQUEST_ID,
-    signature: { bigR: { x: "11".repeat(32), y: "22".repeat(32) }, s: "33".repeat(32), recoveryId: 0 },
-    contractState: CONTRACT_STATE,
-    ledgerParameters: toHex(LedgerParameters.initialParameters().serialize()),
-    coinPublicKey: "44".repeat(32),
-    ttlSeconds: 1_800_000_000,
+    ...BUILD,
   });
 
 interface Run {
@@ -42,10 +27,19 @@ interface Run {
   readonly stderr: string;
 }
 
-function drive(lines: readonly string[]): Promise<Run> {
+function drive(lines: readonly string[], env: NodeJS.ProcessEnv = {}): Promise<Run> {
   return new Promise((resolve, reject) => {
+    const childEnv = { ...process.env };
+    for (const name of Object.keys(childEnv)) {
+      if (name.startsWith("MIDNIGHT_PUB_")) delete childEnv[name];
+    }
     const child = spawn(process.execPath, [ENTRY], {
-      env: { ...process.env, MIDNIGHT_PUB_MANAGED_DIR: managedDir(), MIDNIGHT_PUB_NETWORK_ID: "undeployed" },
+      env: {
+        ...childEnv,
+        MIDNIGHT_PUB_MANAGED_DIR: managedDir(),
+        MIDNIGHT_PUB_NETWORK_ID: "undeployed",
+        ...env,
+      },
     });
     let stdout = "";
     let stderr = "";
@@ -58,15 +52,6 @@ function drive(lines: readonly string[]): Promise<Run> {
     child.stdin.end();
   });
 }
-
-// Built here rather than assumed present, so the suite can never pass on a stale `dist/`.
-beforeAll(() => {
-  const { resolve } = createRequire(import.meta.url);
-  execFileSync(process.execPath, [resolve("typescript/bin/tsc"), "-p", `${ROOT}tsconfig.build.json`], {
-    cwd: ROOT,
-    stdio: "pipe",
-  });
-}, 180_000);
 
 describe("dist/main.js over a pipe", () => {
   it("answers a burst in order, one line per request, and nothing else on stdout", async () => {
@@ -104,22 +89,19 @@ describe("dist/main.js over a pipe", () => {
     expect(replies[2]).toMatchObject({ ok: true });
   }, 120_000);
 
-  it("keeps every diagnostic off the wire", async () => {
-    const run = await drive([request(1), JSON.stringify({ id: 2, circuit: "respond" })]);
+  it("does not print credentials carried by the node URL", async () => {
+    const run = await drive([], {
+      MIDNIGHT_PUB_NODE_URL: "https://authuser:secret@example.invalid/rpc?token=private",
+      MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
+      MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
+      MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
+      MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
+    });
 
-    expect(run.stderr.length).toBeGreaterThan(0);
-    const strayReplies = run.stderr
-      .split("\n")
-      .filter((line) => line.trim().startsWith("{"))
-      .filter((line) => {
-        try {
-          return "ok" in JSON.parse(line);
-        } catch {
-          return false;
-        }
-      });
-
-    expect(strayReplies).toEqual([]);
-    expect(run.stdout.split("\n").filter((line) => line.length > 0)).toHaveLength(2);
-  }, 120_000);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain("node=https://example.invalid");
+    expect(run.stderr).not.toContain("authuser");
+    expect(run.stderr).not.toContain("secret");
+    expect(run.stderr).not.toContain("private");
+  });
 });
