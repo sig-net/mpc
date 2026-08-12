@@ -100,13 +100,13 @@ impl EthTestEnv {
     }
 }
 
-/// Poll for the `SignatureResponded` log matching `request_id`, returning the
-/// responder address.
+/// Poll for the `SignatureResponded` log matching `request_id`, returning
+/// the responder address and the transaction hash it was mined in.
 pub async fn wait_for_responded(
     env: &EthTestEnv,
     request_id: B256,
     timeout: Duration,
-) -> Result<Address> {
+) -> Result<(Address, B256)> {
     let filter = Filter::new()
         .address(env.contract_address)
         .event_signature(ChainSignatures::SignatureResponded::SIGNATURE_HASH)
@@ -117,7 +117,10 @@ pub async fn wait_for_responded(
         if let Some(log) = logs.into_iter().next() {
             let event = ChainSignatures::SignatureResponded::decode_log_data(log.data())
                 .context("decode SignatureResponded")?;
-            return Ok(event.responder);
+            let tx_hash = log
+                .transaction_hash
+                .context("responded log missing transaction hash")?;
+            return Ok((event.responder, tx_hash));
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
