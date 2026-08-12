@@ -24,7 +24,7 @@ Not all of the below is implemented. Where a property or invariant is only partl
   5. settlement is chain-specific: NEAR verifies the signature and resumes the yielded promise, emitting no event of its own; the EVM contract keeps no request state and emits an event for any submitter without checking anything  
   6. downstream process is responsible for event verification and exactly once semantics 
 
-Both artifacts below have a unique owner, the node that coordinated their generation, which simplifies statesync and coordination, and a set of holders, the nodes storing their shares.
+Both artifacts below have a single owner, the node that coordinated their generation, which simplifies statesync and coordination, and a set of holders, the nodes storing their shares.
 
 * Triple pair (artifact): two secret-shared random triples, produced in the background and stored, owned and consumed as a single artifact under one id, spent to build one presignature.
 
@@ -36,11 +36,11 @@ Both artifacts below have a unique owner, the node that coordinated their genera
   * proposer sends Start carrying the final participant list to each accepter  
   * the proposer reserves its artifact when proposing and commits it, removing it from the pool, when generation starts; aborting before the commit releases the reservation, aborting after does not  
 
-* Instance : one attempt to run protocol to completion over a specific artifact and participant list
+* Instance: one attempt to run the protocol to completion over a specific artifact, named by that artifact
   * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
   * Triple pair/presignature: identified by artifact id. A triple pair's id is drawn at random by its proposer; a presignature's id is derived from the pair it consumes (hash of the pair id), not chosen.  
 
-  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, different rounds are different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature, possible when the first aborted before committing it, share one name.
+  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, rounds are usually different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature, possible when the first aborted before committing it, share one name.
 
 ## 2\. System model
 
@@ -54,11 +54,11 @@ Each node holds its own local, read-only snapshot of it, refreshed on contract u
   * Safety of S1–S4 must hold against f arbitrarily corrupted nodes.
     Two conditions bound f. 
     * f \< t keeps the adversary from assembling a signing quorum out of its own key shares; with f ≥ t it holds one and all bets are off. 
-    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5 and thus works for every f up to n − t; a threshold vote can only raise t further, since the contract clamps a proposed threshold to \[⌊2n/3⌋ \+ 1, n − 1\], and both conditions get easier as t grows, so that floor is what keeps the model intact. Below n \= 5 it falls back to a simple majority (⌊n/2⌋ \+ 1), which does not: at n \= 3 that gives 2t − n \= 1, so only f \= 0 is inside the model.  
+    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5 and thus works for every f up to n − t; a threshold vote can only raise t further, since the contract clamps a proposed threshold to \[⌊2n/3⌋ \+ 1, n − 1\], and both conditions get easier as t grows, so that floor is what keeps the model intact. Below n \= 5 it falls back to a simple majority (⌊n/2⌋ \+ 1), which does not: at n \= 3 that gives 2t − n \= 1, so only f \= 0 is inside the model. The floor is applied on resharing and by threshold votes, not to the value passed at contract initialization, which is checked only against n, so a network can also be deployed outside the model.  
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
-    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming δ never exceeds that ceiling; liveness is therefore argued for δ up to the ceiling, not for arbitrary finite δ (more details in L1)  
-  * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is eﬀectively reliable and timely.
+    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming a whole round fits inside that ceiling: a Propose, Accept and Start exchange, the generation protocol, and the indexing skew between two nodes. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (more details in L1)  
+  * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
   * Channels are authenticated and encrypted. 
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
 * Chain state reaches a node only through its RPC provider, which sits outside the fault model above: a provider that reports a committee or a request the chain never finalized breaks S3 and S2 at that node, and nothing in this layer detects it. Verifying responses against a light client is what would remove the assumption; until then it is one, and it covers the indexers as well.  
@@ -75,9 +75,9 @@ Violating any of these is unacceptable in any execution within §2's fault bound
 
 ## 4\. Liveness
 
-Progress is guaranteed during a suﬃciently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
+Progress is guaranteed during a sufficiently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
-* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the correct nodes that own no usable presignature). That such a presignature keeps existing is L2.  
+* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).  
 * **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
@@ -112,15 +112,15 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Enforcement* Three local rules:
 
-1. Single writer. Only the artifact's recorded owner initiates consumption. Every holder enforces this itself rather than trusting the proposer, but only when the share is taken, not when the posit is answered, so a posit naming the wrong owner fails a phase late.
+1. Single writer. Only the artifact's recorded owner initiates consumption. Every holder enforces this itself rather than trusting the proposer, but only when the share is taken, not when the posit is answered, so a Propose from a node that is not the recorded owner is answered normally and only fails when the share is taken.
 2. Delete-on-first-use at every holder when generation starts. The proposer removes the artifact from storage and every deliberator takes its local share, so a later attempt fails at any holder that already used it. The removal must reach durable storage *before* any message derived from the artifact is sent, or a holder that crashes and recovers resurrects the share and honestly serves a second request.
 3. Instance naming. Every message names its instance, and a node feeds each one only to the instance it names. Posit messages name the round as well, generation messages do not (§1).
 
 *Epoch scope.* An artifact is only meaningful under the sharing it was produced with, and its id carries no epoch, so what separates one epoch from the next is a wipe: on resharing finalization a node clears both pools before serving the new epoch. That wipe is best-effort, a failure is logged and the node carries on, so a surviving artifact keeps a name the new epoch accepts. S2 still binds every share to an indexed request, so the exposure is aborts and wasted rounds rather than a signature nobody asked for; scoping the storage keys by epoch would close it.
 
-*Why deleting at each holder suffices.* Per-holder deletion by itself would still allow two **disjoint** sets of honest holders to each serve their own first request on one artifact. Quorum intersection rules that out: both instances need a participant list of at least t (the posit phase starts an instance only once t peers have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
+*Why deleting at each holder suffices.* Per-holder deletion by itself would still allow two **disjoint** sets of honest holders to each serve their own first request on one artifact. Quorum intersection rules that out: both instances need a participant list of at least t (the posit phase starts an instance only once t nodes including the proposer have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
 
-*Hardening.* Binding the artifact to its first consumer rather than merely deleting it (on first use persist presignature\_id → sign\_id, refuse that presignature under any other sign\_id, and keep the record as long as the request can be retried) would hold S1 even where the intersection argument does not reach: at n \= 3, and whenever n ≡ 1 (mod 3), where 2t − n exceeds n − t by exactly one, so at f \= n − t the intersection holds a single honest node (n \= 7 and n \= 100 alike; the margin follows n mod 3, not the size of n). It stays local and single-writer, so it costs no agreement.
+*Hardening.* Binding the artifact to its first consumer rather than merely deleting it (on first use persist presignature\_id → sign\_id, refuse that presignature under any other sign\_id, and keep the record as long as the request can be retried) would hold S1 where the intersection argument has no slack: at n ≡ 1 (mod 3), 2t − n exceeds n − t by exactly one, so at f \= n − t the intersection holds a single honest node (n \= 7 and n \= 100 alike; the margin follows n mod 3, not the size of n), and at n \= 3 it holds none, putting f \= 1 outside the model. It stays local and single-writer, so it costs no agreement.
 
 ### S2. Only indexed requests are signed
 
@@ -128,7 +128,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Rationale.* A node that signs anything its own chain view did not finalize gives peers a way to obtain signatures for transactions no user ever requested.
 
-*Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered directly. Those buffers are unbounded (§D5); only the recently-completed ids are capped, by a 4096-entry LRU. 
+*Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered directly. Each mailbox holds one message per sender, but the map of mailboxes is keyed on sign id with no bound and no eviction for ids that never get indexed (§D5); only recently-completed ids are capped, by a 4096-entry LRU. 
 
 ### S3. Membership and epochs change only on-chain
 
@@ -137,7 +137,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 *Rationale.* Every other safety claim here is stated in terms of n, t and the committee, so a node acting on an unfinalized committee quietly voids the fault bound the rest of the document argues against.
 
 *Enforcement*: 
-The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable membership, threshold, and epoch. A node's committee is its local snapshot of that state as reported by the chain's RPC provider, with the three variants flattened to a single Running flag. Tasks pause whenever the contract is not Running.
+The contract's ProtocolState is Initializing, Running, or Resharing. Initializing yields no committee at all; Resharing yields the incoming membership, threshold, and epoch with the Running flag clear; only Running yields a committee cleared for work. A node's committee is its local snapshot of that state as reported by the chain's RPC provider. Sign tasks are held whenever the flag is clear.
 
 ### S4. Instance-local agreement
 
@@ -145,17 +145,17 @@ The contract's ProtocolState is Initializing, Running, or Resharing; only Runnin
 
 *Rationale.* Each node's computations depend on its participant list, so nodes working from different lists cannot combine into a valid signature, and catching the divergence turns a guaranteed dead end into a clean abort.
 
-*Enforcement*: An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation. The instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the owner per instance follows from the single-writer rule (§D3): only the presignature's owner can open an instance on it. No agreement *across* instances is claimed: two rounds of the same request may overlap, and safety does not depend on that never happening.
+*Enforcement*: An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation. The instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Only the presignature's owner can consume it (§D3), but that check runs at take time, so a non-owner can drive a posit as far as Start; the instance then dies when every holder's take fails. No agreement *across* instances is claimed: two rounds of the same request may overlap, and safety does not depend on that never happening.
 
-This holds even against a Byzantine proposer: A malicious proposer can send divergent lists to different honest accepters, but each honest node uses *its own* list, so mismatched lists never reconstruct a valid signature: the combine fails and the instance aborts. The worst outcome is an abort, never a bad signature. 
+This holds even against a Byzantine proposer: A malicious proposer can send divergent lists to different honest accepters, but each honest node uses the list it was told and different nodes were told different lists, so they never reconstruct a valid signature: the combine fails and the instance aborts. The worst outcome is an abort, never a bad signature. 
 
 ### L1. Signature progress.
 
-*Property.* During a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the correct nodes that own no usable presignature). That such a presignature keeps existing is L2.
+*Property.* During a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.
 
 A round only makes progress if the proposer that round elects owns a usable presignature, since a proposer proposes one of its own. Rotation is what turns "some node owns one" into "some round has one", which is why the bound is stated over rounds and not over a single attempt. Rotation is blind to who holds what, so it passes correct proposers with nothing to propose exactly as it passes faulty ones: that is the p in the bound, and where one node owns the only usable presignature it is n − 1 rounds.
 
-∆timeout is not a constant: the round budget follows the shared schedule `round_timeout(r)` (a generous round 0, then geometric growth from a short floor to a hard ceiling), so rotating past the f \+ p unproductive proposers costs the sum of `round_timeout` over the failed rounds. That sum is dominated by the round-0 budget while that count is small (20 s, then 2 s, 2.3 s, 2.6 s, ...): the ceiling is reached only after tens of rounds, so (f \+ p) times the ceiling is a bound, not an estimate.
+∆timeout is not a constant: the round budget follows the shared schedule `round_timeout(r)` (a generous round 0, then geometric growth from a short floor to a hard ceiling), so rotating past the f \+ p proposers that cannot deliver costs the sum of `round_timeout` over the failed rounds. That sum is dominated by the round-0 budget while that count is small (20 s, then 2 s, 2.3 s, 2.6 s, ...): the ceiling is reached only after tens of rounds, so (f \+ p) times the ceiling is a bound, not an estimate.
 
 *Rationale.* This is the property a user actually observes: a request that never reaches a signature is indistinguishable from the service being down.
 
@@ -164,7 +164,7 @@ The proposer starts as soon as every invitee has answered (Accept or Reject) and
 
 Proposer election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on the round `r`. Therefore peers in the same round agree on the proposer and the deadline (D2). A round advance is only ever triggered locally (deadline, enough rejects, abort), but the round it advances to is the highest a peer has shown us, so a node that falls behind catches up in one bump by learning the rejector's current round rather than climbing one round per attempt. 
 
-Three caveats remain: (i) organizing waits for the local active set to reach t (this node included) with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) the timeout is capped at a ceiling of 10 minutes; since two nodes can only transact while both are inside the same round, that ceiling is also the largest combined δ and indexing skew the schedule can absorb, though for NEAR-originated requests it is out of reach because L3's deadline expires first; (iii) a node proposes for at most 4 requests at a time, and a proposer that cannot get a slot inside its round budget burns the round, so a burst of requests this node is elected for costs rounds even with a perfectly healthy network.
+Three caveats remain: (i) organizing waits for the local active set to reach t (this node included) with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) the timeout is capped at a ceiling of 10 minutes; since two nodes can only transact while both are inside the same round, that ceiling less the messages a round has to fit is what caps the combined δ and indexing skew the schedule can absorb, though for NEAR-originated requests it is out of reach because L3's deadline expires first; (iii) a node proposes for at most 4 requests at a time, and a proposer that cannot get a slot inside its round budget burns the round, so a burst of requests this node is elected for costs rounds even with a perfectly healthy network.
 
 ### L2. Artifact supply.
 
