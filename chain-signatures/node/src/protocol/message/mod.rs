@@ -23,7 +23,11 @@ pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
 pub use sub::Subscriber;
 
-pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
+/// Depth of the inbox queue of undecrypted, unauthenticated `Ciphered` from
+/// `/msg` — a memory ceiling (~depth x body limit) that fills only under a
+/// flood the microsecond-scale consumer can't drain. Past it `send_inbox`
+/// backpressures and the sender retries. Tune via the `channel="incoming"` gauge.
+pub const MAX_MESSAGE_INCOMING: usize = 16 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
