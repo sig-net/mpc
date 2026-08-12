@@ -47,7 +47,7 @@ Note that not all of the below has been implemented fully.
 ## 2\. System model
 
 * n nodes; membership, threshold t, and epoch are fixed by the contract. Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
-Eeach node holds its own local, read-only snapshot of it, refreshed on contract update.
+Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
 * Contract keeps committee state, requests and responses
   * (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
   * (ii) nodes act only on finalized state (finalization definition may differ per chain).  
@@ -56,32 +56,32 @@ Eeach node holds its own local, read-only snapshot of it, refreshed on contract 
   * Safety of S1–S4 must hold against f arbitrarily corrupted nodes.
     Two conditions bound f. 
     * f \< t keeps the adversary from assembling a signing quorum out of its own key shares; with f ≥ t it holds one and all bets are off. 
-    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists (§S1): lists carry at least t members, so any two of them overlap in at least 2t − n nodes, too many for the adversary to occupy alone. This presumes t \> n/2, without which 2t − n is not positive and no f satisfies the bound. The second is the stronger whenever t \< n, so it is the bound assumed here. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5, which admits every f up to n − t, the same count the threshold leaves room to have offline, though the margin narrows to one node by n \= 100. Below n \= 5 the contract uses a simple majority instead, and n \= 3 does not satisfy the bound at all: with t \= 2 two lists share a single node, which may be the corrupted one.  
+    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5 and thus works for every f up to n − t.  
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
     * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming δ never exceeds that ceiling; liveness is therefore argued for δ up to the ceiling, not for arbitrary finite δ (more details in Appendix)  
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is eﬀectively reliable and timely.
   * Channels are authenticated and encrypted. 
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the participant set. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
+* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 
 * **S1  One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 * **S2  Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
-* **S3  Membership and epochs change only on-chain:** No honest node adopts a participant set, threshold, or epoch other than from finalized contract state, and no node processes requests under a non-Running state. 
+* **S3  Membership and epochs change only on-chain:** No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state. 
 * **S4 Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
-Violating any of these is unacceptable in any execution within §2's fault bound.  See Appendix for more details.
+Violating any of these is unacceptable in any execution within §2's fault bound.  See Appendix for more details, including enforcing mechanisms.
 
 ## 4\. Liveness
 
 Progress is guaranteed during a suﬃciently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
-* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.  
+* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature).   
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).  
-* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable participant (re)enters each correct node's active set within bounded time. 
+* **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
 
 ## 5\. Efficiency targets
 
@@ -125,26 +125,24 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.
 
-*Why it matters.* A signature is spendable authority, so a node that signs anything its own chain view did not finalize gives peers a way to obtain signatures for transactions no user ever requested.
+*Why it matters.* A node that signs anything its own chain view did not finalize gives peers a way to obtain signatures for transactions no user ever requested.
 
-*Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered. 
+*Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered directly. 
 
 ### S3. Membership and epochs change only on-chain
 
-*Property.* No honest node adopts a participant set, threshold, or epoch other than from finalized contract state, and no node processes requests under a non-Running state.
+*Property.* No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state.
 
-*Why it matters.* Every other safety claim here is stated in terms of n, t and the participant set, so a node acting on an unfinalized committee quietly voids the fault bound the rest of the document argues against.
+*Why it matters.* Every other safety claim here is stated in terms of n, t and the committee, so a node acting on an unfinalized committee quietly voids the fault bound the rest of the document argues against.
 
 *Enforcement*: 
-The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable participant set, threshold, and epoch. A node's committee (§2) is its local snapshot of that state as reported by the chain's RPC provider, with the three variants flattened to a single Running flag. It is not agreed on directly: a node's committee is correct exactly when its snapshot matches the finalized contract state.
-
-Currently enforced by: the committee is a snapshot of contract state; tasks pause whenever the contract is not Running.
+The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable membership, threshold, and epoch. A node's committee is its local snapshot of that state as reported by the chain's RPC provider, with the three variants flattened to a single Running flag. Tasks pause whenever the contract is not Running.
 
 ### S4. Instance-local agreement
 
 *Property.* Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
-*Why it matters.* Each node scales its signature share by Lagrange coefficients taken from its own participant list, so nodes working from different lists cannot combine into a valid signature, and catching the divergence turns a guaranteed dead end into a clean abort.
+*Why it matters.* Each node's computations depend on its participant list, so nodes working from different lists cannot combine into a valid signature, and catching the divergence turns a guaranteed dead end into a clean abort.
 
 An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation.
 
@@ -154,14 +152,14 @@ This holds even against a Byzantine proposer, at a liveness cost. A malicious pr
 
 ### L1. Signature progress.
 
-*Property.* During a long-enough δ-synchronous interval with ≥ t correct participants online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.
+*Property.* During a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.
 
 *Why it matters.* This is the property a user actually observes: a request that never reaches a signature is indistinguishable from the service being down, and on NEAR the yield deadline makes that outcome permanent.
 
 Spelled out, given a
 
 * δ-synchronous interval long enough,  
-* ≥ t correct participants online throughout,  
+* ≥ t correct committee members online throughout,  
 * a usable presignature whose holders are online and owner is correct and online (*that such a presignature keeps existing is L2)*  
 * and ≥ t nodes having indexed the request when the interval starts,
 
@@ -205,7 +203,7 @@ Currently not guaranteed, since there's no timer-based resubmit.
 
 ### L4. Mesh convergence
 
-*Property.* During a long-enough synchronous interval, every correct, reachable participant (re)enters each correct node's active set within bounded time.
+*Property.* During a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time.
 
 *Why it matters.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
