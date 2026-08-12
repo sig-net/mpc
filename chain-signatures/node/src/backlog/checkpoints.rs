@@ -37,29 +37,21 @@ impl Checkpoints {
             .set(len as i64);
     }
 
-    pub(super) async fn create(
-        &self,
-        requests: &RwLock<PendingRequests>,
-        chain: Chain,
-    ) -> Option<Checkpoint> {
-        let pending = self.pending(chain).read().await;
+    pub(super) async fn persist(&self, checkpoint: &Checkpoint) -> bool {
+        let pending = self.pending(checkpoint.chain).read().await;
         if pending.len() >= MAX_PENDING_CHECKPOINTS {
             tracing::warn!(
-                ?chain,
+                chain = ?checkpoint.chain,
                 count = pending.len(),
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
-            return None;
+            return false;
         }
         drop(pending);
 
-        let requests = requests.read().await;
-        let checkpoint = Self::snapshot(&requests, chain);
-        drop(requests);
-
-        if let Err(err) = self.storage.persist_pending(&checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to persist pending checkpoint");
-            return None;
+        if let Err(err) = self.storage.persist_pending(checkpoint).await {
+            tracing::warn!(chain = ?checkpoint.chain, %err, "failed to persist pending checkpoint");
+            return false;
         }
 
         let len = {
@@ -68,7 +60,7 @@ impl Checkpoints {
             pending.len()
         };
         self.observe(checkpoint.chain, len);
-        Some(checkpoint)
+        true
     }
 
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {

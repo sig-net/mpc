@@ -589,7 +589,14 @@ impl Backlog {
     ///
     /// Returns `None` if the pending checkpoint cap has been reached or persistence fails.
     pub async fn checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        self.checkpoints.create(self.pending(&chain), chain).await
+        let checkpoint = {
+            let requests = self.pending(&chain).read().await;
+            Checkpoints::snapshot(&requests, chain)
+        };
+        self.checkpoints
+            .persist(&checkpoint)
+            .await
+            .then_some(checkpoint)
     }
 
     /// Confirm a locally available checkpoint against an on-chain consensus digest.
