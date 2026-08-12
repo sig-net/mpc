@@ -5,17 +5,24 @@ and how each item would be tackled. Code references are against `develop` at
 `92108fc6`. Every gap below is one the properties doc already names; nothing here
 is a new requirement.
 
-| # | Gap | Property | Issue | Size |
-|---|-----|----------|-------|------|
-| 1 | Publish has no failover and does not survive a restart | L3 | [#1063](https://github.com/sig-net/mpc/issues/1063), [#837](https://github.com/sig-net/mpc/issues/837) | large |
-| 2 | Redis persistence does not back D3's "durably" | D3 | [#1008](https://github.com/sig-net/mpc/issues/1008), [#562](https://github.com/sig-net/mpc/issues/562) | small, operational |
-| 3 | One peer can drive another node's round arbitrarily high | L1, D2 | unfiled | small |
-| 4 | A respawned task runs round 0's budget at its carried round | L1 | unfiled | trivial |
-| 5 | Organizing waits for the active set with no timeout | L1 | unfiled ([#876](https://github.com/sig-net/mpc/issues/876) adjacent) | small, needs a decision |
-| 6 | Orphan posit mailboxes are unbounded | D5 | unfiled ([#793](https://github.com/sig-net/mpc/issues/793) adjacent) | small |
-| 7 | S1 rests on quorum intersection alone | S1 | [#611](https://github.com/sig-net/mpc/issues/611) | medium |
-| 8 | Epochs are separated by a best-effort wipe, not by the artifact's name | S1 | unfiled ([#5](https://github.com/sig-net/mpc/issues/5) adjacent) | small |
-| 9 | Sync reports per batch, not per peer | L4 | [#658](https://github.com/sig-net/mpc/issues/658) | medium |
+| # | Gap | Property | Already bites under | Issue | Size |
+|---|-----|----------|----------------------|-------|------|
+| 1 | Publish has no failover and does not survive a restart | L3 | crash-recovery | [#1063](https://github.com/sig-net/mpc/issues/1063), [#837](https://github.com/sig-net/mpc/issues/837) | large |
+| 2 | Redis persistence does not back D3's "durably" | D3 | crash-recovery | [#1008](https://github.com/sig-net/mpc/issues/1008), [#562](https://github.com/sig-net/mpc/issues/562) | small, operational |
+| 3 | One peer can drive another node's round arbitrarily high | L1, D2 | malicious (or buggy) | unfiled | small |
+| 4 | A respawned task runs round 0's budget at its carried round | L1 | crash-recovery | unfiled | trivial |
+| 5 | Organizing waits for the active set with no timeout | L1 | crash-recovery | unfiled ([#876](https://github.com/sig-net/mpc/issues/876) adjacent) | small, needs a decision |
+| 6 | Orphan posit mailboxes are unbounded | D5 | crash-recovery | unfiled ([#793](https://github.com/sig-net/mpc/issues/793) adjacent) | small |
+| 7 | S1 rests on quorum intersection alone | S1 | crash-recovery | [#611](https://github.com/sig-net/mpc/issues/611) | medium |
+| 8 | Epochs are separated by a best-effort wipe, not by the artifact's name | S1 | crash-recovery | unfiled ([#5](https://github.com/sig-net/mpc/issues/5) adjacent) | small |
+| 9 | Sync reports per batch, not per peer | L4 | crash-recovery | [#658](https://github.com/sig-net/mpc/issues/658) | medium |
+
+The fault model column says whether a gap already bites under §2's
+crash-recovery model, with no adversary anywhere, or whether it needs a member to
+misbehave. Only 3 needs one. Two of the other eight bite harder under f
+corruptions as well, 6 because a peer can flood the map faster than a stalled
+indexer leaks it, and 7 because quorum intersection is what covers the Byzantine
+case that the binding would replace.
 
 Ordered by importance, most important first. 1 is the only property the doc
 declares broken and the only one that loses requests with no adversary present. 2
