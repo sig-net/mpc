@@ -38,7 +38,7 @@ impl Checkpoints {
     }
 
     pub(super) async fn persist(&self, checkpoint: &Checkpoint) -> bool {
-        let pending = self.pending(checkpoint.chain).read().await;
+        let mut pending = self.pending(checkpoint.chain).write().await;
         if pending.len() >= MAX_PENDING_CHECKPOINTS {
             tracing::warn!(
                 chain = ?checkpoint.chain,
@@ -47,18 +47,15 @@ impl Checkpoints {
             );
             return false;
         }
-        drop(pending);
 
         if let Err(err) = self.storage.persist_pending(checkpoint).await {
             tracing::warn!(chain = ?checkpoint.chain, %err, "failed to persist pending checkpoint");
             return false;
         }
 
-        let len = {
-            let mut pending = self.pending(checkpoint.chain).write().await;
-            pending.insert(checkpoint.block_height, checkpoint.clone());
-            pending.len()
-        };
+        pending.insert(checkpoint.block_height, checkpoint.clone());
+        let len = pending.len();
+        drop(pending);
         self.observe(checkpoint.chain, len);
         true
     }
@@ -228,5 +225,55 @@ impl Checkpoints {
     #[cfg(test)]
     pub(super) fn storage(&self) -> &CheckpointStorage {
         &self.storage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Barrier;
+
+    fn checkpoint(height: u64) -> Checkpoint {
+        Checkpoint {
+            chain: Chain::Ethereum,
+            block_height: height,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_persistence_respects_pending_checkpoint_cap() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        for height in 0..MAX_PENDING_CHECKPOINTS as u64 - 1 {
+            assert!(checkpoints.persist(&checkpoint(height)).await);
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let first = {
+            let checkpoints = checkpoints.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                checkpoints
+                    .persist(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
+                    .await
+            })
+        };
+        let second = {
+            let checkpoints = checkpoints.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                checkpoints
+                    .persist(&checkpoint(MAX_PENDING_CHECKPOINTS as u64 + 1))
+                    .await
+            })
+        };
+
+        assert_ne!(first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            checkpoints.count(Chain::Ethereum).await,
+            MAX_PENDING_CHECKPOINTS
+        );
     }
 }
