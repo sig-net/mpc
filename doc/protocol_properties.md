@@ -161,7 +161,7 @@ The proposer starts the instant every invitee has Accepted, so the signature is 
 
 Proposer election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on the round `r`. Therefore peers in the same round agree on the proposer and the deadline (D2). Rounds advance on local timeouts only; a node that falls behind catches up in one by learning the rejector's current round. 
 
-Two caveats remain: (i) organizing waits for the local active set to reach t with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) and the timeout is capped at a ceiling of XX hours, so the advance bound holds only while the real δ and indexing delay are below YY minutes.
+Two caveats remain: (i) organizing waits for the local active set to reach t with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) the timeout is capped at a ceiling of 10 minutes; since two nodes can only transact while both are inside the same round, that ceiling is also the largest combined δ and indexing skew the schedule can absorb.
 
 ### L2. Artifact supply.
 
@@ -181,9 +181,8 @@ Generation is skipped entirely while \< t nodes are in active set, so the failur
 
 For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline of 200 blocks \~= 200s)  
 
-*Enforcement*: 
-Timer-based resubmit.
-Currently not guaranteed because ZZZ.
+*Enforcement*: The owner republishes on a timer, retrying indefinitely with backoff capped at 60 s.
+Currently not guaranteed because that retry lives only in the publishing process: nothing about a pending publish is persisted, so a crash before the chain accepts loses the signature with no record to resume from. On NEAR the 200 s yield deadline can also expire while the publisher is still backing off.
 
 ### L4. Mesh convergence
 
