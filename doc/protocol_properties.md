@@ -44,11 +44,14 @@ Both artifacts below have a single owner, the node that coordinated their genera
 
 ## 2\. System model
 
-* n nodes; membership, threshold t, and epoch are fixed by the contract. Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
-Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
-* The NEAR governance contract keeps the committee state. Request and response state is per chain: NEAR holds pending requests and settles them, while the EVM contract holds nothing and only emits events.
-  * (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
-  * (ii) nodes act only on finalized state (finalization definition may differ per chain).  
+* On-chain information
+  * Entities: n nodes; membership, threshold t, and epoch are fixed by the NEAR governance contract. 
+    * Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
+    * Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
+  * Request and response (per supported chain): NEAR holds pending requests, verifies signatures for them and settles them. The others mostly emit an event for whoever submits, which is why exactly-once is the consumer's job (§1).
+  
+  (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
+  (ii) nodes act only on finalized state (finalization definition may differ per chain).  
 * Hybrid fault model.  
   * Liveness is argued under crash-recovery: correct nodes may halt and restart (otherwise never deviating). After restart the node's durable storage is assumed to be intact.  
   * Safety of S1–S4 must hold against f arbitrarily corrupted nodes.
@@ -102,6 +105,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 * D4. Abort anywhere, retry fresh. Every phase must be abortable without cleanup obligations on peers, and retried with fresh resources or resources provably safe to reuse (i.e., derived only from D2's shared inputs, never from this attempt's own messages or local view, and never a D3 one-shot artifact). No step may assume any peer observed a previous attempt. *Serves L1, L2 and protects S1 on retry.*  
 * D5. Local state is bounded. Any map, buffer, or cache keyed on something peers or requests can produce without limit must carry a size bound and an eviction rule. Rationale: memory-driven restarts are churn, and churn is what the liveness bounds spend themselves absorbing, so an unbounded structure turns a remote peer's behaviour into a local restart. Not yet enforced: a posit for a sign id this node never indexes creates a mailbox with no bound and no eviction, so a peer can grow that map at will (§S2). *Serves L1, L2, L4.*
 
+
 # **Protocol Appendix: Property Details**
 
 ### S1. One-shot artifacts are consumed at most once
@@ -110,11 +114,9 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Rationale.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization does not change that, since the delta is public and both signatures share the same underlying k; it only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as different.
 
-*Enforcement*: the single-writer rule of §D3, applied locally at every holder and needing no agreement. Only the artifact's recorded owner can open an instance on it, which each holder checks itself rather than trusting the proposer, though only when it takes its share (§S4). Taking is what burns it: when generation starts the proposer removes the artifact from storage and every deliberator takes its own share, so a later attempt finds nothing at any holder that already served one, and the removal must reach durable storage before anything derived from the artifact is sent or a crash resurrects the share. Every message names its instance and is fed only to the instance it names, so an attempt cannot pick up shares meant for another (§D4).
+*Enforcement*: ensured by the single-writer rule of §D3, applied locally at every holder and needing no agreement. Only the artifact's recorded owner can open an instance on it, which each holder checks itself rather than trusting the proposer, though only when it takes its share (§S4). Taking is what burns it: when generation starts the proposer removes the artifact from storage and every deliberator takes its own share, so a later attempt finds nothing at any holder that already served one, and the removal must reach durable storage before anything derived from the artifact is sent or a crash resurrects the share. Every message names its instance and is fed only to the instance it names, so an attempt cannot pick up shares meant for another (§D4).
 
 Per-holder deletion is enough because lists intersect. Two **disjoint** sets of honest holders could otherwise each serve their own first request on one artifact. Both instances need a participant list of at least t (the posit phase starts an instance only once t nodes including the proposer have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
-
-*Known gaps*, with the plans in [protocol_properties_gaps.md](protocol_properties_gaps.md): "durably" is worth only what the store's fsync policy is worth, and today's can lose a second of acknowledged deletes; the intersection argument has a margin of a single honest node at n ≡ 1 (mod 3) and none at n \= 3, which binding each artifact to its first sign\_id would remove; and artifacts carry no epoch in their names, so a best-effort wipe at resharing finalization is all that separates the epochs.
 
 ### S2. Only indexed requests are signed
 
