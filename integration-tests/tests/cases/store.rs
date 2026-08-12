@@ -408,7 +408,14 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         vec![second.clone()]
     );
 
-    restarted.reset_to_latest(&second).await?;
+    let mut conflicting = second.clone();
+    conflicting.cumulative_digest[0] = 1;
+    assert!(restarted.persist_pending(&conflicting).await.is_err());
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, second.block_height, second.digest())
+            .await?
+    );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
     assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
     Ok(())

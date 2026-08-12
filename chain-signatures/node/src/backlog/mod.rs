@@ -1291,7 +1291,6 @@ mod tests {
         // Add some transactions
         let tx1 = create_test_tx(1);
         let tx2 = create_test_tx(2);
-        backlog.set_processed_block(Chain::Ethereum, 100).await;
 
         insert_bidirectional_with_status(
             &backlog,
@@ -1309,6 +1308,8 @@ mod tests {
             "ethereum",
         )
         .await;
+
+        backlog.set_processed_block(Chain::Ethereum, 100).await;
 
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
         assert_eq!(checkpoint.block_height, 100);
