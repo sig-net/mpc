@@ -13,10 +13,12 @@ is a new requirement.
 | 4 | Sync reports per batch, not per peer | L4 | [#658](https://github.com/sig-net/mpc/issues/658) | medium |
 | 5 | S1 rests on quorum intersection alone | S1 | [#611](https://github.com/sig-net/mpc/issues/611) | medium |
 | 6 | Redis persistence does not back D3's "durably" | D3 | [#1008](https://github.com/sig-net/mpc/issues/1008), [#562](https://github.com/sig-net/mpc/issues/562) | small, operational |
+| 7 | Epochs are separated by a best-effort wipe, not by the artifact's name | S1 | unfiled ([#5](https://github.com/sig-net/mpc/issues/5) adjacent) | small |
 
 Suggested order: 2 and 4 first (self-contained, no protocol change), then 3 once
 its rotation question is settled, then 1, which is the only property the doc
-declares broken. 5 and 6 are a pair and should be decided together.
+declares broken. 5 and 6 are a pair and should be decided together, and 7 rides
+with 5, since both change how an artifact is named in storage.
 
 ## 1. L3: settlement failover and restart survival
 
@@ -267,6 +269,43 @@ and checkpoints in the same store is what #1008 and #829 are about.
 
 **Tests.** None in-repo. This is a deployment check, so it belongs in whatever
 runbook covers node bring-up.
+
+## 7. S1: separate the epochs by name, not by a best-effort wipe
+
+*Related: [#5](https://github.com/sig-net/mpc/issues/5), which asks for
+epoch-partitioned triple storage for a different reason (serving requests from the
+old pool while a resharing runs). Not filed on its own.*
+
+**Now.** An artifact's keys are `<kind>:<version>:<account_id>`
+(`storage/protocol_storage.rs:242-245`), with no epoch anywhere in them, so nothing
+in a stored artifact's name says which sharing produced it. What separates one
+epoch from the next is `ResharingState::try_finalize`, which calls
+`triple_storage.clear()` and `presignature_storage.clear()` after the new secret
+share is stored (`protocol/cryptography.rs:386-392`). Both calls are best-effort: a
+failure is logged at error level and finalization proceeds into the new epoch, with
+nothing retrying it and nothing re-checking at the next startup. The failure is
+also quiet, since a resharing keeps the public key (`:377`), so a surviving
+artifact looks like any other to every check that exists today.
+
+**Plan.**
+
+1. Put the epoch into the storage prefix, so an artifact from a previous sharing
+   cannot be named in the new epoch and the wipe becomes cleanup rather than a
+   correctness step. This is the direction #5 already wants.
+2. Failing that, retry the wipe and re-run it at startup, so a node that crashed
+   between storing the secret and clearing the pools converges instead of carrying
+   the old pool forward indefinitely.
+
+**Tests.** Storage-level test that a take under epoch e+1 cannot see an artifact
+written under epoch e. A `try_finalize` test where `clear` fails and the node still
+ends up unable to serve the old artifacts.
+
+**Risks.** Option 1 changes the key layout, so a node that upgrades mid-epoch
+starts from an empty pool and refills by L2, costing a supply dip and nothing else.
+Refusing to finalize a resharing until both pools report cleared is the obvious
+third option and the wrong one: what a stale artifact costs is aborts and wasted
+rounds, so stalling a resharing on a Redis failure trades a liveness problem for a
+worse one.
 
 ## Note on L3's persistence wording
 
