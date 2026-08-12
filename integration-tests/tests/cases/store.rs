@@ -402,7 +402,10 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
             .promote_pending(Chain::Solana, first.block_height)
             .await?
     );
-    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_latest(Chain::Solana).await?,
+        Some(first.clone())
+    );
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,
         vec![second.clone()]
@@ -415,6 +418,11 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         !restarted
             .promote_pending(Chain::Solana, second.block_height + 1)
             .await?
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
     );
     assert!(
         restarted
