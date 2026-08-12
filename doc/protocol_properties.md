@@ -103,13 +103,13 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 * D4. Abort anywhere, retry fresh. Every phase must be abortable without cleanup obligations on peers, and retried with fresh resources or resources provably safe to reuse (i.e., derived only from D2's shared inputs, never from this attempt's own messages or local view, and never a D3 one-shot artifact). No step may assume any peer observed a previous attempt. *Serves L1, L2 and protects S1 on retry.*  
 * D5. Local state is bounded. Any map, buffer, or cache keyed on something peers or requests can produce without limit must carry a size bound and an eviction rule. Rationale: memory-driven restarts are churn, and churn is what the liveness bounds spend themselves absorbing, so an unbounded structure turns a remote peer's behaviour into a local restart. *Serves L1, L2, L4.*
 
-# **Protocol Appendix: Property Details and Precedents**
+# **Protocol Appendix: Property Details**
 
 ### S1. One-shot artifacts are consumed at most once
 
 *Property.* No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
 
-*Why it matters.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
+*Rationale.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization (keyed on request id, request entropy, and big\_r) does not change this: the delta is public and both signatures share the same underlying k. It only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as "different".
 
 *Enforcement* Three local rules:
 
@@ -125,7 +125,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.
 
-*Why it matters.* A node that signs anything its own chain view did not finalize gives peers a way to obtain signatures for transactions no user ever requested.
+*Rationale.* A node that signs anything its own chain view did not finalize gives peers a way to obtain signatures for transactions no user ever requested.
 
 *Enforcement*: signature tasks are spawned exclusively from local indexer output, and posit messages for unknown sign ids are buffered, never answered directly. 
 
@@ -133,7 +133,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Property.* No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state.
 
-*Why it matters.* Every other safety claim here is stated in terms of n, t and the committee, so a node acting on an unfinalized committee quietly voids the fault bound the rest of the document argues against.
+*Rationale.* Every other safety claim here is stated in terms of n, t and the committee, so a node acting on an unfinalized committee quietly voids the fault bound the rest of the document argues against.
 
 *Enforcement*: 
 The contract's ProtocolState is Initializing, Running, or Resharing; only Running carries a usable membership, threshold, and epoch. A node's committee is its local snapshot of that state as reported by the chain's RPC provider, with the three variants flattened to a single Running flag. Tasks pause whenever the contract is not Running.
@@ -142,74 +142,58 @@ The contract's ProtocolState is Initializing, Running, or Resharing; only Runnin
 
 *Property.* Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
-*Why it matters.* Each node's computations depend on its participant list, so nodes working from different lists cannot combine into a valid signature, and catching the divergence turns a guaranteed dead end into a clean abort.
+*Rationale.* Each node's computations depend on its participant list, so nodes working from different lists cannot combine into a valid signature, and catching the divergence turns a guaranteed dead end into a clean abort.
 
-An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation.
+*Enforcement*: An instance is identified by (sign\_id, presignature\_id) for signing, and analogously by artifact id for triple/presignature generation. The instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the owner per instance follows from the single-writer rule (§D3): only the presignature's owner can open an instance on it. No agreement *across* instances is claimed anywhere. Two rounds of the same request may overlap, and safety must not (and does not) depend on that never happening.
 
-*Enforcement*: The instance's proposer alone determines the participant list and sends it in Start to each accepter; anything inconsistent is rejected and the instance aborts (§D4). Uniqueness of the dictator per instance follows from S1's single-writer rule: only the presignature's owner can open an instance on it. No agreement *across* instances is claimed anywhere. Two rounds of the same request may overlap, and safety must not (and does not) depend on that never happening.
-
-This holds even against a Byzantine proposer, at a liveness cost. A malicious proposer can send divergent lists to different honest accepters, but each honest node scales its signature share by the Lagrange coeﬃcients of *its own* list, so mismatched lists never reconstruct a valid signature: the combine fails and the instance aborts. The forbidden event (two honest nodes proceeding to completion on different lists) is therefore unreachable; the worst outcome is an abort, never a bad signature. That is why S4 is enforced by detect-and-abort rather than prevention (§2).
+This holds even against a Byzantine proposer: A malicious proposer can send divergent lists to different honest accepters, but each honest node uses *its own* list, so mismatched lists never reconstruct a valid signature: the combine fails and the instance aborts. The forbidden event (two honest nodes proceeding to completion on different lists) is therefore unreachable; the worst outcome is an abort, never a bad signature. 
 
 ### L1. Signature progress.
 
 *Property.* During a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t nodes having indexed the request, the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). That such a presignature keeps existing is L2.
 
-*Why it matters.* This is the property a user actually observes: a request that never reaches a signature is indistinguishable from the service being down, and on NEAR the yield deadline makes that outcome permanent.
+Note that ∆timeout is not a constant: the round budget follows the shared schedule `round_timeout(r)` (a generous round 0, then geometric growth from a short floor to a hard ceiling), so rotating past f dead proposers costs the sum of `round_timeout` over the failed rounds, at most f times the ceiling.
 
-Spelled out, given a
+*Rationale.* This is the property a user actually observes: a request that never reaches a signature is indistinguishable from the service being down.
 
-* δ-synchronous interval long enough,  
-* ≥ t correct committee members online throughout,  
-* a usable presignature whose holders are online and owner is correct and online (*that such a presignature keeps existing is L2)*  
-* and ≥ t nodes having indexed the request when the interval starts,
+*Enforcement*: 
+The proposer starts the instant every invitee has Accepted, so the signature is produced at network speed in one generation round and independent of ∆timeout, if everyone is honest and up-and-running. An alternative proposer gets a chance after ∆timeout.
 
-then the request produces a signature within bounded time (O(f)·∆timeout \+ one generation round). ∆timeout is not a constant: the round budget follows the shared schedule `round_timeout(r)` (a generous round 0, then geometric growth from a short floor to a hard ceiling), so rotating past f dead proposers costs the sum of `round_timeout` over the failed rounds, at most f times the ceiling.
+Proposer election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on the round `r`. Therefore peers in the same round agree on the proposer and the deadline (D2). Rounds advance on local timeouts only; a node that falls behind catches up in one by learning the rejector's current round. 
 
-How it is meant to work, combines two regimes  
-(i) Optimistic (honest, reachable proposer). The proposer starts the instant every invitee has Accepted (meets\_totality()), so the signature is produced at network speed, one generation round, independent of ∆timeout. (ii) Advance (crashed / slow proposer). Rotation must carry all nodes past the bad proposer to the next round within ∆timeout \+ O(δ).
-
-Mechanisms: election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on r, so peers that agree on the round agree on the proposer and the deadline (D2). Rounds still advance on local timeouts only; a node that falls behind catches up in one `bump_round`, because StaleRound rejects carry the rejector's current round (sent from both the deliberator and the proposer path) and the round survives a task respawn instead of resetting to 0. Two caveats remain: organizing waits for the local active set to reach t with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts (the same local-active gate as L2); and the schedule is capped at its ceiling, so the advance bound holds only while the real δ stays under that ceiling (§2).
+Two caveats remain: (i) organizing waits for the local active set to reach t with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) and the timeout is capped at a ceiling of XX hours, so the advance bound holds only while the real δ and indexing delay are below YY minutes.
 
 ### L2. Artifact supply.
 
 *Property.* During a long-enough synchronous interval with ≥ t peers in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) eventually completes a generation, given its inputs (none for a triple, one owned triple pair for a presignature).
 
-*Why it matters.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
+*Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
-Spelled out, if
-
-* the network is synchronous for a suﬃciently long interval and  
-* ≥ t peers are in the node's active set,
-
-then a node holding fewer artifacts than its floor (min\_triples / min\_presignatures) eventually completes a generation, provided its inputs are available: none for a triple, one owned triple pair for a presignature.
-
-Presignature supply therefore depends on triple supply; the two are the same property under diﬀerent input preconditions.
-
-Mechanism: re-proposes every 100 ms while a node is below its floor; concurrency counters free themselves as generation tasks finish and as proposals expire.  
-Local-active gate: generation is skipped entirely while active.len() \< threshold, so the failure detector gates supply though never correctness.
+*Enforcement*: 
+A node re-proposes every 100 ms while a node is below its artifact floor; concurrency counters free themselves as generation tasks finish and as proposals expire.  
+Generation is skipped entirely while \< t nodes are in active set, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement
 
 *Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).
 
-*Why it matters.* A signature that never reaches the chain is worth no more to the user than no signature at all, while the presignature spent producing it is gone either way.
+*Rationale.* A signature that never reaches the chain is worth no more to the user than no signature at all, while the presignature spent producing it is gone either way.
 
-For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline outside our control, 200 blocks \~= 200s)  
-For other chains it requires the publisher to eventually (re)submit the signature until it lands.
+For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline of 200 blocks \~= 200s)  
 
-Currently not guaranteed, since there's no timer-based resubmit.
-
-*Deadline note (NEAR).* A hard deadline turns L1 \+ L3 into a joint time budget: the rounds a request burns, one generation round, and submission must together fit inside \~200 s. The round schedule does not enforce this: cumulative `round_timeout` crosses 200 s after roughly 20 rounds, and a single ceiling-length round (600 s) exceeds the deadline on its own. The node only observes a miss (a delayed-request watcher and the SIGN\_REQUEST\_DELAYED metric), it does not abort or prioritize. Whether the budget is met is therefore an emergent property of how few rounds a request needs, which is exactly what L1 bounds during synchrony.
+*Enforcement*: 
+Timer-based resubmit.
+Currently not guaranteed because ZZZ.
 
 ### L4. Mesh convergence
 
 *Property.* During a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time.
 
-*Why it matters.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
+*Rationale.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
-*Why it is a property, not an assumption.* L1 and L2 are conditioned on the local active set holding ≥ t peers, and the active set is this layer's own failure detector (§2), maintained by its own code. Its recovery is therefore something the layer must provide; without L4, nothing says the gate that L1 and L2 wait behind ever opens. The consumers of the gate do not bound the wait themselves: organizing waits for ≥ t active peers with no timeout of its own (`wait_for_active_participants`), and artifact generation is skipped entirely while the view is short (L2's local-active gate).
+*Enforcement.* Every transition into Active, including any reconnection, first forces a state sync: the peer is held in Syncing, outside the active set, until a sync round-trip to it succeeds *and* its stale holder entries are pruned locally, and only that success path flips it to Active. For a correct, reachable peer during a synchronous interval that round-trip succeeds, since §2's fair-lossy links are compensated by timeout-and-retry, so the property holds. The bound is the status-poll interval that observes the peer Running, plus the round-trip, plus the wait for the sync broadcast it rides in: peers are synced concurrently but their results are reported as one batch bounded by `BROADCAST_TIMEOUT` (120 s), so a peer answering in milliseconds is still activated at the pace of the slowest peer in that cycle. Reporting each peer's result as its own task finishes would reduce the bound to that peer's own round-trip and is the only change the property calls for.
 
-*Current state.* Every transition into Active, including any reconnection, first forces a state sync: the peer is held in Syncing, outside the active set, until a sync round-trip to it succeeds *and* its stale holder entries are pruned locally; only that success path flips it to Active. There is no fallback activation on failure: the peer stays queued and is retried, so convergence is one round-trip on the happy path but unbounded when syncs keep failing. Broadcasts are also serialized with a 120 s deadline (`BROADCAST_TIMEOUT`), so a single unresponsive peer stretches every broadcast cycle to the full deadline and delays the activation of healthy reconnectors behind it. While the resulting view is short, every request on the node stalls (L1) and supply halts (L2). The sync's work is garbage collection of stale holder data, not a correctness gate: only owners initiate consumption (D3), so a stale view costs a MissingArtifact round at worst. Convergence time is log-derivable from the status-transition lines.
+*Outside the property.* A node that answers `/status` as Running but whose syncs keep failing is not correct in §2's sense, so L4 says nothing about it, yet it is an ordinary operational failure. Nothing bounds how long such a peer sits in Syncing, and while the view is short every request on the node stalls (L1) and supply halts (L2). Activating it regardless would not be free: the sync garbage-collects stale holder data, so acting on a stale view costs a MissingArtifact round (D3 keeps it to that, since only owners initiate consumption) once per attempt for as long as the staleness lasts, not once in total. Convergence is currently only derivable from status-transition log lines; a histogram of the Offline-to-Active transition would make both the bound and this case visible.
 
 ### Round-timeout precedents (§2)
 
