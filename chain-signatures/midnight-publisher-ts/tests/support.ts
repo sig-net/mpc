@@ -10,6 +10,7 @@ import {
   witnesses,
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
+import { deriveAccountKeys } from "@sig-net/midnight-contract-deploy";
 
 import type { Config } from "../src/config.js";
 import type { BuildIntentInput } from "../src/intent.js";
@@ -24,10 +25,15 @@ export function managedDir(): string {
   return join(dirname(resolve("@sig-net/midnight-contract")), "managed");
 }
 
-// No endpoints: the submit path can only reach a wallet a test primed by hand.
 export const testConfig = (overrides: Partial<Config> = {}): Config => ({
   networkId: "undeployed",
-  endpoints: undefined,
+  endpoints: {
+    nodeUrl: "ws://127.0.0.1:9944/",
+    proofServerUrl: "http://127.0.0.1:6300/",
+    indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
+    indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
+  },
+  accountKeys: deriveAccountKeys("ab".repeat(32), "undeployed"),
   ...overrides,
 });
 
@@ -74,8 +80,6 @@ export function primeStub(edges: StubEdges = {}): void {
 
 export const decodeIntent = (bytes: Uint8Array) => Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
 
-export const renderCall = (bytes: Uint8Array): string => String(decodeIntent(bytes).actions[0]);
-
 // Both respond circuits push byte-identical signature-only args; the entry point is the
 // stable route discriminator (their ledger-cell writes also differ, but those indices
 // are compiler-assigned and contract-version-coupled).
@@ -85,18 +89,24 @@ export function calledEntryPoint(bytes: Uint8Array): string {
   return String(action.entryPoint);
 }
 
-// The circuit's arguments as the transcript pushed them: the one `pushs` op ending in
-// the signature's `b32b32b32b1` is the only place the argument VALUES survive into the
-// intent, so it is the only thing that can catch transposed, dropped or zeroed fields.
-// Byte goldens cannot: the communication commitment makes every build unique.
-export function pushedCallArgs(bytes: Uint8Array): string {
-  const ops = renderCall(bytes)
-    .split("\n")
-    .map((line) => line.trim().replace(/,$/, ""))
-    .filter((op) => op.startsWith("pushs <[") && op.endsWith("b32b32b32b1>"));
+// Values pushed by typed VM operations. Byte goldens cannot compare an entire intent
+// because the communication commitment is fresh on every build.
+export function pushedCells(bytes: Uint8Array, storage: boolean, widths: readonly number[]): string[][] {
+  const [action] = decodeIntent(bytes).actions;
+  if (!(action instanceof ContractCall)) throw new Error("expected the intent's one action to be a contract call");
+  const program = action.guaranteedTranscript?.program;
+  if (program === undefined) throw new Error("expected a guaranteed transcript");
 
-  if (ops.length !== 1) throw new Error(`expected one argument push in the transcript, found ${ops.length}`);
-  return ops[0]!;
+  return program.flatMap((op) => {
+    if (typeof op === "string" || !("push" in op)) return [];
+    const pushed = op.push;
+    if (pushed.storage !== storage || pushed.value.tag !== "cell") return [];
+    const actual = pushed.value.content.alignment.map((segment) =>
+      segment.tag === "atom" && segment.value.tag === "bytes" ? segment.value.length : undefined,
+    );
+    if (actual.length !== widths.length || actual.some((width, index) => width !== widths[index])) return [];
+    return [pushed.value.content.value.map(toHex)];
+  });
 }
 
 let singletonStateHex: Promise<string> | undefined;

@@ -37,6 +37,11 @@ function drive(lines: readonly string[], env: NodeJS.ProcessEnv = {}): Promise<R
       env: {
         ...childEnv,
         MIDNIGHT_PUB_NETWORK_ID: "undeployed",
+        MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
+        MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
+        MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
+        MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
+        MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
         ...env,
       },
     });
@@ -58,7 +63,10 @@ describe("dist/main.js over a pipe", () => {
 
     expect(run.code).toBe(0);
 
-    const replies = run.stdout.split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
+    expect(run.stdout.endsWith("\n")).toBe(true);
+    const replyLines = run.stdout.slice(0, -1).split("\n");
+    expect(replyLines.every((line) => line.length > 0)).toBe(true);
+    const replies = replyLines.map((line) => JSON.parse(line));
 
     // The blank line is skipped, the bad line is answered: BURST + 1.
     expect(replies).toHaveLength(BURST + 1);
@@ -67,25 +75,6 @@ describe("dist/main.js over a pipe", () => {
     expect(replies.slice(0, BURST).every((reply) => reply.ok === true)).toBe(true);
     expect(replies.slice(0, BURST).every((reply) => /^(?:[0-9a-f]{2})+$/.test(reply.intent))).toBe(true);
     expect(replies.at(-1)).toMatchObject({ ok: false, code: "bad_request" });
-  }, 120_000);
-
-  it("answers a submit on a build-only deployment instead of dying on it", async () => {
-    // A dead child costs the caller a respawn and a retry, so the child must answer and
-    // keep answering.
-    const built = JSON.parse((await drive([request(1)])).stdout.trim()) as { intent: string };
-
-    const run = await drive([
-      JSON.stringify({ id: 1, op: "submit", intent: built.intent }),
-      JSON.stringify({ id: 2, op: "nonsense" }),
-      request(3),
-    ]);
-
-    expect(run.code).toBe(0);
-    const replies = run.stdout.split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
-    expect(replies.map((reply) => reply.id)).toEqual([1, 2, 3]);
-    expect(replies[0]).toMatchObject({ ok: false, code: "wallet_unsynced" });
-    expect(replies[1]).toMatchObject({ ok: false, code: "bad_request" });
-    expect(replies[2]).toMatchObject({ ok: true });
   }, 120_000);
 
   it("does not print credentials carried by the node URL", async () => {

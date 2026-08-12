@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configFromEnv, SUBMIT_VAR_NAMES } from "../src/config.js";
+import { configFromEnv } from "../src/config.js";
 
 const BUILDER = {
   MIDNIGHT_PUB_NETWORK_ID: "undeployed",
@@ -15,12 +15,17 @@ const SUBMITTER = {
   MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
 };
 
+const REQUIRED = [
+  "MIDNIGHT_PUB_NODE_URL",
+  "MIDNIGHT_PUB_PROOF_SERVER_URL",
+  "MIDNIGHT_PUB_INDEXER_URL",
+  "MIDNIGHT_PUB_INDEXER_WS_URL",
+  "MIDNIGHT_PUB_FUNDING_SEED",
+] as const;
+
 describe("configFromEnv", () => {
-  it("starts a deployment that only builds intents", () => {
-    expect(configFromEnv(BUILDER)).toEqual({
-      networkId: "undeployed",
-      endpoints: undefined,
-    });
+  it("refuses a deployment without the wallet configuration", () => {
+    expect(() => configFromEnv(BUILDER)).toThrowError(/MIDNIGHT_PUB_NODE_URL[\s\S]*MIDNIGHT_PUB_FUNDING_SEED/);
   });
 
   it("starts a deployment that submits, with every endpoint the wallet needs", () => {
@@ -31,16 +36,35 @@ describe("configFromEnv", () => {
       indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
       indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
     });
-    expect(JSON.stringify(config)).not.toContain(SUBMITTER.MIDNIGHT_PUB_FUNDING_SEED);
+    expect(config.accountKeys.shieldedSecretKeys.coinPublicKey).toBe(
+      "f919eee2f2e7f8423e8deae5c7ea32a69ff685acf93f441841f8dfdea16101ec",
+    );
   });
 
-  it("reads a blank seed as no wallet, because the parent always sets the variable", () => {
-    expect(configFromEnv({ ...BUILDER, MIDNIGHT_PUB_FUNDING_SEED: "" }).endpoints).toBeUndefined();
+  it("refuses a blank funding seed", () => {
+    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "" })).toThrowError(
+      /MIDNIGHT_PUB_FUNDING_SEED/,
+    );
+  });
+
+  it("uses the SDK's 16-to-64-byte hex seed contract and never quotes a rejection", () => {
+    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(17) })).not.toThrow();
+
+    for (const invalid of [
+      "ab".repeat(15),
+      "ab".repeat(65),
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    ]) {
+      expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid })).toThrowError(
+        /MIDNIGHT_PUB_FUNDING_SEED/,
+      );
+      expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid })).not.toThrowError(invalid);
+    }
   });
 
   it("refuses a half-configured submit path at startup, naming what is missing", () => {
     // Left to the first request, a typo'd endpoint costs a real signature instead of a restart.
-    for (const name of SUBMIT_VAR_NAMES) {
+    for (const name of REQUIRED) {
       const partial: Record<string, string> = { ...SUBMITTER };
       delete partial[name];
 
@@ -61,13 +85,13 @@ describe("configFromEnv", () => {
   });
 
   it("refuses malformed endpoint URLs at startup", () => {
-    for (const name of SUBMIT_VAR_NAMES.slice(0, 4)) {
+    for (const name of REQUIRED.slice(0, 4)) {
       expect(() => configFromEnv({ ...SUBMITTER, [name]: "not-a-url" }), name).toThrowError(name);
     }
   });
 
   it("refuses unsupported endpoint schemes at startup", () => {
-    for (const name of SUBMIT_VAR_NAMES.slice(0, 4)) {
+    for (const name of REQUIRED.slice(0, 4)) {
       expect(() => configFromEnv({ ...SUBMITTER, [name]: "file:///tmp/socket" }), name).toThrowError(name);
     }
   });

@@ -2,17 +2,14 @@
 // spendable DUST is derived by replaying ledger events, which no node RPC serves.
 
 import {
-  deriveAccountKeys,
   initialiseWalletFacade,
-  parseSeed,
-  SeedFormat,
   type AccountKeys,
   type MidnightNodeConfig,
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 
-import { fundingSeed, type Endpoints } from "./config.js";
+import type { Endpoints } from "./config.js";
 import type { UnboundTransaction } from "./prover.js";
 
 // Derived rather than imported: the type's home package would be a second copy of the wallet SDK.
@@ -30,25 +27,7 @@ export interface FundingWallet {
 }
 
 // Also the dust intent's TTL: how long a submit dying between finalize and submit strands the coin.
-const RECIPE_TTL_MS = 5 * 60 * 1000;
-
-// Hex only; the message names the env var and never quotes the value.
-export function parseFundingSeed(seed: string): Uint8Array {
-  try {
-    const parsed = parseSeed(seed);
-    if (parsed.source.format === SeedFormat.Hex) return parsed.seed;
-  } catch {
-    // The lib's ParseError describes shapes; ours must name the env var instead.
-  }
-  throw new Error("MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted");
-}
-
-function deriveFundingKeys(seed: string, networkId: string): AccountKeys {
-  // Not redundant: `deriveAccountKeys` also accepts a BIP-39 mnemonic and PBKDF2s it
-  // into a different, unfunded wallet.
-  parseFundingSeed(seed);
-  return deriveAccountKeys(seed, networkId);
-}
+export const RECIPE_TTL_MS = 5 * 60 * 1000;
 
 async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
   const facade = await initialiseWalletFacade(keys, config);
@@ -83,8 +62,12 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
   };
 }
 
-export async function openFundingWallet(networkId: string, endpoints: Endpoints): Promise<FundingWallet> {
-  return openFacade(deriveFundingKeys(fundingSeed(), networkId), {
+export async function openFundingWallet(
+  keys: AccountKeys,
+  networkId: string,
+  endpoints: Endpoints,
+): Promise<FundingWallet> {
+  return openFacade(keys, {
     indexerUrl: endpoints.indexerUrl,
     indexerWsUrl: endpoints.indexerWsUrl,
     nodeUrl: endpoints.nodeUrl,

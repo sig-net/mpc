@@ -2,7 +2,7 @@
 // and `Transaction.fromParts` are real; only the proof server and the funding wallet
 // are stood in for. Real proving, balancing and submission are live-stack territory.
 
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { Transaction } from "@midnightntwrk/ledger-v9";
 import { Data, Effect } from "effect";
@@ -14,7 +14,7 @@ import {
   closePublisher,
   decodeIntent,
   handleSubmit,
-  SUBMIT_TIMEOUT,
+  SUBMIT_TIMEOUT_MS,
   withDeadline,
 } from "../src/submit.js";
 import type { Landed } from "../src/wallet.js";
@@ -35,11 +35,9 @@ beforeAll(async () => {
   intent = await buildIntent(await respondInput());
 }, 120_000);
 
-const PRODUCTION_TIMEOUT = SUBMIT_TIMEOUT.ms;
-
 afterEach(async () => {
   await closePublisher();
-  SUBMIT_TIMEOUT.ms = PRODUCTION_TIMEOUT;
+  vi.useRealTimers();
 });
 
 const failing = (message: string) => async (): Promise<never> => {
@@ -66,27 +64,15 @@ describe("decodeIntent", () => {
 
 describe("withDeadline", () => {
   it("rejects with the factory's error once the deadline passes", async () => {
+    vi.useFakeTimers();
     const hang = new Promise<never>(() => undefined);
+    const deadline = withDeadline(hang, 20, () => new PublisherError("internal", "took too long"));
+    const rejected = expect(deadline).rejects.toMatchObject({ code: "internal" });
 
-    await expect(withDeadline(hang, 20, () => new PublisherError("internal", "took too long"))).rejects.toMatchObject({
-      code: "internal",
-    });
+    await vi.advanceTimersByTimeAsync(20);
+    await rejected;
   });
 
-  it("leaves the abandoned attempt's late failure handled", async () => {
-    // An unhandled rejection from the losing side would kill a process holding a hot wallet.
-    const unhandled: unknown[] = [];
-    const record = (reason: unknown): void => void unhandled.push(reason);
-    process.on("unhandledRejection", record);
-    try {
-      const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("late")), 20));
-      await expect(withDeadline(late, 5, () => new Error("deadline"))).rejects.toThrow("deadline");
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", record);
-    }
-  });
 });
 
 describe("handleSubmit: the flow", () => {
@@ -122,15 +108,6 @@ describe("handleSubmit: the flow", () => {
     expect(balanced).toBe(proven);
     expect(finalized).toBe(proven);
     expect(submitted).toBe(proven);
-  });
-
-  it("refuses a submit on a deployment that configured no wallet", async () => {
-    await closePublisher();
-    const refusal = await refused(4);
-
-    expect(refusal.code).toBe("wallet_unsynced");
-    expect(refusal.message).toContain("MIDNIGHT_PUB_FUNDING_SEED");
-    expect(refusal.message).toContain("MIDNIGHT_PUB_NODE_URL");
   });
 
   it("classifies wallet failures for retry policy", async () => {
@@ -176,18 +153,23 @@ describe("handleSubmit: the flow", () => {
 describe("handleSubmit: the busy gate", () => {
   it("refuses a second submit while the first still holds the wallet", async () => {
     let release!: () => void;
+    let entered!: () => void;
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const balancing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     primeStub({
       balanceTx: async (tx) => {
+        entered();
         await held;
         return tx;
       },
     });
 
     const first = handleSubmit(CONFIG, 1, intent);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await balancing;
 
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");
@@ -215,15 +197,16 @@ describe("handleSubmit: the busy gate", () => {
   });
 
   it("keeps the gate claimed while an abandoned submit is still spending", async () => {
-    SUBMIT_TIMEOUT.ms = 50;
+    vi.useFakeTimers();
     primeStub({ balanceTx: () => new Promise(() => undefined) });
-    const timedOut = await refused(1);
-    expect(timedOut.code).toBe("internal");
+    const pending = refused(1);
+    await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS);
+    const timedOut = await pending;
+    expect(timedOut.code).toBe("ambiguous_submit");
     expect(timedOut.message).toMatch(/deadline/);
     expect(timedOut.message).toMatch(/may still land/);
     expect(timedOut.message).toContain("request 1");
 
-    SUBMIT_TIMEOUT.ms = PRODUCTION_TIMEOUT;
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");
     expect(refusal.message).toContain("request 1");

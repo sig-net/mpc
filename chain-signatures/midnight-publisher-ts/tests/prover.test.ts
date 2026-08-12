@@ -18,8 +18,8 @@ const provider = () => provingProvider(NOWHERE);
 const contractKeyLocation = (circuit: SignetContractCircuitId, verifierKeyHash = expectedVk[circuit]!) =>
   encodeContractKeyLocation({ contractAddress: SINGLETON, circuitId: circuit, verifierKeyHash });
 
-async function proofRequest() {
-  const intent = await buildIntent(await respondInput());
+async function proofRequest(circuit: "respond" | "respondBidirectional" = "respond") {
+  const intent = await buildIntent(await respondInput({ circuit }));
   const transaction = Transaction.fromParts("undeployed", undefined, undefined, decodeIntent(intent));
   let captured: { preimage: Uint8Array; keyLocation: string } | undefined;
   const stop = new Error("captured proof request");
@@ -70,7 +70,9 @@ describe("the proving provider", () => {
   });
 
   it("puts the contract address, circuit, and verifier hash in proof requests", async () => {
-    await expect(proofRequest()).resolves.toMatchObject({ keyLocation: contractKeyLocation("respond") });
+    for (const circuit of ["respond", "respondBidirectional"] as const) {
+      await expect(proofRequest(circuit)).resolves.toMatchObject({ keyLocation: contractKeyLocation(circuit) });
+    }
   });
 
   it("leaves the protocol's own circuits to the server", async () => {

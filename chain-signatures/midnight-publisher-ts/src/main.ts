@@ -10,8 +10,7 @@ import { closePublisher } from "./submit.js";
 const config = configFromEnv();
 
 console.error(
-  `midnight-publisher started network=${config.networkId} ` +
-    `node=${config.endpoints === undefined ? "none (builds intents only)" : new URL(config.endpoints.nodeUrl).origin}`,
+  `midnight-publisher started network=${config.networkId} node=${new URL(config.endpoints.nodeUrl).origin}`,
 );
 
 // Awaited per line, so a slow circuit run's reply cannot be overtaken by the next request's.

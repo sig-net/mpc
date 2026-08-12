@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { ContractOperation, ContractState } from "@midnight-ntwrk/compact-runtime";
+import { ContractCall } from "@midnightntwrk/ledger-v9";
 
 import { buildIntent } from "../src/intent.js";
 import {
@@ -13,9 +14,8 @@ import {
   decodeIntent,
   initialSingletonStateHex,
   managedDir,
-  pushedCallArgs,
+  pushedCells,
   respondInput,
-  renderCall,
   toHex,
 } from "./support.js";
 
@@ -32,14 +32,17 @@ describe("buildIntent", () => {
     const bytes = await buildIntent({ ...input, signature: { ...input.signature, recoveryId: 1 } });
 
     const intent = decodeIntent(bytes);
-    const rendered = renderCall(bytes);
     expect(intent.actions).toHaveLength(1);
-    expect(String(intent.actions[0])).toContain(input.contractAddress);
+    const [call] = intent.actions;
+    expect(call).toBeInstanceOf(ContractCall);
+    if (!(call instanceof ContractCall)) throw new Error("expected a contract call");
+    expect(call.address).toBe(input.contractAddress);
     expect(calledEntryPoint(bytes)).toBe("respond");
-    expect(pushedCallArgs(bytes)).toBe(`pushs <[${X}, ${Y}, ${S}, 01]: b32b32b32b1>`);
-    expect(rendered).toContain(`push <[${input.requestId}]: b32>`);
-    expect(rendered).toContain("guaranteed_transcript: Some(");
-    expect(rendered).toContain("fallible_transcript: None");
+    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, "01"]]);
+    expect(pushedCells(bytes, false, [32])).toContainEqual([input.requestId]);
+    expect(call.guaranteedTranscript).toBeDefined();
+    expect(call.fallibleTranscript).toBeUndefined();
+    expect(intent.ttl.getTime()).toBe(input.ttlSeconds * 1_000);
     expect(Buffer.from(bytes.slice(0, 20)).toString("utf8")).toContain("midnight:intent[v9]");
   });
 
@@ -48,7 +51,7 @@ describe("buildIntent", () => {
 
     expect(decodeIntent(bytes).actions).toHaveLength(1);
     expect(calledEntryPoint(bytes)).toBe("respondBidirectional");
-    expect(pushedCallArgs(bytes)).toBe(`pushs <[${X}, ${Y}, ${S}, -]: b32b32b32b1>`);
+    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, ""]]);
   });
 
   it("names the mismatch when the deployed contract has no such entry point", async () => {

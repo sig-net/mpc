@@ -6,13 +6,21 @@ import { z } from "zod";
 import { type Config } from "./config.js";
 import { describeFailure, jsonObject, PublisherError, type ErrorCode } from "./errors.js";
 import { buildIntent, RESPOND_CIRCUITS, type BuildIntentInput } from "./intent.js";
-import { handleSubmit } from "./submit.js";
+import { handleSubmit, SUBMIT_TIMEOUT_MS } from "./submit.js";
+import { RECIPE_TTL_MS } from "./wallet.js";
 
-export type BuildRequest = { readonly id: number } & BuildIntentInput;
+export type BuildRequest = { readonly id: number } & Omit<BuildIntentInput, "coinPublicKey">;
 
 export type SubmitRequest = { readonly id: number; readonly intent: string };
 
 export type Response =
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly ready: true;
+      readonly submitTimeoutMs: number;
+      readonly recipeTtlMs: number;
+    }
   | { readonly id: number; readonly ok: true; readonly intent: string }
   | { readonly id: number; readonly ok: true; readonly txId: string }
   | { readonly id: number | null; readonly ok: false; readonly code: ErrorCode; readonly message: string };
@@ -23,7 +31,7 @@ const MUST_BE_HEX_32 = "must be 64 lowercase hex";
 const MUST_BE_LEDGER_HEX = "must be lowercase hex, an even number of digits";
 const MUST_BE_A_CIRCUIT = "must be respond or respondBidirectional";
 const MUST_BE_A_TTL = "must be a positive integer, in absolute unix seconds";
-const MUST_BE_AN_OP = "must be build or submit";
+const MUST_BE_AN_OP = "must be ready, build, or submit";
 
 const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
 
@@ -47,6 +55,7 @@ const wireId = z
   .max(Number.MAX_SAFE_INTEGER, MUST_BE_AN_ID);
 
 const SubmitSchema = wireObject({ id: wireId, intent: ledgerHex });
+const ReadySchema = wireObject({ id: wireId });
 
 const BuildSchema = wireObject({
   id: wireId,
@@ -56,7 +65,6 @@ const BuildSchema = wireObject({
   signature: wireSignature,
   contractState: ledgerHex,
   ledgerParameters: ledgerHex,
-  coinPublicKey: hex32,
   ttlSeconds: z.int(MUST_BE_A_TTL).positive(MUST_BE_A_TTL),
 });
 
@@ -75,12 +83,26 @@ function readId(body: Record<string, unknown>): number | null {
 // sends none. An unknown op hits `default` before either schema can blame a missing field.
 async function answer(config: Config, body: Record<string, unknown>): Promise<Response> {
   switch (body["op"]) {
+    case "ready": {
+      const parsed = ReadySchema.safeParse(body);
+      if (!parsed.success) throw toBadRequest(parsed.error);
+      return {
+        id: parsed.data.id,
+        ok: true,
+        ready: true,
+        submitTimeoutMs: SUBMIT_TIMEOUT_MS,
+        recipeTtlMs: RECIPE_TTL_MS,
+      };
+    }
     case undefined:
     case "build": {
       const parsed = BuildSchema.safeParse(body);
       if (!parsed.success) throw toBadRequest(parsed.error);
       const request: BuildRequest = parsed.data;
-      const intent = await buildIntent(request);
+      const intent = await buildIntent({
+        ...request,
+        coinPublicKey: config.accountKeys.shieldedSecretKeys.coinPublicKey,
+      });
       return { id: request.id, ok: true, intent: Buffer.from(intent).toString("hex") };
     }
     case "submit": {

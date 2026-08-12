@@ -3,7 +3,7 @@
 
 import { Intent, Transaction, type UnprovenIntent, type UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 
-import { SUBMIT_VAR_NAMES, type Config } from "./config.js";
+import type { Config } from "./config.js";
 import { describeFailure, PublisherError, type ErrorCode } from "./errors.js";
 import { proveTransaction, type UnboundTransaction } from "./prover.js";
 import { openFundingWallet, type FundingWallet, type Landed } from "./wallet.js";
@@ -32,7 +32,7 @@ export interface Publisher {
 }
 
 // Every dependency below waits forever by default; unbounded, one would hold the busy gate silently.
-export const SUBMIT_TIMEOUT = { ms: 6 * 60 * 1000 };
+export const SUBMIT_TIMEOUT_MS = 6 * 60 * 1000;
 
 // `Promise.race` handles the loser, so the abandoned attempt's own late failure surfaces nowhere.
 export async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
@@ -51,15 +51,9 @@ let publisherPromise: Promise<Publisher> | undefined;
 
 async function buildPublisher(config: Config): Promise<Publisher> {
   const endpoints = config.endpoints;
-  if (endpoints === undefined) {
-    throw new PublisherError(
-      "wallet_unsynced",
-      `this deployment builds intents only and has no funding wallet; set ${SUBMIT_VAR_NAMES.join(", ")} to give it one`,
-    );
-  }
   return {
     proveTx: (tx) => proveTransaction(endpoints.proofServerUrl, tx),
-    wallet: await openFundingWallet(config.networkId, endpoints),
+    wallet: await openFundingWallet(config.accountKeys, config.networkId, endpoints),
   };
 }
 
@@ -139,11 +133,11 @@ export async function handleSubmit(config: Config, id: number, intent: Uint8Arra
   // spending; the caller has to learn its post may land anyway.
   return withDeadline(
     work,
-    SUBMIT_TIMEOUT.ms,
+    SUBMIT_TIMEOUT_MS,
     () =>
       new PublisherError(
-        "internal",
-        `submit exceeded the ${SUBMIT_TIMEOUT.ms} ms deadline; if it had reached submit the transaction ` +
+        "ambiguous_submit",
+        `submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline; if it had reached submit the transaction ` +
           `may still land, so check the chain for request ${id} before retrying`,
       ),
   );

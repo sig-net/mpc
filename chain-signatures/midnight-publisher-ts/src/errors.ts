@@ -5,6 +5,7 @@ export type ErrorCode =
   | "wallet_busy"
   | "wallet_unfunded"
   | "state_conflict"
+  | "ambiguous_submit"
   | "internal";
 
 export class PublisherError extends Error {

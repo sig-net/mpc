@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
-import type { WalletFacade } from "@sig-net/midnight-contract-deploy";
+import { deriveAccountKeys, type WalletFacade } from "@sig-net/midnight-contract-deploy";
 
 const sdk = vi.hoisted(() => ({ initialiseWalletFacade: vi.fn() }));
 
@@ -10,7 +10,7 @@ vi.mock("@sig-net/midnight-contract-deploy", async (importOriginal) => ({
   initialiseWalletFacade: sdk.initialiseWalletFacade,
 }));
 
-import { openFundingWallet, parseFundingSeed } from "../src/wallet.js";
+import { openFundingWallet } from "../src/wallet.js";
 import type { UnboundTransaction } from "../src/prover.js";
 import type { BalancingRecipe } from "../src/wallet.js";
 
@@ -22,6 +22,7 @@ const ENDPOINTS = {
   indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
   indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
 };
+const KEYS = deriveAccountKeys("ab".repeat(32), "undeployed");
 
 function stubFacade() {
   return {
@@ -39,12 +40,7 @@ function stubFacade() {
   } as unknown as WalletFacade;
 }
 
-beforeEach(() => {
-  process.env["MIDNIGHT_PUB_FUNDING_SEED"] = "ab".repeat(32);
-});
-
 afterEach(() => {
-  delete process.env["MIDNIGHT_PUB_FUNDING_SEED"];
   vi.clearAllMocks();
 });
 
@@ -54,7 +50,7 @@ describe("openFundingWallet", () => {
     vi.mocked(facade.start).mockRejectedValueOnce(new Error("dust wallet unavailable"));
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
 
-    await expect(openFundingWallet("undeployed", ENDPOINTS)).rejects.toThrow("dust wallet unavailable");
+    await expect(openFundingWallet(KEYS, "undeployed", ENDPOINTS)).rejects.toThrow("dust wallet unavailable");
 
     expect(facade.stop).toHaveBeenCalledOnce();
   });
@@ -64,7 +60,7 @@ describe("openFundingWallet", () => {
     vi.mocked(facade.waitForSyncedState).mockRejectedValueOnce(new Error("indexer unavailable"));
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
 
-    await expect(openFundingWallet("undeployed", ENDPOINTS)).rejects.toThrow("indexer unavailable");
+    await expect(openFundingWallet(KEYS, "undeployed", ENDPOINTS)).rejects.toThrow("indexer unavailable");
 
     expect(facade.stop).toHaveBeenCalledOnce();
   });
@@ -72,13 +68,20 @@ describe("openFundingWallet", () => {
   it("submits through the facade so pending transaction state is tracked", async () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet("undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
     const tx = { identifiers: () => ["ab".repeat(32)] } as unknown as FinalizedTransaction;
+
+    expect(sdk.initialiseWalletFacade).toHaveBeenCalledWith(KEYS, {
+      ...ENDPOINTS,
+      networkId: "undeployed",
+    });
 
     await expect(wallet.submitTx(tx)).resolves.toEqual({ txId: "ab".repeat(32) });
 
     expect(facade.submitTransaction).toHaveBeenCalledWith(tx);
     expect(facade.submissionService.submitTransaction).not.toHaveBeenCalled();
+    await wallet.close();
+    expect(facade.stop).toHaveBeenCalledOnce();
   });
 
   it("balances with wallet keys and a five-minute recipe before finalizing", async () => {
@@ -90,7 +93,7 @@ describe("openFundingWallet", () => {
     vi.mocked(facade.signRecipe).mockResolvedValueOnce(signed);
     vi.mocked(facade.finalizeRecipe).mockResolvedValueOnce(finalized);
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet("undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
     const tx = { unbound: true } as unknown as UnboundTransaction;
     const before = Date.now();
 
@@ -107,16 +110,10 @@ describe("openFundingWallet", () => {
   it("does not submit a transaction with no identifier", async () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet("undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
     const tx = { identifiers: () => [] } as unknown as FinalizedTransaction;
 
     await expect(wallet.submitTx(tx)).rejects.toThrow("carries no identifier");
     expect(facade.submitTransaction).not.toHaveBeenCalled();
   });
-});
-
-it("does not quote a rejected funding seed", () => {
-  const invalid = "c0ffee1234567890".repeat(20);
-  expect(() => parseFundingSeed(invalid)).toThrowError(/MIDNIGHT_PUB_FUNDING_SEED/);
-  expect(() => parseFundingSeed(invalid)).not.toThrowError(invalid);
 });

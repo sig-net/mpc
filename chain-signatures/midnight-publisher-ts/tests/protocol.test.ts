@@ -57,7 +57,6 @@ describe("handleLine", () => {
 
   it("names the offending field in a rejection", async () => {
     const cases: readonly [Record<string, unknown>, string][] = [
-      [{ coinPublicKey: undefined }, "coinPublicKey"],
       [{ contractAddress: "00" }, "contractAddress"],
       [{ signature: { bigR: { x: "11".repeat(32) }, s: "33".repeat(32), recoveryId: 0 } }, "signature.bigR.y"],
       [{ ttlSeconds: 0 }, "ttlSeconds"],
@@ -101,6 +100,16 @@ describe("handleLine", () => {
 });
 
 describe("handleLine: the operation discriminator", () => {
+  it("reports the child-owned submit timing at readiness", async () => {
+    await expect(answer(JSON.stringify({ id: 6, op: "ready" }))).resolves.toEqual({
+      id: 6,
+      ok: true,
+      ready: true,
+      submitTimeoutMs: 6 * 60 * 1_000,
+      recipeTtlMs: 5 * 60 * 1_000,
+    });
+  });
+
   it("treats an absent op and an explicit build as the same request", async () => {
     const implicit = await answer(request());
     const explicit = await answer(request({ op: "build" }));
