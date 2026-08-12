@@ -8,7 +8,7 @@ use crate::metrics::requests::{
 };
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
-use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
+use crate::protocol::posit::{PositAction, PositBarrier, PositBarrierResult, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};

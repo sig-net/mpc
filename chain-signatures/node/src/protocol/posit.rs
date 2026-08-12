@@ -55,7 +55,7 @@ pub enum PositAction {
     RejectWithReason(PositRejectReason),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Hash)]
 pub enum PositRejectReason {
     Unknown,
     /// The node is already participating in a generation, or has already
@@ -437,58 +437,125 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
     }
 }
 
-/// A single posit counter that tracks participants accepting/rejecting a proposal.
-/// This is used by individual signature tasks instead of the global Posits mapping.
-pub struct SinglePositCounter {
-    participants: HashSet<Participant>,
-    rejects: HashMap<Participant, PositRejectReason>,
-    pub accepts: HashSet<Participant>,
+/// The participants observed by a [`PositBarrier`] when it reaches a terminal
+/// state. `pending` contains participants that have not sent a usable response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PositBarrierState {
+    pub(crate) accepted: HashSet<Participant>,
+    pub(crate) rejected: HashMap<Participant, PositRejectReason>,
+    pub(crate) pending: HashSet<Participant>,
 }
 
-impl SinglePositCounter {
-    pub fn new(me: Participant, participants: &[Participant]) -> Self {
-        let mut accepts = HashSet::new();
-        accepts.insert(me);
+/// The terminal state of a [`PositBarrier`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PositBarrierResult {
+    Timeout(PositBarrierState),
+    TooManyRejects(PositBarrierState),
+    EnoughAccepts(PositBarrierState),
+}
+
+/// Collects responses to one posit and reports when the posit can be decided.
+///
+/// Unlike [`tokio::sync::Barrier`], this barrier does not require every
+/// participant to respond. The caller owns async I/O and deadlines; this type
+/// only tracks votes and computes the current terminal result.
+pub(crate) struct PositBarrier {
+    participants: HashSet<Participant>,
+    threshold: usize,
+    accepted: HashSet<Participant>,
+    rejected: HashMap<Participant, PositRejectReason>,
+}
+
+impl PositBarrier {
+    /// Create a barrier with the local participant's implicit accept vote.
+    ///
+    /// The local participant is inserted into `participants` if it is not
+    /// already present. Each participant contributes at most one vote: later
+    /// duplicate or contradictory responses are ignored.
+    pub(crate) fn new(me: Participant, participants: &[Participant], threshold: usize) -> Self {
+        let mut participants: HashSet<_> = participants.iter().copied().collect();
+        participants.insert(me);
+
+        let mut accepted = HashSet::new();
+        accepted.insert(me);
+
         Self {
-            participants: participants.iter().copied().collect(),
-            rejects: HashMap::new(),
-            accepts,
+            participants,
+            threshold,
+            accepted,
+            rejected: HashMap::new(),
         }
     }
 
-    pub fn enough_accepts(&self, threshold: usize) -> bool {
-        self.accepts.len() >= threshold
-    }
-
-    pub fn enough_rejects(&self, threshold: usize) -> bool {
-        self.rejects.len() > self.participants.len() - threshold
-    }
-
-    pub fn meets_totality(&self) -> bool {
-        self.accepts.len() + self.rejects.len() == self.participants.len()
-    }
-
-    pub fn num_peers_already_generating(&self) -> usize {
-        self.rejects
-            .values()
-            .filter(|reason| matches!(reason, PositRejectReason::AlreadyGenerating))
-            .count()
-    }
-
-    pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
+    /// Record one participant's response. Returns false for non-voting posit
+    /// actions or senders outside the participant set.
+    ///
+    /// Each participant has one vote: the first response wins, and later
+    /// duplicate or contradictory responses are accepted as handled but do not
+    /// change the recorded result.
+    pub(crate) fn process_action(&mut self, from: Participant, action: &PositAction) {
         if !self.participants.contains(&from) {
-            return false;
+            return;
         }
+
+        let response_recorded = self.accepted.contains(&from) || self.rejected.contains_key(&from);
         match action {
+            PositAction::Accept | PositAction::RejectWithReason(_) if response_recorded => {}
             PositAction::Accept => {
-                self.accepts.insert(from);
+                self.accepted.insert(from);
             }
             PositAction::RejectWithReason(reason) => {
-                self.rejects.insert(from, *reason);
+                self.rejected.insert(from, *reason);
             }
-            _ => return false,
+            PositAction::Propose | PositAction::Start(_) => {}
         }
-        true
+    }
+
+    fn enough_accepts(&self) -> bool {
+        self.accepted.len() >= self.threshold
+    }
+
+    fn enough_rejects(&self) -> bool {
+        self.rejected.len() > self.participants.len().saturating_sub(self.threshold)
+    }
+
+    fn meets_totality(&self) -> bool {
+        self.accepted.len() + self.rejected.len() == self.participants.len()
+    }
+
+    pub(crate) fn terminal_result(
+        &self,
+        accept_deadline_reached: bool,
+    ) -> Option<PositBarrierResult> {
+        if self.enough_rejects() {
+            return Some(PositBarrierResult::TooManyRejects(self.state()));
+        }
+
+        if self.enough_accepts() && (accept_deadline_reached || self.meets_totality()) {
+            return Some(PositBarrierResult::EnoughAccepts(self.state()));
+        }
+
+        None
+    }
+
+    pub(crate) fn timeout(&self) -> PositBarrierResult {
+        PositBarrierResult::Timeout(self.state())
+    }
+
+    fn state(&self) -> PositBarrierState {
+        let responded = self
+            .accepted
+            .iter()
+            .copied()
+            .chain(self.rejected.keys().copied())
+            .collect::<HashSet<_>>();
+        let pending = self.participants.difference(&responded).copied().collect();
+
+        PositBarrierState {
+            accepted: self.accepted.clone(),
+            rejected: self.rejected.clone(),
+            pending,
+        }
     }
 }
 
@@ -683,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_posit_counter_reason_counting() {
+    fn test_posit_barrier_keeps_first_vote() {
         let me = Participant::from(0);
         let participants = vec![
             me,
@@ -691,37 +758,88 @@ mod tests {
             Participant::from(2),
             Participant::from(3),
         ];
-        let mut counter = SinglePositCounter::new(me, &participants);
+        let mut barrier = PositBarrier::new(me, &participants, 2);
 
-        assert_eq!(counter.num_peers_already_generating(), 0);
-
-        counter.process_action(
+        barrier.process_action(
             Participant::from(1),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_already_generating(), 1);
-
-        counter.process_action(
+        barrier.process_action(
             Participant::from(3),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_already_generating(), 2);
+        assert_eq!(barrier.state().rejected.len(), 2);
 
-        // Other reject reasons are not counted.
-        counter.process_action(
-            Participant::from(2),
-            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
-        );
-        assert_eq!(counter.num_peers_already_generating(), 2);
-
-        counter.process_action(Participant::from(3), &PositAction::Accept);
-        assert_eq!(counter.num_peers_already_generating(), 2);
-
-        // Reject from the same peer is not counted again.
-        counter.process_action(
+        // A participant has one vote. Contradictory or duplicate responses are
+        // ignored once that participant has responded.
+        barrier.process_action(Participant::from(3), &PositAction::Accept);
+        assert!(!barrier.enough_accepts());
+        barrier.process_action(
             Participant::from(1),
+            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+        );
+        assert_eq!(barrier.state().rejected.len(), 2);
+        assert_eq!(
+            barrier.state().rejected[&Participant::from(1)],
+            PositRejectReason::AlreadyGenerating
+        );
+
+        barrier.process_action(Participant::from(99), &PositAction::Accept);
+        barrier.process_action(Participant::from(1), &PositAction::Propose);
+    }
+
+    #[test]
+    fn test_posit_barrier_returns_enough_accepts_with_pending() {
+        let me = Participant::from(0);
+        let participants = vec![
+            me,
+            Participant::from(1),
+            Participant::from(2),
+            Participant::from(3),
+        ];
+        let mut barrier = PositBarrier::new(me, &participants, 2);
+        barrier.process_action(Participant::from(1), &PositAction::Accept);
+
+        let Some(PositBarrierResult::EnoughAccepts(state)) = barrier.terminal_result(true) else {
+            panic!("expected enough accepts");
+        };
+        assert_eq!(state.accepted.len(), 2);
+        assert!(state.rejected.is_empty());
+        assert_eq!(state.pending.len(), 2);
+    }
+
+    #[test]
+    fn test_posit_barrier_returns_too_many_rejects() {
+        let me = Participant::from(0);
+        let participants = vec![me, Participant::from(1), Participant::from(2)];
+        let mut barrier = PositBarrier::new(me, &participants, 2);
+        barrier.process_action(
+            Participant::from(1),
+            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+        );
+        barrier.process_action(
+            Participant::from(2),
             &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
         );
-        assert_eq!(counter.num_peers_already_generating(), 2);
+
+        let Some(PositBarrierResult::TooManyRejects(state)) = barrier.terminal_result(false) else {
+            panic!("expected too many rejects");
+        };
+        assert_eq!(state.accepted, HashSet::from([me]));
+        assert_eq!(state.rejected.len(), 2);
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn test_posit_barrier_returns_timeout() {
+        let me = Participant::from(0);
+        let participants = vec![me, Participant::from(1)];
+        let barrier = PositBarrier::new(me, &participants, 2);
+        let PositBarrierResult::Timeout(state) = barrier.timeout() else {
+            panic!("expected timeout");
+        };
+        assert_eq!(state.accepted, HashSet::from([me]));
+        assert!(state.rejected.is_empty());
+        assert_eq!(state.pending, HashSet::from([Participant::from(1)]));
     }
 }

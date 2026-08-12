@@ -209,6 +209,179 @@ impl PositPhase {
         Ok(presignature_id)
     }
 
+    /// Return the next response relevant to the proposer barrier, handling
+    /// stale and future rounds before they reach the collector.
+    async fn next_proposer_action(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+    ) -> (Participant, PositAction) {
+        loop {
+            let task_msg = mailbox.recv().await;
+            let peer_round = task_msg.round;
+
+            if let (
+                PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                Some(peer_current),
+            ) = (&task_msg.action, task_msg.stale_round)
+            {
+                state.record_peer_round(peer_current);
+            }
+
+            if state.round() > peer_round {
+                if matches!(&task_msg.action, PositAction::RejectWithReason(_)) {
+                    continue;
+                }
+                ctx.msg
+                    .send(
+                        ctx.governance.me,
+                        task_msg.from,
+                        PositMessage {
+                            id: PositProtocolId::Signature(
+                                ctx.sign_id,
+                                task_msg.presignature_id,
+                                peer_round,
+                            ),
+                            from: ctx.governance.me,
+                            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                            stale_round: Some(state.round()),
+                        },
+                    )
+                    .await;
+                continue;
+            }
+
+            if state.round() < peer_round {
+                tracing::info!(
+                    peer_round,
+                    my_round = state.round(),
+                    "Storing message for future round"
+                );
+                state.buffer_future_posit_message(task_msg);
+                continue;
+            }
+
+            let SignPositMessage { from, action, .. } = task_msg;
+            return (from, action);
+        }
+    }
+
+    async fn wait_for_accepts(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+        barrier: &mut PositBarrier,
+        timeout: Duration,
+    ) -> PositBarrierResult {
+        let started_at = tokio::time::Instant::now();
+        let timeout_at = started_at + timeout;
+        let accept_deadline_at = started_at + ACCEPT_POSIT_TIMEOUT;
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+        let accept_sleep = tokio::time::sleep(ACCEPT_POSIT_TIMEOUT);
+        tokio::pin!(accept_sleep);
+        let mut accept_deadline_reached = false;
+
+        loop {
+            // A busy mailbox can be ready on every poll. Check wall-clock
+            // deadlines explicitly so it cannot starve the timers.
+            let now = tokio::time::Instant::now();
+            if now >= timeout_at {
+                return barrier.timeout();
+            }
+            if !accept_deadline_reached && now >= accept_deadline_at {
+                accept_deadline_reached = true;
+                if let Some(result) = barrier.terminal_result(true) {
+                    return result;
+                }
+            }
+
+            tokio::select! {
+                biased;
+                _ = &mut timeout_sleep => {
+                    return barrier.timeout();
+                }
+                _ = &mut accept_sleep, if !accept_deadline_reached => {
+                    accept_deadline_reached = true;
+                    if let Some(result) = barrier.terminal_result(true) {
+                        return result;
+                    }
+                }
+                (from, action) = Self::next_proposer_action(ctx, state, mailbox) => {
+                    barrier.process_action(from, &action);
+                    if let Some(result) = barrier.terminal_result(accept_deadline_reached) {
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_for_start(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+        proposer: Participant,
+    ) -> Result<Vec<Participant>, ()> {
+        loop {
+            let task_msg = match state.take_buffered_posit_message() {
+                Some(buffered) => buffered,
+                None => mailbox.recv().await,
+            };
+            let peer_round = task_msg.round;
+
+            if let (
+                PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                Some(peer_current),
+            ) = (&task_msg.action, task_msg.stale_round)
+            {
+                state.record_peer_round(peer_current);
+            }
+
+            if matches!(&task_msg.action, PositAction::RejectWithReason(_)) {
+                continue;
+            }
+
+            if state.round() > peer_round {
+                ctx.msg
+                    .send(
+                        ctx.governance.me,
+                        task_msg.from,
+                        PositMessage {
+                            id: PositProtocolId::Signature(
+                                ctx.sign_id,
+                                task_msg.presignature_id,
+                                peer_round,
+                            ),
+                            from: ctx.governance.me,
+                            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                            stale_round: Some(state.round()),
+                        },
+                    )
+                    .await;
+                continue;
+            }
+
+            if state.round() < peer_round {
+                state.buffer_future_posit_message(task_msg);
+                continue;
+            }
+
+            let SignPositMessage { from, action, .. } = task_msg;
+            let PositAction::Start(participants) = action else {
+                continue;
+            };
+            if from != proposer {
+                tracing::warn!(?from, ?proposer, "received Start from non-proposer");
+                continue;
+            }
+            if participants.len() < ctx.governance.threshold {
+                return Err(());
+            }
+            return Ok(participants);
+        }
+    }
+
     /// Run the posit round. Returns `Generating` with the accepted participants,
     /// or `Organizing` on rejection/timeout.
     pub async fn advance(
@@ -251,177 +424,90 @@ impl PositPhase {
 
         // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = active.iter().copied().collect::<Vec<_>>();
-        let mut counter = SinglePositCounter::new(ctx.governance.me, &posit_participants);
 
-        let mut remaining = state.budget.remaining();
-        if is_deliberator {
-            // We just sent an Accept to the proposer. The proposer might wait up to ACCEPT_POSIT_TIMEOUT
-            // to gather more accepts before sending Start.
-            // We must wait at least that long so we don't abandon the round after promising to participate,
-            // which would cause the proposer's generation phase to hang.
-            let min_wait = 2 * ACCEPT_POSIT_TIMEOUT;
-            if remaining < min_wait {
-                remaining = min_wait;
-            }
-        }
-        let posit_deadline = tokio::time::sleep(remaining);
-        tokio::pin!(posit_deadline);
-        let accept_deadline = tokio::time::sleep(ACCEPT_POSIT_TIMEOUT);
-        tokio::pin!(accept_deadline);
-        let mut accept_deadline_reached = false;
+        let accepted_participants = if is_proposer {
+            let mut barrier = PositBarrier::new(
+                ctx.governance.me,
+                &posit_participants,
+                ctx.governance.threshold,
+            );
+            let remaining = state.budget.remaining();
+            let result = Self::wait_for_accepts(ctx, state, mailbox, &mut barrier, remaining).await;
 
-        let accepted_participants = loop {
-            tokio::select! {
-                task_msg = mailbox.recv() => {
-                    let SignPositMessage { round: peer_round , ..} = task_msg;
-
-                    // A StaleRound reject carries the rejector's current round;
-                    // remember it so our next bump catches up in one step.
-                    if let (PositAction::RejectWithReason(PositRejectReason::StaleRound), Some(peer_current)) = (&task_msg.action, task_msg.stale_round) {
-                        state.record_peer_round(peer_current);
-                    }
-
-                    // Answer older rounds with StaleRound (as `wait_for_propose`
-                    // does) so a behind peer learns our round instead of
-                    // burning its full timeout in silence. Rejects are never
-                    // answered: replying would ping-pong rejects between nodes.
-                    if state.round() > peer_round {
-                        if matches!(task_msg.action, PositAction::RejectWithReason(_)) {
-                            continue;
-                        }
-                        ctx.msg
-                            .send(
-                                ctx.governance.me,
-                                task_msg.from,
-                                PositMessage {
-                                    // The id echoes the rejected message so the
-                                    // sender knows which attempt we are answering.
-                                    id: PositProtocolId::Signature(
-                                        sign_id,
-                                        task_msg.presignature_id,
-                                        peer_round,
-                                    ),
-                                    from: ctx.governance.me,
-                                    action: PositAction::RejectWithReason(
-                                        PositRejectReason::StaleRound,
-                                    ),
-                                    stale_round: Some(state.round()),
-                                },
-                            )
-                            .await;
-                        continue;
-                    }
-
-                    // Message can't be processed now but is crucial to make progress later.
-                    // Note that we must first try and finish the current round and
-                    // not immediately jump to that higher round. Otherwise, any peer
-                    // could force themselves to be the proposer every time.
-                    if state.round() < peer_round {
-                        tracing::info!(
-                            peer_round,
-                            my_round = state.round(),
-                            "Storing message for future round",
+            match result {
+                PositBarrierResult::EnoughAccepts(result) => {
+                    Self::start_with_current_accepts(
+                        ctx,
+                        state,
+                        result.accepted.into_iter().collect(),
+                        sign_id,
+                        presignature_id,
+                    )
+                    .await
+                }
+                PositBarrierResult::TooManyRejects(result) => {
+                    let peers_already_generating = result
+                        .rejected
+                        .values()
+                        .filter(|reason| matches!(reason, PositRejectReason::AlreadyGenerating))
+                        .count();
+                    let too_few_available = ctx
+                        .governance
+                        .participants
+                        .len()
+                        .saturating_sub(peers_already_generating)
+                        < ctx.governance.threshold;
+                    let reason = if too_few_available {
+                        state.pause_proposing_until = Some(
+                            Instant::now()
+                                + Duration::from_millis(ctx.cfg.signature.generation_timeout),
                         );
-                        state.buffer_future_posit_message(task_msg);
-                        continue;
-                    }
-
-                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action, stale_round: _ } = task_msg;
-
-                    if is_deliberator {
-                        if let PositAction::Start(participants) = action {
-                            if from != proposer {
-                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
-                                continue;
-                            }
-
-                            if participants.len() < ctx.governance.threshold {
-                                return state.reorganize("not enough Start participants");
-                            }
-
-                            tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
-                            break participants;
-                        }
+                        "peers already generating this signature"
                     } else {
-                        if !counter.process_action(from, &action) {
-                            continue;
-                        }
-
-                        if counter.enough_rejects(ctx.governance.threshold) {
-                            let peers_already_generating = counter.num_peers_already_generating();
-                            let too_few_available = ctx
-                                .governance
-                                .participants
-                                .len()
-                                .saturating_sub(peers_already_generating)
-                                < ctx.governance.threshold;
-                            let reason = if too_few_available {
-                                state.pause_proposing_until = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(ctx.cfg.signature.generation_timeout),
-                                );
-                                "peers already generating this signature"
-                            } else {
-                                "received enough rejects"
-                            };
-                            if let Some(_reservation) = presignature {
-                                tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
-                            }
-                            return state.reorganize(reason);
-                        }
-
-                        // Starting as soon as we have enough accepts leaves
-                        // participants accepting a bit later in a bad state.
-                        // They will try to become propose in later rounds,
-                        // wasting Presignatures, memory and CPU time.
-                        //
-                        // Instead, wait for at least the `accept_deadline`,
-                        // only nodes answer slower will be left out. This isn't
-                        // perfect but much better than always forcing nodes
-                        // into the bad state.
-                        let ready_to_go = counter.meets_totality() ||  accept_deadline_reached;
-                        if ready_to_go && counter.enough_accepts(ctx.governance.threshold) {
-                            let participants = Self::start_with_current_accepts(
-                                ctx,
-                                state,
-                                counter,
-                                sign_id,
-                                presignature_id
-                            ).await;
-                            break participants;
-                        }
-                    }
-                }
-                _ = &mut posit_deadline => {
-                    let reason = if is_proposer {
-                        if presignature.is_some() {
-                            tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
-                        }
-                        format!(
-                            "proposer posit deadline reached ({} accepts, threshold {})",
-                            counter.accepts.len(),
-                            ctx.governance.threshold
-                        )
-                    } else {
-                        format!("deliberator posit timeout waiting for Start from {proposer:?}")
+                        "received enough rejects"
                     };
-
-                    return state.reorganize(&reason);
-                }
-                _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
-                    accept_deadline_reached = true;
-                    if counter.enough_accepts(ctx.governance.threshold) {
-                        let participants = Self::start_with_current_accepts(
-                            ctx,
-                            state,
-                            counter,
-                            sign_id,
-                            presignature_id
-                        ).await;
-                        break participants;
+                    if presignature.is_some() {
+                        tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                     }
+                    return state.reorganize(reason);
                 }
+                PositBarrierResult::Timeout(result) => {
+                    if presignature.is_some() {
+                        tracing::warn!(
+                            ?sign_id,
+                            accepts = result.accepted.len(),
+                            threshold = ctx.governance.threshold,
+                            "returning presignature to pool due to proposer timeout"
+                        );
+                    }
+                    return state.reorganize(&format!(
+                        "proposer posit deadline reached ({} accepts, threshold {})",
+                        result.accepted.len(),
+                        ctx.governance.threshold
+                    ));
+                }
+            }
+        } else {
+            // We just sent an Accept to the proposer. The proposer might wait up to
+            // ACCEPT_POSIT_TIMEOUT to gather more accepts before sending Start.
+            // We must wait at least that long so we don't abandon the round after
+            // promising to participate, which would cause the proposer's generation
+            // phase to hang.
+            let remaining = state.budget.remaining().max(2 * ACCEPT_POSIT_TIMEOUT);
+            let result = tokio::time::timeout(
+                remaining,
+                Self::wait_for_start(ctx, state, mailbox, proposer),
+            )
+            .await;
 
+            match result {
+                Ok(Ok(participants)) => participants,
+                Ok(Err(())) => return state.reorganize("not enough Start participants"),
+                Err(_) => {
+                    return state.reorganize(&format!(
+                        "deliberator posit timeout waiting for Start from {proposer:?}"
+                    ));
+                }
             }
         };
 
@@ -437,11 +523,10 @@ impl PositPhase {
     async fn start_with_current_accepts(
         ctx: &SignTask,
         state: &mut SignState,
-        counter: SinglePositCounter,
+        participants: Vec<Participant>,
         sign_id: SignId,
         presignature_id: PresignatureId,
     ) -> Vec<Participant> {
-        let participants = counter.accepts.into_iter().collect::<Vec<_>>();
         tracing::info!(?sign_id, round=?state.round(), me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
 
         for &p in &participants {
@@ -642,6 +727,40 @@ mod tests {
         assert_eq!(t.state.round(), 5);
         // A reject is never answered — replying would ping-pong rejects.
         assert!(t.outbox.intercept_outgoing_messages().try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn proposer_deadline_wins_over_busy_mailbox() {
+        let proposer = Participant::from(0);
+        let other = Participant::from(1);
+        let mut t = setup(proposer, other, 2);
+        let mailbox = PositMailbox::new();
+        let producer_mailbox = Arc::clone(&mailbox);
+        let producer = tokio::spawn(async move {
+            loop {
+                producer_mailbox.push(SignPositMessage {
+                    presignature_id: 42,
+                    round: 0,
+                    from: other,
+                    action: PositAction::Propose,
+                    stale_round: None,
+                });
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let mut barrier = PositBarrier::new(proposer, &[proposer, other], 2);
+        let result = PositPhase::wait_for_accepts(
+            &t.ctx,
+            &mut t.state,
+            &mailbox,
+            &mut barrier,
+            Duration::from_millis(1),
+        )
+        .await;
+        producer.abort();
+
+        assert!(matches!(result, PositBarrierResult::Timeout(_)));
     }
 
     /// The posit loop must answer stale-round messages the same way instead of
