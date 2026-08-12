@@ -13,6 +13,18 @@ pub(super) struct Checkpoints {
     pending: Arc<HashMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("pending checkpoint cap reached for {chain}")]
+    PendingCap { chain: Chain },
+    #[error("failed to persist checkpoint for {chain}")]
+    Storage {
+        chain: Chain,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
 impl Checkpoints {
     pub(super) fn new(storage: CheckpointStorage) -> Self {
         let pending = Chain::iter()
@@ -37,27 +49,46 @@ impl Checkpoints {
             .set(len as i64);
     }
 
-    pub(super) async fn persist(&self, checkpoint: &Checkpoint) -> bool {
+    pub(super) async fn persist(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let mut pending = self.pending(checkpoint.chain).write().await;
+        if let Some(existing) = pending.get(&checkpoint.block_height) {
+            if existing == checkpoint {
+                return Ok(());
+            }
+
+            return Err(CheckpointError::Storage {
+                chain: checkpoint.chain,
+                source: anyhow::anyhow!(
+                    "conflicting pending checkpoint at height {}",
+                    checkpoint.block_height
+                ),
+            });
+        }
+
         if pending.len() >= MAX_PENDING_CHECKPOINTS {
             tracing::warn!(
                 chain = ?checkpoint.chain,
                 count = pending.len(),
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
-            return false;
+            return Err(CheckpointError::PendingCap {
+                chain: checkpoint.chain,
+            });
         }
 
-        if let Err(err) = self.storage.persist_pending(checkpoint).await {
-            tracing::warn!(chain = ?checkpoint.chain, %err, "failed to persist pending checkpoint");
-            return false;
-        }
+        self.storage
+            .persist_pending(checkpoint)
+            .await
+            .map_err(|source| CheckpointError::Storage {
+                chain: checkpoint.chain,
+                source,
+            })?;
 
         pending.insert(checkpoint.block_height, checkpoint.clone());
         let len = pending.len();
         drop(pending);
         self.observe(checkpoint.chain, len);
-        true
+        Ok(())
     }
 
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
@@ -120,7 +151,7 @@ impl Checkpoints {
 
         match self
             .storage
-            .promote_pending(chain, checkpoint.block_height, digest)
+            .promote_pending(chain, checkpoint.block_height)
             .await
         {
             Ok(true) => {}
@@ -246,7 +277,7 @@ mod tests {
     async fn concurrent_persistence_respects_pending_checkpoint_cap() {
         let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
         for height in 0..MAX_PENDING_CHECKPOINTS as u64 - 1 {
-            assert!(checkpoints.persist(&checkpoint(height)).await);
+            assert!(checkpoints.persist(&checkpoint(height)).await.is_ok());
         }
 
         let barrier = Arc::new(Barrier::new(2));
@@ -270,7 +301,13 @@ mod tests {
             })
         };
 
-        assert_ne!(first.await.unwrap(), second.await.unwrap());
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert!(
+            matches!(first, Ok(())) && matches!(second, Err(CheckpointError::PendingCap { .. }))
+                || matches!(second, Ok(()))
+                    && matches!(first, Err(CheckpointError::PendingCap { .. }))
+        );
         assert_eq!(
             checkpoints.count(Chain::Ethereum).await,
             MAX_PENDING_CHECKPOINTS

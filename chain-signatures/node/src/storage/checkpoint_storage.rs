@@ -155,14 +155,9 @@ impl CheckpointStorage {
         }
     }
 
-    /// Promote the durable pending checkpoint identified by its height and consensus digest.
+    /// Promote the durable pending checkpoint identified by its height.
     /// Returns false when the checkpoint is no longer pending.
-    pub async fn promote_pending(
-        &self,
-        chain: Chain,
-        height: u64,
-        digest: [u8; 32],
-    ) -> anyhow::Result<bool> {
+    pub async fn promote_pending(&self, chain: Chain, height: u64) -> anyhow::Result<bool> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -200,17 +195,11 @@ impl CheckpointStorage {
                     let Some(checkpoints) = pending.get_mut(&chain) else {
                         return Ok(false);
                     };
-                    let Some(checkpoint) = checkpoints.get(&height) else {
+                    let Some(promoted) = checkpoints.remove(&height) else {
                         return Ok(false);
                     };
-                    if checkpoint.digest() != digest {
-                        return Ok(false);
-                    }
-                    let Some(checkpoint) = checkpoints.remove(&height) else {
-                        return Ok(false);
-                    };
-                    checkpoints.retain(|height, _| *height > checkpoint.block_height);
-                    checkpoint
+                    checkpoints.retain(|height, _| *height > promoted.block_height);
+                    promoted
                 };
                 latest.write().await.insert(chain, promoted);
                 Ok(true)
@@ -335,11 +324,7 @@ mod tests {
             vec![first.clone(), second.clone()]
         );
 
-        assert!(
-            storage
-                .promote_pending(chain, first.block_height, first.digest())
-                .await?
-        );
+        assert!(storage.promote_pending(chain, first.block_height).await?);
         assert_eq!(storage.load_latest(chain).await?, Some(first));
         assert_eq!(storage.load_pending(chain).await?, vec![second]);
 
@@ -367,7 +352,7 @@ mod tests {
         assert!(storage.persist_pending(&conflicting).await.is_err());
         assert!(
             !storage
-                .promote_pending(Chain::Solana, checkpoint.block_height, conflicting.digest())
+                .promote_pending(Chain::Solana, checkpoint.block_height + 1)
                 .await?
         );
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);

@@ -399,7 +399,7 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
 
     assert!(
         restarted
-            .promote_pending(Chain::Solana, first.block_height, first.digest())
+            .promote_pending(Chain::Solana, first.block_height)
             .await?
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
@@ -412,8 +412,13 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     conflicting.cumulative_digest[0] = 1;
     assert!(restarted.persist_pending(&conflicting).await.is_err());
     assert!(
+        !restarted
+            .promote_pending(Chain::Solana, second.block_height + 1)
+            .await?
+    );
+    assert!(
         restarted
-            .promote_pending(Chain::Solana, second.block_height, second.digest())
+            .promote_pending(Chain::Solana, second.block_height)
             .await?
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));

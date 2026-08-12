@@ -281,7 +281,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let digest = cp.digest();
 
@@ -307,9 +307,9 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp1 = backlog.checkpoint(chain).await.unwrap();
-        backlog.set_processed_block(chain, 200).await;
+        backlog.set_processed_block(chain, 200).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let digest1 = cp1.digest();
@@ -332,7 +332,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let different_digest = [0xabu8; 32];
@@ -359,7 +359,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
@@ -383,7 +383,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let matching_digest = cp.digest();
 
@@ -506,7 +506,7 @@ mod tests {
     async fn regression_cancels_and_restarts_run() {
         let chain = Chain::Ethereum;
         let backlog = Backlog::new();
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let attempts = Arc::new(AtomicUsize::new(0));

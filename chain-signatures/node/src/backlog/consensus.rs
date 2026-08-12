@@ -359,7 +359,11 @@ mod tests {
                 }
 
                 for &height in &case.local_checkpoints {
-                    fixture.backlog.set_processed_block(chain, height).await;
+                    fixture
+                        .backlog
+                        .set_processed_block(chain, height)
+                        .await
+                        .unwrap();
                     let cp = fixture.backlog.checkpoint(chain).await.unwrap();
                     local_digests.push(cp.digest());
                 }
@@ -571,7 +575,11 @@ mod tests {
         }));
 
         // Create a local checkpoint at 100
-        fixture.backlog.set_processed_block(chain, 100).await;
+        fixture
+            .backlog
+            .set_processed_block(chain, 100)
+            .await
+            .unwrap();
         let _cp = fixture.backlog.checkpoint(chain).await.unwrap();
 
         let backlog_clone = fixture.backlog.clone();

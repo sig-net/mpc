@@ -3,6 +3,7 @@ pub mod consensus;
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
 use anyhow::Context;
@@ -568,17 +569,24 @@ impl Backlog {
         if height / interval > prev / interval {
             let tx_count = pending.len();
             drop(pending);
-            if let Some(checkpoint) = self.checkpoint(chain).await {
-                tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
-                Some(checkpoint)
-            } else {
-                tracing::warn!(
-                    ?chain,
-                    height,
-                    tx_count,
-                    "checkpoint creation stalled (pending cap reached)"
-                );
-                None
+            match self.checkpoint(chain).await {
+                Ok(checkpoint) => {
+                    tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
+                    Some(checkpoint)
+                }
+                Err(CheckpointError::PendingCap { .. }) => {
+                    tracing::warn!(
+                        ?chain,
+                        height,
+                        tx_count,
+                        "checkpoint creation stalled (pending cap reached)"
+                    );
+                    None
+                }
+                Err(err @ CheckpointError::Storage { .. }) => {
+                    tracing::error!(?chain, %err, "failed to create checkpoint");
+                    None
+                }
             }
         } else {
             None
@@ -587,16 +595,13 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain.
     ///
-    /// Returns `None` if the pending checkpoint cap has been reached or persistence fails.
-    pub async fn checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
+    pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
         let checkpoint = {
             let requests = self.pending(&chain).read().await;
             Checkpoints::snapshot(&requests, chain)
         };
-        self.checkpoints
-            .persist(&checkpoint)
-            .await
-            .then_some(checkpoint)
+        self.checkpoints.persist(&checkpoint).await?;
+        Ok(checkpoint)
     }
 
     /// Confirm a locally available checkpoint against an on-chain consensus digest.
@@ -1309,7 +1314,10 @@ mod tests {
         )
         .await;
 
-        backlog.set_processed_block(Chain::Ethereum, 100).await;
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
 
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
         assert_eq!(checkpoint.block_height, 100);
@@ -2271,9 +2279,8 @@ mod tests {
         // 500 / 120 = 4 > 0, so a boundary was crossed.
         let cp = backlog
             .set_processed_block_interval(Chain::Solana, 500, 120)
-            .await;
-        assert!(cp.is_some());
-        let cp = cp.unwrap();
+            .await
+            .unwrap();
         assert_eq!(cp.block_height, 500);
         assert_eq!(cp.pending_requests.len(), 1);
     }

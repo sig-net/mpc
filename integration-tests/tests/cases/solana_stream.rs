@@ -336,7 +336,10 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
             Ok(Some(ChainEvent::Block(block))) => {
                 tracing::info!(block, "received block event");
                 checkpoint_block = Some(block);
-                backlog.set_processed_block(Chain::Solana, block).await;
+                backlog
+                    .set_processed_block(Chain::Solana, block)
+                    .await
+                    .unwrap();
                 break;
             }
             Ok(Some(event)) => {
@@ -437,7 +440,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .await;
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
-        .await;
+        .await
+        .unwrap();
     let checkpoint = seeded_backlog
         .checkpoint(Chain::Solana)
         .await
