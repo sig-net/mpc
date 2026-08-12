@@ -458,7 +458,6 @@ fn intent_gen_command(
 
     command
         .env("MIDNIGHT_PUB_FUNDING_SEED", &config.funding_seed)
-        .env("MIDNIGHT_PUB_MANAGED_DIR", &config.managed_dir)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
         // Written unconditionally: a name left unwritten is one the `env_remove`
         // above took away, and blank is how a build-only deployment says no wallet.
@@ -673,7 +672,6 @@ mod tests {
     fn stub_config(script: &str) -> PublisherConfig {
         PublisherConfig {
             intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
-            managed_dir: "/managed".to_string(),
             request_timeout: Duration::from_secs(5),
             restart_backoff: RetryConfig {
                 min_delay: Duration::from_millis(1),
@@ -1185,8 +1183,7 @@ mod tests {
             format!("{err:#}"),
             "midnight intent builder refused the request [bad_request]: \
              MIDNIGHT_PUB_FUNDING_SEED,MIDNIGHT_PUB_INDEXER_URL,MIDNIGHT_PUB_INDEXER_WS_URL,\
-             MIDNIGHT_PUB_MANAGED_DIR,MIDNIGHT_PUB_NETWORK_ID,MIDNIGHT_PUB_NODE_URL,\
-             MIDNIGHT_PUB_PROOF_SERVER_URL,"
+             MIDNIGHT_PUB_NETWORK_ID,MIDNIGHT_PUB_NODE_URL,MIDNIGHT_PUB_PROOF_SERVER_URL,"
         );
     }
 
@@ -1194,7 +1191,7 @@ mod tests {
     async fn the_child_is_handed_every_value_it_is_configured_with() {
         // The VALUES have to arrive, each its own: four distinguishable endpoints, not one URL repeated.
         let mut config = stub_config(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"net=%s dir=%s node=%s prover=%s indexer=%s ws=%s"}\n' "$MIDNIGHT_PUB_NETWORK_ID" "$MIDNIGHT_PUB_MANAGED_DIR" "$MIDNIGHT_PUB_NODE_URL" "$MIDNIGHT_PUB_PROOF_SERVER_URL" "$MIDNIGHT_PUB_INDEXER_URL" "$MIDNIGHT_PUB_INDEXER_WS_URL""#,
+            r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"net=%s node=%s prover=%s indexer=%s ws=%s"}\n' "$MIDNIGHT_PUB_NETWORK_ID" "$MIDNIGHT_PUB_NODE_URL" "$MIDNIGHT_PUB_PROOF_SERVER_URL" "$MIDNIGHT_PUB_INDEXER_URL" "$MIDNIGHT_PUB_INDEXER_WS_URL""#,
         );
         config.node_ws_url = "ws://127.0.0.1:9944".to_string();
         config.proof_server_url = "http://127.0.0.1:6300".to_string();
@@ -1208,7 +1205,7 @@ mod tests {
             .unwrap_err();
         assert!(
             format!("{err:#}").contains(
-                "net=undeployed dir=/managed node=ws://127.0.0.1:9944 \
+                "net=undeployed node=ws://127.0.0.1:9944 \
                  prover=http://127.0.0.1:6300 \
                  indexer=http://127.0.0.1:8088/api/v3/graphql \
                  ws=ws://127.0.0.1:8088/api/v3/graphql/ws"

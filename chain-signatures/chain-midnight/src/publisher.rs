@@ -661,7 +661,6 @@ mod tests {
     fn config(intent_gen_command: Vec<String>) -> PublisherConfig {
         PublisherConfig {
             intent_gen_command,
-            managed_dir: "/managed".to_string(),
             funding_seed: funding_seed(),
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             proof_server_url: "http://127.0.0.1:6300".to_string(),

@@ -53,8 +53,6 @@ impl Default for IndexerConfig {
 pub struct PublisherConfig {
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,
-    /// Reaches the child as `MIDNIGHT_PUB_MANAGED_DIR`.
-    pub managed_dir: String,
     /// Funds respond transactions; empty is the indexer-only deployment.
     pub funding_seed: String,
     /// Duplicates `MidnightConfig::node_ws_url`: `into_config` fills both from one flag
@@ -78,7 +76,6 @@ impl Default for PublisherConfig {
         Self {
             // The `bin` name the TypeScript package installs, resolved on PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
-            managed_dir: String::new(),
             // Blank as a set: the child reads all five blank as "no funding wallet".
             funding_seed: String::new(),
             node_ws_url: String::new(),
@@ -103,7 +100,6 @@ impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublisherConfig")
             .field("intent_gen_command", &self.intent_gen_command)
-            .field("managed_dir", &self.managed_dir)
             .field("funding_seed", &"<redacted>")
             .field("node_ws_url", &self.node_ws_url)
             .field("proof_server_url", &self.proof_server_url)
@@ -165,12 +161,6 @@ impl MidnightConfig {
                  no 0x prefix, got {} characters",
                 seed.len()
             );
-            // Required exactly when the seed is: only a seeded node spawns the builder.
-            anyhow::ensure!(
-                !self.publisher.managed_dir.is_empty(),
-                "midnight config: publisher.managed_dir is empty, but publisher.funding_seed \
-                 is set, and a responding node's builder needs the contract assets it names"
-            );
         }
         self.validate_submit_half()
     }
@@ -226,7 +216,6 @@ mod tests {
     fn responding_config() -> MidnightConfig {
         let mut config = valid_config();
         config.publisher.funding_seed = "0f".repeat(32);
-        config.publisher.managed_dir = "/var/lib/mpc/midnight".to_string();
         config.publisher.node_ws_url = config.node_ws_url.clone();
         config.publisher.proof_server_url = "http://127.0.0.1:6300".to_string();
         config.publisher.indexer_url = "http://127.0.0.1:8088/api/v3/graphql".to_string();
@@ -383,13 +372,5 @@ mod tests {
         empty_network.network_id = String::new();
         let err = empty_network.validate().unwrap_err().to_string();
         assert!(err.contains("network_id"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn a_funding_seed_without_a_managed_dir_is_rejected() {
-        let mut config = responding_config();
-        config.publisher.managed_dir = String::new();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("managed_dir"), "unexpected error: {err}");
     }
 }

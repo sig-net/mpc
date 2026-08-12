@@ -36,13 +36,6 @@ pub struct MidnightArgs {
         requires = "midnight_node_ws_url"
     )]
     pub midnight_funding_seed: Option<String>,
-    /// Directory the publisher keeps its prover artifacts and wallet state in.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_MANAGED_DIR"),
-        requires = "midnight_node_ws_url"
-    )]
-    pub midnight_managed_dir: Option<String>,
     /// argv of the intent builder child process, JSON-encoded:
     /// `["node","dist/main.js"]`. One clap value rather than a multi-value
     /// flag, whose forms stop at anything flag-shaped; JSON escapes instead
@@ -81,7 +74,7 @@ pub struct MidnightArgs {
 
 impl MidnightArgs {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(18);
+        let mut args = Vec::with_capacity(16);
         if let Some(v) = self.midnight_node_ws_url {
             args.extend(["--midnight-node-ws-url".to_string(), v]);
         }
@@ -93,9 +86,6 @@ impl MidnightArgs {
         }
         if let Some(v) = self.midnight_funding_seed {
             args.extend(["--midnight-funding-seed".to_string(), v]);
-        }
-        if let Some(v) = self.midnight_managed_dir {
-            args.extend(["--midnight-managed-dir".to_string(), v]);
         }
         if let Some(v) = self.midnight_intent_gen_command {
             args.extend(["--midnight-intent-gen-command".to_string(), v]);
@@ -128,9 +118,6 @@ impl MidnightArgs {
         let mut publisher = PublisherConfig::default();
         if let Some(v) = self.midnight_funding_seed {
             publisher.funding_seed = v;
-        }
-        if let Some(v) = self.midnight_managed_dir {
-            publisher.managed_dir = v;
         }
         if let Some(v) = self.midnight_intent_gen_command {
             publisher.intent_gen_command = serde_json::from_str(&v).with_context(|| {
@@ -178,7 +165,6 @@ impl MidnightArgs {
                 } = c;
                 let PublisherConfig {
                     funding_seed,
-                    managed_dir,
                     intent_gen_command,
                     proof_server_url,
                     indexer_url,
@@ -194,7 +180,6 @@ impl MidnightArgs {
                     midnight_central_address: Some(central_address),
                     midnight_network_id: Some(network_id),
                     midnight_funding_seed: Some(funding_seed),
-                    midnight_managed_dir: Some(managed_dir),
                     midnight_intent_gen_command: Some(
                         serde_json::to_string(&intent_gen_command)
                             .expect("a Vec<String> always serializes"),
@@ -209,7 +194,6 @@ impl MidnightArgs {
                 midnight_central_address: None,
                 midnight_network_id: None,
                 midnight_funding_seed: None,
-                midnight_managed_dir: None,
                 midnight_intent_gen_command: None,
                 midnight_proof_server_url: None,
                 midnight_indexer_url: None,
@@ -235,12 +219,11 @@ mod tests {
             network_id: "undeployed".into(),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                managed_dir: "/var/lib/mpc/midnight".into(),
                 // A space and a leading dash, which only a structured encoding gets back out intact.
                 intent_gen_command: vec![
                     "node".into(),
                     "/opt/midnight publisher/dist/main.js".into(),
-                    "--managed-dir".into(),
+                    "--child-option".into(),
                 ],
                 proof_server_url: "http://127.0.0.1:6300".into(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
@@ -312,7 +295,6 @@ mod tests {
         for flag in [
             "--midnight-network-id",
             "--midnight-funding-seed",
-            "--midnight-managed-dir",
             "--midnight-intent-gen-command",
             "--midnight-proof-server-url",
             "--midnight-indexer-url",
@@ -325,6 +307,18 @@ mod tests {
                 "{flag} is not gated on the node ws url: {err}"
             );
         }
+    }
+
+    #[test]
+    fn contract_assets_are_not_an_operator_input() {
+        crate::cli::tests::assert_midnight_env_unset();
+
+        let err = MidnightArgs::try_parse_from(["test", "--midnight-managed-dir", "/tmp/managed"])
+            .expect_err("the TypeScript package owns its matching contract assets");
+        assert!(
+            err.to_string().contains("unexpected argument"),
+            "got: {err}"
+        );
     }
 
     #[test]

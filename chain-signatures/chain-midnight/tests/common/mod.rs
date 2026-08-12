@@ -19,23 +19,14 @@ fn path_arg(path: &Path) -> String {
 pub fn base_live_config() -> PublisherConfig {
     let package = publisher_package();
     let entry = package.join("dist/main.js");
-    // The library resolves its assets relative to its package: the installed copy, not `tests/`.
-    let managed = package.join("node_modules/@sig-net/midnight-contract/dist/managed");
     assert!(
         entry.is_file(),
         "{} is missing: run `npm ci && npm run build` in {}",
         entry.display(),
         package.display()
     );
-    assert!(
-        managed.is_dir(),
-        "{} is missing: run `npm ci` in {}",
-        managed.display(),
-        package.display()
-    );
     PublisherConfig {
         intent_gen_command: vec!["node".to_string(), path_arg(&entry)],
-        managed_dir: path_arg(&managed),
         ..Default::default()
     }
 }
