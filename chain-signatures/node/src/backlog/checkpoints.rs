@@ -340,4 +340,109 @@ mod tests {
             MAX_PENDING_CHECKPOINTS
         );
     }
+
+    #[tokio::test]
+    async fn persist_stalls_at_cap() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        for height in 0..MAX_PENDING_CHECKPOINTS as u64 {
+            checkpoints.persist(&checkpoint(height)).await.unwrap();
+        }
+
+        assert!(matches!(
+            checkpoints
+                .persist(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
+                .await,
+            Err(CheckpointError::PendingCap { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirmation_frees_pending_slot() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        for height in 0..MAX_PENDING_CHECKPOINTS as u64 {
+            checkpoints.persist(&checkpoint(height)).await.unwrap();
+        }
+
+        let latest = checkpoint(MAX_PENDING_CHECKPOINTS as u64 - 1);
+        assert!(checkpoints.confirm(latest.chain, latest.digest()).await);
+        assert!(checkpoints
+            .persist(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn confirmation_removes_pending_checkpoints_through_confirmed_height() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let first = checkpoint(1);
+        let second = checkpoint(2);
+        let third = checkpoint(3);
+        checkpoints.persist(&first).await.unwrap();
+        checkpoints.persist(&second).await.unwrap();
+        checkpoints.persist(&third).await.unwrap();
+
+        assert!(checkpoints.confirm(second.chain, second.digest()).await);
+        assert_eq!(checkpoints.count(first.chain).await, 1);
+        assert_eq!(checkpoints.latest(first.chain).await, Some(third));
+    }
+
+    #[tokio::test]
+    async fn load_local_hydrates_pending_checkpoints_after_restart() {
+        let storage = CheckpointStorage::in_memory();
+        let first = checkpoint(1);
+        let second = checkpoint(2);
+        let checkpoints = Checkpoints::new(storage.clone());
+        checkpoints.persist(&first).await.unwrap();
+        checkpoints.persist(&second).await.unwrap();
+
+        let restarted = Checkpoints::new(storage);
+        assert_eq!(
+            restarted.load_local(first.chain).await.unwrap(),
+            Some(second.clone())
+        );
+        assert_eq!(restarted.count(first.chain).await, 2);
+        assert_eq!(
+            restarted.find(first.chain, first.digest()).await,
+            Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_resets_checkpoint_state() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        checkpoints.persist(&checkpoint(1)).await.unwrap();
+        checkpoints.persist(&checkpoint(2)).await.unwrap();
+        let consensus = checkpoint(0);
+
+        checkpoints.regress(&consensus).await.unwrap();
+
+        assert_eq!(checkpoints.count(consensus.chain).await, 0);
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_latest(consensus.chain)
+                .await
+                .unwrap(),
+            Some(consensus)
+        );
+    }
+
+    #[tokio::test]
+    async fn find_falls_back_to_confirmed_checkpoint() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let checkpoint = checkpoint(1);
+        checkpoints.persist(&checkpoint).await.unwrap();
+        assert!(
+            checkpoints
+                .confirm(checkpoint.chain, checkpoint.digest())
+                .await
+        );
+
+        assert_eq!(
+            checkpoints
+                .find(checkpoint.chain, checkpoint.digest())
+                .await,
+            Some(checkpoint)
+        );
+    }
 }
