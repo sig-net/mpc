@@ -1,17 +1,22 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { encodeContractKeyLocation } from "@midnight-ntwrk/compact-js";
 import { CostModel, createProvingPayload, Transaction } from "@midnightntwrk/ledger-v9";
+import { expectedVk, type SignetContractCircuitId } from "@sig-net/midnight-contract";
 import { describe, expect, it } from "vitest";
 
 import { buildIntent } from "../src/intent.js";
 import { provingProvider } from "../src/prover.js";
 import { decodeIntent } from "../src/submit.js";
-import { respondInput } from "./support.js";
+import { respondInput, SINGLETON } from "./support.js";
 
 const NOWHERE = "http://127.0.0.1:1";
 
 const provider = () => provingProvider(NOWHERE);
+
+const contractKeyLocation = (circuit: SignetContractCircuitId, verifierKeyHash = expectedVk[circuit]!) =>
+  encodeContractKeyLocation({ contractAddress: SINGLETON, circuitId: circuit, verifierKeyHash });
 
 async function proofRequest() {
   const intent = await buildIntent(await respondInput());
@@ -56,7 +61,7 @@ async function serve(handler: (request: IncomingMessage, response: ServerRespons
 describe("the proving provider", () => {
   it("carries the compiled contract's key material for its supported circuits", async () => {
     for (const circuit of ["respond", "respondBidirectional"] as const) {
-      const material = await provider().lookupKey(circuit);
+      const material = await provider().lookupKey(contractKeyLocation(circuit));
 
       expect(material?.proverKey.length, circuit).toBeGreaterThan(0);
       expect(material?.verifierKey.length, circuit).toBeGreaterThan(0);
@@ -64,15 +69,30 @@ describe("the proving provider", () => {
     }
   });
 
+  it("puts the contract address, circuit, and verifier hash in proof requests", async () => {
+    await expect(proofRequest()).resolves.toMatchObject({ keyLocation: contractKeyLocation("respond") });
+  });
+
   it("leaves the protocol's own circuits to the server", async () => {
     expect(await provider().lookupKey("midnight/zswap/spend")).toBeUndefined();
   });
 
-  it("refuses every non-builtin location outside the publisher's exact contract surface", async () => {
-    for (const keyLocation of ["notACircuit", "../../../../etc/passwd"]) {
+  it("refuses locations outside the publisher's exact contract surface", async () => {
+    for (const keyLocation of [
+      "respond",
+      "notACircuit",
+      "../../../../etc/passwd",
+      contractKeyLocation("signBidirectional"),
+    ]) {
       await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toMatchObject({ code: "bad_request" });
       await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toThrowError(/unsupported key location/);
     }
+  });
+
+  it("refuses a canonical location for different verifier material", async () => {
+    await expect(provider().lookupKey(contractKeyLocation("respond", "00".repeat(32)))).rejects.toMatchObject({
+      code: "bad_request",
+    });
   });
 
   it("posts ledger payloads and reports proof-server status failures", async () => {

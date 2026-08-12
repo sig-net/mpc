@@ -97,6 +97,7 @@ describe("openFundingWallet", () => {
     await expect(wallet.balanceTx(tx)).resolves.toBe(signed);
     const [, keys, options] = vi.mocked(facade.balanceUnboundTransaction).mock.calls[0]!;
     expect(keys).toMatchObject({ shieldedSecretKeys: expect.anything(), dustSecretKey: expect.anything() });
+    expect(options.tokenKindsToBalance).toEqual(["dust"]);
     expect(options.ttl.getTime()).toBeGreaterThanOrEqual(before + 5 * 60 * 1_000);
     expect(options.ttl.getTime()).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1_000);
     expect(facade.signRecipe).toHaveBeenCalledWith(recipe, expect.any(Function));

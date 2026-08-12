@@ -3,7 +3,12 @@
 
 import { Effect, Layer } from "effect";
 import { NodeContext } from "@effect/platform-node";
-import { ContractExecutable, hashVerifierKey } from "@midnight-ntwrk/compact-js";
+import {
+  ContractExecutable,
+  encodeContractKeyLocation,
+  hashVerifierKey,
+  ProvableCircuitId,
+} from "@midnight-ntwrk/compact-js";
 import { ZKFileConfiguration } from "@midnight-ntwrk/compact-js-node";
 // onchain-runtime-v4's ContractState, not ledger-v9's: different WASM classes, and the
 // executor refuses the wrong one.
@@ -18,9 +23,11 @@ import {
   communicationCommitmentRandomness,
 } from "@midnightntwrk/ledger-v9";
 import {
+  Contract as SignetContract,
   createSignetContractPrivateState,
   expectedVk,
   type SignetContractCircuitId,
+  type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
 import {
   signetContractCompiledContract,
@@ -32,6 +39,20 @@ import { PublisherError } from "./errors.js";
 export const RESPOND_CIRCUITS = ["respond", "respondBidirectional"] as const satisfies readonly SignetContractCircuitId[];
 
 export type RespondCircuit = (typeof RESPOND_CIRCUITS)[number];
+
+type CompiledSignetContract = SignetContract<SignetContractPrivateState>;
+// Compact's branded id widens to every generated circuit, so check each argument
+// tuple against its generated function before passing it to the executor.
+type CircuitArguments<K extends RespondCircuit> = Parameters<CompiledSignetContract["provableCircuits"][K]> extends [
+  unknown,
+  ...infer Arguments,
+]
+  ? Arguments
+  : never;
+
+const RESPOND_CIRCUIT_ID = ProvableCircuitId<CompiledSignetContract>("respond");
+const RESPOND_BIDIRECTIONAL_CIRCUIT_ID =
+  ProvableCircuitId<CompiledSignetContract>("respondBidirectional");
 
 export interface WireSignature {
   readonly bigR: { readonly x: string; readonly y: string };
@@ -61,10 +82,6 @@ function signatureStruct(signature: WireSignature) {
     s: fromHex(signature.s),
     recoveryId: BigInt(signature.recoveryId),
   };
-}
-
-function circuitArgs(input: BuildIntentInput): readonly [Uint8Array, unknown] {
-  return [fromHex(input.requestId), { signature: signatureStruct(input.signature) }];
 }
 
 // `Configuration.Keys` is required even though respond signs nothing: the one executable
@@ -102,31 +119,44 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
       `the contract deployed at ${input.contractAddress} has no verifier key for \`${input.circuit}\``,
     );
   }
-  if (hashVerifierKey(deployedVerifierKey) !== expectedVk[input.circuit]) {
+  const verifierKeyHash = hashVerifierKey(deployedVerifierKey);
+  if (verifierKeyHash !== expectedVk[input.circuit]) {
     throw new PublisherError(
       "contract_mismatch",
       `the contract deployed at ${input.contractAddress} has a different verifier key for \`${input.circuit}\``,
     );
   }
 
-  const [requestId, event] = circuitArgs(input);
-  // `ProvableCircuitId` does not accept a hand-written union, so the id and argument
-  // tuple cross as `never`; the operation lookup above validates the pair.
-  const result = await Effect.runPromise(
-    ContractExecutable.make(signetContractCompiledContract)
-      .circuit(
-        input.circuit as never,
-        {
-          address: ContractAddress.ContractAddress(input.contractAddress),
-          contractState,
-          privateState: createSignetContractPrivateState(),
-          ledgerParameters: LedgerParameters.deserialize(fromHex(input.ledgerParameters)),
-        },
-        requestId,
-        event as never,
-      )
-      .pipe(Effect.provide(executionContext(input.coinPublicKey))),
-  );
+  const executable = ContractExecutable.make(signetContractCompiledContract);
+  const context = {
+    address: ContractAddress.ContractAddress(input.contractAddress),
+    contractState,
+    privateState: createSignetContractPrivateState(),
+    ledgerParameters: LedgerParameters.deserialize(fromHex(input.ledgerParameters)),
+  };
+  const requestId = fromHex(input.requestId);
+  const event = { signature: signatureStruct(input.signature) };
+  const layer = executionContext(input.coinPublicKey);
+  const result =
+    input.circuit === "respond"
+      ? await Effect.runPromise(
+          executable
+            .circuit(
+              RESPOND_CIRCUIT_ID,
+              context,
+              ...([requestId, event] satisfies CircuitArguments<"respond">),
+            )
+            .pipe(Effect.provide(layer)),
+        )
+      : await Effect.runPromise(
+          executable
+            .circuit(
+              RESPOND_BIDIRECTIONAL_CIRCUIT_ID,
+              context,
+              ...([requestId, event] satisfies CircuitArguments<"respondBidirectional">),
+            )
+            .pipe(Effect.provide(layer)),
+        );
 
   // A second call would mean the contract grew cross-contract calls this builder cannot carry.
   if (result.calls.length !== 1) {
@@ -145,7 +175,11 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
     call.private.input,
     call.private.output,
     communicationCommitmentRandomness(),
-    input.circuit,
+    encodeContractKeyLocation({
+      contractAddress: input.contractAddress,
+      circuitId: input.circuit,
+      verifierKeyHash,
+    }),
   );
 
   return Intent.new(new Date(input.ttlSeconds * 1000)).addCall(prototype).serialize();

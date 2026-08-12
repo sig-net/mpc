@@ -66,6 +66,7 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
       const secretKeys = { shieldedSecretKeys: keys.shieldedSecretKeys, dustSecretKey: keys.dustSecretKey };
       const recipe = await facade.balanceUnboundTransaction(tx, secretKeys, {
         ttl: new Date(Date.now() + RECIPE_TTL_MS),
+        tokenKindsToBalance: ["dust"],
       });
       return facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
     },

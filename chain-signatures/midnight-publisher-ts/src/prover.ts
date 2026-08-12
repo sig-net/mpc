@@ -5,6 +5,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { hashVerifierKey, parseContractKeyLocation } from "@midnight-ntwrk/compact-js";
 import {
   CostModel,
   createCheckPayload,
@@ -18,6 +19,7 @@ import {
   type Transaction,
   type UnprovenTransaction,
 } from "@midnightntwrk/ledger-v9";
+import { expectedVk } from "@sig-net/midnight-contract";
 import { signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
 import { PublisherError } from "./errors.js";
@@ -27,20 +29,18 @@ export type UnboundTransaction = Transaction<SignatureEnabled, Proof, PreBinding
 
 const BUILTIN_PREFIX = "midnight/";
 
-function isRespondCircuit(keyLocation: string): keyLocation is RespondCircuit {
-  return RESPOND_CIRCUITS.some((circuit) => circuit === keyLocation);
+function isRespondCircuit(circuitId: string): circuitId is RespondCircuit {
+  return RESPOND_CIRCUITS.some((circuit) => circuit === circuitId);
 }
 
-async function keyMaterial(keyLocation: RespondCircuit): Promise<ProvingKeyMaterial> {
+async function keyMaterial(circuit: RespondCircuit, verifierKeyHash: string): Promise<ProvingKeyMaterial> {
   const artifact = async (directory: string, extension: string): Promise<Uint8Array> => {
     try {
-      return Uint8Array.from(
-        await readFile(join(signetContractManagedPath, directory, `${keyLocation}.${extension}`)),
-      );
+      return Uint8Array.from(await readFile(join(signetContractManagedPath, directory, `${circuit}.${extension}`)));
     } catch (cause) {
       throw new PublisherError(
         "contract_mismatch",
-        `the packaged contract has no ${extension} for circuit \`${keyLocation}\``,
+        `the packaged contract has no ${extension} for circuit \`${circuit}\``,
         { cause },
       );
     }
@@ -51,6 +51,12 @@ async function keyMaterial(keyLocation: RespondCircuit): Promise<ProvingKeyMater
     artifact("keys", "verifier"),
     artifact("zkir", "bzkir"),
   ]);
+  if (hashVerifierKey(verifierKey) !== verifierKeyHash) {
+    throw new PublisherError(
+      "contract_mismatch",
+      `the packaged verifier key for circuit \`${circuit}\` does not match the intent`,
+    );
+  }
   return { proverKey, verifierKey, ir };
 }
 
@@ -69,10 +75,15 @@ async function post(proofServerUrl: string, path: string, body: Uint8Array): Pro
 export function provingProvider(proofServerUrl: string): ProvingProvider {
   const material = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> => {
     if (keyLocation.startsWith(BUILTIN_PREFIX)) return undefined;
-    if (!isRespondCircuit(keyLocation)) {
+    const location = parseContractKeyLocation(keyLocation);
+    if (
+      location === undefined ||
+      !isRespondCircuit(location.circuitId) ||
+      location.verifierKeyHash !== expectedVk[location.circuitId]
+    ) {
       throw new PublisherError("bad_request", `the intent names an unsupported key location \`${keyLocation}\``);
     }
-    return keyMaterial(keyLocation);
+    return keyMaterial(location.circuitId, location.verifierKeyHash);
   };
 
   return {
