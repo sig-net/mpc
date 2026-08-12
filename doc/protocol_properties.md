@@ -36,12 +36,13 @@ Not all of the below is implemented. Where a property or invariant is only partl
   * proposer sends Propose message to each peer  
   * peers answer Accept/Reject  
   * proposer sends Start carrying the final participant list to each accepter  
+  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, when generation starts; aborting before the commit releases the reservation, aborting after does not  
 
 * Instance : one attempt to run protocol to completion over a specific artifact and participant list
   * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
   * Triple pair/presignature: identified by artifact id. A triple pair's id is drawn at random by its proposer; a presignature's id is derived from the pair it consumes (hash of the pair id), not chosen.  
 
-  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, different rounds are different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Note that only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature (possible after an abort that returned it to the pool) share one name.
+  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, different rounds are different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Note that only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature, possible when the first aborted before committing it, share one name.
 
 ## 2\. System model
 
@@ -112,9 +113,9 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Enforcement* Three local rules:
 
-1. Single writer. Only the artifact's recorded owner initiates consumption. Every holder enforces this itself rather than trusting the proposer, but only when the share is actually taken (the take is keyed on the recorded owner), not when the posit is answered, so a posit naming the wrong owner is accepted first and fails a phase later.
+1. Single writer. Only the artifact's recorded owner initiates consumption. Every holder enforces this itself rather than trusting the proposer, but only when the share is taken, not when the posit is answered, so a posit naming the wrong owner fails a phase late.
 2. Delete-on-first-use at every holder when generation starts. The proposer removes the artifact from storage and every deliberator takes its local share, so a later attempt fails at any holder that already used it. The removal must reach durable storage *before* any message derived from the artifact is sent, or a holder that crashes and recovers resurrects the share and honestly serves a second request.
-3. Instance naming. Every message names its instance, and a node feeds each one only to the instance it names. Posit messages name the round as well; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature share a name (see §1).
+3. Instance naming. Every message names its instance, and a node feeds each one only to the instance it names. Posit messages name the round as well, generation messages do not (§1).
 
 *Why deleting at each holder suffices.* Per-holder deletion by itself would still allow two **disjoint** sets of honest holders to each serve their own first request on one artifact. Quorum intersection rules that out: both instances need a participant list of at least t (the posit phase starts an instance only once t peers have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
 
@@ -168,7 +169,7 @@ Three caveats remain: (i) organizing waits for the local active set to reach t (
 
 *Property.* During a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor ( min\_triples or min\_presignatures ) and below the network-wide cap ( max\_triples or max\_presignatures ) eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).
 
-The cap belongs in the property, not in a footnote: a node under its own floor generates nothing while the network-wide potential is at the cap, which is intended (the pool is full) but means the floor alone does not entail progress.
+A node under its own floor still generates nothing while the network-wide potential is at the cap. That is intended, the pool being full, but it means the floor alone does not entail progress.
 
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
