@@ -674,7 +674,7 @@ impl Backlog {
         Some(checkpoint)
     }
 
-    async fn mark_consensus_confirmed(&self, chain: Chain, height: u64) {
+    async fn update_pending(&self, chain: Chain, height: u64) {
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
             pending.retain(|&pending_height, _| pending_height > height);
@@ -685,25 +685,20 @@ impl Backlog {
 
     /// Confirm a locally available checkpoint against an on-chain consensus digest.
     pub async fn confirm_consensus(&self, chain: Chain, digest: [u8; 32]) -> bool {
-        let pending = self
+        let Some(checkpoint) = self.find_checkpoint_by_digest(chain, digest).await else {
+            return false;
+        };
+        let is_pending = self
             .pending_checkpoints(&chain)
             .read()
             .await
-            .values()
-            .find(|checkpoint| checkpoint.digest() == digest)
-            .cloned();
+            .get(&checkpoint.block_height)
+            .is_some_and(|pending| pending.digest() == digest);
 
-        let Some(checkpoint) = pending else {
-            let Ok(Some(latest)) = self.storage.load_latest(chain).await else {
-                return false;
-            };
-            if latest.digest() != digest {
-                return false;
-            }
-            self.mark_consensus_confirmed(chain, latest.block_height)
-                .await;
+        if !is_pending {
+            self.update_pending(chain, checkpoint.block_height).await;
             return true;
-        };
+        }
 
         match self
             .storage
@@ -724,8 +719,7 @@ impl Backlog {
                 return false;
             }
         }
-        self.mark_consensus_confirmed(chain, checkpoint.block_height)
-            .await;
+        self.update_pending(chain, checkpoint.block_height).await;
 
         tracing::info!(
             ?chain,
