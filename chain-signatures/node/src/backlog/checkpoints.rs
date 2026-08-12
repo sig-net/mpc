@@ -39,6 +39,7 @@ impl From<CheckpointKind> for Checkpoint {
 }
 
 impl Checkpoints {
+    /// Creates an empty local pending-checkpoint cache backed by `storage`.
     pub(super) fn new(storage: CheckpointStorage) -> Self {
         let pending = Chain::iter()
             .into_iter()
@@ -50,18 +51,21 @@ impl Checkpoints {
         }
     }
 
+    /// Returns the pending-checkpoint map for `chain`.
     fn pending(&self, chain: Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
         self.pending
             .get(&chain)
-            .expect("chain should be initialized within `Checkpoints::new`")
+            .unwrap_or_default()
     }
 
+    /// Updates the pending-checkpoint metric for `chain`.
     fn observe(&self, chain: Chain, len: usize) {
         crate::metrics::requests::PENDING_CHECKPOINTS
             .with_label_values(&[chain.as_str()])
             .set(len as i64);
     }
 
+    /// Durably records an unconfirmed checkpoint and adds it to the local cache.
     pub(super) async fn persist(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         let mut pending = self.pending(checkpoint.chain).write().await;
         if let Some(existing) = pending.get(&checkpoint.block_height) {
@@ -104,6 +108,7 @@ impl Checkpoints {
         Ok(())
     }
 
+    /// Captures the current request state as a deterministic checkpoint.
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
         let mut encoded = requests
             .requests
@@ -137,6 +142,7 @@ impl Checkpoints {
         }
     }
 
+    /// Removes pending checkpoints through `height` after a confirmed checkpoint advances state.
     async fn update_pending(&self, chain: Chain, height: u64) {
         let len = {
             let mut pending = self.pending(chain).write().await;
@@ -146,6 +152,7 @@ impl Checkpoints {
         self.observe(chain, len);
     }
 
+    /// Promotes a locally pending checkpoint when its digest reaches consensus.
     pub(super) async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> bool {
         let Some(checkpoint_kind) = self.find_kind(chain, digest).await else {
             return false;
@@ -186,6 +193,7 @@ impl Checkpoints {
         true
     }
 
+    /// Hydrates local pending checkpoints and returns the newest known checkpoint.
     pub(super) async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         let latest = self.storage.load_latest(chain).await?;
         let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
@@ -214,6 +222,7 @@ impl Checkpoints {
         Ok(pending.into_iter().next_back().or(latest))
     }
 
+    /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(super) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         self.storage.reset_to_latest(checkpoint).await?;
         self.pending(checkpoint.chain).write().await.clear();
@@ -221,6 +230,7 @@ impl Checkpoints {
         Ok(())
     }
 
+    /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
     pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
         if let Some(checkpoint) = self
             .pending(chain)
@@ -235,18 +245,22 @@ impl Checkpoints {
         self.storage.load_latest(chain).await.ok().flatten()
     }
 
+    /// Reports whether `chain` can create another pending checkpoint.
     pub(super) async fn has_slot(&self, chain: Chain) -> bool {
         self.pending(chain).read().await.len() < MAX_PENDING_CHECKPOINTS
     }
 
+    /// Returns the number of locally pending checkpoints for `chain`.
     pub(super) async fn count(&self, chain: Chain) -> usize {
         self.pending(chain).read().await.len()
     }
 
+    /// Finds a checkpoint by digest, searching pending checkpoints before durable latest state.
     pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
         self.find_kind(chain, digest).await.map(Checkpoint::from)
     }
 
+    /// Finds a checkpoint by digest and identifies whether it is pending or confirmed.
     async fn find_kind(&self, chain: Chain, digest: [u8; 32]) -> Option<CheckpointKind> {
         if let Some(checkpoint) = self
             .pending(chain)
@@ -268,6 +282,7 @@ impl Checkpoints {
     }
 
     #[cfg(test)]
+    /// Returns the backing storage for tests that need to seed checkpoint state.
     pub(super) fn storage(&self) -> &CheckpointStorage {
         &self.storage
     }
