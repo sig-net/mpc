@@ -5,7 +5,7 @@ version.workspace = true
 description = "Solana chain integration for MPC"
 
 [dependencies]
-alloy-sol-types.workspace = true
+alloy.workspace = true
 anchor-client.workspace = true
 anchor-lang.workspace = true
 # TODO: replace with thiserror

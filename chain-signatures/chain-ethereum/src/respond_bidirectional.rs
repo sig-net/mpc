@@ -1,5 +1,5 @@
+use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::{Bytes, I256, U256};
-use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
