@@ -2,7 +2,7 @@
 //! submission).
 
 use crate::abi::{ChainSignatures, ChainSignaturesConstructor};
-use alloy::network::TransactionBuilder;
+use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::{Provider, WalletProvider};
 use alloy::rpc::types::request::TransactionRequest;
@@ -39,10 +39,15 @@ where
         .abi_encode(),
     );
 
-    let tx = TransactionRequest::default()
-        .into_create()
-        .with_from(deployer)
-        .with_input(Bytes::from(deployment));
+    let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_input(
+        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
+            <TransactionRequest as TransactionBuilder<Ethereum>>::into_create(
+                TransactionRequest::default(),
+            ),
+            deployer,
+        ),
+        Bytes::from(deployment),
+    );
 
     let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     receipt
