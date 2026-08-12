@@ -74,6 +74,12 @@ pub async fn run(
         .route("/sync", post(sync))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
+    // A legit `/msg` body is one <=256 KB encrypted partition. Set the limit
+    // explicitly so the bound isn't axum's invisible 2 MiB default.
+    let msg = Router::new()
+        .route("/msg", post(msg))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
+
     let mut router = Router::new()
         // healthcheck endpoint
         .route(
@@ -83,12 +89,12 @@ pub async fn run(
                 StatusCode::OK
             }),
         )
-        .route("/msg", post(msg))
         .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/checkpoint", get(checkpoint))
         .route("/debug", get(debug::page))
+        .merge(msg)
         .merge(sync);
 
     if cfg!(feature = "bench") {
@@ -139,11 +145,12 @@ async fn msg(
     WithRejection(Cbor(encrypted), _): WithRejection<Cbor<Vec<Ciphered>>, Error>,
 ) {
     let start = Instant::now();
+    // Forward each message inline instead of spawning a task per element.
+    // Spawning let one request create unboundedly many parked tasks (one per
+    // `Ciphered`, each holding its bytes) whenever the inbox channel was full.
+    // Awaiting instead lets a full inbox slow the connection.
     for encrypted in encrypted.into_iter() {
-        let msg_channel = state.msg_channel.clone();
-        tokio::spawn(async move {
-            msg_channel.send_inbox(encrypted).await;
-        });
+        state.msg_channel.send_inbox(encrypted).await;
     }
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["msg"])
