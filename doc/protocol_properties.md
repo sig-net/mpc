@@ -184,7 +184,7 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline of 200 blocks \~= 200s)  
 
 *Enforcement*: The owner republishes on a timer, retrying indefinitely with backoff capped at 60 s.
-Currently not guaranteed because that retry lives only in the publishing process, and only the successful instance's proposer publishes at all: no other participant takes over, and nothing about a pending publish is persisted, so a crash before the chain accepts loses the signature with no record to resume from. On NEAR the 200 s yield deadline can also expire while the publisher is still backing off.
+Currently not guaranteed, for two reasons. Only the successful instance's proposer publishes, and no other participant takes over, even though every participant holds the finished signature. And the retry itself lives in the publishing process, so what survives a restart is only what reached a confirmed checkpoint: on the checkpointed chains that includes the pending publish and its signature, while NEAR and Bitcoin produce no checkpoints at all and keep it in memory alone. On NEAR the 200 s yield deadline can also expire while the publisher is still backing off.
 
 ### L4. Mesh convergence
 
