@@ -600,7 +600,7 @@ impl Backlog {
             let requests = self.pending(&chain).read().await;
             Checkpoints::snapshot(&requests, chain)
         };
-        self.checkpoints.persist(&checkpoint).await?;
+        self.checkpoints.persist_pending(&checkpoint).await?;
         Ok(checkpoint)
     }
 
