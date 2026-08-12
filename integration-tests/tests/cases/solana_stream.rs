@@ -443,7 +443,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .await
         .expect("checkpoint creation should succeed");
     seeded_backlog
-        .on_consensus_confirmed(Chain::Solana, &checkpoint)
+        .confirm_consensus(Chain::Solana, checkpoint.digest())
         .await;
 
     let recovered_backlog = Backlog::persisted(storage);

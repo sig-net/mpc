@@ -57,9 +57,8 @@ pub(crate) async fn wait_detected_regression(
 }
 
 /// Returns `true` if a regression is detected. When the consensus digest matches
-/// a local checkpoint (latest or historical), the checkpoint is confirmed and
-/// persisted via `on_consensus_confirmed`. Returns `false` when the backlog is
-/// aligned (no regression).
+/// a local checkpoint (latest or historical), the checkpoint is confirmed via
+/// `confirm_consensus`. Returns `false` when the backlog is aligned (no regression).
 async fn detect_regression(
     chain: Chain,
     backlog: &Backlog,
@@ -76,17 +75,18 @@ async fn detect_regression(
         return false;
     };
 
-    // Consensus matches our latest local checkpoint → confirm and persist.
-    if current_checkpoint.digest() == checkpoint_digest.digest {
-        backlog
-            .on_consensus_confirmed(chain, &current_checkpoint)
-            .await;
+    // Consensus matches our latest local checkpoint → confirm it.
+    if current_checkpoint.digest() == checkpoint_digest.digest
+        && backlog
+            .confirm_consensus(chain, checkpoint_digest.digest)
+            .await
+    {
         return false;
     }
 
-    // Consensus matches an older checkpoint in our history → confirm and persist.
-    if let Some(matched) = backlog
-        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+    // Consensus matches an older checkpoint in our history → confirm it.
+    if backlog
+        .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
         tracing::info!(
@@ -95,7 +95,6 @@ async fn detect_regression(
             consensus_height = checkpoint_digest.height,
             "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
         );
-        backlog.on_consensus_confirmed(chain, &matched).await;
         return false;
     }
 

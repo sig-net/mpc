@@ -23,18 +23,10 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    // If we can find the consensus checkpoint locally, confirm it and return.
-    if let Some(matched) = backlog
-        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+    if backlog
+        .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        tracing::info!(
-            ?chain,
-            matched_height = matched.block_height,
-            consensus_height = checkpoint_digest.height,
-            "consensus checkpoint matches a local checkpoint; confirming"
-        );
-        backlog.on_consensus_confirmed(chain, &matched).await;
         return None;
     }
 

@@ -379,7 +379,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 
     // Simulate consensus confirmation so storage has the checkpoint
     ctx.backlog
-        .on_consensus_confirmed(tx.source_chain, &checkpoint)
+        .confirm_consensus(tx.source_chain, checkpoint.digest())
         .await;
 
     let threshold = 1;

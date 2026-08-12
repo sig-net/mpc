@@ -674,27 +674,65 @@ impl Backlog {
         Some(checkpoint)
     }
 
-    /// Called when consensus confirms a checkpoint (via the watcher).
-    /// Promotes it to the latest checkpoint before removing it from memory.
-    pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
-        if let Err(err) = self.storage.promote_pending(checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to promote consensus checkpoint");
-            return;
-        }
-
-        // Remove from pending checkpoints (frees a slot for future checkpoints)
+    async fn mark_consensus_confirmed(&self, chain: Chain, height: u64) {
         let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
-            pending.retain(|&height, _| height > checkpoint.block_height);
+            pending.retain(|&pending_height, _| pending_height > height);
             pending.len()
         };
         self.observe_pending_checkpoints(chain, len);
+    }
+
+    /// Confirm a locally available checkpoint against an on-chain consensus digest.
+    pub async fn confirm_consensus(&self, chain: Chain, digest: [u8; 32]) -> bool {
+        let pending = self
+            .pending_checkpoints(&chain)
+            .read()
+            .await
+            .values()
+            .find(|checkpoint| checkpoint.digest() == digest)
+            .cloned();
+
+        let Some(checkpoint) = pending else {
+            let Ok(Some(latest)) = self.storage.load_latest(chain).await else {
+                return false;
+            };
+            if latest.digest() != digest {
+                return false;
+            }
+            self.mark_consensus_confirmed(chain, latest.block_height)
+                .await;
+            return true;
+        };
+
+        match self
+            .storage
+            .promote_pending(chain, checkpoint.block_height, digest)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    ?chain,
+                    ?digest,
+                    "pending checkpoint disappeared before promotion"
+                );
+                return false;
+            }
+            Err(err) => {
+                tracing::warn!(?chain, %err, "failed to promote consensus checkpoint");
+                return false;
+            }
+        }
+        self.mark_consensus_confirmed(chain, checkpoint.block_height)
+            .await;
 
         tracing::info!(
             ?chain,
             height = checkpoint.block_height,
             "consensus checkpoint confirmed"
         );
+        true
     }
 
     /// Load the durable checkpoint state and return the newest checkpoint.
@@ -2743,7 +2781,7 @@ mod tests {
 
         // Confirm one checkpoint → frees a slot
         let cp = backlog.latest_checkpoint(chain).await.unwrap();
-        backlog.on_consensus_confirmed(chain, &cp).await;
+        assert!(backlog.confirm_consensus(chain, cp.digest()).await);
 
         // Should be able to create a new checkpoint now
         let h = (MAX_PENDING_CHECKPOINTS as u64 + 1) * interval;
@@ -2754,7 +2792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_consensus_confirmed_removes_from_pending() {
+    async fn test_confirm_consensus_removes_from_pending() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
         let interval = chain.checkpoint_interval().unwrap();
@@ -2774,7 +2812,7 @@ mod tests {
         );
 
         // Confirm first → pending has 1
-        backlog.on_consensus_confirmed(chain, &cp1).await;
+        assert!(backlog.confirm_consensus(chain, cp1.digest()).await);
         assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 1);
         assert_eq!(
             backlog.latest_checkpoint(chain).await.unwrap().block_height,
@@ -2783,7 +2821,7 @@ mod tests {
         );
 
         // Confirm second → pending has 0
-        backlog.on_consensus_confirmed(chain, &cp2).await;
+        assert!(backlog.confirm_consensus(chain, cp2.digest()).await);
         assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 0);
     }
 
@@ -2867,7 +2905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_consensus_confirmed_evicts_older_pending_checkpoints() {
+    async fn test_confirm_consensus_evicts_older_pending_checkpoints() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
         let interval = chain.checkpoint_interval().unwrap();
@@ -2890,7 +2928,7 @@ mod tests {
         );
 
         // Confirming the second checkpoint should evict the first and second
-        backlog.on_consensus_confirmed(chain, &cp2).await;
+        assert!(backlog.confirm_consensus(chain, cp2.digest()).await);
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
             1,
@@ -2911,7 +2949,7 @@ mod tests {
         );
 
         // Confirming the third checkpoint should evict cp3 (0 pending)
-        backlog.on_consensus_confirmed(chain, &cp3).await;
+        assert!(backlog.confirm_consensus(chain, cp3.digest()).await);
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
             0,
@@ -2935,7 +2973,7 @@ mod tests {
         let digest = cp.digest();
 
         // Confirm it (removes from pending, persists to storage)
-        backlog.on_consensus_confirmed(chain, &cp).await;
+        assert!(backlog.confirm_consensus(chain, cp.digest()).await);
 
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),

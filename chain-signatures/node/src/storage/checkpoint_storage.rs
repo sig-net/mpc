@@ -57,6 +57,10 @@ impl CheckpointStorage {
         }
     }
 
+    fn pending_checkpoint_field(height: u64, digest: [u8; 32]) -> String {
+        format!("{height}:{}", hex::encode(digest))
+    }
+
     /// Persist a checkpoint as the latest consensus checkpoint.
     ///
     /// Only consensus-confirmed checkpoints should be persisted.
@@ -89,13 +93,27 @@ impl CheckpointStorage {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize pending checkpoint")?;
-                conn.hset::<_, _, _, ()>(
-                    self.pending_checkpoint_key(checkpoint.chain),
-                    checkpoint.block_height,
-                    value,
-                )
-                .await
-                .context("failed to persist pending checkpoint to redis")?;
+                const PERSIST: &str = r#"
+                    local height = ARGV[1]
+                    local entries = redis.call('HKEYS', KEYS[1])
+                    for _, field in ipairs(entries) do
+                        if string.match(field, '^(%d+):') == height then
+                            redis.call('HDEL', KEYS[1], field)
+                        end
+                    end
+                    redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
+                "#;
+                let _: () = redis::Script::new(PERSIST)
+                    .key(self.pending_checkpoint_key(checkpoint.chain))
+                    .arg(checkpoint.block_height)
+                    .arg(Self::pending_checkpoint_field(
+                        checkpoint.block_height,
+                        checkpoint.digest(),
+                    ))
+                    .arg(value)
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to persist pending checkpoint to redis")?;
             }
             CheckpointStorage::InMemory { pending, .. } => {
                 pending
@@ -137,65 +155,67 @@ impl CheckpointStorage {
         }
     }
 
-    /// Promote the durable pending checkpoint and prune all older pending checkpoints.
-    pub async fn promote_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        let expected = serde_json::to_string(checkpoint)
-            .context("failed to serialize checkpoint persistence")?;
+    /// Promote the durable pending checkpoint identified by its height and consensus digest.
+    /// Returns false when the checkpoint is no longer pending.
+    pub async fn promote_pending(
+        &self,
+        chain: Chain,
+        height: u64,
+        digest: [u8; 32],
+    ) -> anyhow::Result<bool> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 const PROMOTE: &str = r#"
-                    local pending = redis.call('HGET', KEYS[2], ARGV[2])
-                    if pending and pending ~= ARGV[1] then
+                    local pending = redis.call('HGET', KEYS[2], ARGV[1])
+                    if not pending then
                         return 0
                     end
-                    redis.call('SET', KEYS[1], pending or ARGV[1])
+                    redis.call('SET', KEYS[1], pending)
+                    local height = tonumber(ARGV[2])
                     local entries = redis.call('HGETALL', KEYS[2])
                     for i = 1, #entries, 2 do
-                        if tonumber(entries[i]) <= tonumber(ARGV[2]) then
+                        local field_height = tonumber(string.match(entries[i], '^(%d+):'))
+                        if field_height <= height then
                             redis.call('HDEL', KEYS[2], entries[i])
                         end
                     end
                     return 1
                 "#;
                 let promoted: i32 = redis::Script::new(PROMOTE)
-                    .key(self.checkpoint_key(checkpoint.chain))
-                    .key(self.pending_checkpoint_key(checkpoint.chain))
-                    .arg(expected)
-                    .arg(checkpoint.block_height)
+                    .key(self.checkpoint_key(chain))
+                    .key(self.pending_checkpoint_key(chain))
+                    .arg(Self::pending_checkpoint_field(height, digest))
+                    .arg(height)
                     .invoke_async(&mut conn)
                     .await
                     .context("failed to promote pending checkpoint")?;
-                if promoted == 0 {
-                    anyhow::bail!(
-                        "pending checkpoint changed before promotion at height {}",
-                        checkpoint.block_height
-                    );
-                }
+                Ok(promoted == 1)
             }
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
                 let promoted = {
                     let mut pending = pending.write().await;
-                    let checkpoints = pending.entry(checkpoint.chain).or_default();
-                    if let Some(stored) = checkpoints.get(&checkpoint.block_height) {
-                        anyhow::ensure!(
-                            stored == checkpoint,
-                            "pending checkpoint changed before promotion at height {}",
-                            checkpoint.block_height
-                        );
+                    let Some(checkpoints) = pending.get_mut(&chain) else {
+                        return Ok(false);
+                    };
+                    let Some(checkpoint) = checkpoints.get(&height) else {
+                        return Ok(false);
+                    };
+                    if checkpoint.digest() != digest {
+                        return Ok(false);
                     }
-                    let promoted = checkpoints
-                        .remove(&checkpoint.block_height)
-                        .unwrap_or_else(|| checkpoint.clone());
+                    let Some(checkpoint) = checkpoints.remove(&height) else {
+                        return Ok(false);
+                    };
                     checkpoints.retain(|height, _| *height > checkpoint.block_height);
-                    promoted
+                    checkpoint
                 };
-                latest.write().await.insert(checkpoint.chain, promoted);
+                latest.write().await.insert(chain, promoted);
+                Ok(true)
             }
         }
-        Ok(())
     }
 
     /// Replace the confirmed checkpoint and discard obsolete pending checkpoints.
@@ -315,7 +335,11 @@ mod tests {
             vec![first.clone(), second.clone()]
         );
 
-        storage.promote_pending(&first).await?;
+        assert!(
+            storage
+                .promote_pending(chain, first.block_height, first.digest())
+                .await?
+        );
         assert_eq!(storage.load_latest(chain).await?, Some(first));
         assert_eq!(storage.load_pending(chain).await?, vec![second]);
 
@@ -340,7 +364,11 @@ mod tests {
 
         storage.persist_pending(&checkpoint).await?;
         storage.persist_pending(&conflicting).await?;
-        assert!(storage.promote_pending(&checkpoint).await.is_err());
+        assert!(
+            !storage
+                .promote_pending(Chain::Solana, checkpoint.block_height, checkpoint.digest())
+                .await?
+        );
         assert_eq!(
             storage.load_pending(Chain::Solana).await?,
             vec![conflicting]
