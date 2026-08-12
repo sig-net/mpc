@@ -192,5 +192,3 @@ Currently not guaranteed because ZZZ.
 *Rationale.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
 *Enforcement.* A peer reporting Running waits in Syncing, outside the active set, until a sync round-trip succeeds; for a correct, reachable peer in a synchronous interval it does, so the property holds. The bound is the poll interval, the round-trip, and the batch it rides in: syncs run concurrently but report as one group capped by `BROADCAST_TIMEOUT` (120 s), so a fast peer activates at the slowest peer's pace. Per-peer reporting would cut that to the peer's own round-trip.
-
-*Outside the property.* A node answering `/status` as Running while its syncs keep failing is not correct in §2's sense, so L4 excludes it, though it is an ordinary failure: nothing bounds its time in Syncing, and meanwhile requests stall (L1) and supply halts (L2). Activating it anyway is not free, since a stale view costs a MissingArtifact round per attempt (D3 caps it at that), not once. Convergence is only visible in logs; an Offline-to-Active histogram would fix that.
