@@ -8,10 +8,9 @@ use checkpoints::Checkpoints;
 use anyhow::Context;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PendingTx,
-    SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
+    SignKind,
 };
-use sha3::Digest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -107,43 +106,9 @@ impl PendingRequests {
         self.processed_block_height = Some(height);
     }
 
+    #[cfg(test)]
     fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        let mut encoded = self
-            .requests
-            .iter()
-            .map(|(&sign_id, entry)| {
-                let mut transaction = Vec::new();
-                ciborium::ser::into_writer(entry, &mut transaction)
-                    .expect("serialize backlog entry for checkpoint");
-                let consensus_tag = entry.status().consensus_tag();
-                (
-                    PendingTx {
-                        sign_id,
-                        transaction,
-                    },
-                    consensus_tag,
-                )
-            })
-            .collect::<Vec<_>>();
-        encoded.sort_by_key(|(pending, _)| pending.sign_id);
-
-        let mut cumulative = sha3::Sha3_256::new();
-        for (_, consensus_tag) in &encoded {
-            cumulative.update([*consensus_tag]);
-        }
-        let cumulative_digest = cumulative.finalize().into();
-
-        let pending_requests = encoded
-            .into_iter()
-            .map(|(pending, _)| pending)
-            .collect::<Vec<_>>();
-
-        Checkpoint {
-            chain,
-            block_height: self.processed_block_height.unwrap_or(0),
-            pending_requests,
-            cumulative_digest,
-        }
+        Checkpoints::snapshot(self, chain)
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {

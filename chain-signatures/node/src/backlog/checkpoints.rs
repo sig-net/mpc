@@ -1,7 +1,8 @@
 use super::{PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::{Chain, Checkpoint, PendingTx};
+use sha3::Digest;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -52,7 +53,9 @@ impl Checkpoints {
         }
         drop(pending);
 
-        let checkpoint = requests.read().await.checkpoint(chain);
+        let requests = requests.read().await;
+        let checkpoint = Self::snapshot(&requests, chain);
+        drop(requests);
 
         if let Err(err) = self.storage.persist_pending(&checkpoint).await {
             tracing::warn!(?chain, %err, "failed to persist pending checkpoint");
@@ -66,6 +69,39 @@ impl Checkpoints {
         };
         self.observe(checkpoint.chain, len);
         Some(checkpoint)
+    }
+
+    pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
+        let mut encoded = requests
+            .requests
+            .iter()
+            .map(|(&sign_id, entry)| {
+                let mut transaction = Vec::new();
+                ciborium::ser::into_writer(entry, &mut transaction)
+                    .expect("serialize backlog entry for checkpoint");
+                let consensus_tag = entry.status().consensus_tag();
+                (
+                    PendingTx {
+                        sign_id,
+                        transaction,
+                    },
+                    consensus_tag,
+                )
+            })
+            .collect::<Vec<_>>();
+        encoded.sort_by_key(|(pending, _)| pending.sign_id);
+
+        let mut cumulative = sha3::Sha3_256::new();
+        for (_, consensus_tag) in &encoded {
+            cumulative.update([*consensus_tag]);
+        }
+
+        Checkpoint {
+            chain,
+            block_height: requests.processed_block_height.unwrap_or(0),
+            pending_requests: encoded.into_iter().map(|(pending, _)| pending).collect(),
+            cumulative_digest: cumulative.finalize().into(),
+        }
     }
 
     async fn update_pending(&self, chain: Chain, height: u64) {
