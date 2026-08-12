@@ -18,30 +18,29 @@ import {
   type Transaction,
   type UnprovenTransaction,
 } from "@midnightntwrk/ledger-v9";
+import { signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
 import { PublisherError } from "./errors.js";
+import { RESPOND_CIRCUITS, type RespondCircuit } from "./intent.js";
 
 export type UnboundTransaction = Transaction<SignatureEnabled, Proof, PreBinding>;
 
 const BUILTIN_PREFIX = "midnight/";
 
-// The key location arrives inside caller-supplied bytes and becomes a path; refusing
-// anything but a compactc artifact name stops the wire choosing which file is read.
-const CIRCUIT_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+function isRespondCircuit(keyLocation: string): keyLocation is RespondCircuit {
+  return RESPOND_CIRCUITS.some((circuit) => circuit === keyLocation);
+}
 
-async function keyMaterial(managedDir: string, keyLocation: string): Promise<ProvingKeyMaterial> {
-  if (!CIRCUIT_NAME.test(keyLocation)) {
-    throw new PublisherError("bad_request", `the intent names an unusable key location \`${keyLocation}\``);
-  }
-
+async function keyMaterial(keyLocation: RespondCircuit): Promise<ProvingKeyMaterial> {
   const artifact = async (directory: string, extension: string): Promise<Uint8Array> => {
     try {
-      return Uint8Array.from(await readFile(join(managedDir, directory, `${keyLocation}.${extension}`)));
+      return Uint8Array.from(
+        await readFile(join(signetContractManagedPath, directory, `${keyLocation}.${extension}`)),
+      );
     } catch (cause) {
       throw new PublisherError(
         "contract_mismatch",
-        `no ${extension} for circuit \`${keyLocation}\` in ${managedDir}; ` +
-          `rebuild the contract assets or repoint MIDNIGHT_PUB_MANAGED_DIR`,
+        `the packaged contract has no ${extension} for circuit \`${keyLocation}\``,
         { cause },
       );
     }
@@ -67,10 +66,14 @@ async function post(proofServerUrl: string, path: string, body: Uint8Array): Pro
   return new Uint8Array(await response.arrayBuffer());
 }
 
-export function provingProvider(managedDir: string, proofServerUrl: string): ProvingProvider {
-  // Read per call: a cache would outlive a redeployed managed dir.
-  const material = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> =>
-    keyLocation.startsWith(BUILTIN_PREFIX) ? undefined : keyMaterial(managedDir, keyLocation);
+export function provingProvider(proofServerUrl: string): ProvingProvider {
+  const material = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> => {
+    if (keyLocation.startsWith(BUILTIN_PREFIX)) return undefined;
+    if (!isRespondCircuit(keyLocation)) {
+      throw new PublisherError("bad_request", `the intent names an unsupported key location \`${keyLocation}\``);
+    }
+    return keyMaterial(keyLocation);
+  };
 
   return {
     check: async (preimage, keyLocation) =>
@@ -88,9 +91,8 @@ export function provingProvider(managedDir: string, proofServerUrl: string): Pro
 }
 
 export function proveTransaction(
-  managedDir: string,
   proofServerUrl: string,
   transaction: UnprovenTransaction,
 ): Promise<UnboundTransaction> {
-  return transaction.prove(provingProvider(managedDir, proofServerUrl), CostModel.initialCostModel());
+  return transaction.prove(provingProvider(proofServerUrl), CostModel.initialCostModel());
 }

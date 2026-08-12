@@ -18,17 +18,20 @@ import {
   communicationCommitmentRandomness,
 } from "@midnightntwrk/ledger-v9";
 import {
-  Contract as SignetContract,
   createSignetContractPrivateState,
   expectedVk,
   type SignetContractCircuitId,
-  type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
-import { makeVacantCompiledContract } from "@sig-net/midnight-contract-deploy";
+import {
+  signetContractCompiledContract,
+  signetContractManagedPath,
+} from "@sig-net/midnight-contract-deploy";
 
 import { PublisherError } from "./errors.js";
 
-export type RespondCircuit = Extract<SignetContractCircuitId, "respond" | "respondBidirectional">;
+export const RESPOND_CIRCUITS = ["respond", "respondBidirectional"] as const satisfies readonly SignetContractCircuitId[];
+
+export type RespondCircuit = (typeof RESPOND_CIRCUITS)[number];
 
 export interface WireSignature {
   readonly bigR: { readonly x: string; readonly y: string };
@@ -66,9 +69,9 @@ function circuitArgs(input: BuildIntentInput): readonly [Uint8Array, unknown] {
 
 // `Configuration.Keys` is required even though respond signs nothing: the one executable
 // also serves the maintenance operations, and it reads `keys.coinPublic` off the provider.
-function executionContext(managedDir: string, coinPublicKey: string) {
+function executionContext(coinPublicKey: string) {
   return Layer.mergeAll(
-    ZKFileConfiguration.layer(managedDir).pipe(Layer.provide(NodeContext.layer)),
+    ZKFileConfiguration.layer(signetContractManagedPath).pipe(Layer.provide(NodeContext.layer)),
     Layer.provide(
       Configuration.layer,
       Layer.setConfigProvider(Configuration.configProvider({ keys: { coinPublic: coinPublicKey } })),
@@ -80,7 +83,7 @@ function executionContext(managedDir: string, coinPublicKey: string) {
  * NOT byte-deterministic: the communication commitment is sampled per call. Assert on
  * the decoded call, never the bytes.
  */
-export async function buildIntent(managedDir: string, input: BuildIntentInput): Promise<Uint8Array> {
+export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> {
   const contractState = ContractState.deserialize(fromHex(input.contractState));
 
   const operation = contractState.operation(input.circuit);
@@ -106,16 +109,11 @@ export async function buildIntent(managedDir: string, input: BuildIntentInput): 
     );
   }
 
-  const compiledContract = makeVacantCompiledContract<
-    SignetContract<SignetContractPrivateState>,
-    SignetContractPrivateState
-  >("signet-contract", SignetContract, managedDir);
-
   const [requestId, event] = circuitArgs(input);
   // `ProvableCircuitId` does not accept a hand-written union, so the id and argument
   // tuple cross as `never`; the operation lookup above validates the pair.
   const result = await Effect.runPromise(
-    ContractExecutable.make(compiledContract)
+    ContractExecutable.make(signetContractCompiledContract)
       .circuit(
         input.circuit as never,
         {
@@ -127,7 +125,7 @@ export async function buildIntent(managedDir: string, input: BuildIntentInput): 
         requestId,
         event as never,
       )
-      .pipe(Effect.provide(executionContext(managedDir, input.coinPublicKey))),
+      .pipe(Effect.provide(executionContext(input.coinPublicKey))),
   );
 
   // A second call would mean the contract grew cross-contract calls this builder cannot carry.

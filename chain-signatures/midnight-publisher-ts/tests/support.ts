@@ -26,7 +26,6 @@ export function managedDir(): string {
 
 // No endpoints: the submit path can only reach a wallet a test primed by hand.
 export const testConfig = (overrides: Partial<Config> = {}): Config => ({
-  managedDir: managedDir(),
   networkId: "undeployed",
   endpoints: undefined,
   ...overrides,

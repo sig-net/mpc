@@ -29,10 +29,7 @@ const S = "33".repeat(32);
 describe("buildIntent", () => {
   it("builds one guaranteed respond call with the exact wire arguments", async () => {
     const input = await respondInput();
-    const bytes = await buildIntent(
-      managedDir(),
-      { ...input, signature: { ...input.signature, recoveryId: 1 } },
-    );
+    const bytes = await buildIntent({ ...input, signature: { ...input.signature, recoveryId: 1 } });
 
     const intent = decodeIntent(bytes);
     const rendered = renderCall(bytes);
@@ -47,7 +44,7 @@ describe("buildIntent", () => {
   });
 
   it("builds respondBidirectional with the same signature-only shape as respond", async () => {
-    const bytes = await buildIntent(managedDir(), await respondInput({ circuit: "respondBidirectional" }));
+    const bytes = await buildIntent(await respondInput({ circuit: "respondBidirectional" }));
 
     expect(decodeIntent(bytes).actions).toHaveLength(1);
     expect(calledEntryPoint(bytes)).toBe("respondBidirectional");
@@ -57,7 +54,7 @@ describe("buildIntent", () => {
   it("names the mismatch when the deployed contract has no such entry point", async () => {
     const empty = toHex(new ContractState().serialize());
 
-    await expect(buildIntent(managedDir(), await respondInput({ contractState: empty }))).rejects.toThrow(
+    await expect(buildIntent(await respondInput({ contractState: empty }))).rejects.toThrow(
       /exposes no operation `respond`/,
     );
   });
@@ -69,7 +66,7 @@ describe("buildIntent", () => {
     state.setOperation("respond", operation);
 
     await expect(
-      buildIntent(managedDir(), await respondInput({ contractState: toHex(state.serialize()) })),
+      buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
     ).rejects.toMatchObject({ code: "contract_mismatch" });
   });
 
@@ -78,7 +75,7 @@ describe("buildIntent", () => {
     state.setOperation("respond", new ContractOperation());
 
     await expect(
-      buildIntent(managedDir(), await respondInput({ contractState: toHex(state.serialize()) })),
+      buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
     ).rejects.toMatchObject({ code: "contract_mismatch" });
   });
 });

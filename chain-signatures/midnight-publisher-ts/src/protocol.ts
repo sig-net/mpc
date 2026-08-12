@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { type Config } from "./config.js";
 import { describeFailure, jsonObject, PublisherError, type ErrorCode } from "./errors.js";
-import { buildIntent, type BuildIntentInput } from "./intent.js";
+import { buildIntent, RESPOND_CIRCUITS, type BuildIntentInput } from "./intent.js";
 import { handleSubmit } from "./submit.js";
 
 export type BuildRequest = { readonly id: number } & BuildIntentInput;
@@ -51,7 +51,7 @@ const SubmitSchema = wireObject({ id: wireId, intent: ledgerHex });
 const BuildSchema = wireObject({
   id: wireId,
   contractAddress: hex32,
-  circuit: z.literal(["respond", "respondBidirectional"], MUST_BE_A_CIRCUIT),
+  circuit: z.literal(RESPOND_CIRCUITS, MUST_BE_A_CIRCUIT),
   requestId: hex32,
   signature: wireSignature,
   contractState: ledgerHex,
@@ -80,7 +80,7 @@ async function answer(config: Config, body: Record<string, unknown>): Promise<Re
       const parsed = BuildSchema.safeParse(body);
       if (!parsed.success) throw toBadRequest(parsed.error);
       const request: BuildRequest = parsed.data;
-      const intent = await buildIntent(config.managedDir, request);
+      const intent = await buildIntent(request);
       return { id: request.id, ok: true, intent: Buffer.from(intent).toString("hex") };
     }
     case "submit": {

@@ -19,7 +19,6 @@ import {
 } from "../src/submit.js";
 import type { Landed } from "../src/wallet.js";
 import {
-  managedDir,
   primeStub,
   respondInput,
   SINGLETON,
@@ -33,7 +32,7 @@ const CONFIG = testConfig();
 let intent: Uint8Array;
 
 beforeAll(async () => {
-  intent = await buildIntent(managedDir(), await respondInput());
+  intent = await buildIntent(await respondInput());
 }, 120_000);
 
 const PRODUCTION_TIMEOUT = SUBMIT_TIMEOUT.ms;

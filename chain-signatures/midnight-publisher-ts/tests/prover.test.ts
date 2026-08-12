@@ -7,14 +7,14 @@ import { describe, expect, it } from "vitest";
 import { buildIntent } from "../src/intent.js";
 import { provingProvider } from "../src/prover.js";
 import { decodeIntent } from "../src/submit.js";
-import { managedDir, respondInput } from "./support.js";
+import { respondInput } from "./support.js";
 
 const NOWHERE = "http://127.0.0.1:1";
 
-const provider = () => provingProvider(managedDir(), NOWHERE);
+const provider = () => provingProvider(NOWHERE);
 
 async function proofRequest() {
-  const intent = await buildIntent(managedDir(), await respondInput());
+  const intent = await buildIntent(await respondInput());
   const transaction = Transaction.fromParts("undeployed", undefined, undefined, decodeIntent(intent));
   let captured: { preimage: Uint8Array; keyLocation: string } | undefined;
   const stop = new Error("captured proof request");
@@ -54,32 +54,25 @@ async function serve(handler: (request: IncomingMessage, response: ServerRespons
 }
 
 describe("the proving provider", () => {
-  it("carries the compiled contract's own key material for a circuit it has", async () => {
-    const material = await provider().lookupKey("respond");
+  it("carries the compiled contract's key material for its supported circuits", async () => {
+    for (const circuit of ["respond", "respondBidirectional"] as const) {
+      const material = await provider().lookupKey(circuit);
 
-    expect(material?.proverKey.length).toBeGreaterThan(0);
-    expect(material?.verifierKey.length).toBeGreaterThan(0);
-    expect(material?.ir.length).toBeGreaterThan(0);
+      expect(material?.proverKey.length, circuit).toBeGreaterThan(0);
+      expect(material?.verifierKey.length, circuit).toBeGreaterThan(0);
+      expect(material?.ir.length, circuit).toBeGreaterThan(0);
+    }
   });
 
   it("leaves the protocol's own circuits to the server", async () => {
-    for (const builtin of ["midnight/zswap/spend", "midnight/zswap/output", "midnight/dust/spend"]) {
-      expect(await provider().lookupKey(builtin), builtin).toBeUndefined();
-    }
+    expect(await provider().lookupKey("midnight/zswap/spend")).toBeUndefined();
   });
 
-  it("refuses a key location that is not a circuit name, before it becomes a path", async () => {
-    // The key location is read out of bytes this process did not write.
-    const hostile = ["../../../../etc/passwd", "keys/respond", "respond/../../secret", ".env", "/etc/passwd", ""];
-
-    for (const keyLocation of hostile) {
+  it("refuses every non-builtin location outside the publisher's exact contract surface", async () => {
+    for (const keyLocation of ["notACircuit", "../../../../etc/passwd"]) {
       await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toMatchObject({ code: "bad_request" });
+      await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toThrowError(/unsupported key location/);
     }
-  });
-
-  it("names the managed dir when a well-formed circuit name has no artifacts", async () => {
-    await expect(provider().lookupKey("notACircuit")).rejects.toMatchObject({ code: "contract_mismatch" });
-    await expect(provider().lookupKey("notACircuit")).rejects.toThrowError(/MIDNIGHT_PUB_MANAGED_DIR/);
   });
 
   it("posts ledger payloads and reports proof-server status failures", async () => {
@@ -96,7 +89,7 @@ describe("the proving provider", () => {
       body = Buffer.concat(chunks);
       response.writeHead(200).end(Buffer.from([7, 8, 9]));
     });
-    const live = provingProvider(managedDir(), server.url);
+    const live = provingProvider(server.url);
     try {
       const request = await proofRequest();
       await expect(live.check(request.preimage, request.keyLocation)).rejects.toThrow(

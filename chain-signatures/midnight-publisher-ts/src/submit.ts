@@ -58,7 +58,7 @@ async function buildPublisher(config: Config): Promise<Publisher> {
     );
   }
   return {
-    proveTx: (tx) => proveTransaction(config.managedDir, endpoints.proofServerUrl, tx),
+    proveTx: (tx) => proveTransaction(endpoints.proofServerUrl, tx),
     wallet: await openFundingWallet(config.networkId, endpoints),
   };
 }

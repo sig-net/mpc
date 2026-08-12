@@ -13,7 +13,6 @@ export interface Endpoints {
 }
 
 export interface Config {
-  readonly managedDir: string;
   readonly networkId: string;
   readonly endpoints: Endpoints | undefined;
 }
@@ -31,7 +30,6 @@ const optionalUrl = (protocols: readonly string[]) =>
     .optional();
 
 const EnvSchema = z.object({
-  MIDNIGHT_PUB_MANAGED_DIR: z.string().min(1),
   MIDNIGHT_PUB_NETWORK_ID: z.literal(NETWORK_IDS, `must be one of ${NETWORK_IDS.join(", ")}`),
   MIDNIGHT_PUB_NODE_URL: optionalUrl(["http:", "https:", "ws:", "wss:"]),
   MIDNIGHT_PUB_PROOF_SERVER_URL: optionalUrl(["http:", "https:"]),
@@ -75,7 +73,6 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   return {
-    managedDir: parsed.data.MIDNIGHT_PUB_MANAGED_DIR,
     networkId: parsed.data.MIDNIGHT_PUB_NETWORK_ID,
     endpoints: endpointsFromEnv(parsed.data),
   };

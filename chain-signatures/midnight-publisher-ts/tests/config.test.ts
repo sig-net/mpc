@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { configFromEnv, SUBMIT_VAR_NAMES } from "../src/config.js";
 
 const BUILDER = {
-  MIDNIGHT_PUB_MANAGED_DIR: "/managed",
   MIDNIGHT_PUB_NETWORK_ID: "undeployed",
 };
 
@@ -19,7 +18,6 @@ const SUBMITTER = {
 describe("configFromEnv", () => {
   it("starts a deployment that only builds intents", () => {
     expect(configFromEnv(BUILDER)).toEqual({
-      managedDir: "/managed",
       networkId: "undeployed",
       endpoints: undefined,
     });
@@ -60,10 +58,6 @@ describe("configFromEnv", () => {
     expect(() => configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NETWORK_ID: "undeploy" })).toThrowError(
       /MIDNIGHT_PUB_NETWORK_ID/,
     );
-  });
-
-  it("refuses a missing managed dir, which both operations need", () => {
-    expect(() => configFromEnv({ MIDNIGHT_PUB_NETWORK_ID: "undeployed" })).toThrowError(/MIDNIGHT_PUB_MANAGED_DIR/);
   });
 
   it("refuses malformed endpoint URLs at startup", () => {

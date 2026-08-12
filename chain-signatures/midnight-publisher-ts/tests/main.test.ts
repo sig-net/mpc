@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { managedDir, respondInput } from "./support.js";
+import { respondInput } from "./support.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const ENTRY = `${ROOT}dist/main.js`;
@@ -36,7 +36,6 @@ function drive(lines: readonly string[], env: NodeJS.ProcessEnv = {}): Promise<R
     const child = spawn(process.execPath, [ENTRY], {
       env: {
         ...childEnv,
-        MIDNIGHT_PUB_MANAGED_DIR: managedDir(),
         MIDNIGHT_PUB_NETWORK_ID: "undeployed",
         ...env,
       },
