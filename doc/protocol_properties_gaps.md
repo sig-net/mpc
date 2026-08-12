@@ -14,6 +14,8 @@ is a new requirement.
 | 5 | S1 rests on quorum intersection alone | S1 | [#611](https://github.com/sig-net/mpc/issues/611) | medium |
 | 6 | Redis persistence does not back D3's "durably" | D3 | [#1008](https://github.com/sig-net/mpc/issues/1008), [#562](https://github.com/sig-net/mpc/issues/562) | small, operational |
 | 7 | Epochs are separated by a best-effort wipe, not by the artifact's name | S1 | unfiled ([#5](https://github.com/sig-net/mpc/issues/5) adjacent) | small |
+| 8 | One peer can drive another node's round arbitrarily high | L1, D2 | unfiled | small |
+| 9 | A respawned task runs round 0's budget at its carried round | L1 | unfiled | trivial |
 
 Suggested order: 2 and 4 first (self-contained, no protocol change), then 3 once
 its rotation question is settled, then 1, which is the only property the doc
@@ -306,6 +308,71 @@ Refusing to finalize a resharing until both pools report cleared is the obvious
 third option and the wrong one: what a stale artifact costs is aborts and wasted
 rounds, so stalling a resharing on a Redis failure trades a liveness problem for a
 worse one.
+
+## 8. L1, D2: the round a node adopts is peer-supplied and unchecked
+
+*Not filed. Found by a code-checked review of the properties doc, 2026-08-12.*
+
+**Now.** A posit message whose round is above the local one is buffered before
+anything about it is validated (`protocol/request/posit.rs:98-105`), ahead of both
+the `PositAction::Propose` check at `:108` and any check of who sent it.
+`buffer_future_posit_message` records the claimed round in `highest_seen_round`
+(`protocol/request/state.rs:101-110`), and `bump_round` then advances to
+`max(round + 1, highest_seen_round)` (`:80-88`). `record_peer_round`, fed by
+`StaleRound` rejects, takes the same unchecked path (`:92-99`).
+
+So one committee member, Byzantine or merely buggy, can send a posit stamped with
+any round it likes and move a victim there on its next bump. Two consequences:
+`round_timeout` jumps to the 10 minute ceiling, and proposer election, which is
+`(entropy[0] + round) % n`, becomes attacker-selectable. That is a liveness attack
+at f = 1 against an L1 that only assumes ≥ t correct members, and it is reachable
+without breaking any safety property. The comment at `:96` shows the immediate-jump
+case was considered; the next-bump case was not.
+
+**Plan.**
+
+1. For a Propose, the receiver can check the sender itself: `proposer_per_round` is
+   a pure function of shared inputs (D2), so reject any Propose whose sender is not
+   the elected proposer for the round it claims, before buffering it.
+2. For `StaleRound` rejects, the rejector's round cannot be checked directly, so
+   require evidence: adopt a higher round only once f + 1 distinct senders have
+   claimed at least it. One of them is then honest, which is the same amplification
+   argument the fault bound already rests on. Keep the current one-slot-per-sender
+   buffer so the evidence set costs nothing extra to maintain.
+3. Cap the per-bump jump as a backstop, so a bug on the evidence path degrades to
+   slow catch-up rather than a jump to the ceiling.
+
+**Tests.** A task-level test where a non-proposer sends a Propose for round 10^6 and
+the victim's round is unchanged. A test that f + 1 `StaleRound` rejects do move the
+round, and that f do not.
+
+**Risks.** Item 2 slows genuine catch-up when fewer than f + 1 peers have rejected,
+costing a round. That is the same cost D4 already accepts on retry, and it is
+bounded, unlike the current behaviour.
+
+## 9. L1: a respawned task runs round 0's budget
+
+*Not filed. Found by a code-checked review of the properties doc, 2026-08-12.*
+
+**Now.** `SignState::new` restores `round` from the carried counter but sets
+`budget: TimeoutBudget::new(round_timeout(0))` unconditionally
+(`protocol/request/state.rs:38-48`). A task respawned at round 9 therefore runs a
+20 s budget while its peers run `round_timeout(9)`, roughly 6 s. `spawn_tasks`
+respawns every retained request on any committee change, so this is a normal path,
+not a rare one. It contradicts L1's "peers in the same round agree on the proposer
+and the deadline", which is what makes rotation converge.
+
+This is the other half of [#1100](https://github.com/sig-net/mpc/pull/1100): the
+round was carried across respawns, the budget derived from it was not.
+
+**Plan.** Use `round_timeout(round)` for the initial budget, with `round` the value
+just loaded from the carried counter.
+
+**Tests.** Construct a state with a carried round above zero and assert the budget
+matches `round_timeout(that round)`.
+
+**Risks.** None beyond the fix being correct: a respawned task at a high round now
+gets the same short budget as its peers, which is the intent.
 
 ## Note on L3's persistence wording
 
