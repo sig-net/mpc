@@ -392,7 +392,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let recovered = Backlog::persisted(storage.clone());
 
     let checkpoint = recovered
-        .storage
+        .checkpoint_storage()
         .load_latest(tx.source_chain)
         .await
         .unwrap()

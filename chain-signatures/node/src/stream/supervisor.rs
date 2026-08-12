@@ -290,7 +290,11 @@ mod tests {
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "matching digest should not trigger regression");
 
-        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(chain)
+            .await
+            .unwrap();
         assert!(
             persisted.is_some(),
             "matching checkpoint should be persisted"
@@ -314,7 +318,11 @@ mod tests {
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "ahead with match should not trigger regression");
 
-        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(chain)
+            .await
+            .unwrap();
         assert!(persisted.is_some());
         assert_eq!(persisted.unwrap().block_height, 100);
     }

@@ -445,7 +445,12 @@ mod tests {
             );
 
             // 6. Assert persisted state
-            let persisted = fixture.backlog.storage.load_latest(chain).await.unwrap();
+            let persisted = fixture
+                .backlog
+                .checkpoint_storage()
+                .load_latest(chain)
+                .await
+                .unwrap();
             if let Some(expected_height) = case.expected_persisted_height {
                 assert!(
                     persisted.is_some(),
