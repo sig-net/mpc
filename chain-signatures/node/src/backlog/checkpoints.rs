@@ -519,4 +519,37 @@ mod tests {
             Some(checkpoint)
         );
     }
+
+    #[tokio::test]
+    async fn confirm_reports_storage_error_when_promotion_fails() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::failing());
+        let checkpoint = checkpoint(1);
+
+        // Seed the in-memory mirror directly so the lookup succeeds and the
+        // durable promotion is the failing step.
+        checkpoints
+            .pending(checkpoint.chain)
+            .write()
+            .await
+            .insert(checkpoint.block_height, checkpoint.clone());
+
+        assert!(matches!(
+            checkpoints
+                .confirm(checkpoint.chain, checkpoint.digest())
+                .await,
+            Err(CheckpointError::Storage { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirm_reports_storage_error_when_lookup_fails() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::failing());
+
+        // No local checkpoint and a failing storage: the lookup error must be
+        // surfaced instead of being reported as "not found".
+        assert!(matches!(
+            checkpoints.confirm(Chain::Ethereum, [1; 32]).await,
+            Err(CheckpointError::Storage { .. })
+        ));
+    }
 }

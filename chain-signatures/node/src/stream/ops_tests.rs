@@ -378,9 +378,12 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
 
     // Simulate consensus confirmation so storage has the checkpoint
-    ctx.backlog
-        .confirm_consensus(tx.source_chain, checkpoint.digest())
-        .await;
+    assert!(matches!(
+        ctx.backlog
+            .confirm_consensus(tx.source_chain, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let threshold = 1;
     let mut mesh_state = MeshState::default();
