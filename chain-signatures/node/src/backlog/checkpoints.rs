@@ -192,7 +192,22 @@ impl Checkpoints {
         Ok(true)
     }
 
-    /// Hydrates local pending checkpoints and returns the newest known checkpoint.
+    /// Hydrates all durable pending checkpoints above the confirmed height and
+    /// returns the newest known checkpoint.
+    ///
+    /// The full pending set is restored (not just the newest item) so that
+    /// `confirm` and `find` can still match a consensus digest for any in-flight
+    /// checkpoint after a restart, including when this node was ahead of
+    /// consensus. Consequently a pending set that had reached
+    /// `MAX_PENDING_CHECKPOINTS` is restored at its previous size: a stall
+    /// caused by consensus falling behind persists across restarts by design,
+    /// because the cap is backpressure and only a consensus confirmation (which
+    /// frees slots) unstalls it.
+    ///
+    /// The returned checkpoint is the resume point: the newest pending
+    /// checkpoint (restoring the pre-crash in-flight state and skipping
+    /// re-derivation of lower blocks), or the confirmed latest when no pending
+    /// checkpoint remains.
     pub(super) async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         let latest = self.storage.load_latest(chain).await?;
         let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
