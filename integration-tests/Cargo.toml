@@ -6,7 +6,7 @@ publish = false
 
 
 [dependencies]
-alloy = { workspace = true, features = ["provider-anvil-api"] }
+alloy = { workspace = true, features = ["provider-anvil-api", "rlp"] }
 anyhow.workspace = true
 async-process = "1"
 async-trait = "0.1"
@@ -73,6 +73,7 @@ mpc-chain-canton.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-ethereum.workspace = true
 mpc-chain-near.workspace = true
+mpc-chain-midnight.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",

@@ -1,8 +1,10 @@
 //! Midnight node configuration.
 
+use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
 use std::time::Duration;
+use url::Url;
 
 /// Timeouts and retry budget for the subxt node RPC client.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,10 +55,10 @@ impl Default for IndexerConfig {
 pub struct PublisherConfig {
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,
-    /// Funds respond transactions; empty is the indexer-only deployment.
+    /// Funds respond transactions.
     pub funding_seed: String,
     /// Duplicates `MidnightConfig::node_ws_url`: `into_config` fills both from one flag
-    /// so they cannot disagree; the child validates the submit half all-or-none.
+    /// so they cannot disagree.
     pub node_ws_url: String,
     /// These contracts are zkir-v3, which cannot be proven in process.
     pub proof_server_url: String,
@@ -76,14 +78,15 @@ impl Default for PublisherConfig {
         Self {
             // The `bin` name the TypeScript package installs, resolved on PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
-            // Blank as a set: the child reads all five blank as "no funding wallet".
             funding_seed: String::new(),
             node_ws_url: String::new(),
             proof_server_url: String::new(),
             indexer_url: String::new(),
             indexer_ws_url: String::new(),
             request_timeout: Duration::from_secs(120),
-            submit_timeout: Duration::from_secs(300),
+            // The child owns the 360 second submit deadline. Rust is only its looser
+            // process-supervision backstop, checked against the child's ready reply.
+            submit_timeout: Duration::from_secs(420),
             restart_backoff: RetryConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
@@ -118,18 +121,15 @@ pub struct MidnightConfig {
     pub node_ws_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
-    pub network_id: String,
-    pub publisher: PublisherConfig,
+    /// `None` is an indexer-only node. `Some` is a complete responder configuration.
+    pub publisher: Option<PublisherConfig>,
     pub rpc: RpcConfig,
     pub indexer: IndexerConfig,
 }
 
 impl MidnightConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.node_ws_url.is_empty(),
-            "midnight config: node_ws_url is empty"
-        );
+        validate_url("node_ws_url", &self.node_ws_url, &["ws", "wss"])?;
         anyhow::ensure!(
             self.central_address.len() == 64
                 && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -144,57 +144,39 @@ impl MidnightConfig {
             "midnight config: central_address must be lowercase hex, the canonical form \
              every comparison site assumes"
         );
-        // Presence only: legal ids belong to the builder's own schema.
-        anyhow::ensure!(
-            !self.network_id.is_empty(),
-            "midnight config: network_id is empty"
-        );
-        // An empty seed is the legal indexer-only deployment; no case rule either,
-        // unlike central_address, because the seed is decoded and never compared.
-        if !self.publisher.funding_seed.is_empty() {
-            let seed = &self.publisher.funding_seed;
+        if let Some(publisher) = &self.publisher {
+            publisher.validate()?;
             anyhow::ensure!(
-                seed.len().is_multiple_of(2)
-                    && (32..=128).contains(&seed.len())
-                    && seed.bytes().all(|b| b.is_ascii_hexdigit()),
-                "midnight config: publisher.funding_seed must be 16 to 64 bytes of hex with \
-                 no 0x prefix, got {} characters",
-                seed.len()
+                publisher.node_ws_url == self.node_ws_url,
+                "midnight config: publisher.node_ws_url must match node_ws_url"
             );
         }
-        self.validate_submit_half()
+        Ok(())
     }
+}
 
-    /// The five values a respond needs, all-or-none the way the child checks them, so
-    /// the missing one is named at startup rather than on a stderr nobody reads. Only
-    /// the names are rendered; one of the five is a spending key.
-    fn validate_submit_half(&self) -> anyhow::Result<()> {
-        let publisher = &self.publisher;
-        let submit_half = [
-            ("publisher.funding_seed", &publisher.funding_seed),
-            ("publisher.node_ws_url", &publisher.node_ws_url),
-            ("publisher.proof_server_url", &publisher.proof_server_url),
-            ("publisher.indexer_url", &publisher.indexer_url),
-            ("publisher.indexer_ws_url", &publisher.indexer_ws_url),
-        ];
-        let missing: Vec<&str> = submit_half
-            .iter()
-            .filter(|(_, value)| value.is_empty())
-            .map(|(name, _)| *name)
-            .collect();
+impl PublisherConfig {
+    fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            missing.is_empty() || missing.len() == submit_half.len(),
-            "midnight config: responding needs all of {}, or none of them for a node that \
-             only indexes; missing {}",
-            submit_half
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", "),
-            missing.join(", ")
+            self.intent_gen_command
+                .first()
+                .is_some_and(|program| !program.is_empty()),
+            "midnight config: publisher.intent_gen_command must name a program"
         );
         Ok(())
     }
+}
+
+fn validate_url(field: &str, value: &str, schemes: &[&str]) -> anyhow::Result<()> {
+    let parsed = Url::parse(value)
+        .with_context(|| format!("midnight config: {field} must be an absolute URL"))?;
+    anyhow::ensure!(
+        schemes.contains(&parsed.scheme()),
+        "midnight config: {field} must use one of {}, got {}",
+        schemes.join(", "),
+        parsed.scheme()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -205,8 +187,7 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
-            publisher: Default::default(),
+            publisher: None,
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -215,12 +196,19 @@ mod tests {
     /// A node that answers as well as indexes: the whole submit half filled.
     fn responding_config() -> MidnightConfig {
         let mut config = valid_config();
-        config.publisher.funding_seed = "0f".repeat(32);
-        config.publisher.node_ws_url = config.node_ws_url.clone();
-        config.publisher.proof_server_url = "http://127.0.0.1:6300".to_string();
-        config.publisher.indexer_url = "http://127.0.0.1:8088/api/v3/graphql".to_string();
-        config.publisher.indexer_ws_url = "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string();
+        config.publisher = Some(PublisherConfig {
+            funding_seed: "0f".repeat(32),
+            node_ws_url: config.node_ws_url.clone(),
+            proof_server_url: "http://127.0.0.1:6300".to_string(),
+            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+            ..Default::default()
+        });
         config
+    }
+
+    fn publisher_mut(config: &mut MidnightConfig) -> &mut PublisherConfig {
+        config.publisher.as_mut().expect("the test config responds")
     }
 
     #[test]
@@ -228,19 +216,14 @@ mod tests {
         // The timeouts have no flags, so only this assert observes a retune.
         let publisher = PublisherConfig::default();
         assert_eq!(publisher.request_timeout, Duration::from_secs(120));
-        assert_eq!(publisher.submit_timeout, Duration::from_secs(300));
-        assert!(publisher.funding_seed.is_empty());
-        assert!(publisher.node_ws_url.is_empty());
-        assert!(publisher.proof_server_url.is_empty());
-        assert!(publisher.indexer_url.is_empty());
-        assert!(publisher.indexer_ws_url.is_empty());
+        assert_eq!(publisher.submit_timeout, Duration::from_secs(420));
     }
 
     #[test]
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
         let mut config = responding_config();
-        config.publisher.funding_seed = seed.to_string();
+        publisher_mut(&mut config).funding_seed = seed.to_string();
 
         let rendered = format!("{config:?}");
         assert!(
@@ -255,97 +238,23 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_funding_seed_validates() {
-        let mut seedless = valid_config();
-        seedless.publisher.funding_seed = String::new();
-        seedless
+    fn indexer_only_and_responding_shapes_validate() {
+        valid_config()
             .validate()
-            .expect("a node that only indexes needs no funding seed");
-
+            .expect("an indexer-only node has no publisher config");
         responding_config()
             .validate()
-            .expect("64 hex characters is 32 bytes");
-
-        // Uppercase stays legal, unlike central_address: the seed is never compared.
-        let mut uppercase = responding_config();
-        uppercase.publisher.funding_seed = "0F".repeat(32);
-        uppercase
-            .validate()
-            .expect("the seed is decoded, never compared against anything");
-    }
-
-    #[test]
-    fn the_submit_half_validates_as_one_set_or_not_at_all() {
-        // Each of the five has to be the one missing, or a value left off the checked list stays green.
-        for blank in [
-            "funding_seed",
-            "node_ws_url",
-            "proof_server_url",
-            "indexer_url",
-            "indexer_ws_url",
-        ] {
-            let mut config = responding_config();
-            let publisher = &mut config.publisher;
-            match blank {
-                "funding_seed" => publisher.funding_seed = String::new(),
-                "node_ws_url" => publisher.node_ws_url = String::new(),
-                "proof_server_url" => publisher.proof_server_url = String::new(),
-                "indexer_url" => publisher.indexer_url = String::new(),
-                _ => publisher.indexer_ws_url = String::new(),
-            }
-            let err = config.validate().unwrap_err().to_string();
-            assert!(
-                err.contains(&format!("missing publisher.{blank}")),
-                "a config missing only {blank} must say so: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_half_configured_publisher_never_renders_the_seed_it_does_have() {
-        let seed = "0123456789abcdef0123456789abcdef";
-        let mut config = responding_config();
-        config.publisher.funding_seed = seed.to_string();
-        config.publisher.indexer_url = String::new();
-
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("missing publisher.indexer_url"), "got: {err}");
-        assert!(
-            !err.contains(seed),
-            "the funding seed reached an error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_a_malformed_funding_seed() {
-        // A typo would otherwise surface as a child failing to derive a wallet.
-        for seed in [
-            // Odd length, so the last byte has one nibble.
-            "0f".repeat(16) + "a",
-            // Hex-shaped but not hex.
-            "zz".repeat(16),
-            // Under 16 bytes.
-            "0f".repeat(15),
-            // Over 64 bytes.
-            "0f".repeat(65),
-        ] {
-            // Endpoint-complete, so the shape check is unambiguously what refuses.
-            let mut config = responding_config();
-            config.publisher.funding_seed = seed.clone();
-            let err = config.validate().unwrap_err().to_string();
-            assert!(
-                err.contains("16 to 64 bytes of hex"),
-                "unexpected error for {seed:?}: {err}"
-            );
-        }
+            .expect("the publisher's owned values are valid");
     }
 
     #[test]
     fn validate_names_offending_field() {
-        let mut empty_ws = valid_config();
-        empty_ws.node_ws_url = String::new();
-        let err = empty_ws.validate().unwrap_err().to_string();
-        assert!(err.contains("node_ws_url"), "unexpected error: {err}");
+        for invalid in ["", "http://127.0.0.1:9944"] {
+            let mut bad_ws = valid_config();
+            bad_ws.node_ws_url = invalid.to_string();
+            let err = bad_ws.validate().unwrap_err().to_string();
+            assert!(err.contains("node_ws_url"), "unexpected error: {err}");
+        }
 
         let mut short_address = valid_config();
         short_address.central_address = "ab".repeat(31);
@@ -368,9 +277,17 @@ mod tests {
         let err = uppercase.validate().unwrap_err().to_string();
         assert!(err.contains("lowercase"), "unexpected error: {err}");
 
-        let mut empty_network = valid_config();
-        empty_network.network_id = String::new();
-        let err = empty_network.validate().unwrap_err().to_string();
-        assert!(err.contains("network_id"), "unexpected error: {err}");
+        let mut mismatched_node = responding_config();
+        publisher_mut(&mut mismatched_node).node_ws_url = "ws://127.0.0.1:9999".to_string();
+        let err = mismatched_node.validate().unwrap_err().to_string();
+        assert!(err.contains("must match"), "unexpected error: {err}");
+
+        let mut empty_command = responding_config();
+        publisher_mut(&mut empty_command).intent_gen_command.clear();
+        let err = empty_command.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("intent_gen_command"),
+            "unexpected error: {err}"
+        );
     }
 }

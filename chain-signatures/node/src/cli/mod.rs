@@ -28,6 +28,7 @@ pub use args::{
     solana::SolArgs,
 };
 
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -320,7 +321,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &chains,
                 shutdown.clone(),
             )
-            .await;
+            .await?;
 
             let (sync_channel, sync_task) = SyncTask::new(
                 &node_client,
@@ -509,13 +510,12 @@ impl ChainConfigs {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured. A client that fails to build is
-    /// logged and skipped rather than aborting startup.
+    /// each other chain is added only when configured.
     async fn publishers(
         &self,
         near: NearClient,
         shutdown: CancellationToken,
-    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -548,54 +548,40 @@ impl ChainConfigs {
             }
         }
         if let Some(midnight) = &self.midnight {
-            if let Some(client) = midnight_publisher(midnight, shutdown.clone()).await {
-                publishers.insert(Chain::Midnight, client);
+            if midnight.publisher.is_some() {
+                publishers.insert(
+                    Chain::Midnight,
+                    midnight_publisher(midnight, shutdown.clone()).await?,
+                );
             }
         }
 
-        publishers
+        Ok(publishers)
     }
 }
 
-/// The Midnight publisher, when this deployment has one. Gated on the funding seed
-/// rather than on the chain being configured, unlike the arms above it: Midnight
-/// deploys indexer-only today, so a seedless deployment indexes without answering.
-/// Loud at boot, because an operator who meant to run a publisher would otherwise
-/// learn about it from a signature that is indexed, routed and never answered.
 async fn midnight_publisher(
     config: &MidnightConfig,
     shutdown: CancellationToken,
-) -> Option<Arc<MidnightPublisher>> {
-    if config.publisher.funding_seed.is_empty() {
-        tracing::warn!(
-            "midnight is configured with no funding seed, so no midnight publisher is \
-             registered and this node will index midnight requests without answering \
-             them. Supply --midnight-funding-seed to register one."
-        );
-        return None;
-    }
+) -> anyhow::Result<Arc<MidnightPublisher>> {
+    let publisher_config = config
+        .publisher
+        .as_ref()
+        .context("midnight publisher requested without publisher configuration")?;
     // A second connection to the node the indexer also dials (`MidnightIndexer` opens
     // its own inside `run()` and does not expose it); the builder is spawned only
     // here, so this stays the single child process.
-    let build = async {
-        let rpc = Arc::new(MidnightRpc::connect(config).await?);
-        let intent_gen = Arc::new(IntentGen::spawn(&config.publisher, &config.network_id).await?);
-        MidnightPublisher::new(
-            &config.publisher,
-            config.central_address.clone(),
-            rpc,
-            intent_gen,
-            Arc::new(NodeTelemetry::new(Chain::Midnight)),
-            shutdown,
-        )
-    };
-    match build.await {
-        Ok(publisher) => Some(Arc::new(publisher)),
-        Err(err) => {
-            tracing::error!(?err, "failed to create midnight publisher");
-            None
-        }
-    }
+    let rpc = Arc::new(MidnightRpc::connect(config).await?);
+    let network_id = rpc.network_id().await?;
+    let intent_gen = Arc::new(IntentGen::spawn(publisher_config, &network_id).await?);
+    Ok(Arc::new(MidnightPublisher::new(
+        publisher_config,
+        config.central_address.clone(),
+        rpc,
+        intent_gen,
+        Arc::new(NodeTelemetry::new(Chain::Midnight)),
+        shutdown,
+    )))
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -700,7 +686,7 @@ impl RpcHandles {
         signer: InMemorySigner,
         chains: &ChainConfigs,
         shutdown: CancellationToken,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
         // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
@@ -719,15 +705,15 @@ impl RpcHandles {
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone(), shutdown).await;
+        let publishers = chains.publishers(near_client.clone(), shutdown).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Self {
+        Ok(Self {
             near_client,
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        }
+        })
     }
 }
 
@@ -1187,7 +1173,6 @@ mod tests {
         for var in [
             "MPC_MIDNIGHT_NODE_WS_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
-            "MPC_MIDNIGHT_NETWORK_ID",
             "MPC_MIDNIGHT_FUNDING_SEED",
             "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
             "MPC_MIDNIGHT_PROOF_SERVER_URL",
@@ -1233,8 +1218,6 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
-            "--midnight-network-id",
-            "undeployed",
             "--midnight-funding-seed",
             &funding_seed,
             "--midnight-intent-gen-command",
@@ -1253,8 +1236,6 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
-            "--midnight-network-id",
-            "undeployed",
             "--midnight-funding-seed",
             funding_seed.as_str(),
             "--midnight-intent-gen-command",
@@ -1310,7 +1291,10 @@ mod tests {
             signer,
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         );
-        let publishers = chains.publishers(near, CancellationToken::new()).await;
+        let publishers = chains
+            .publishers(near, CancellationToken::new())
+            .await
+            .expect("an unconfigured Midnight publisher cannot fail startup");
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),

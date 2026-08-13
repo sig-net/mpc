@@ -626,17 +626,17 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         jitter: true,
     };
 
-    let publish_res = retry_rpc!(
-        Duration::MAX, // Prevent from timing out
-        retry_config,
-        // Count the failed attempt, then log the error and retry attempt
-        |attempt, err, sleep| {
+    let mut attempt = 0usize;
+    let publish = || publisher.publish_signature(&action);
+    use mpc_chain_integration_core::backon::Retryable as _;
+    let publish_res = publish
+        .retry(&retry_config.build())
+        .when(|error| publisher.should_retry(error))
+        .notify(|err, sleep| {
+            attempt += 1;
             crate::metrics::requests::SIGN_PUBLISH_FAILED_ATTEMPTS
                 .with_label_values(&[chain.as_str()])
                 .inc();
-            crate::metrics::requests::SIGN_PUBLISH_RETRY_AGE_SECONDS
-                .with_label_values(&[chain.as_str()])
-                .set(action.timestamp.elapsed().as_secs() as i64);
             tracing::warn!(
                 ?sign_id,
                 retry_count = attempt,
@@ -644,23 +644,15 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
                 ?chain,
                 "failed to publish ({err}), retrying in {sleep:?}"
             );
-        },
-        // Try to publish the signature
-        { publisher.publish_signature(&action).await }
-    );
+        })
+        .await;
 
-    if publish_res.is_ok() {
-        crate::metrics::requests::SIGN_PUBLISH_RETRY_AGE_SECONDS
-            .with_label_values(&[chain.as_str()])
-            .set(0);
-    }
-
-    // Log error if the publish failed after all retries
+    // Log an error when the publisher classifies a failure as terminal.
     if publish_res.is_err() {
         tracing::error!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
-            "exceeded max retries, trashing publish request"
+            "publisher declined to retry, trashing publish request"
         );
     }
 }
@@ -735,7 +727,7 @@ mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
-        atomic::{AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     };
 
@@ -858,37 +850,33 @@ mod tests {
         }
     }
 
-    /// Fails the first `n` calls, then succeeds, recording the chain's retry-age
-    /// gauge on the successful call: a fresh label also reads 0, so only this can
-    /// tell "set then reset" from "never written".
+    /// Fails the first `n` calls, then succeeds.
     struct FailNTimesPublisher {
         remaining: AtomicUsize,
-        age_at_success: AtomicI64,
+        retry: bool,
     }
 
     impl FailNTimesPublisher {
-        fn new(failures: usize) -> Self {
+        fn new(failures: usize, retry: bool) -> Self {
             Self {
                 remaining: AtomicUsize::new(failures),
-                age_at_success: AtomicI64::new(-1),
+                retry,
             }
         }
     }
 
     #[async_trait::async_trait]
     impl ChainPublisher for FailNTimesPublisher {
-        async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
             if self.remaining.load(Ordering::SeqCst) > 0 {
                 self.remaining.fetch_sub(1, Ordering::SeqCst);
                 anyhow::bail!("intentional publish failure")
             }
-            self.age_at_success.store(
-                crate::metrics::requests::SIGN_PUBLISH_RETRY_AGE_SECONDS
-                    .with_label_values(&[action.request.chain.as_str()])
-                    .get(),
-                Ordering::SeqCst,
-            );
             Ok(())
+        }
+
+        fn should_retry(&self, _error: &anyhow::Error) -> bool {
+            self.retry
         }
     }
 
@@ -1078,28 +1066,24 @@ mod tests {
             .with_label_values(&["Ethereum"])
             .get();
         // A publisher that fails twice then succeeds: the counter must advance by
-        // exactly the number of FAILED attempts, and the age gauge must end at 0.
-        let publisher = Arc::new(FailNTimesPublisher::new(2));
-        let mut action =
-            make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([7u8; 32]));
-        // Backdate the action so failed attempts set a nonzero age (the action
-        // timestamp is a real-time Instant, unaffected by the paused clock); the
-        // final 0 then proves the success path reset the gauge.
-        action.timestamp -= Duration::from_secs(10);
+        // exactly the number of failed attempts.
+        let publisher = Arc::new(FailNTimesPublisher::new(2, true));
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([7u8; 32]));
         execute_publish(publisher.clone(), action).await;
         let after = crate::metrics::requests::SIGN_PUBLISH_FAILED_ATTEMPTS
             .with_label_values(&["Ethereum"])
             .get();
         assert_eq!(after - before, 2.0);
-        // The last failed attempt left the backdated age on the gauge...
-        assert!(publisher.age_at_success.load(Ordering::SeqCst) >= 10);
-        // ...and the success path reset it.
-        assert_eq!(
-            crate::metrics::requests::SIGN_PUBLISH_RETRY_AGE_SECONDS
-                .with_label_values(&["Ethereum"])
-                .get(),
-            0
-        );
+    }
+
+    #[tokio::test]
+    async fn publisher_retry_policy_can_make_a_failure_terminal() {
+        let publisher = Arc::new(FailNTimesPublisher::new(2, false));
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([8u8; 32]));
+
+        execute_publish(publisher.clone(), action).await;
+
+        assert_eq!(publisher.remaining.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

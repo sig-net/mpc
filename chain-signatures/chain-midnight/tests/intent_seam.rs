@@ -65,7 +65,6 @@ fn respond_request() -> IntentRequest {
         signature: signature(),
         contract_state: hex::encode(SINGLETON_STATE),
         ledger_parameters: initial_ledger_parameters(),
-        coin_public_key: "44".repeat(32),
         ttl_seconds: 1_800_000_000,
     }
 }

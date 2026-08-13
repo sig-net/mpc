@@ -27,6 +27,11 @@ pub fn base_live_config() -> PublisherConfig {
     );
     PublisherConfig {
         intent_gen_command: vec!["node".to_string(), path_arg(&entry)],
+        funding_seed: "ab".repeat(32),
+        node_ws_url: "ws://127.0.0.1:9944".to_string(),
+        proof_server_url: "http://127.0.0.1:6300".to_string(),
+        indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+        indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
         ..Default::default()
     }
 }

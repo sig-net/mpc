@@ -27,8 +27,8 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 /// runtime entry point on the wire (`Trait_method`). Confirmed against node
 /// 2.0.0-rc.4 metadata; a rename upstream fails loudly as "function not found".
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
-/// `MidnightRuntimeApi::get_zswap_chain_state`, from the same metadata read.
-const ZSWAP_CHAIN_STATE_ENTRY: &str = "MidnightRuntimeApi_get_zswap_chain_state";
+/// The connected runtime is the canonical owner of the wallet network identity.
+const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 /// How the legacy backend renders a `state_call` at a hash the node cannot serve.
 const UNKNOWN_BLOCK_MSG: &str = "UnknownBlock";
 
@@ -252,28 +252,24 @@ impl MidnightRpc {
             })
     }
 
-    /// The zswap ledger state at `at_block_hash_0x`: the whole chain's, not one
-    /// contract's. The entry point declares an address argument and ignores it, so
-    /// unlike `contract_state` there is no absent case to report.
-    pub async fn zswap_chain_state(
-        &self,
-        address_64hex: &str,
-        at_block_hash_0x: &str,
-    ) -> anyhow::Result<Vec<u8>> {
-        use subxt::ext::codec::Encode as _;
-        // The entry point declares a `Vec<u8>`, so the address goes on the wire
-        // SCALE encoded, length prefix and all: the bare 32 bytes trap the runtime
-        // wasm on an `unreachable` instruction rather than failing legibly.
-        let call_parameters = hex::decode(address_64hex)
-            .context("contract address is not hex")?
-            .encode();
-        let at = parse_block_hash(at_block_hash_0x)?;
-        self.reads
-            .runtime_api_bytes(ZSWAP_CHAIN_STATE_ENTRY, call_parameters, at)
-            .await?
-            .with_context(|| {
-                format!("midnight node has no zswap chain state at {at_block_hash_0x}")
-            })
+    /// The network id reported by the connected finalized runtime.
+    pub async fn network_id(&self) -> anyhow::Result<String> {
+        use subxt::ext::codec::Decode as _;
+
+        let at = self.reads.finalized_head().await?;
+        let answer = self
+            .reads
+            .runtime_api_answer(NETWORK_ID_ENTRY, Vec::new(), at)
+            .await?;
+        let mut payload = &answer[..];
+        let network_id = String::decode(&mut payload)
+            .context("midnight runtime returned a malformed network id")?;
+        anyhow::ensure!(
+            payload.is_empty(),
+            "midnight runtime network id has {} trailing bytes",
+            payload.len()
+        );
+        Ok(network_id)
     }
 
     /// The finalized head as a [`BlockRef`]: the head hash, then its header for the
@@ -509,13 +505,25 @@ impl Reads {
         call_parameters: Vec<u8>,
         at: H256,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        let answer = self
+            .runtime_api_answer(entry_point, call_parameters, at)
+            .await?;
+        unwrap_runtime_api_result(&answer)
+    }
+
+    async fn runtime_api_answer(
+        &self,
+        entry_point: &'static str,
+        call_parameters: Vec<u8>,
+        at: H256,
+    ) -> anyhow::Result<Vec<u8>> {
         let fetched = retry_rpc!(self.request_timeout, self.retry, "midnight_state_call", {
             match self
                 .legacy
                 .state_call(entry_point, Some(&call_parameters), Some(at))
                 .await
             {
-                Ok(answer) => unwrap_runtime_api_result(&answer).map(Fetched::Value),
+                Ok(answer) => Ok(Fetched::Value(answer)),
                 Err(err) if err.to_string().contains(UNKNOWN_BLOCK_MSG) => {
                     Err(ReadFailure::Unservable.err(err))
                 }
@@ -551,8 +559,7 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
-            network_id: "undeployed".to_string(),
-            publisher: Default::default(),
+            publisher: None,
             rpc: Default::default(),
             indexer: Default::default(),
         };

@@ -60,7 +60,7 @@ use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-async fn start_container_with_network_retry<I, R, F>(
+pub(crate) async fn start_container_with_network_retry<I, R, F>(
     mut build: F,
     network: &str,
 ) -> Result<ContainerAsync<I>, TestcontainersError>
@@ -178,7 +178,7 @@ impl Node {
             sol: sol_args,
             hydration: hydration_args,
             canton: canton_args,
-            midnight: MidnightArgs::from_config(None),
+            midnight: MidnightArgs::from_config(config.cfg.midnight.clone()),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),

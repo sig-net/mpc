@@ -165,10 +165,12 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
+    pub midnight: Option<crate::midnight::MidnightContext>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    pub use_midnight: bool,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -206,10 +208,12 @@ impl Default for ClusterSpawner {
             worker: None,
             solana: None,
             canton: None,
+            midnight: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
+            use_midnight: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -336,6 +340,11 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    pub fn midnight(mut self) -> Self {
+        self.use_midnight = true;
         self
     }
 
@@ -490,6 +499,19 @@ impl IntoFuture for ClusterSpawner {
                 self.canton = Some(sandbox);
             }
 
+            if self.use_midnight && self.midnight.is_none() {
+                let root_public_key = self
+                    .pregenerated_keys
+                    .public_key()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "Midnight real-stack tests require pregenerated MPC keys so the caller response key exists before node startup"
+                    ))?;
+                let midnight =
+                    crate::midnight::MidnightContext::run(&self, root_public_key).await?;
+                self.cfg.midnight = Some(midnight.config.clone());
+                self.midnight = Some(midnight);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -503,6 +525,7 @@ impl IntoFuture for ClusterSpawner {
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),
+                midnight: self.midnight.take(),
                 nodes,
             };
 

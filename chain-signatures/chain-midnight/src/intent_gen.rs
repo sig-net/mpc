@@ -20,6 +20,24 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::PublisherConfig;
 
+#[derive(Debug)]
+pub(crate) struct AmbiguousSubmit;
+
+impl std::fmt::Display for AmbiguousSubmit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "the answer was lost; the transaction may still reach the chain, so check it for \
+             this request before posting again by reconciling finalized state",
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousSubmit {}
+
+pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<AmbiguousSubmit>().is_some()
+}
+
 /// One respond call, in the shape the child validates. Every byte field is bare
 /// lowercase hex with no `0x`; the child converts nothing and rejects anything else.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -33,8 +51,6 @@ pub struct IntentRequest {
     /// The reads this caller pinned, so the child stays a pure function of them.
     pub contract_state: String,
     pub ledger_parameters: String,
-    /// The only thing about the funding wallet the child is ever told.
-    pub coin_public_key: String,
     /// Absolute unix seconds, not a duration from now.
     pub ttl_seconds: u64,
 }
@@ -101,29 +117,31 @@ impl SeedRedactor {
 /// again; a submit's may be on chain, and asking again races the single dust UTXO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    Ready,
     BuildIntent,
     Submit,
 }
 
 impl Operation {
-    /// The submit budget must stay LONGER than the dust recipe's TTL, or the coin may
-    /// be stranded with the recipe still live; the service this replaces paired a 360s
-    /// deadline with a 300s recipe TTL. Anyone retuning one must move the other.
+    /// Build and readiness share the request budget. Submit uses Rust's process
+    /// backstop, whose strict ordering against the child's own deadlines is checked
+    /// during the readiness exchange.
     fn deadline(self, config: &PublisherConfig) -> Duration {
         match self {
-            Self::BuildIntent => config.request_timeout,
+            Self::Ready | Self::BuildIntent => config.request_timeout,
             Self::Submit => config.submit_timeout,
         }
     }
 
     /// Whether an answer lost in transit may simply be asked for again.
     fn is_repeatable(self) -> bool {
-        matches!(self, Self::BuildIntent)
+        matches!(self, Self::Ready | Self::BuildIntent)
     }
 
     /// The `op` the child discriminates on; it reads a missing one as a build.
     fn wire_op(self) -> Option<&'static str> {
         match self {
+            Self::Ready => Some("ready"),
             Self::BuildIntent => None,
             Self::Submit => Some("submit"),
         }
@@ -131,20 +149,9 @@ impl Operation {
 
     fn name(self) -> &'static str {
         match self {
+            Self::Ready => "readiness check",
             Self::BuildIntent => "intent build",
             Self::Submit => "submit",
-        }
-    }
-
-    /// What a lost answer leaves behind, for whoever reads the error.
-    fn lost_answer_warning(self) -> &'static str {
-        match self {
-            Self::BuildIntent => "",
-            Self::Submit => {
-                "; the transaction may still reach the chain, so check it for this request \
-                 before posting again, and expect the balanced coin to stay stranded until \
-                 its recipe TTL expires"
-            }
         }
     }
 }
@@ -366,9 +373,9 @@ impl Exchange {
 /// wherever a pass breaks PAST THE WRITE and nowhere else: from there a lost answer
 /// and a landed transaction are indistinguishable, before it an alarm would be false.
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
-    match operation.lost_answer_warning() {
-        "" => error,
-        warning => error.context(format!("the answer was lost{warning}")),
+    match operation {
+        Operation::Submit => error.context(AmbiguousSubmit),
+        Operation::Ready | Operation::BuildIntent => error,
     }
 }
 
@@ -389,13 +396,55 @@ where
 
 /// Starts the builder under the restart budget.
 async fn spawn_session(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
-    // The per-attempt deadline never realistically fires: spawning returns with the fork.
     retry_rpc!(
         config.request_timeout,
         config.restart_backoff,
         "midnight_intent_gen_spawn",
-        { spawn_child(config, network_id) }
+        {
+            let session = spawn_child(config, network_id)?;
+            verify_ready(session, config).await
+        }
     )
+}
+
+#[derive(Serialize)]
+struct ReadyRequest {}
+
+async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow::Result<Session> {
+    let id = session.next_id;
+    session.next_id += 1;
+    let line = encode_request(&ReadyRequest {}, id, Operation::Ready)?;
+    let reply = tokio::time::timeout(config.request_timeout, round_trip(&mut session, &line))
+        .await
+        .context("midnight intent builder did not become ready before its startup deadline")??;
+    let decoded = match decode_reply(&reply, id, &SeedRedactor::new(&config.funding_seed)) {
+        Exchange::Answered(result) => result?,
+        Exchange::Broken { error, .. } => return Err(error),
+    };
+    anyhow::ensure!(
+        decoded.ready == Some(true),
+        "midnight intent builder readiness reply did not identify itself"
+    );
+    let submit_timeout = Duration::from_millis(
+        decoded
+            .submit_timeout_ms
+            .context("midnight intent builder readiness reply has no submitTimeoutMs")?,
+    );
+    let recipe_ttl = Duration::from_millis(
+        decoded
+            .recipe_ttl_ms
+            .context("midnight intent builder readiness reply has no recipeTtlMs")?,
+    );
+    anyhow::ensure!(
+        recipe_ttl < submit_timeout && submit_timeout < config.submit_timeout,
+        "midnight publisher deadlines must satisfy recipe TTL ({recipe_ttl:?}) < child submit \
+         timeout ({submit_timeout:?}) < Rust backstop ({:?})",
+        config.submit_timeout
+    );
+    // Readiness is a session bootstrap, not an application request. Reusing id zero
+    // keeps the application protocol independent of whether the bootstrap grows.
+    session.next_id = 0;
+    Ok(session)
 }
 
 fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
@@ -460,7 +509,7 @@ fn intent_gen_command(
         .env("MIDNIGHT_PUB_FUNDING_SEED", &config.funding_seed)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
         // Written unconditionally: a name left unwritten is one the `env_remove`
-        // above took away, and blank is how a build-only deployment says no wallet.
+        // above took away.
         .env("MIDNIGHT_PUB_NODE_URL", &config.node_ws_url)
         .env("MIDNIGHT_PUB_PROOF_SERVER_URL", &config.proof_server_url)
         .env("MIDNIGHT_PUB_INDEXER_URL", &config.indexer_url)
@@ -607,11 +656,17 @@ fn decode_reply(line: &str, id: u64, redactor: &SeedRedactor) -> Exchange {
 /// The refusal's `message` is the one field on this wire that can carry the key back out.
 fn granted(reply: WireReply, redactor: &SeedRedactor) -> anyhow::Result<WireReply> {
     if !reply.ok {
-        anyhow::bail!(
+        let code = reply.code.as_deref().unwrap_or("no code");
+        let error = anyhow::anyhow!(
             "midnight intent builder refused the request [{}]: {}",
-            reply.code.as_deref().unwrap_or("no code"),
+            code,
             redactor.scrub(reply.message.as_deref().unwrap_or("no message"))
         );
+        return Err(if code == "ambiguous_submit" {
+            error.context(AmbiguousSubmit)
+        } else {
+            error
+        });
     }
     Ok(reply)
 }
@@ -648,6 +703,9 @@ struct WireReply {
     /// Null when the child could not read an id off the line it was rejecting.
     id: Option<u64>,
     ok: bool,
+    ready: Option<bool>,
+    submit_timeout_ms: Option<u64>,
+    recipe_ttl_ms: Option<u64>,
     intent: Option<String>,
     /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
@@ -670,8 +728,11 @@ mod tests {
     /// A shell stub in place of the real Node child; a test reading an unpinned field
     /// must pin its own, or it silently tests the default.
     fn stub_config(script: &str) -> PublisherConfig {
+        let script = format!(
+            r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
+        );
         PublisherConfig {
-            intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
+            intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
             request_timeout: Duration::from_secs(5),
             restart_backoff: RetryConfig {
                 min_delay: Duration::from_millis(1),
@@ -752,7 +813,6 @@ mod tests {
             },
             contract_state: "beef".to_string(),
             ledger_parameters: "f00d".to_string(),
-            coin_public_key: "44".repeat(32),
             ttl_seconds: 1_800_000_000,
         }
     }
@@ -773,9 +833,9 @@ mod tests {
     #[tokio::test]
     async fn build_surfaces_the_child_s_error_code_and_message() {
         let builder = spawn_stub(&stub_config(
-            r#"read line; printf '{"id":0,"ok":false,"code":"contract_mismatch","message":"no operation"}\n'"#,
-        ))
-        .await;
+        r#"read line; printf '{"id":0,"ok":false,"code":"contract_mismatch","message":"no operation"}\n'"#,
+    ))
+    .await;
         let err = builder
             .build(&sample_request(), &CancellationToken::new())
             .await
@@ -793,9 +853,9 @@ mod tests {
 
         // A null id on the failure arm is this request's own rejection, not a mismatch to bury it under.
         let builder = spawn_stub(&stub_config(
-            r#"read line; printf '{"id":null,"ok":false,"code":"bad_request","message":"invalid JSON"}\n'"#,
-        ))
-        .await;
+        r#"read line; printf '{"id":null,"ok":false,"code":"bad_request","message":"invalid JSON"}\n'"#,
+    ))
+    .await;
         let err = builder
             .build(&sample_request(), &CancellationToken::new())
             .await
@@ -865,9 +925,9 @@ mod tests {
         // The stub names the transaction after the intent it was handed, so one
         // assertion covers the whole exchange.
         let builder = spawn_stub(&stub_config(
-            r#"read -r line; case "$line" in *'"op":"submit"'*) intent=$(printf "%s" "$line" | sed -n 's/.*"intent":"\([0-9a-f]*\)".*/\1/p'); printf '{"id":0,"ok":true,"txId":"%s","blockHash":"cd"}\n' "$intent" ;; *) printf '{"id":0,"ok":false,"code":"bad_request","message":"this line carries no submit op"}\n' ;; esac"#,
-        ))
-        .await;
+        r#"read -r line; case "$line" in *'"op":"submit"'*) intent=$(printf "%s" "$line" | sed -n 's/.*"intent":"\([0-9a-f]*\)".*/\1/p'); printf '{"id":0,"ok":true,"txId":"%s","blockHash":"cd"}\n' "$intent" ;; *) printf '{"id":0,"ok":false,"code":"bad_request","message":"this line carries no submit op"}\n' ;; esac"#,
+    ))
+    .await;
         let tx_id = builder
             .submit(SAMPLE_INTENT, &CancellationToken::new())
             .await
@@ -971,9 +1031,9 @@ mod tests {
     async fn a_submit_surfaces_the_child_s_error_code_and_message() {
         // A refusal like `wallet_unfunded` is the operator's to act on: an answer, not a pipe fault.
         let builder = spawn_stub(&stub_config(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"wallet_unfunded","message":"no spendable dust"}\n'"#,
-        ))
-        .await;
+        r#"read -r line; printf '{"id":0,"ok":false,"code":"wallet_unfunded","message":"no spendable dust"}\n'"#,
+    ))
+    .await;
         let err = builder
             .submit(SAMPLE_INTENT, &CancellationToken::new())
             .await
@@ -994,6 +1054,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_child_submit_timeout_is_typed_as_ambiguous() {
+        let builder = spawn_stub(&stub_config(
+        r#"read -r line; printf '{"id":0,"ok":false,"code":"ambiguous_submit","message":"may still land"}\n'"#,
+    ))
+    .await;
+
+        let error = builder
+            .submit(&[0xde, 0xad], &CancellationToken::new())
+            .await
+            .expect_err("an ambiguous child answer is not a receipt");
+
+        assert!(is_ambiguous_submit(&error), "unexpected error: {error:#}");
+        assert!(format!("{error:#}").contains("may still land"));
+    }
+
+    #[tokio::test]
     async fn a_submit_is_bounded_by_the_submit_budget_and_not_the_build_one() {
         // Bounding a submit by the build's budget would kill the child mid-prove on every real post.
         let mut config = stub_config("sleep 30");
@@ -1010,7 +1086,7 @@ mod tests {
         assert!(
             started.elapsed() >= Duration::from_millis(300),
             "a submit bounded by the build's 50ms budget would have given up at once, \
-             killing the child mid-prove on every real post"
+         killing the child mid-prove on every real post"
         );
     }
 
@@ -1146,6 +1222,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_child_that_exits_before_readiness_fails_startup() {
+        let mut config = stub_config("unreachable");
+        config.intent_gen_command = vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
+
+        let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
+            panic!("an exited process is not a ready publisher")
+        };
+
+        assert!(
+            format!("{error:#}").contains("closed its stdout"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_deadline_that_reaches_the_rust_backstop_fails_startup() {
+        let mut config = stub_config("unreachable");
+        config.submit_timeout = Duration::from_millis(2);
+
+        let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
+            panic!("the Rust supervisor must outlive the child submit deadline")
+        };
+
+        assert!(
+            format!("{error:#}").contains("child submit timeout (2ms) < Rust backstop (2ms)"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_command_that_does_not_exist_fails_at_startup_and_names_itself() {
         // The case the eager spawn does catch: a missing binary is learned at startup.
         let mut config = stub_config("unreachable");
@@ -1172,9 +1278,9 @@ mod tests {
     async fn the_child_s_publisher_namespace_is_exactly_what_this_process_put_there() {
         // Exact, not "contains": an ambient survivor is an extra name, a forgotten set a missing one.
         let builder = spawn_stub(&stub_config(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"%s"}\n' "$(env | sed -n "s/^\(MIDNIGHT_PUB_[A-Z_]*\)=.*/\1/p" | sort | tr "\n" ",")""#,
-        ))
-        .await;
+        r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"%s"}\n' "$(env | sed -n "s/^\(MIDNIGHT_PUB_[A-Z_]*\)=.*/\1/p" | sort | tr "\n" ",")""#,
+    ))
+    .await;
         let err = builder
             .build(&sample_request(), &CancellationToken::new())
             .await
@@ -1182,8 +1288,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "midnight intent builder refused the request [bad_request]: \
-             MIDNIGHT_PUB_FUNDING_SEED,MIDNIGHT_PUB_INDEXER_URL,MIDNIGHT_PUB_INDEXER_WS_URL,\
-             MIDNIGHT_PUB_NETWORK_ID,MIDNIGHT_PUB_NODE_URL,MIDNIGHT_PUB_PROOF_SERVER_URL,"
+         MIDNIGHT_PUB_FUNDING_SEED,MIDNIGHT_PUB_INDEXER_URL,MIDNIGHT_PUB_INDEXER_WS_URL,\
+         MIDNIGHT_PUB_NETWORK_ID,MIDNIGHT_PUB_NODE_URL,MIDNIGHT_PUB_PROOF_SERVER_URL,"
         );
     }
 
@@ -1206,9 +1312,9 @@ mod tests {
         assert!(
             format!("{err:#}").contains(
                 "net=undeployed node=ws://127.0.0.1:9944 \
-                 prover=http://127.0.0.1:6300 \
-                 indexer=http://127.0.0.1:8088/api/v3/graphql \
-                 ws=ws://127.0.0.1:8088/api/v3/graphql/ws"
+             prover=http://127.0.0.1:6300 \
+             indexer=http://127.0.0.1:8088/api/v3/graphql \
+             ws=ws://127.0.0.1:8088/api/v3/graphql/ws"
             ),
             "got: {err:#}"
         );
@@ -1228,7 +1334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_child_that_dies_at_boot_reports_what_it_said_on_its_way_out() {
+    async fn a_child_that_dies_after_readiness_reports_what_it_said_on_its_way_out() {
         // The stub quotes the seed rather than a literal, which would sit in the rendered argv.
         let mut config = stub_config(
             r#"printf 'invalid MIDNIGHT_PUB_* configuration: missing MIDNIGHT_PUB_INDEXER_URL (wallet %s)\n' "$MIDNIGHT_PUB_FUNDING_SEED" >&2; exit 1"#,
@@ -1274,9 +1380,9 @@ mod tests {
 
         let changes: Vec<_> = command.as_std().get_envs().collect();
         assert!(
-            changes.iter().any(|(name, value)| *name == stray && value.is_none()),
-            "a publisher variable this process does not set must be removed, not inherited: {changes:?}"
-        );
+        changes.iter().any(|(name, value)| *name == stray && value.is_none()),
+        "a publisher variable this process does not set must be removed, not inherited: {changes:?}"
+    );
         // Ordering, not contradiction: the removal registers first and the set that
         // follows replaces it.
         assert!(
@@ -1362,13 +1468,12 @@ mod tests {
                 },
                 "contractState": "beef",
                 "ledgerParameters": "f00d",
-                "coinPublicKey": "44".repeat(32),
                 "ttlSeconds": 1_800_000_000u64,
             }),
             "the unidirectional circuit carries no output fields, and the child's \
-             discriminated union rejects the request outright if it does. No `op` \
-             either: the child reads an absent one as a build, and that is what lets a \
-             third operation be added to one side at a time"
+         discriminated union rejects the request outright if it does. No `op` \
+         either: the child reads an absent one as a build, and that is what lets a \
+         third operation be added to one side at a time"
         );
     }
 
@@ -1389,7 +1494,7 @@ mod tests {
             encoded,
             serde_json::json!({ "id": 4, "op": "submit", "intent": "deadbeef" }),
             "the pinned reads that built the intent have no reader on the other side, \
-             and the child balances against a wallet it syncs itself"
+         and the child balances against a wallet it syncs itself"
         );
     }
 }

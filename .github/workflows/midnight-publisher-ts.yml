@@ -7,8 +7,8 @@
 # with the real client, which is what catches the two sides drifting apart, and is
 # why the `chain-midnight` path filter below is among the triggers.
 #
-# The live end-to-end path (boot the dockerized stack, deploy a singleton,
-# balance/prove/submit, confirm on chain) is deliberately NOT automated here.
+# The required live end-to-end path runs in the Integration workflow's
+# Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
 name: Midnight Publisher TS
 
 on:
@@ -17,6 +17,7 @@ on:
       - develop
     paths:
       - ".github/workflows/midnight-publisher-ts.yml"
+      - "Dockerfile"
       - "chain-signatures/midnight-publisher-ts/**"
       - "chain-signatures/chain-midnight/**"
   pull_request:
@@ -51,6 +52,10 @@ jobs:
 
       - name: Run TypeScript tests
         run: npx vitest run
+
+      - name: Production publisher image smoke
+        working-directory: .
+        run: docker build --target midnight-publisher-runtime .
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1

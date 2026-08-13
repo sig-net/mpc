@@ -1,0 +1,115 @@
+// Test-only real caller for the Rust-owned integration stack. Its structure is the
+// minimal subset of sig-net/midnight-integration's v0.15.0 test caller (commit
+// b270880f71a229ae0724c60d32d8215aeb0f59ed), using the same Signet.compact API.
+pragma language_version >= 0.25;
+
+import CompactStandardLibrary;
+import "@sig-net/midnight/src/Signet";
+
+// The declaration order is protocol-visible. The request map is field 3 and the
+// notification below names that exact path.
+export ledger requestNonce: Counter;
+export ledger mpcResponseKey: Secp256k1Point;
+sealed ledger signetSigner: SignetSigner;
+export ledger requests: SignBidirectionalEventMap<EvmType2TxParams<1, 0, 0>, 34, 34>;
+sealed ledger deployer: Bytes<32>;
+export ledger initialised: Counter;
+
+witness deployerSecretKey(): Bytes<32>;
+
+export pure circuit deployerCommitment(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "signet-caller:deployer:"), sk]);
+}
+
+constructor(initialDeployerCommitment: Bytes<32>, signetContract: SignetSigner) {
+  deployer = disclose(initialDeployerCommitment);
+  signetSigner = disclose(signetContract);
+}
+
+export circuit initialise(responseKey: Secp256k1Point): [] {
+  assert(initialised == 0, "Already initialised");
+  assert(deployerCommitment(deployerSecretKey()) == deployer, "Not the deployer");
+  initialised.increment(1);
+  mpcResponseKey = disclose(responseKey);
+}
+
+export circuit submitIsEvenRequest(
+  evmNonce: Uint<64>,
+  keyVersion: Uint<8>,
+  to: Bytes<20>,
+  argWord: Bytes<32>
+): SignetMapKey {
+  const calldata = EvmCalldata<1> {
+    selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
+    noWords: 1 as Uint<16>,
+    words: [argWord]
+  };
+  const txParams = EvmType2TxParams<1, 0, 0> {
+    chainId: 31337 as Uint<64>,
+    nonce: evmNonce,
+    maxPriorityFeePerGas: 1000000000 as Uint<128>,
+    maxFeePerGas: 30000000000 as Uint<128>,
+    gasLimit: 100000 as Uint<64>,
+    to: to,
+    value: 0 as Uint<128>,
+    calldata: some<EvmCalldata<1>>(calldata),
+    accessListEntryCount: 0,
+    accessList: []
+  };
+  const schema = "[{\"name\":\"success\",\"type\":\"bool\"}]" as Bytes<34>;
+  const nonce = requestNonce as Uint<64>;
+  const request = constructSignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 34, 34>(
+    kernel.self(),
+    nonce,
+    keyVersion,
+    pad(32, "caller-path"),
+    MPCSignatureAlgorithm.ecdsa,
+    MPCDestination.unused,
+    pad(64, ""),
+    TxParamType.evmType2,
+    txParams,
+    pad(32, "eip155:1"),
+    schema,
+    schema
+  );
+  const requestId = disclose(calculateRequestId<EvmType2TxParams<1, 0, 0>, 34, 34>(request));
+
+  assert(!requests.member(requestId), "Request already exists");
+  requestNonce.increment(1);
+  requests.insert(requestId, disclose(request));
+
+  return signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(),
+      1 as Uint<8>,
+      [3, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+struct BoolResponse {
+  success: Boolean;
+}
+
+export circuit verifyResponse(
+  requestId: RequestId,
+  respondBidirectionalEvent: RespondBidirectionalEvent,
+  serializedOutput: Bytes<1>
+): [] {
+  const disclosedRequestId = disclose(requestId);
+  assert(initialised != 0, "Not initialised");
+  assert(
+    verifyRespondBidirectionalEvent<1>(
+      disclosedRequestId,
+      serializedOutput,
+      disclose(respondBidirectionalEvent),
+      mpcResponseKey
+    ),
+    "Invalid attestation signature"
+  );
+  const response = deserialize<BoolResponse, 1>(serializedOutput);
+  assert(response.success, "Foreign call reported failure");
+  assert(requests.member(disclosedRequestId), "Request not found");
+  requests.remove(disclosedRequestId);
+}

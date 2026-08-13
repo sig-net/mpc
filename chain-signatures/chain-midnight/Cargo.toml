@@ -13,7 +13,6 @@ futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
 midnight-base-crypto.workspace = true
-midnight-node-ledger-helpers.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
@@ -29,6 +28,7 @@ subxt = { workspace = true, features = ["jsonrpsee", "native"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 midnight-ledger-v9.workspace = true
