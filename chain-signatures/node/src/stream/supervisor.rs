@@ -125,7 +125,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
 
-    let threshold = ctx.contract_watcher.wait_threshold().await;
     let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
@@ -144,7 +143,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &mut ctx.checkpoints_rx,
             &mut ctx.mesh_state,
             &ctx.node_client,
-            threshold,
             &my_account_id,
         )
         .await;
@@ -260,7 +258,7 @@ mod tests {
         watch::Sender<MeshState>,
         mpsc::Receiver<RpcAction>,
     ) {
-        // threshold 0 so `recover_backlog` doesn't block on the empty mesh.
+        // Threshold 0 for the test contract watcher.
         make_test_stream_context(
             backlog,
             sign_tx,
