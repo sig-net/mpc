@@ -269,7 +269,8 @@ impl Checkpoints {
         self.pending(chain).read().await.len()
     }
 
-    /// Finds a checkpoint by digest, searching pending checkpoints before durable latest state.
+    /// Finds a checkpoint by digest, searching the in-memory pending mirror, the
+    /// durable latest checkpoint, and finally durable pending checkpoints.
     pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
         self.find_kind(chain, digest)
             .await
@@ -294,9 +295,27 @@ impl Checkpoints {
         {
             return Ok(Some(CheckpointKind::Pending(checkpoint)));
         }
-        match self.storage.load_latest(chain).await {
-            Ok(Some(checkpoint)) if checkpoint.digest() == digest => {
-                Ok(Some(CheckpointKind::Latest(checkpoint)))
+        let latest = match self.storage.load_latest(chain).await {
+            Ok(latest) => latest,
+            Err(source) => return Err(CheckpointError::Storage { chain, source }),
+        };
+        if let Some(checkpoint) = &latest {
+            if checkpoint.digest() == digest {
+                return Ok(Some(CheckpointKind::Latest(checkpoint.clone())));
+            }
+        }
+
+        // The in-memory mirror is only hydrated by `load_local` once the mesh is
+        // active, but the web server serves `/checkpoint` independently. Look up
+        // durable pending storage directly so a body persisted before restart can
+        // still be handed out to peers, applying the same "above confirmed height"
+        // filter `load_local` uses so stale entries are ignored.
+        let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
+        match self.storage.find_pending(chain, digest).await {
+            Ok(Some(checkpoint))
+                if latest_height.is_none_or(|height| checkpoint.block_height > height) =>
+            {
+                Ok(Some(CheckpointKind::Pending(checkpoint)))
             }
             Ok(_) => Ok(None),
             Err(source) => Err(CheckpointError::Storage { chain, source }),
@@ -566,5 +585,47 @@ mod tests {
             checkpoints.confirm(Chain::Ethereum, [1; 32]).await,
             Err(CheckpointError::Storage { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn find_serves_pending_digest_before_hydration() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoint = checkpoint(1);
+        storage.persist_pending(&checkpoint).await.unwrap();
+
+        // A fresh `Checkpoints` has an empty mirror until `load_local` hydrates
+        // it, as happens right after a restart before the mesh is active. The
+        // durable pending body must still be findable.
+        let checkpoints = Checkpoints::new(storage);
+
+        assert_eq!(
+            checkpoints
+                .find(checkpoint.chain, checkpoint.digest())
+                .await,
+            Some(checkpoint)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_promotes_pending_digest_before_hydration() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoint = checkpoint(1);
+        storage.persist_pending(&checkpoint).await.unwrap();
+
+        let checkpoints = Checkpoints::new(storage);
+        assert!(matches!(
+            checkpoints
+                .confirm(checkpoint.chain, checkpoint.digest())
+                .await,
+            Ok(true)
+        ));
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_latest(checkpoint.chain)
+                .await
+                .unwrap(),
+            Some(checkpoint)
+        );
     }
 }
