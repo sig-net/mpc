@@ -80,6 +80,34 @@ pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|
     .unwrap()
 });
 
+pub(crate) static CHECKPOINT_PAYLOAD_BYTES: LazyLock<Histogram> = LazyLock::new(|| {
+    try_create_histogram_vec_with_node_account_id(
+        "multichain_checkpoint_payload_bytes",
+        "Serialized size of /checkpoint responses in bytes",
+        &[],
+        Some(vec![
+            1024.0,
+            4096.0,
+            16384.0,
+            65536.0,
+            262144.0,
+            1048576.0,
+            4194304.0,
+            8388608.0,
+            12582912.0,
+            16777216.0,
+            33554432.0,
+            67108864.0,
+            134217728.0,
+            268435456.0,
+            536870912.0,
+            1073741824.0,
+        ]),
+    )
+    .unwrap()
+    .with_label_values(&[] as &[&str])
+});
+
 pub(crate) static CHANNEL_CAPACITY_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
         "multichain_channel_capacity_size",

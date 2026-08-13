@@ -68,6 +68,8 @@ pub enum RequestError {
     Conversion(String),
     #[error("peer returned checkpoint version {0}")]
     MismatchCheckpointVersion(u64),
+    #[error("checkpoint payload too large: {size} bytes exceeds the limit of {limit} bytes")]
+    PayloadTooLarge { size: usize, limit: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,10 @@ pub struct NodeClient {
     http: reqwest::Client,
     options: Options,
 }
+
+/// Timeout for a single `/checkpoint` fetch, long enough to transfer the
+/// maximum payload size over a slow link.
+const CHECKPOINT_FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn check_checkpoint_version(version: u64) -> Result<(), RequestError> {
     if version != crate::CHECKPOINT_VERSION {
@@ -88,6 +94,39 @@ fn decode_checkpoint_response(body: &[u8]) -> Result<CheckpointResponse, Request
         ciborium::from_reader(body).map_err(|err| RequestError::Conversion(err.to_string()))?;
     check_checkpoint_version(resp.version)?;
     Ok(resp)
+}
+
+/// Read a response body into memory, refusing payloads above `limit` bytes.
+///
+/// Checkpoint payloads embed full backlog entries, so a peer with a large
+/// backlog (or a misbehaving peer) can send a huge body. Reading it
+/// unbounded would let a single response exhaust this node's memory, so the
+/// body is streamed and truncated at the limit instead.
+async fn read_bounded(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, RequestError> {
+    if let Some(size) = resp.content_length() {
+        if size > limit as u64 {
+            return Err(RequestError::PayloadTooLarge {
+                size: size as usize,
+                limit,
+            });
+        }
+    }
+
+    let mut buf = Vec::new();
+    loop {
+        let chunk = resp.chunk().await.map_err(RequestError::ReqwestClient)?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if buf.len() + chunk.len() > limit {
+            return Err(RequestError::PayloadTooLarge {
+                size: buf.len() + chunk.len(),
+                limit,
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 impl NodeClient {
@@ -268,13 +307,13 @@ impl NodeClient {
         let resp = self
             .http
             .get(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(CHECKPOINT_FETCH_TIMEOUT)
             .send()
             .await?;
 
         let status = resp.status();
         let request_id = Self::extract_request_id(&resp);
-        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+        let body = read_bounded(resp, crate::checkpoint_max_payload_size()).await?;
 
         if status.is_success() {
             let response = decode_checkpoint_response(body.as_ref())?;
@@ -302,13 +341,13 @@ impl NodeClient {
         let resp = self
             .http
             .get(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(CHECKPOINT_FETCH_TIMEOUT)
             .send()
             .await?;
 
         let status = resp.status();
         let request_id = Self::extract_request_id(&resp);
-        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+        let body = read_bounded(resp, crate::checkpoint_max_payload_size()).await?;
 
         if status.is_success() {
             let response = decode_checkpoint_response(body.as_ref())?;
@@ -392,5 +431,86 @@ mod tests {
                 if version == crate::CHECKPOINT_VERSION + 1
         ));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_read_bounded_rejects_oversized_content_length() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/checkpoint")
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(vec![0u8; 8192])
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/checkpoint", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let err = read_bounded(resp, 1024).await.unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "checkpoint payload too large: 8192 bytes exceeds the limit of 1024 bytes"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_read_bounded_streams_and_rejects_oversized_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let limit = 100;
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the request so dropping the socket at the end sends a
+            // clean FIN instead of an RST.
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if request.as_slice().windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/cbor\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(format!("{:X}\r\n", 4096).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(&vec![0u8; 4096]).await.unwrap();
+            socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/checkpoint"))
+            .send()
+            .await
+            .unwrap();
+        let err = read_bounded(resp, limit).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RequestError::PayloadTooLarge { size, limit: l } if size > limit && l == limit
+            ),
+            "unexpected error: {err:?}"
+        );
+        server.await.unwrap();
     }
 }

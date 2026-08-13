@@ -1,6 +1,6 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::node_client::{NodeClient, RequestError};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
@@ -78,8 +78,19 @@ async fn fetch_peer_checkpoint(
     let checkpoint = node_client
         .fetch_checkpoint_by_digest(url, chain, target_digest)
         .await
-        .inspect_err(|err| {
-            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+        .inspect_err(|err| match err {
+            RequestError::PayloadTooLarge { size, limit } => {
+                tracing::warn!(
+                    ?url,
+                    ?chain,
+                    size,
+                    limit,
+                    "peer checkpoint payload exceeds the limit; skipping peer"
+                );
+            }
+            _ => {
+                tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+            }
         })
         .ok()?;
 

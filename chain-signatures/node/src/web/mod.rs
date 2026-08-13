@@ -8,7 +8,7 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
-use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
+use crate::metrics::messaging::{CHECKPOINT_PAYLOAD_BYTES, WEB_ENDPOINT_LATENCY};
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
@@ -19,9 +19,9 @@ use crate::web::error::Result;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
+use axum::http::{header, HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_util::io::{ReaderStream, SyncIoBridge};
 use tracing::Instrument;
 
 struct AxumState {
@@ -393,11 +394,67 @@ impl CheckpointQuery {
     }
 }
 
+/// Serialize a checkpoint response into a streaming response body.
+///
+/// A checkpoint embeds the full backlog entry (including serialized
+/// transactions) for every pending request, so a large backlog produces a
+/// large payload. Streaming keeps the extra memory bounded to the duplex
+/// buffer instead of a full-size serialized copy, letting peers fetch
+/// arbitrarily large checkpoints. Fetching nodes bound what they ingest via
+/// `crate::checkpoint_max_payload_size`.
+fn stream_checkpoint_response(resp: CheckpointResponse) -> Body {
+    let (writer, reader) = tokio::io::duplex(1024 * 1024);
+    let serialization = tokio::task::spawn_blocking(move || {
+        let mut writer = CountingWriter::new(SyncIoBridge::new(writer));
+        let result = ciborium::into_writer(&resp, &mut writer);
+        CHECKPOINT_PAYLOAD_BYTES.observe(writer.count() as f64);
+        result
+    });
+    tokio::spawn(async move {
+        match serialization.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(%err, "checkpoint serialization failed (peer may have disconnected)")
+            }
+            Err(err) => tracing::warn!(%err, "checkpoint serialization task panicked"),
+        }
+    });
+    Body::from_stream(ReaderStream::new(reader))
+}
+
+/// Wraps a `Write` to count the bytes written through it.
+struct CountingWriter<W> {
+    inner: W,
+    count: usize,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, count: 0 }
+    }
+
+    fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.count += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Cbor<CheckpointResponse>> {
+) -> Result<Response> {
     let start = Instant::now();
 
     let mut resp = HashMap::new();
@@ -418,19 +475,76 @@ async fn checkpoint(
         resp.insert(chain, checkpoint);
     }
 
+    let body = stream_checkpoint_response(CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        checkpoints: resp,
+    });
+
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(CheckpointResponse {
-        version: crate::CHECKPOINT_VERSION,
-        checkpoints: resp,
-    }))
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/cbor")],
+        body,
+    )
+        .into_response())
 }
 
 #[cfg(not(feature = "debug-page"))]
 mod debug {
     pub async fn page() -> axum::response::Html<String> {
         "<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>".to_string().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mpc_primitives::{PendingTx, SignId};
+
+    fn checkpoint_response(pending: Vec<PendingTx>) -> CheckpointResponse {
+        CheckpointResponse {
+            version: crate::CHECKPOINT_VERSION,
+            checkpoints: HashMap::from([(
+                Chain::Ethereum,
+                Checkpoint {
+                    chain: Chain::Ethereum,
+                    block_height: 1,
+                    pending_requests: pending,
+                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
+                },
+            )]),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_checkpoint_response_round_trips() {
+        let resp = checkpoint_response(vec![]);
+
+        let body = stream_checkpoint_response(resp.clone());
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let decoded: CheckpointResponse =
+            ciborium::from_reader(bytes.as_ref()).expect("streamed body should decode");
+        assert_eq!(decoded, resp);
+    }
+
+    #[tokio::test]
+    async fn stream_checkpoint_response_accepts_large_payload() {
+        let resp = checkpoint_response(vec![PendingTx {
+            sign_id: SignId::new([0u8; 32]),
+            transaction: vec![0u8; 8 * 1024 * 1024],
+        }]);
+
+        let body = stream_checkpoint_response(resp.clone());
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        assert!(
+            bytes.len() > 8 * 1024 * 1024,
+            "large payload should stream through"
+        );
+        let decoded: CheckpointResponse =
+            ciborium::from_reader(bytes.as_ref()).expect("streamed body should decode");
+        assert_eq!(decoded, resp);
     }
 }
