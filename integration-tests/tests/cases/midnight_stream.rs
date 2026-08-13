@@ -1,16 +1,14 @@
 use std::time::Duration;
 
-use alloy::consensus::{SignableTransaction as _, TxEip1559};
-use alloy::eips::eip2718::Encodable2718 as _;
-use alloy::primitives::{Address, Bytes, FixedBytes, Signature as AlloySignature, U256};
+use alloy::primitives::{keccak256, Address, Bytes, U256};
 use alloy::providers::ext::AnvilApi as _;
 use alloy::providers::{Provider as _, ProviderBuilder};
-use alloy::rlp::Decodable as _;
 use anyhow::Context as _;
 use integration_tests::cluster;
 use mpc_chain_integration_core::{ChainIndexer as _, MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignKind, SignatureRespondedEvent};
+use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
+use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignKind};
 use serial_test::serial;
 use test_log::test;
 use tokio::sync::mpsc;
@@ -23,31 +21,6 @@ struct MidnightEvents {
     rx: mpsc::Receiver<ChainEvent>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
-
-fn encode_signed_eip1559(
-    unsigned: &[u8],
-    signature: &mpc_primitives::Signature,
-) -> anyhow::Result<(Vec<u8>, Address)> {
-    anyhow::ensure!(
-        unsigned.first() == Some(&0x02),
-        "expected an EIP-1559 payload"
-    );
-    let mut body = &unsigned[1..];
-    let transaction = TxEip1559::decode(&mut body).context("decoding unsigned EIP-1559 tx")?;
-    anyhow::ensure!(
-        body.is_empty(),
-        "unsigned EIP-1559 payload has trailing bytes"
-    );
-    let r: [u8; 32] = mpc_crypto::x_coordinate(&signature.big_r).to_bytes().into();
-    let s: [u8; 32] = signature.s.to_bytes().into();
-    let signature = AlloySignature::from_scalars_and_parity(
-        FixedBytes::from(r),
-        FixedBytes::from(s),
-        signature.recovery_id == 1,
-    );
-    let sender = signature.recover_address_from_prehash(&alloy::primitives::keccak256(unsigned))?;
-    Ok((transaction.into_signed(signature).encoded_2718(), sender))
 }
 
 async fn wait_for_completed_checkpoint(
@@ -130,7 +103,7 @@ impl MidnightEvents {
 #[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
 #[serial]
 #[test(tokio::test)]
-async fn midnight_to_ethereum_emits_both_response_events() -> anyhow::Result<()> {
+async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::Result<()> {
     let cluster = cluster::spawn().ethereum().midnight().await?;
     cluster.wait().signable().await?;
     let midnight = cluster
@@ -177,18 +150,37 @@ async fn midnight_to_ethereum_emits_both_response_events() -> anyhow::Result<()>
     };
     assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
 
-    let response: SignatureRespondedEvent = events
-        .wait_for("the finalized respond entry", |event| match event {
-            ChainEvent::Respond(response) if response.request_id == request_id => Some(response),
-            _ => None,
+    events
+        .wait_for("the finalized respond entry", |event| {
+            matches!(event, ChainEvent::Respond(response) if response.request_id == request_id)
+                .then_some(())
         })
         .await?;
-    let (signed, sender) =
-        encode_signed_eip1559(&sign_event.serialized_transaction, &response.signature)?;
-    anvil
-        .anvil_set_balance(sender, U256::from(10_000_000_000_000_000_000u128))
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
+    let signed = midnight
+        .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
         .await?;
-    let pending = anvil.send_raw_transaction(&signed).await?;
+    assert_eq!(signed.from.parse::<Address>()?, expected_sender);
+    assert_eq!(signed.to.parse::<Address>()?, target);
+    assert_eq!(signed.chain_id, "31337");
+    assert_eq!(
+        signed.unsigned_hash,
+        format!("{:#x}", keccak256(&sign_event.serialized_transaction))
+    );
+    let mut expected_input = hex::decode("2a2e1320")?;
+    expected_input.extend_from_slice(&argument);
+    assert_eq!(
+        hex::decode(signed.data.trim_start_matches("0x"))?,
+        expected_input
+    );
+    anvil
+        .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
+        .await?;
+    let pending = anvil
+        .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
+        .await?;
     let receipt = pending.get_receipt().await?;
     anyhow::ensure!(receipt.status(), "the MPC-signed EVM transaction reverted");
 
@@ -201,6 +193,7 @@ async fn midnight_to_ethereum_emits_both_response_events() -> anyhow::Result<()>
             .then_some(())
         })
         .await?;
+    midnight.settle_response(request_id).await?;
     let final_block = events
         .wait_for("a block after respondBidirectional", |event| match event {
             ChainEvent::Block(height) => Some(height),

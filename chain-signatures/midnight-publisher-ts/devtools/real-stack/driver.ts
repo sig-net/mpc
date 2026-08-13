@@ -18,8 +18,20 @@ import {
   type MidnightNodeConfig,
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
-import { deriveMidnightResponseKey } from "@sig-net/midnight";
-import { pureCircuits, type Contract } from "./managed/caller/contract/index.js";
+import {
+  parseRequestIdHex,
+  parseSecp256k1PublicKey,
+  pureCircuits as signetCircuits,
+  SignetRequestResponseReader,
+  type RequestIdHex,
+  type Secp256k1Point,
+  type SignetPublicStateSource,
+} from "@sig-net/midnight";
+import {
+  ledger,
+  pureCircuits,
+  type Contract,
+} from "./managed/caller/contract/index.js";
 import {
   buildCallerProviders,
   callerCompiledContract,
@@ -36,8 +48,12 @@ type CallerHandle = FoundContract<Contract<CallerPrivateState>>;
 interface BootstrapRequest {
   op: "bootstrap";
   config: MidnightNodeConfig;
-  rootPublicKey: string;
   artifactDir: string;
+}
+
+interface InitialiseRequest {
+  op: "initialise";
+  responsePublicKey: string;
 }
 
 interface SubmitRequest {
@@ -47,15 +63,36 @@ interface SubmitRequest {
   argument: string;
 }
 
+interface SignedTransactionRequest {
+  op: "signedTransaction";
+  requestId: string;
+  expectedSigner: string;
+}
+
+interface SettleResponseRequest {
+  op: "settleResponse";
+  requestId: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
 
-type Request = BootstrapRequest | SubmitRequest | ShutdownRequest;
+type Request =
+  | BootstrapRequest
+  | InitialiseRequest
+  | SubmitRequest
+  | SignedTransactionRequest
+  | SettleResponseRequest
+  | ShutdownRequest;
 
 interface Session {
   facade: WalletFacade;
   caller: CallerHandle;
+  callerAddress: string;
+  publicDataProvider: SignetPublicStateSource;
+  reader: SignetRequestResponseReader;
+  responseKey?: Secp256k1Point;
 }
 
 let session: Session | undefined;
@@ -77,6 +114,27 @@ function bytes(hex: string, width?: number): Uint8Array {
     throw new Error(`expected ${width} bytes, got ${result.length}`);
   }
   return result;
+}
+
+async function waitFor<T>(
+  description: string,
+  read: () => Promise<T | undefined>,
+): Promise<T> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+async function callerHasRequest(
+  active: Session,
+  requestId: RequestIdHex,
+): Promise<boolean> {
+  const state = await active.publicDataProvider.queryContractState(active.callerAddress);
+  if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
+  return ledger(state.data).requests.member(bytes(requestId, 32));
 }
 
 function deployEnv(config: MidnightNodeConfig, seed: string): Record<string, string> {
@@ -133,8 +191,6 @@ async function bootstrap(request: BootstrapRequest) {
       return { contractAddress: built.contractAddress };
     },
   );
-  diagnostics("initialising deployed Compact caller");
-
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
@@ -151,17 +207,21 @@ async function bootstrap(request: BootstrapRequest) {
     privateStateId: CALLER_PRIVATE_STATE_ID,
     initialPrivateState: createCallerPrivateState(deployerSecret),
   });
-  const responseKey = deriveMidnightResponseKey(
-    request.rootPublicKey,
-    callerDeployment.contractAddress,
-  );
-  await caller.callTx.initialise(responseKey);
   session = {
     facade,
     caller,
+    callerAddress: callerDeployment.contractAddress,
+    publicDataProvider: providers.publicDataProvider,
+    reader: new SignetRequestResponseReader({
+      requesterContractAddress: callerDeployment.contractAddress,
+      requesterRequestsPath: [3],
+      signetContractAddress: central.contractAddress,
+      publicDataProvider: providers.publicDataProvider,
+    }),
   };
   return {
     centralAddress: central.contractAddress,
+    callerAddress: callerDeployment.contractAddress,
     publisherSeed: PUBLISHER_SEED,
   };
 }
@@ -174,8 +234,53 @@ async function dispatch(request: Request): Promise<unknown> {
     return {};
   }
   if (session === undefined) throw new Error("driver is not bootstrapped");
-  await session.facade.waitForSyncedState();
-  await session.caller.callTx.submitIsEvenRequest(
+  const active = session;
+  await active.facade.waitForSyncedState();
+  if (request.op === "initialise") {
+    if (active.responseKey !== undefined) throw new Error("caller is already initialised");
+    diagnostics("initialising deployed Compact caller");
+    const responseKey = parseSecp256k1PublicKey(request.responsePublicKey);
+    await active.caller.callTx.initialise(responseKey);
+    active.responseKey = responseKey;
+    return {};
+  }
+  if (request.op === "signedTransaction") {
+    const requestId = parseRequestIdHex(request.requestId);
+    const transaction = await waitFor("a verified signed EVM transaction", () =>
+      active.reader.getSignedEvmTransaction(requestId, request.expectedSigner),
+    );
+    return {
+      serialized: transaction.serialized,
+      unsignedHash: transaction.unsignedHash,
+      from: transaction.from,
+      to: transaction.to,
+      data: transaction.data,
+      chainId: transaction.chainId.toString(),
+    };
+  }
+  if (request.op === "settleResponse") {
+    const responseKey = active.responseKey;
+    if (responseKey === undefined) throw new Error("caller is not initialised");
+    const requestId = parseRequestIdHex(request.requestId);
+    const serializedOutput = signetCircuits.boolAbiWord(true);
+    const response = await waitFor("a verified respondBidirectional entry", () =>
+      active.reader.getVerifiedRespondBidirectionalEvent(
+        requestId,
+        serializedOutput,
+        responseKey,
+      ),
+    );
+    await active.caller.callTx.verifyResponse(
+      bytes(requestId, 32),
+      response,
+      serializedOutput,
+    );
+    await waitFor("the caller request to be removed", async () =>
+      (await callerHasRequest(active, requestId)) ? undefined : true,
+    );
+    return {};
+  }
+  await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
     1n,
     bytes(request.target, 20),

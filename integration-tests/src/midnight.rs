@@ -69,7 +69,19 @@ struct MidnightStack {
 #[serde(rename_all = "camelCase")]
 struct BootstrapResult {
     central_address: String,
+    caller_address: String,
     publisher_seed: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedEvmTransaction {
+    pub serialized: String,
+    pub unsigned_hash: String,
+    pub from: String,
+    pub to: String,
+    pub data: String,
+    pub chain_id: String,
 }
 
 pub struct MidnightContext {
@@ -89,19 +101,38 @@ impl MidnightContext {
         );
         let stack = MidnightStack::run(spawner).await?;
         let mut driver = MidnightDriver::spawn(&stack.artifact_dir).await?;
-        let root_public_key = format!(
-            "0x{}",
-            hex::encode(root_public_key.to_encoded_point(true).as_bytes())
-        );
         let bootstrap = driver
             .request::<BootstrapResult>(&serde_json::json!({
                 "op": "bootstrap",
                 "config": DriverConfig::new(&stack),
-                "rootPublicKey": root_public_key,
                 "artifactDir": stack.artifact_dir,
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
+        let caller = bootstrap.caller_address.trim_start_matches("0x");
+        let caller_bytes = hex::decode(caller).context("decoding Midnight caller address")?;
+        anyhow::ensure!(
+            caller_bytes.len() == 32,
+            "Midnight caller address must be 32 bytes, got {}",
+            caller_bytes.len()
+        );
+        let epsilon = mpc_crypto::derive_epsilon_midnight(
+            mpc_primitives::LATEST_MPC_KEY_VERSION,
+            &hex::encode(caller_bytes),
+            mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
+        );
+        let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
+        let response_public_key = format!(
+            "0x{}",
+            hex::encode(response_public_key.to_encoded_point(false).as_bytes())
+        );
+        let _: serde_json::Value = driver
+            .request(&serde_json::json!({
+                "op": "initialise",
+                "responsePublicKey": response_public_key,
+            }))
+            .await
+            .context("initialising the Midnight caller with the MPC response key")?;
         let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
         anyhow::ensure!(
             publisher_entrypoint.is_file(),
@@ -131,6 +162,32 @@ impl MidnightContext {
                 "nonce": nonce.to_string(),
                 "target": hex::encode(target),
                 "argument": hex::encode(argument),
+            }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn signed_evm_transaction(
+        &self,
+        request_id: [u8; 32],
+        expected_signer: &str,
+    ) -> anyhow::Result<SignedEvmTransaction> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "signedTransaction",
+                "requestId": format!("0x{}", hex::encode(request_id)),
+                "expectedSigner": expected_signer,
+            }))
+            .await
+    }
+
+    pub async fn settle_response(&self, request_id: [u8; 32]) -> anyhow::Result<()> {
+        let mut driver = self.driver.lock().await;
+        let _: serde_json::Value = driver
+            .request(&serde_json::json!({
+                "op": "settleResponse",
+                "requestId": format!("0x{}", hex::encode(request_id)),
             }))
             .await?;
         Ok(())

@@ -181,10 +181,24 @@ jobs:
         run: MPC_SETUP_ALWAYS=1 ./setup.sh
 
       - name: List Midnight integration test
-        run: cargo test -p integration-tests --test lib midnight_to_ethereum_emits_both_response_events -- --list
+        run: |
+          test_name='cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response'
+          test_list=/tmp/midnight-real-stack-tests.txt
+          cargo test -p integration-tests --test lib "$test_name" -- --exact --list > "$test_list"
+          cat "$test_list"
+          match_count=$(grep -Fxc "$test_name: test" "$test_list" || true)
+          summary_count=$(grep -Fxc '1 test, 0 benchmarks' "$test_list" || true)
+          if [ "$match_count" -ne 1 ]; then
+            echo "expected exactly one Midnight real-stack test, found $match_count"
+            exit 1
+          fi
+          if [ "$summary_count" -ne 1 ]; then
+            echo "Midnight real-stack test listing did not report exactly one test"
+            exit 1
+          fi
 
       - name: Test Midnight end-to-end stream
-        run: cargo test -p integration-tests --test lib midnight_to_ethereum_emits_both_response_events -- --ignored --nocapture --test-threads 1
+        run: cargo test -p integration-tests --test lib 'cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response' -- --exact --ignored --nocapture --test-threads 1
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

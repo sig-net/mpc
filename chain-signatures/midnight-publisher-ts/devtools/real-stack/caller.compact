@@ -88,19 +88,15 @@ export circuit submitIsEvenRequest(
   );
 }
 
-struct BoolResponse {
-  success: Boolean;
-}
-
 export circuit verifyResponse(
   requestId: RequestId,
   respondBidirectionalEvent: RespondBidirectionalEvent,
-  serializedOutput: Bytes<1>
+  serializedOutput: Bytes<32>
 ): [] {
   const disclosedRequestId = disclose(requestId);
   assert(initialised != 0, "Not initialised");
   assert(
-    verifyRespondBidirectionalEvent<1>(
+    verifyRespondBidirectionalEvent<32>(
       disclosedRequestId,
       serializedOutput,
       disclose(respondBidirectionalEvent),
@@ -108,8 +104,7 @@ export circuit verifyResponse(
     ),
     "Invalid attestation signature"
   );
-  const response = deserialize<BoolResponse, 1>(serializedOutput);
-  assert(response.success, "Foreign call reported failure");
+  assert(abiWordToBool(serializedOutput), "Foreign call reported failure");
   assert(requests.member(disclosedRequestId), "Request not found");
   requests.remove(disclosedRequestId);
 }
