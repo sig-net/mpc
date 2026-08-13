@@ -602,8 +602,12 @@ impl Backlog {
 
     /// Replace the local backlog with a consensus checkpoint after divergence.
     async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        // Decode the checkpoint before the durable write so a malformed peer
+        // checkpoint cannot leave storage regressed while memory stays put.
+        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
         self.checkpoints.regress(&checkpoint).await?;
-        self.recover_by_checkpoint(checkpoint).await
+        self.apply_checkpoint(checkpoint, restored).await;
+        Ok(())
     }
 
     /// Get the latest checkpoint for a specific chain.
@@ -638,6 +642,13 @@ impl Backlog {
     /// Recover backlog state from a checkpoint.
     /// This is called when a node restarts or when it needs to align/regress to consensus.
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+        self.apply_checkpoint(checkpoint, restored).await;
+        Ok(())
+    }
+
+    /// Apply an already-decoded checkpoint to the backlog.
+    async fn apply_checkpoint(&self, checkpoint: Checkpoint, restored: PendingRequests) {
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
@@ -653,19 +664,19 @@ impl Backlog {
 
             // Execution watchers are ephemeral, we need to get all the execution watchers here
             let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(&checkpoint)?;
-            let restored = pending.len();
+            let restored_len = restored.len();
+            *pending = restored;
 
             // Update total pending count based on the difference between cleared and restored requests
             self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending.fetch_add(restored, Ordering::Relaxed);
+            self.total_pending.fetch_add(restored_len, Ordering::Relaxed);
 
             tracing::info!(
                 ?chain,
                 old_block = previous_height,
                 new_block = checkpoint_height,
                 cleared_requests = cleared,
-                restored_requests = restored,
+                restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
             pending.pending_executions()
@@ -686,8 +697,6 @@ impl Backlog {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
-
-        Ok(())
     }
 }
 
