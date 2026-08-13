@@ -336,9 +336,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
             Ok(Some(ChainEvent::Block(block))) => {
                 tracing::info!(block, "received block event");
                 checkpoint_block = Some(block);
-                backlog
-                    .set_processed_block(Chain::Solana, block)
-                    .await;
+                backlog.set_processed_block(Chain::Solana, block).await;
                 break;
             }
             Ok(Some(event)) => {

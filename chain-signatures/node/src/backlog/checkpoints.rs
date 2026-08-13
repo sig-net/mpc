@@ -1,16 +1,17 @@
 use super::{PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
+use enum_map::EnumMap;
 use mpc_primitives::{Chain, Checkpoint, PendingTx};
 use sha3::Digest;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub(super) struct Checkpoints {
     storage: CheckpointStorage,
-    pending: Arc<HashMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
+    pending: Arc<EnumMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,19 +42,15 @@ impl From<CheckpointKind> for Checkpoint {
 impl Checkpoints {
     /// Creates an empty local pending-checkpoint cache backed by `storage`.
     pub(super) fn new(storage: CheckpointStorage) -> Self {
-        let pending = Chain::iter()
-            .into_iter()
-            .map(|chain| (chain, RwLock::new(BTreeMap::new())))
-            .collect();
         Self {
             storage,
-            pending: Arc::new(pending),
+            pending: Arc::default(),
         }
     }
 
     /// Returns the pending-checkpoint map for `chain`.
     fn pending(&self, chain: Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
-        &self.pending[&chain]
+        &self.pending[chain]
     }
 
     /// Updates the pending-checkpoint metric for `chain`.
@@ -78,9 +75,7 @@ impl Checkpoints {
 
             return Err(CheckpointError::Storage {
                 chain,
-                source: anyhow::anyhow!(
-                    "conflicting pending checkpoint at height {height}",
-                ),
+                source: anyhow::anyhow!("conflicting pending checkpoint at height {height}"),
             });
         }
 
@@ -90,18 +85,13 @@ impl Checkpoints {
                 count = pending.len(),
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
-            return Err(CheckpointError::PendingCap {
-                chain,
-            });
+            return Err(CheckpointError::PendingCap { chain });
         }
 
         self.storage
             .persist_pending(checkpoint)
             .await
-            .map_err(|source| CheckpointError::Storage {
-                chain,
-                source,
-            })?;
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
 
         pending.insert(height, checkpoint.clone());
         let len = pending.len();

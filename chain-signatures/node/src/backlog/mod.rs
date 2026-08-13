@@ -7,6 +7,7 @@ pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
 use anyhow::Context;
+use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
@@ -175,9 +176,9 @@ impl ExecutionWatchers {
 pub struct Backlog {
     checkpoints: Checkpoints,
     /// Pending requests indexed by chain
-    requests: Arc<HashMap<Chain, RwLock<PendingRequests>>>,
+    requests: Arc<EnumMap<Chain, RwLock<PendingRequests>>>,
     /// Execution watchers indexed by chain
-    execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
+    execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
 }
@@ -193,41 +194,26 @@ impl Backlog {
         Self::persisted(CheckpointStorage::in_memory())
     }
 
-    /// Initialize the backlog with storage and pre-allocate maps for all chains
+    /// Initialize the backlog with storage for all chains
     pub fn persisted(storage: CheckpointStorage) -> Self {
-        let mut requests = HashMap::new();
-        let mut execution_watchers = HashMap::new();
-
-        // Pre-allocate the maps for all chains
-        for chain in Chain::iter() {
-            requests.insert(chain, RwLock::new(PendingRequests::new()));
-            execution_watchers.insert(chain, RwLock::new(ExecutionWatchers::default()));
-        }
-
         Self {
             checkpoints: Checkpoints::new(storage),
-            requests: Arc::new(requests),
-            execution_watchers: Arc::new(execution_watchers),
+            requests: Arc::default(),
+            execution_watchers: Arc::default(),
             total_pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// Get the pending requests for a specific chain.
-    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
     fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
-        self.requests
-            .get(chain)
-            .expect("chain should be initialized within `persisted` method")
+        &self.requests[*chain]
     }
 
     /// Get the execution watchers for a specific chain.
-    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
     fn watchers(&self, chain: &Chain) -> &RwLock<ExecutionWatchers> {
-        self.execution_watchers
-            .get(chain)
-            .expect("chain should be initialized within `persisted` method")
+        &self.execution_watchers[*chain]
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
