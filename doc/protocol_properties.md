@@ -1,7 +1,5 @@
 # **Protocol Properties** 
 
-Draft, last updated 2026, August 12, 15:31 UTC
-
 Goals:
 
 * capture *what must hold* in the MPC node coordination layer and *why* to be able to reason about simplifications that improve robustness
