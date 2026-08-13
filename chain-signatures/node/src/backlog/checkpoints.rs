@@ -68,29 +68,30 @@ impl Checkpoints {
         &self,
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
-        let mut pending = self.pending(checkpoint.chain).write().await;
-        if let Some(existing) = pending.get(&checkpoint.block_height) {
+        let chain = checkpoint.chain;
+        let height = checkpoint.block_height;
+        let mut pending = self.pending(chain).write().await;
+        if let Some(existing) = pending.get(&height) {
             if existing == checkpoint {
                 return Ok(());
             }
 
             return Err(CheckpointError::Storage {
-                chain: checkpoint.chain,
+                chain,
                 source: anyhow::anyhow!(
-                    "conflicting pending checkpoint at height {}",
-                    checkpoint.block_height
+                    "conflicting pending checkpoint at height {height}",
                 ),
             });
         }
 
         if pending.len() >= MAX_PENDING_CHECKPOINTS {
             tracing::warn!(
-                chain = ?checkpoint.chain,
+                ?chain,
                 count = pending.len(),
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
             return Err(CheckpointError::PendingCap {
-                chain: checkpoint.chain,
+                chain,
             });
         }
 
@@ -98,14 +99,14 @@ impl Checkpoints {
             .persist_pending(checkpoint)
             .await
             .map_err(|source| CheckpointError::Storage {
-                chain: checkpoint.chain,
+                chain,
                 source,
             })?;
 
-        pending.insert(checkpoint.block_height, checkpoint.clone());
+        pending.insert(height, checkpoint.clone());
         let len = pending.len();
         drop(pending);
-        self.observe(checkpoint.chain, len);
+        self.observe(chain, len);
         Ok(())
     }
 
