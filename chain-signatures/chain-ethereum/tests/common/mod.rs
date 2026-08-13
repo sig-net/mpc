@@ -108,6 +108,8 @@ pub async fn wait_for_responded(
     timeout: Duration,
 ) -> Result<(Address, B256)> {
     let filter = Filter::new()
+        // Scan from genesis, Anvil uses `latest` if not specified, which can miss logs
+        .from_block(0u64)
         .address(env.contract_address)
         .event_signature(ChainSignatures::SignatureResponded::SIGNATURE_HASH)
         .topic1(request_id);
