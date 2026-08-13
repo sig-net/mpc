@@ -591,7 +591,15 @@ impl Backlog {
     }
 
     /// Confirm a locally available checkpoint against an on-chain consensus digest.
-    pub async fn confirm_consensus(&self, chain: Chain, digest: [u8; 32]) -> bool {
+    ///
+    /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
+    /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
+    /// storage was unavailable.
+    pub async fn confirm_consensus(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<bool, CheckpointError> {
         self.checkpoints.confirm(chain, digest).await
     }
 
@@ -669,7 +677,8 @@ impl Backlog {
 
             // Update total pending count based on the difference between cleared and restored requests
             self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending.fetch_add(restored_len, Ordering::Relaxed);
+            self.total_pending
+                .fetch_add(restored_len, Ordering::Relaxed);
 
             tracing::info!(
                 ?chain,

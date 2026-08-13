@@ -58,7 +58,9 @@ pub(crate) async fn wait_detected_regression(
 
 /// Returns `true` if a regression is detected. When the consensus digest matches
 /// a local checkpoint (latest or historical), the checkpoint is confirmed via
-/// `confirm_consensus`. Returns `false` when the backlog is aligned (no regression).
+/// `confirm_consensus`. A transient storage error is treated as aligned so it is
+/// retried on the next checkpoint change. Returns `false` when the backlog is
+/// aligned (no regression).
 async fn detect_regression(
     chain: Chain,
     backlog: &Backlog,
@@ -75,11 +77,23 @@ async fn detect_regression(
 
     // A consensus digest can match either the latest checkpoint or a retained
     // pending checkpoint while this node is ahead of consensus.
-    if backlog
+    match backlog
         .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        return false;
+        Ok(found) => {
+            if found {
+                return false;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error confirming checkpoint; retrying on next change"
+            );
+            return false;
+        }
     }
 
     // No match → regression detected.

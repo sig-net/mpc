@@ -23,11 +23,23 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    if backlog
+    match backlog
         .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        return None;
+        Ok(found) => {
+            if found {
+                return None;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error confirming consensus checkpoint; retrying later"
+            );
+            return None;
+        }
     }
 
     tracing::warn!(

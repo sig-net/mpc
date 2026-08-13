@@ -145,16 +145,24 @@ impl Checkpoints {
     }
 
     /// Promotes a locally pending checkpoint when its digest reaches consensus.
-    pub(super) async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> bool {
-        let Some(checkpoint_kind) = self.find_kind(chain, digest).await else {
-            return false;
+    ///
+    /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
+    /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
+    /// storage was unavailable.
+    pub(super) async fn confirm(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<bool, CheckpointError> {
+        let Some(checkpoint_kind) = self.find_kind(chain, digest).await? else {
+            return Ok(false);
         };
         let is_pending = matches!(&checkpoint_kind, CheckpointKind::Pending(_));
         let checkpoint = Checkpoint::from(checkpoint_kind);
 
         if !is_pending {
             self.update_pending(chain, checkpoint.block_height).await;
-            return true;
+            return Ok(true);
         }
 
         match self
@@ -169,11 +177,10 @@ impl Checkpoints {
                     ?digest,
                     "pending checkpoint disappeared before promotion"
                 );
-                return false;
+                return Ok(false);
             }
-            Err(err) => {
-                tracing::warn!(?chain, %err, "failed to promote consensus checkpoint");
-                return false;
+            Err(source) => {
+                return Err(CheckpointError::Storage { chain, source });
             }
         }
         self.update_pending(chain, checkpoint.block_height).await;
@@ -182,7 +189,7 @@ impl Checkpoints {
             height = checkpoint.block_height,
             "consensus checkpoint confirmed"
         );
-        true
+        Ok(true)
     }
 
     /// Hydrates local pending checkpoints and returns the newest known checkpoint.
@@ -249,11 +256,19 @@ impl Checkpoints {
 
     /// Finds a checkpoint by digest, searching pending checkpoints before durable latest state.
     pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
-        self.find_kind(chain, digest).await.map(Checkpoint::from)
+        self.find_kind(chain, digest)
+            .await
+            .ok()
+            .flatten()
+            .map(Checkpoint::from)
     }
 
     /// Finds a checkpoint by digest and identifies whether it is pending or confirmed.
-    async fn find_kind(&self, chain: Chain, digest: [u8; 32]) -> Option<CheckpointKind> {
+    async fn find_kind(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<Option<CheckpointKind>, CheckpointError> {
         if let Some(checkpoint) = self
             .pending(chain)
             .read()
@@ -262,15 +277,15 @@ impl Checkpoints {
             .find(|checkpoint| checkpoint.digest() == digest)
             .cloned()
         {
-            return Some(CheckpointKind::Pending(checkpoint));
+            return Ok(Some(CheckpointKind::Pending(checkpoint)));
         }
-        self.storage
-            .load_latest(chain)
-            .await
-            .ok()
-            .flatten()
-            .filter(|checkpoint| checkpoint.digest() == digest)
-            .map(CheckpointKind::Latest)
+        match self.storage.load_latest(chain).await {
+            Ok(Some(checkpoint)) if checkpoint.digest() == digest => {
+                Ok(Some(CheckpointKind::Latest(checkpoint)))
+            }
+            Ok(_) => Ok(None),
+            Err(source) => Err(CheckpointError::Storage { chain, source }),
+        }
     }
 
     #[cfg(test)]
@@ -378,7 +393,10 @@ mod tests {
         }
 
         let latest = checkpoint(MAX_PENDING_CHECKPOINTS as u64 - 1);
-        assert!(checkpoints.confirm(latest.chain, latest.digest()).await);
+        assert!(matches!(
+            checkpoints.confirm(latest.chain, latest.digest()).await,
+            Ok(true)
+        ));
         assert!(checkpoints
             .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
             .await
@@ -395,7 +413,10 @@ mod tests {
         checkpoints.persist_pending(&second).await.unwrap();
         checkpoints.persist_pending(&third).await.unwrap();
 
-        assert!(checkpoints.confirm(second.chain, second.digest()).await);
+        assert!(matches!(
+            checkpoints.confirm(second.chain, second.digest()).await,
+            Ok(true)
+        ));
         assert_eq!(checkpoints.count(first.chain).await, 1);
         assert_eq!(checkpoints.latest(first.chain).await, Some(third));
     }
@@ -406,7 +427,10 @@ mod tests {
         let checkpoint = checkpoint(1);
         checkpoints.persist_pending(&checkpoint).await.unwrap();
 
-        assert!(!checkpoints.confirm(checkpoint.chain, [1; 32]).await);
+        assert!(matches!(
+            checkpoints.confirm(checkpoint.chain, [1; 32]).await,
+            Ok(false)
+        ));
         assert_eq!(checkpoints.count(checkpoint.chain).await, 1);
         assert_eq!(checkpoints.latest(checkpoint.chain).await, Some(checkpoint));
     }
@@ -481,11 +505,12 @@ mod tests {
         let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
         let checkpoint = checkpoint(1);
         checkpoints.persist_pending(&checkpoint).await.unwrap();
-        assert!(
+        assert!(matches!(
             checkpoints
                 .confirm(checkpoint.chain, checkpoint.digest())
-                .await
-        );
+                .await,
+            Ok(true)
+        ));
 
         assert_eq!(
             checkpoints
