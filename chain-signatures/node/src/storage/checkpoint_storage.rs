@@ -167,7 +167,7 @@ impl CheckpointStorage {
                         return 0
                     end
                     redis.call('SET', KEYS[1], pending)
-                    local height = tonumber(ARGV[2])
+                    local height = tonumber(ARGV[1])
                     local entries = redis.call('HGETALL', KEYS[2])
                     for i = 1, #entries, 2 do
                         local field_height = tonumber(entries[i])
@@ -180,7 +180,6 @@ impl CheckpointStorage {
                 let promoted: i32 = redis::Script::new(PROMOTE)
                     .key(self.checkpoint_key(chain))
                     .key(self.pending_checkpoint_key(chain))
-                    .arg(height)
                     .arg(height)
                     .invoke_async(&mut conn)
                     .await
