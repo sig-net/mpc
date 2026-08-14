@@ -116,19 +116,6 @@ impl FinalizedHeadWatcher {
         }
     }
 
-    pub async fn wait_initialized(&mut self) -> Result<u64, WatcherExit> {
-        let mut head_rx = self.tracker.head.subscribe();
-        loop {
-            if let Some(head) = *head_rx.borrow_and_update() {
-                return Ok(head);
-            }
-            tokio::select! {
-                changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::UnexpectedExit); },
-                result = &mut self.task => return Err(Self::map_join(result)),
-            }
-        }
-    }
-
     pub async fn wait_for(&mut self, block_number: u64) -> Result<u64, WatcherExit> {
         let mut head_rx = self.tracker.head.subscribe();
         loop {
@@ -182,19 +169,6 @@ impl FinalizedHeadTracker {
     }
 
     #[cfg(test)]
-    async fn wait_initialized(&self) -> anyhow::Result<u64> {
-        let mut rx = self.head.subscribe();
-        loop {
-            if let Some(head) = *rx.borrow_and_update() {
-                return Ok(head);
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow::anyhow!("head channel closed"))?;
-        }
-    }
-
-    #[cfg(test)]
     async fn wait_for(&self, block_number: u64) -> anyhow::Result<()> {
         if self.current().is_some_and(|head| head >= block_number) {
             return Ok(());
@@ -228,19 +202,6 @@ impl FinalizedHeadTracker {
             self.optimistic,
             cancel,
         ));
-        FinalizedHeadWatcher {
-            tracker: self.clone(),
-            task,
-        }
-    }
-
-    #[cfg(test)]
-    fn spawn_panicking_watcher(&self) -> FinalizedHeadWatcher {
-        fn panic_result() -> Result<(), WatcherExit> {
-            panic!("test watcher panic");
-        }
-
-        let task = tokio::spawn(async { panic_result() });
         FinalizedHeadWatcher {
             tracker: self.clone(),
             task,
@@ -357,47 +318,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_initialized_never_returns_cached_zero() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let publisher = tracker.clone();
-        let task = tokio::spawn(async move { tracker.wait_initialized().await.unwrap() });
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!task.is_finished());
-        publisher.set_head(42);
-        assert_eq!(task.await.unwrap(), 42);
-    }
-
-    #[tokio::test]
-    async fn sequential_waits_reuse_one_watcher_task() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
-        let cancel = CancellationToken::new();
-        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
-
-        tracker.set_head(10);
-        let head = watcher.wait_initialized().await.unwrap();
-        assert_eq!(head, 10);
-        let head = watcher.wait_for(5).await.unwrap();
-        assert_eq!(head, 10);
-        tracker.set_head(20);
-        let head = watcher.wait_for(15).await.unwrap();
-        assert_eq!(head, 20);
-
-        cancel.cancel();
-    }
-
-    #[tokio::test]
-    async fn watcher_panic_before_initialization_is_an_error() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let mut watcher = tracker.spawn_panicking_watcher();
-        assert!(matches!(
-            watcher.wait_initialized().await,
-            Err(WatcherExit::Panicked)
-        ));
-    }
-
-    #[tokio::test]
     async fn watcher_cancellation_during_wait_is_an_error() {
         let tracker = FinalizedHeadTracker::new_for_test();
         let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
@@ -433,13 +353,6 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut watcher = tracker.spawn_watcher(client, cancel.clone());
 
-        assert_eq!(
-            watcher
-                .wait_initialized()
-                .await
-                .expect("watcher should publish its first finalized sample"),
-            100
-        );
         watcher
             .wait_for(50)
             .await

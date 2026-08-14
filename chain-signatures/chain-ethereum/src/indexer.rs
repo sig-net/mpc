@@ -4,15 +4,16 @@ use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
 use crate::EthConfig;
+use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, Log};
+use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::retry_until_ok;
+use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -315,21 +316,21 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// The catchup-live anchor: the first initialized processable head + 1.
+    /// The catchup-live anchor: the first processable finalized head + 1.
     /// Returns `None` on cancellation.
-    async fn sample_anchor(
-        &self,
-        watcher: &mut FinalizedHeadWatcher,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<Option<u64>> {
-        tokio::select! {
-            _ = cancel.cancelled() => Ok(None),
-            head = watcher.wait_initialized() => match head {
-                Ok(head) => Ok(Some(head.saturating_add(1))),
-                Err(_err) if cancel.is_cancelled() => Ok(None),
-                Err(err) => Err(anyhow::anyhow!("head watcher exited: {err:?}")),
+    async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
+        retry_until_some(
+            cancel,
+            Self::RETRY_DELAY,
+            "ethereum finalized head sampling",
+            || async {
+                self.client
+                    .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
+                    .await
             },
-        }
+        )
+        .await
+        .map(|block| block.header.number.saturating_add(1))
     }
 
     /// Wait until `next` is processable (the head covers it), returning the
@@ -403,7 +404,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .spawn_watcher(self.client.clone(), cancel.clone());
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
-        let Some(anchor) = self.sample_anchor(&mut finalized_watcher, &cancel).await? else {
+        let Some(anchor) = self.sample_anchor(&cancel).await else {
             tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
             return Ok(());
         };
@@ -491,6 +492,32 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn sample_anchor_fetches_finalized_head_directly() {
+        let mut server = Server::new_async().await;
+        let finalized_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 42).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        assert_eq!(
+            indexer.sample_anchor(&CancellationToken::new()).await,
+            Some(43)
+        );
+        finalized_mock.assert_async().await;
+    }
 
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
