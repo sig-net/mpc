@@ -1,6 +1,4 @@
 use crate::client::EthereumClient;
-#[cfg(test)]
-use crate::config::IndexerConfig;
 use crate::EthConfig;
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::BlockId;
@@ -71,22 +69,6 @@ impl FinalizedHeadStall {
     }
 }
 
-/// Owns the cached finalized-head `watch` channel plus the watcher config.
-/// Cloning shares the underlying channel (cheap), so tests can advance the head
-/// from a spawned task.
-#[derive(Clone)]
-pub struct FinalizedHeadTracker {
-    head: watch::Sender<Option<u64>>,
-    optimistic: bool,
-    refresh_interval: Duration,
-    // TODO: max_failures is logged in watch_head but never enforced — the
-    // watcher retries forever and relies on the stream watchdog for recovery.
-    // Either exit with WatcherExit::Panicked once failures exceed it, or drop
-    // the field and its config entirely.
-    max_failures: u32,
-    stall_rewarn_secs: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatcherExit {
     Cancelled,
@@ -95,12 +77,16 @@ pub enum WatcherExit {
     Terminated,
 }
 
-/// Owns the watcher task. Waiting through this guard observes task exit as
-/// well as head updates; retaining the watch sender alone cannot do that.
-/// A resolved task is terminal: waits return an error and production callers
-/// immediately stop the indexer, so this handle is never polled again.
+/// Owns the watcher task maintaining the cached finalized head. Waiting
+/// through this guard observes task exit as well as head updates; retaining
+/// the watch sender alone cannot do that. A resolved task is terminal: waits
+/// return an error and production callers immediately stop the indexer, so
+/// this handle is never polled again.
+///
+/// The `head` channel is shared with the indexer, which retains a clone so
+/// tests can force-publish a head without a running task.
 pub struct FinalizedHeadWatcher {
-    tracker: FinalizedHeadTracker,
+    head: watch::Sender<Option<u64>>,
     task: JoinHandle<()>,
 }
 
@@ -111,6 +97,26 @@ impl Drop for FinalizedHeadWatcher {
 }
 
 impl FinalizedHeadWatcher {
+    /// Spawn the background watcher (`Finalized` in production, `Latest` in
+    /// optimistic dev mode). Dropping the returned guard aborts the task.
+    pub fn spawn(
+        head: watch::Sender<Option<u64>>,
+        eth: &EthConfig,
+        client: Arc<EthereumClient>,
+        cancel: CancellationToken,
+    ) -> Self {
+        let task = tokio::spawn(watch_head(
+            client,
+            head.clone(),
+            Duration::from_millis(eth.refresh_finalized_interval),
+            eth.indexer.max_finalized_failures,
+            eth.indexer.stall_rewarn_secs,
+            eth.optimistic_requests,
+            cancel,
+        ));
+        Self { head, task }
+    }
+
     fn map_join(result: Result<(), tokio::task::JoinError>) -> WatcherExit {
         match result {
             Ok(()) => WatcherExit::Cancelled,
@@ -120,7 +126,7 @@ impl FinalizedHeadWatcher {
     }
 
     pub async fn wait_initialized(&mut self) -> Result<u64, WatcherExit> {
-        let mut head_rx = self.tracker.head.subscribe();
+        let mut head_rx = self.head.subscribe();
         loop {
             if let Some(head) = *head_rx.borrow_and_update() {
                 return Ok(head);
@@ -133,7 +139,7 @@ impl FinalizedHeadWatcher {
     }
 
     pub async fn wait_for(&mut self, block_number: u64) -> Result<u64, WatcherExit> {
-        let mut head_rx = self.tracker.head.subscribe();
+        let mut head_rx = self.head.subscribe();
         loop {
             if let Some(head) = *head_rx.borrow_and_update() {
                 if head >= block_number {
@@ -148,160 +154,113 @@ impl FinalizedHeadWatcher {
     }
 }
 
-impl FinalizedHeadTracker {
-    pub fn new(eth: &EthConfig) -> Self {
-        Self {
-            head: watch::channel(None).0,
-            optimistic: eth.optimistic_requests,
-            refresh_interval: Duration::from_millis(eth.refresh_finalized_interval),
-            max_failures: eth.indexer.max_finalized_failures,
-            stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
-        }
-    }
+/// Background task maintaining the cached head.
+///
+/// Polls `eth_getBlockByNumber(Finalized)` (production) or `(Latest)`
+/// (optimistic dev mode) on the configured interval and publishes advances
+/// over the `watch` channel. Retries forever; the stream supervisor
+/// watchdog remains the escape hatch.
+async fn watch_head(
+    client: Arc<EthereumClient>,
+    head: watch::Sender<Option<u64>>,
+    refresh_interval: Duration,
+    // TODO: max_failures is logged but never enforced — the watcher retries
+    // forever and relies on the stream watchdog for recovery. Either exit
+    // with WatcherExit::Panicked once failures exceed it, or drop the field
+    // and its config entirely.
+    max_failures: u32,
+    stall_rewarn_secs: u64,
+    optimistic: bool,
+    cancel: CancellationToken,
+) {
+    let mut stall = FinalizedHeadStall::new(
+        Chain::Ethereum.expected_finality_time_secs(),
+        stall_rewarn_secs,
+    );
+    let mut failures = 0u32;
 
-    /// Construct a finalized-head tracker for unit tests, with a short refresh interval and no optimistic mode.
-    #[cfg(test)]
-    fn new_for_test() -> Self {
-        let indexer = IndexerConfig::default();
-        Self {
-            head: watch::channel(None).0,
-            optimistic: false, // existing unit tests assume finalized mode
-            refresh_interval: Duration::from_millis(100),
-            max_failures: indexer.max_finalized_failures,
-            stall_rewarn_secs: indexer.stall_rewarn_secs,
-        }
-    }
+    tracing::info!(optimistic, "ethereum head watcher started");
 
-    /// Force the cached head to `n` (used by tests to bypass the watcher).
-    #[cfg(test)]
-    pub fn set_head(&self, n: u64) {
-        self.head.send_replace(Some(n));
-    }
-
-    /// Spawn the background watcher that maintains the cached head.
-    pub fn spawn_watcher(
-        &self,
-        client: Arc<EthereumClient>,
-        cancel: CancellationToken,
-    ) -> FinalizedHeadWatcher {
-        let task = tokio::spawn(Self::watch_head(
-            client,
-            self.head.clone(),
-            self.refresh_interval,
-            self.max_failures,
-            self.stall_rewarn_secs,
-            self.optimistic,
-            cancel,
-        ));
-        FinalizedHeadWatcher {
-            tracker: self.clone(),
-            task,
-        }
-    }
-
-    #[cfg(test)]
-    fn spawn_panicking_watcher(&self) -> FinalizedHeadWatcher {
-        let task = tokio::spawn(async {
-            panic!("test watcher panic");
+    loop {
+        let block_id = BlockId::Number(if optimistic {
+            BlockNumberOrTag::Latest
+        } else {
+            BlockNumberOrTag::Finalized
         });
-        FinalizedHeadWatcher {
-            tracker: self.clone(),
-            task,
+        match client.get_block(block_id).await {
+            Ok(Some(block)) => {
+                failures = 0;
+                let new_final = block.header.number;
+                stall.observe(new_final);
+                head.send_if_modified(|cur| {
+                    if cur.is_none_or(|current| new_final > current) {
+                        *cur = Some(new_final);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "ethereum get_block(head) returned no block; watcher keeps retrying"
+                );
+            }
+            Err(err) => {
+                failures = failures.saturating_add(1);
+                tracing::warn!(
+                    ?err,
+                    failures,
+                    max_failures,
+                    "ethereum get_block(head) failed; watcher keeps retrying"
+                );
+            }
         }
-    }
 
-    // TODO: Currently if this dies silently we have to wait 35 min for the stream supervisor to restart it. Implement faster failure detection and restart.
-    /// Background task maintaining the cached head.
-    ///
-    /// Polls `eth_getBlockByNumber(Finalized)` (production) or `(Latest)`
-    /// (optimistic dev mode) on the configured interval and publishes advances
-    /// over the `watch` channel. Retries forever; the stream supervisor
-    /// watchdog remains the escape hatch.
-    async fn watch_head(
-        client: Arc<EthereumClient>,
-        head: watch::Sender<Option<u64>>,
-        refresh_interval: Duration,
-        max_failures: u32,
-        stall_rewarn_secs: u64,
-        optimistic: bool,
-        cancel: CancellationToken,
-    ) {
-        let mut stall = FinalizedHeadStall::new(
-            Chain::Ethereum.expected_finality_time_secs(),
-            stall_rewarn_secs,
-        );
-        let mut failures = 0u32;
-
-        tracing::info!(optimistic, "ethereum head watcher started");
-
-        loop {
-            let block_id = BlockId::Number(if optimistic {
-                BlockNumberOrTag::Latest
-            } else {
-                BlockNumberOrTag::Finalized
-            });
-            match client.get_block(block_id).await {
-                Ok(Some(block)) => {
-                    failures = 0;
-                    let new_final = block.header.number;
-                    stall.observe(new_final);
-                    head.send_if_modified(|cur| {
-                        if cur.is_none_or(|current| new_final > current) {
-                            *cur = Some(new_final);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        "ethereum get_block(head) returned no block; watcher keeps retrying"
-                    );
-                }
-                Err(err) => {
-                    failures = failures.saturating_add(1);
-                    tracing::warn!(
-                        ?err,
-                        failures,
-                        max_failures,
-                        "ethereum get_block(head) failed; watcher keeps retrying"
-                    );
-                }
-            }
-
-            if cancel.cancelled_within(refresh_interval).await {
-                return;
-            }
+        if cancel.cancelled_within(refresh_interval).await {
+            return;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FinalizedHeadTracker, WatcherExit};
+    use super::{FinalizedHeadWatcher, WatcherExit};
     use crate::test_utils;
     use mockito::{Matcher, Server};
     use serde_json::json;
     use std::sync::Arc;
+    use tokio::sync::watch;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
 
+    async fn spawn_watcher(
+        url: &str,
+        cancel: &CancellationToken,
+    ) -> (watch::Sender<Option<u64>>, FinalizedHeadWatcher) {
+        let head = watch::channel(None).0;
+        let client = Arc::new(test_utils::create_test_ethereum_client(url).await);
+        let watcher = FinalizedHeadWatcher::spawn(
+            head.clone(),
+            &test_utils::test_eth_config(url),
+            client,
+            cancel.clone(),
+        );
+        (head, watcher)
+    }
+
     #[tokio::test]
     async fn wait_initialized_blocks_until_first_publish() {
-        // Watcher against an unroutable endpoint: only the explicit `set_head`
-        // publishes, so the wait must block until then.
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
+        // Watcher against an unroutable endpoint: only the explicit publish
+        // unblocks, so the wait must block until then.
         let cancel = CancellationToken::new();
-        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
+        let (head, mut watcher) = spawn_watcher("http://127.0.0.1:1", &cancel).await;
 
-        let publisher = tracker.clone();
         let task = tokio::spawn(async move { watcher.wait_initialized().await.unwrap() });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!task.is_finished());
-        publisher.set_head(42);
+        head.send_replace(Some(42));
         assert_eq!(task.await.unwrap(), 42);
 
         cancel.cancel();
@@ -309,27 +268,27 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_waits_reuse_one_watcher_task() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
         let cancel = CancellationToken::new();
-        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
+        let (head, mut watcher) = spawn_watcher("http://127.0.0.1:1", &cancel).await;
 
-        tracker.set_head(10);
-        let head = watcher.wait_initialized().await.unwrap();
-        assert_eq!(head, 10);
-        let head = watcher.wait_for(5).await.unwrap();
-        assert_eq!(head, 10);
-        tracker.set_head(20);
-        let head = watcher.wait_for(15).await.unwrap();
-        assert_eq!(head, 20);
+        head.send_replace(Some(10));
+        assert_eq!(watcher.wait_initialized().await.unwrap(), 10);
+        assert_eq!(watcher.wait_for(5).await.unwrap(), 10);
+        head.send_replace(Some(20));
+        assert_eq!(watcher.wait_for(15).await.unwrap(), 20);
 
         cancel.cancel();
     }
 
     #[tokio::test]
     async fn watcher_panic_before_initialization_is_an_error() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let mut watcher = tracker.spawn_panicking_watcher();
+        let head = watch::channel(None).0;
+        let mut watcher = FinalizedHeadWatcher {
+            head,
+            task: tokio::spawn(async {
+                panic!("test watcher panic");
+            }),
+        };
         assert!(matches!(
             watcher.wait_initialized().await,
             Err(WatcherExit::Panicked)
@@ -338,10 +297,8 @@ mod tests {
 
     #[tokio::test]
     async fn watcher_cancellation_during_wait_is_an_error() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-        let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
         let cancel = CancellationToken::new();
-        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
+        let (_head, mut watcher) = spawn_watcher("http://127.0.0.1:1", &cancel).await;
         cancel.cancel();
         assert!(matches!(
             watcher.wait_for(100).await,
@@ -366,11 +323,8 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let tracker = FinalizedHeadTracker::new_for_test();
-
         let cancel = CancellationToken::new();
-        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
+        let (_head, mut watcher) = spawn_watcher(&server.url(), &cancel).await;
 
         assert_eq!(
             watcher

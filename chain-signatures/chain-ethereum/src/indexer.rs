@@ -2,7 +2,7 @@ use crate::abi::ChainSignatures;
 use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
-use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
+use crate::finalized_head::FinalizedHeadWatcher;
 use crate::EthConfig;
 use alloy::primitives::Address;
 use alloy::rpc::types::{Block, Log};
@@ -14,7 +14,7 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::retry_until_ok;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -52,8 +52,9 @@ pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     telemetry: T,
     client: Arc<EthereumClient>,
     contract_address: Address,
-    /// Finalized head tracker and watcher task, used to gate catchup and live tail processing.
-    finalized_head: FinalizedHeadTracker,
+    /// Finalized-head watch channel shared with the spawned watcher task,
+    /// used to gate catchup and live tail processing.
+    finalized_head: watch::Sender<Option<u64>>,
     /// Watcher nonce-gate scheduling state (first-appearance checks + retries).
     watcher_gate: Mutex<WatcherGateState>,
 }
@@ -66,7 +67,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
         let contract_address = eth.contract_address;
 
-        let finalized_head = FinalizedHeadTracker::new(&eth);
+        let finalized_head = watch::channel(None).0;
         Ok(Self {
             eth,
             state_manager,
@@ -88,7 +89,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         client: Arc<EthereumClient>,
         contract_address: Address,
     ) -> Self {
-        let finalized_head = FinalizedHeadTracker::new(&eth);
+        let finalized_head = watch::channel(None).0;
         Self {
             eth,
             state_manager,
@@ -103,8 +104,12 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Spawn the background head watcher (`Finalized` in production, `Latest` in
     /// optimistic dev mode). Returns a guard whose drop aborts the task.
     pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> FinalizedHeadWatcher {
-        self.finalized_head
-            .spawn_watcher(self.client.clone(), cancel)
+        FinalizedHeadWatcher::spawn(
+            self.finalized_head.clone(),
+            &self.eth,
+            self.client.clone(),
+            cancel,
+        )
     }
 
     /// Fetch the contract-relevant logs for a single `block`, gated by its
@@ -398,9 +403,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         tracing::info!("ethereum indexer started");
 
         // Spawn the finalized head watcher.
-        let mut finalized_watcher = self
-            .finalized_head
-            .spawn_watcher(self.client.clone(), cancel.clone());
+        let mut finalized_watcher = FinalizedHeadWatcher::spawn(
+            self.finalized_head.clone(),
+            &self.eth,
+            self.client.clone(),
+            cancel.clone(),
+        );
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
         let Some(anchor) = self.sample_anchor(&mut finalized_watcher, &cancel).await? else {
@@ -478,6 +486,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use crate::client::CatchupItem;
+    use crate::finalized_head::FinalizedHeadWatcher;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::rpc::types::BlockId;
@@ -1069,12 +1078,15 @@ mod tests {
         let head = indexer.finalized_head.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            head.set_head(100);
+            head.send_replace(Some(100));
         });
 
-        let mut watcher = indexer
-            .finalized_head
-            .spawn_watcher(indexer.client.clone(), cancel.clone());
+        let mut watcher = FinalizedHeadWatcher::spawn(
+            indexer.finalized_head.clone(),
+            &indexer.eth,
+            indexer.client.clone(),
+            cancel.clone(),
+        );
         let upper = indexer
             .wait_processable_bound(&mut watcher, 50, &cancel)
             .await

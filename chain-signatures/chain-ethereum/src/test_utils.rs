@@ -23,6 +23,25 @@ fn test_signer() -> alloy::signers::local::PrivateKeySigner {
 /// Default refresh interval (ms) used by `IndexerBuilder` unless overridden.
 const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
 
+/// Base `EthConfig` for tests
+pub fn test_eth_config(url: &str) -> EthConfig {
+    EthConfig {
+        execution_rpc_http_url: url.parse().unwrap(),
+        light_client: false,
+        account_sk: test_signer(),
+        consensus_rpc_http_url: String::new(),
+        contract_address: Address::ZERO,
+        network: String::new(),
+        helios_data_path: String::new(),
+        refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
+        optimistic_requests: false,
+        rpc: Default::default(),
+        gas: Default::default(),
+        publisher: Default::default(),
+        indexer: Default::default(),
+    }
+}
+
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
@@ -33,23 +52,7 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
         jitter: false,
     };
 
-    let eth = EthConfig {
-        execution_rpc_http_url: url.parse().unwrap(),
-        light_client: false,
-        account_sk: test_signer(),
-        consensus_rpc_http_url: "".to_string(),
-        contract_address: Address::ZERO,
-        network: "".to_string(),
-        helios_data_path: "".to_string(),
-        refresh_finalized_interval: 0,
-        optimistic_requests: false,
-        rpc: Default::default(),
-        gas: Default::default(),
-        publisher: Default::default(),
-        indexer: Default::default(),
-    };
-
-    EthereumClient::new_with_strategy(eth, retry_strategy)
+    EthereumClient::new_with_strategy(test_eth_config(url), retry_strategy)
         .await
         .unwrap()
 }
@@ -67,23 +70,13 @@ impl TestIndexerBuilder {
     /// Create a builder wired to a mockito server, with field defaults
     pub fn new(server_url: impl Into<String>) -> Self {
         let server_url = server_url.into();
+        let mut eth = test_eth_config(&server_url);
+        eth.consensus_rpc_http_url = server_url.clone();
+        eth.network = "sepolia".to_string();
+        eth.helios_data_path = "/tmp/helios-test".to_string();
         Self {
-            server_url: server_url.clone(),
-            eth: EthConfig {
-                account_sk: test_signer(),
-                consensus_rpc_http_url: server_url.clone(),
-                execution_rpc_http_url: server_url.parse().unwrap(),
-                contract_address: Address::ZERO,
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
-                optimistic_requests: false,
-                light_client: false,
-                rpc: Default::default(),
-                gas: Default::default(),
-                publisher: Default::default(),
-                indexer: Default::default(),
-            },
+            server_url,
+            eth,
             state_manager: MockStateManager::new(),
         }
     }
