@@ -79,6 +79,10 @@ pub struct FinalizedHeadTracker {
     head: watch::Sender<Option<u64>>,
     optimistic: bool,
     refresh_interval: Duration,
+    // TODO: max_failures is logged in watch_head but never enforced — the
+    // watcher retries forever and relies on the stream watchdog for recovery.
+    // Either exit with WatcherExit::Panicked once failures exceed it, or drop
+    // the field and its config entirely.
     max_failures: u32,
     stall_rewarn_secs: u64,
 }
@@ -168,48 +172,10 @@ impl FinalizedHeadTracker {
         }
     }
 
-    /// Cached finalized block number.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn current(&self) -> Option<u64> {
-        *self.head.borrow()
-    }
-
     /// Force the cached head to `n` (used by tests to bypass the watcher).
     #[cfg(test)]
     pub fn set_head(&self, n: u64) {
         self.head.send_replace(Some(n));
-    }
-
-    #[cfg(test)]
-    async fn wait_initialized(&self) -> anyhow::Result<u64> {
-        let mut rx = self.head.subscribe();
-        loop {
-            if let Some(head) = *rx.borrow_and_update() {
-                return Ok(head);
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow::anyhow!("head channel closed"))?;
-        }
-    }
-
-    #[cfg(test)]
-    async fn wait_for(&self, block_number: u64) -> anyhow::Result<()> {
-        if self.current().is_some_and(|head| head >= block_number) {
-            return Ok(());
-        }
-        let mut rx = self.head.subscribe();
-        loop {
-            if rx
-                .borrow_and_update()
-                .is_some_and(|head| head >= block_number)
-            {
-                return Ok(());
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow::anyhow!("head channel closed"))?;
-        }
     }
 
     /// Spawn the background watcher that maintains the cached head.
@@ -322,47 +288,23 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    async fn wait_for_returns_when_head_covers_block() {
-        // wait_for only reads the cached head; a covering head returns without
-        // any RPC (no client is involved).
+    async fn wait_initialized_blocks_until_first_publish() {
+        // Watcher against an unroutable endpoint: only the explicit `set_head`
+        // publishes, so the wait must block until then.
         let tracker = FinalizedHeadTracker::new_for_test();
-        tracker.set_head(100);
+        let client = Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await);
+        let cancel = CancellationToken::new();
+        let mut watcher = tracker.spawn_watcher(client, cancel.clone());
 
-        tracker
-            .wait_for(42)
-            .await
-            .expect("head covers block; should return without blocking");
-    }
-
-    #[tokio::test]
-    async fn wait_for_resolves_when_head_advances() {
-        let tracker = FinalizedHeadTracker::new_for_test();
-
-        // Head starts at 0; the wait must block until the head advances past 50.
-        let head = tracker.clone();
-        let advancer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            head.set_head(100);
-        });
-
-        tracker
-            .wait_for(50)
-            .await
-            .expect("should resolve once the head advances past the block");
-
-        advancer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn wait_initialized_never_returns_cached_zero() {
-        let tracker = FinalizedHeadTracker::new_for_test();
         let publisher = tracker.clone();
-        let task = tokio::spawn(async move { tracker.wait_initialized().await.unwrap() });
+        let task = tokio::spawn(async move { watcher.wait_initialized().await.unwrap() });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!task.is_finished());
         publisher.set_head(42);
         assert_eq!(task.await.unwrap(), 42);
+
+        cancel.cancel();
     }
 
     #[tokio::test]
