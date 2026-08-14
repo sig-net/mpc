@@ -5,7 +5,7 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig([
-  globalIgnores(["dist/**"]),
+  globalIgnores(["dist/**", "devtools/real-stack/managed/**"]),
 
   {
     name: "midnight-publisher/typescript",
@@ -13,7 +13,9 @@ export default defineConfig([
     extends: [js.configs.recommended, tseslint.configs.recommended],
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          allowDefaultProject: ["devtools/real-stack/*.ts", "vitest.config.ts"],
+        },
         tsconfigRootDir: import.meta.dirname,
       },
     },
