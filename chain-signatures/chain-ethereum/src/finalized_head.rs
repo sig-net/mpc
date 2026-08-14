@@ -86,9 +86,9 @@ pub struct FinalizedHeadTracker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatcherExit {
     Cancelled,
-    UnexpectedExit,
     Panicked,
-    JoinCancelled,
+    /// Watch channel closed while waiting for a head update
+    Terminated,
 }
 
 /// Owns the watcher task. Waiting through this guard observes task exit as
@@ -97,7 +97,7 @@ pub enum WatcherExit {
 /// immediately stop the indexer, so this handle is never polled again.
 pub struct FinalizedHeadWatcher {
     tracker: FinalizedHeadTracker,
-    task: JoinHandle<Result<(), WatcherExit>>,
+    task: JoinHandle<()>,
 }
 
 impl Drop for FinalizedHeadWatcher {
@@ -107,11 +107,10 @@ impl Drop for FinalizedHeadWatcher {
 }
 
 impl FinalizedHeadWatcher {
-    fn map_join(result: Result<Result<(), WatcherExit>, tokio::task::JoinError>) -> WatcherExit {
+    fn map_join(result: Result<(), tokio::task::JoinError>) -> WatcherExit {
         match result {
-            Ok(Ok(())) => WatcherExit::UnexpectedExit,
-            Ok(Err(exit)) => exit,
-            Err(err) if err.is_cancelled() => WatcherExit::JoinCancelled,
+            Ok(()) => WatcherExit::Cancelled,
+            Err(err) if err.is_cancelled() => WatcherExit::Cancelled,
             Err(_) => WatcherExit::Panicked,
         }
     }
@@ -123,7 +122,7 @@ impl FinalizedHeadWatcher {
                 return Ok(head);
             }
             tokio::select! {
-                changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::UnexpectedExit); },
+                changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::Terminated); },
                 result = &mut self.task => return Err(Self::map_join(result)),
             }
         }
@@ -138,7 +137,7 @@ impl FinalizedHeadWatcher {
                 }
             }
             tokio::select! {
-                changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::UnexpectedExit); },
+                changed = head_rx.changed() => if changed.is_err() { return Err(WatcherExit::Terminated); },
                 result = &mut self.task => return Err(Self::map_join(result)),
             }
         }
@@ -236,11 +235,9 @@ impl FinalizedHeadTracker {
 
     #[cfg(test)]
     fn spawn_panicking_watcher(&self) -> FinalizedHeadWatcher {
-        fn panic_result() -> Result<(), WatcherExit> {
+        let task = tokio::spawn(async {
             panic!("test watcher panic");
-        }
-
-        let task = tokio::spawn(async { panic_result() });
+        });
         FinalizedHeadWatcher {
             tracker: self.clone(),
             task,
@@ -262,7 +259,7 @@ impl FinalizedHeadTracker {
         stall_rewarn_secs: u64,
         optimistic: bool,
         cancel: CancellationToken,
-    ) -> Result<(), WatcherExit> {
+    ) {
         let mut stall = FinalizedHeadStall::new(
             Chain::Ethereum.expected_finality_time_secs(),
             stall_rewarn_secs,
@@ -308,7 +305,7 @@ impl FinalizedHeadTracker {
             }
 
             if cancel.cancelled_within(refresh_interval).await {
-                return Err(WatcherExit::Cancelled);
+                return;
             }
         }
     }
