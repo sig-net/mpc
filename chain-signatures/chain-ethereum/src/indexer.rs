@@ -2,7 +2,7 @@ use crate::abi::ChainSignatures;
 use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
-use crate::finalized_head::FinalizedHeadTracker;
+use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
 use crate::EthConfig;
 use alloy::primitives::Address;
 use alloy::rpc::types::{Block, Log};
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use futures_util::{stream, Stream};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::{retry_until_ok, retry_until_some, AbortOnDrop};
+use mpc_utils::task::retry_until_ok;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -102,7 +102,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
     /// Spawn the background head watcher (`Finalized` in production, `Latest` in
     /// optimistic dev mode). Returns a guard whose drop aborts the task.
-    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> AbortOnDrop {
+    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> FinalizedHeadWatcher {
         self.finalized_head
             .spawn_watcher(self.client.clone(), cancel)
     }
@@ -315,32 +315,39 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// The catchup-live anchor: the startup tip + 1 (exclusive catchup end and
-    /// first live block), retrying until the tip is available.
+    /// The catchup-live anchor: the first initialized processable head + 1.
     /// Returns `None` on cancellation.
-    async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        retry_until_some(
-            cancel,
-            Self::RETRY_DELAY,
-            "ethereum latest block",
-            || async { self.client.get_latest_block_number().await },
-        )
-        .await
-        .map(|tip| tip.saturating_add(1))
+    async fn sample_anchor(
+        &self,
+        watcher: &mut FinalizedHeadWatcher,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Option<u64>> {
+        tokio::select! {
+            _ = cancel.cancelled() => Ok(None),
+            head = watcher.wait_initialized() => match head {
+                Ok(head) => Ok(Some(head.saturating_add(1))),
+                Err(_err) if cancel.is_cancelled() => Ok(None),
+                Err(err) => Err(anyhow::anyhow!("head watcher exited: {err:?}")),
+            },
+        }
     }
 
     /// Wait until `next` is processable (the head covers it), returning the
     /// ready upper bound. Returns `None` on cancellation.
     async fn wait_processable_bound(
         &self,
+        watcher: &mut FinalizedHeadWatcher,
         next: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<u64>> {
         tokio::select! {
             _ = cancel.cancelled() => Ok(None),
-            res = self.finalized_head.wait_for(next) => {
-                res?;
-                Ok(Some(self.finalized_head.current()))
+            res = watcher.wait_for(next) => {
+                match res {
+                    Ok(head) => Ok(Some(head)),
+                    Err(_err) if cancel.is_cancelled() => Ok(None),
+                    Err(err) => Err(anyhow::anyhow!("head watcher exited: {err:?}")),
+                }
             }
         }
     }
@@ -391,12 +398,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         tracing::info!("ethereum indexer started");
 
         // Spawn the finalized head watcher.
-        let _finalized_watcher = self
+        let mut finalized_watcher = self
             .finalized_head
             .spawn_watcher(self.client.clone(), cancel.clone());
 
         // Anchor = tip-at-startup + 1: the catchup-live boundary.
-        let Some(anchor) = self.sample_anchor(&cancel).await else {
+        let Some(anchor) = self.sample_anchor(&mut finalized_watcher, &cancel).await? else {
             tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
             return Ok(());
         };
@@ -428,7 +435,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // Catchup: process all blocks up to the anchor, then emit a CatchupCompleted event.
         while next < anchor {
             // Wait for the next block to be processable
-            let Some(upper) = self.wait_processable_bound(next, &cancel).await? else {
+            let Some(upper) = self
+                .wait_processable_bound(&mut finalized_watcher, next, &cancel)
+                .await?
+            else {
                 return Ok(()); // cancelled while waiting
             };
             // Clamp the upper bound to the anchor so we don't process beyond it.
@@ -452,7 +462,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         // Live tail: process each block as it becomes processable, waiting for the finalized head to reach it.
         loop {
-            let Some(upper) = self.wait_processable_bound(next, &cancel).await? else {
+            let Some(upper) = self
+                .wait_processable_bound(&mut finalized_watcher, next, &cancel)
+                .await?
+            else {
                 return Ok(()); // cancelled while waiting
             };
             self.process_range(&events_tx, next, upper + 1, &cancel)
@@ -889,6 +902,21 @@ mod tests {
                 .create_async()
                 .await;
 
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": ["finalized", false]
+                })))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request({
+                    let latest = latest.clone();
+                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                })
+                .create_async()
+                .await;
+
             // Catchup batches (JSON-RPC array body): derive ids and block
             // numbers from the request.
             server
@@ -1020,8 +1048,11 @@ mod tests {
             head.set_head(100);
         });
 
+        let mut watcher = indexer
+            .finalized_head
+            .spawn_watcher(indexer.client.clone(), cancel.clone());
         let upper = indexer
-            .wait_processable_bound(50, &cancel)
+            .wait_processable_bound(&mut watcher, 50, &cancel)
             .await
             .expect("wait_processable_bound resolves once the head covers next");
         assert_eq!(upper, Some(100));
