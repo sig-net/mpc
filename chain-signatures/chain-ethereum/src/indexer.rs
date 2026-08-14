@@ -899,36 +899,21 @@ mod tests {
     }
 
     /// Fixture for running the indexer in a test with a mock JSON-RPC server.
-    /// Holds the mock server, latest block, and other state for running the indexer in tests.
+    /// Holds the mock server, finalized block, and other state for running the indexer in tests.
     struct RunFixture {
         _server: mockito::ServerGuard,
-        latest: Arc<AtomicU64>,
+        finalized: Arc<AtomicU64>,
         cancel: CancellationToken,
         run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
         events_rx: mpsc::Receiver<ChainEvent>,
     }
 
     impl RunFixture {
-        async fn spawn(processed: u64, latest: u64) -> Self {
+        async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
-            let latest = Arc::new(AtomicU64::new(latest));
+            let finalized = Arc::new(AtomicU64::new(finalized));
 
-            // Anchor sampling + live head polling.
-            server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getBlockByNumber",
-                    "params": ["latest", false]
-                })))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body_from_request({
-                    let latest = latest.clone();
-                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
-                })
-                .create_async()
-                .await;
-
+            // Anchor sampling + finalized head polling.
             server
                 .mock("POST", "/")
                 .match_body(Matcher::PartialJson(json!({
@@ -938,8 +923,8 @@ mod tests {
                 .with_status(200)
                 .with_header("content-type", "application/json")
                 .with_body_from_request({
-                    let latest = latest.clone();
-                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                    let finalized = finalized.clone();
+                    move |req| block_reply(req, finalized.load(Ordering::Relaxed))
                 })
                 .create_async()
                 .await;
@@ -988,7 +973,7 @@ mod tests {
 
             Self {
                 _server: server,
-                latest,
+                finalized,
                 cancel,
                 run_handle,
                 events_rx,
@@ -1037,7 +1022,7 @@ mod tests {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         let event = f.next_event().await;
         assert!(
             matches!(event, ChainEvent::Block(10)),
@@ -1064,8 +1049,7 @@ mod tests {
     async fn wait_processable_bound_waits_for_finalized_head() {
         // Non-optimistic mode: wait_processable_bound blocks on the cached finalized
         // head, so no RPC is needed.
-        let mut builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
-        builder.eth.optimistic_requests = false;
+        let builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
         let indexer = builder.build().await;
         let cancel = CancellationToken::new();
 
@@ -1090,13 +1074,13 @@ mod tests {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
 
         f.cancel_and_join().await;
 
         // After cancellation, advancing the tip must not produce any more blocks.
-        f.latest.store(11, Ordering::Relaxed);
+        f.finalized.store(11, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(
             f.events_rx.try_recv().is_err(),
