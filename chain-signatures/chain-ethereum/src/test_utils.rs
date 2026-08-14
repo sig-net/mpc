@@ -77,7 +77,7 @@ impl TestIndexerBuilder {
                 network: "sepolia".to_string(),
                 helios_data_path: "/tmp/helios-test".to_string(),
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
-                optimistic_requests: true,
+                optimistic_requests: false,
                 light_client: false,
                 rpc: Default::default(),
                 gas: Default::default(),

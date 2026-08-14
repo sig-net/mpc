@@ -872,35 +872,20 @@ mod tests {
     }
 
     /// Fixture for running the indexer in a test with a mock JSON-RPC server.
-    /// Holds the mock server, latest block, and other state for running the indexer in tests.
+    /// The fixture spawns the indexer in a background task and provides a channel
+    /// for receiving emitted `ChainEvent`s.
     struct RunFixture {
         _server: mockito::ServerGuard,
-        latest: Arc<AtomicU64>,
+        finalized: Arc<AtomicU64>,
         cancel: CancellationToken,
         run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
         events_rx: mpsc::Receiver<ChainEvent>,
     }
 
     impl RunFixture {
-        async fn spawn(processed: u64, latest: u64) -> Self {
+        async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
-            let latest = Arc::new(AtomicU64::new(latest));
-
-            // Anchor sampling + live head polling.
-            server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getBlockByNumber",
-                    "params": ["latest", false]
-                })))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body_from_request({
-                    let latest = latest.clone();
-                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
-                })
-                .create_async()
-                .await;
+            let finalized = Arc::new(AtomicU64::new(finalized));
 
             server
                 .mock("POST", "/")
@@ -911,8 +896,8 @@ mod tests {
                 .with_status(200)
                 .with_header("content-type", "application/json")
                 .with_body_from_request({
-                    let latest = latest.clone();
-                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                    let finalized = finalized.clone();
+                    move |req| block_reply(req, finalized.load(Ordering::Relaxed))
                 })
                 .create_async()
                 .await;
@@ -961,7 +946,7 @@ mod tests {
 
             Self {
                 _server: server,
-                latest,
+                finalized,
                 cancel,
                 run_handle,
                 events_rx,
@@ -1005,12 +990,52 @@ mod tests {
         f.cancel_and_join().await;
     }
 
+    /// Regression: the catchup-live anchor must come from the first finalized
+    /// head, not the optimistic tip. On mainnet the finalized head trails the
+    /// tip by ~2 epochs, so a tip-derived anchor delayed `CatchupCompleted`
+    /// until the tip itself finalized — and a restart during that window
+    /// re-anchored on a newer tip, potentially indefinitely.
+    #[tokio::test]
+    async fn run_anchors_catchup_on_first_finalized_head() {
+        let mut f = RunFixture::spawn(5, 9).await;
+
+        for n in 6..=9 {
+            let event = f.next_event().await;
+            assert!(
+                matches!(event, ChainEvent::Block(b) if b == n),
+                "expected Block({n}), got {event:?}"
+            );
+        }
+        let event = f.next_event().await;
+        assert!(
+            matches!(event, ChainEvent::CatchupCompleted),
+            "catchup must complete at the finalized head without waiting for the tip to finalize, got {event:?}"
+        );
+
+        // Live tail still gates on finality: nothing past 9 while finality
+        // trails the tip.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            f.events_rx.try_recv().is_err(),
+            "live tail must not emit blocks beyond the finalized head"
+        );
+
+        f.finalized.store(10, Ordering::Relaxed);
+        let event = f.next_event().await;
+        assert!(
+            matches!(event, ChainEvent::Block(10)),
+            "expected Block(10) after the finalized head advanced, got {event:?}"
+        );
+
+        f.cancel_and_join().await;
+    }
+
     #[tokio::test]
     async fn run_emits_live_blocks_after_catchup_completed() {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         let event = f.next_event().await;
         assert!(
             matches!(event, ChainEvent::Block(10)),
@@ -1035,10 +1060,9 @@ mod tests {
 
     #[tokio::test]
     async fn wait_processable_bound_waits_for_finalized_head() {
-        // Non-optimistic mode: wait_processable_bound blocks on the cached finalized
-        // head, so no RPC is needed.
-        let mut builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
-        builder.eth.optimistic_requests = false;
+        // wait_processable_bound blocks on the cached finalized head, so no
+        // RPC is needed.
+        let builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
         let indexer = builder.build().await;
         let cancel = CancellationToken::new();
 
@@ -1063,13 +1087,13 @@ mod tests {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
 
         f.cancel_and_join().await;
 
-        // After cancellation, advancing the tip must not produce any more blocks.
-        f.latest.store(11, Ordering::Relaxed);
+        // After cancellation, advancing the head must not produce any more blocks.
+        f.finalized.store(11, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(
             f.events_rx.try_recv().is_err(),
