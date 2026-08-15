@@ -3,9 +3,16 @@
 
 import { readFileSync } from "node:fs";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ContractState } from "@midnight-ntwrk/compact-runtime";
+
+const submitMocks = vi.hoisted(() => ({ warmupPublisher: vi.fn() }));
+
+vi.mock("../src/submit.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/submit.js")>()),
+  warmupPublisher: submitMocks.warmupPublisher,
+}));
 
 import { handleLine } from "../src/protocol.js";
 import { closePublisher } from "../src/submit.js";
@@ -25,12 +32,14 @@ const BUILD = await respondInput();
 const request = (overrides: Record<string, unknown> = {}): string =>
   JSON.stringify({
     id: 7,
+    op: "build",
     ...BUILD,
     ...overrides,
   });
 
 const answer = async (line: string) => JSON.parse(await handleLine(CONFIG, line));
 
+beforeEach(() => submitMocks.warmupPublisher.mockClear());
 afterEach(() => closePublisher());
 
 describe("handleLine", () => {
@@ -40,7 +49,9 @@ describe("handleLine", () => {
     expect(reply.id).toBe(7);
     expect(reply.ok).toBe(true);
     expect(reply.intent).toMatch(/^(?:[0-9a-f]{2})+$/);
-    expect(Buffer.from(reply.intent, "hex").subarray(0, 20).toString("utf8")).toContain("midnight:intent[v9]");
+    expect(Buffer.from(reply.intent, "hex").subarray(0, 20).toString("utf8")).toContain(
+      "midnight:intent[v9]",
+    );
   });
 
   it("answers malformed JSON values with bad_request", async () => {
@@ -50,15 +61,23 @@ describe("handleLine", () => {
   });
 
   it("echoes only a usable id from a rejected request", async () => {
-    expect(await answer(JSON.stringify({ id: 9, circuit: "nope" }))).toMatchObject({ id: 9, ok: false });
+    expect(await answer(JSON.stringify({ id: 9, circuit: "nope" }))).toMatchObject({
+      id: 9,
+      ok: false,
+    });
     expect(await answer("{not json")).toMatchObject({ id: null });
-    expect(await answer(JSON.stringify({ id: "7", circuit: "respond" }))).toMatchObject({ id: null });
+    expect(await answer(JSON.stringify({ id: "7", circuit: "respond" }))).toMatchObject({
+      id: null,
+    });
   });
 
   it("names the offending field in a rejection", async () => {
     const cases: readonly [Record<string, unknown>, string][] = [
       [{ contractAddress: "00" }, "contractAddress"],
-      [{ signature: { bigR: { x: "11".repeat(32) }, s: "33".repeat(32), recoveryId: 0 } }, "signature.bigR.y"],
+      [
+        { signature: { bigR: { x: "11".repeat(32) }, s: "33".repeat(32), recoveryId: 0 } },
+        "signature.bigR.y",
+      ],
       [{ ttlSeconds: 0 }, "ttlSeconds"],
       [{ contractAddress: "AB".repeat(32) }, "contractAddress"],
       [{ contractState: "ZZ" }, "contractState"],
@@ -80,7 +99,11 @@ describe("handleLine", () => {
     expect(tooBig).toMatchObject({ id: null, ok: false, code: "bad_request" });
     expect(tooBig.message).toContain("`id`");
 
-    expect(await answer(request({ id: -1 }))).toMatchObject({ id: null, ok: false, code: "bad_request" });
+    expect(await answer(request({ id: -1 }))).toMatchObject({
+      id: null,
+      ok: false,
+      code: "bad_request",
+    });
   });
 
   it("surfaces a builder failure as its own code, not as a throw", async () => {
@@ -100,29 +123,51 @@ describe("handleLine", () => {
 });
 
 describe("handleLine: the operation discriminator", () => {
-  it("reports the child-owned submit timing at readiness", async () => {
-    await expect(answer(JSON.stringify({ id: 6, op: "ready" }))).resolves.toEqual({
+  it("reports timing and starts publisher warmup at readiness", async () => {
+    await expect(
+      answer(JSON.stringify({ id: 6, op: "ready", protocolVersion: 1 })),
+    ).resolves.toEqual({
       id: 6,
       ok: true,
       ready: true,
+      protocolVersion: 1,
       submitTimeoutMs: 6 * 60 * 1_000,
       recipeTtlMs: 5 * 60 * 1_000,
     });
+    expect(submitMocks.warmupPublisher).toHaveBeenCalledExactlyOnceWith(CONFIG);
   });
 
-  it("treats an absent op and an explicit build as the same request", async () => {
-    const implicit = await answer(request());
-    const explicit = await answer(request({ op: "build" }));
+  it("requires the exact protocol version on ready", async () => {
+    for (const protocolVersion of [undefined, 0, 2, "1", null]) {
+      const reply = await answer(JSON.stringify({ id: 6, op: "ready", protocolVersion }));
 
-    expect(implicit).toMatchObject({ id: 7, ok: true });
+      expect(reply, String(protocolVersion)).toMatchObject({
+        id: 6,
+        ok: false,
+        code: "bad_request",
+      });
+      expect(reply.message).toContain("protocolVersion");
+    }
+    expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit build operation", async () => {
+    const missing = await answer(JSON.stringify({ id: 7, ...BUILD }));
+    const explicit = await answer(request());
+
+    expect(missing).toMatchObject({ id: 7, ok: false, code: "bad_request" });
+    expect(missing.message).toContain("`op`");
     expect(explicit).toMatchObject({ id: 7, ok: true });
+    expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
   });
 
   it("names `op` when it is neither, rather than reporting a missing circuit", async () => {
-    const reply = await answer(JSON.stringify({ id: 7, op: "publish", intent: "00" }));
-
-    expect(reply).toMatchObject({ id: 7, ok: false, code: "bad_request" });
-    expect(reply.message).toContain("`op`");
+    for (const op of ["publish", "warmup"]) {
+      const reply = await answer(JSON.stringify({ id: 7, op, intent: "00" }));
+      expect(reply, op).toMatchObject({ id: 7, ok: false, code: "bad_request" });
+      expect(reply.message).toContain("`op`");
+    }
+    expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
   });
 
   it("round-trips a submit's id alongside the transaction id", async () => {
@@ -150,7 +195,6 @@ describe("handleLine: the operation discriminator", () => {
     expect(reply).toMatchObject({ id: 23, ok: false, code: "bad_request" });
     expect(reply.message).toContain("`intent`");
   });
-
 });
 
 it("committed initial-singleton-state.mn matches the in-process synthesis", async () => {

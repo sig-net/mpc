@@ -42,13 +42,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint TypeScript
+        run: npm run lint
+
       - name: Typecheck TypeScript
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
-      # `dist/main.js` is what the Rust client spawns, and `tsconfig.json` sets
-      # `noEmit`, so the build config is the only thing that produces it.
-      - name: Build TypeScript publisher
-        run: npm run build
-
-      - name: Run TypeScript tests
-        run: npx vitest run
+      # `npm test` runs the package's pretest build because the child-process
+      # tests execute the emitted `dist/main.js` entry point.
+      - name: Build and test TypeScript publisher
+        run: npm test

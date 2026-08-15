@@ -33,10 +33,15 @@ function isRespondCircuit(circuitId: string): circuitId is RespondCircuit {
   return RESPOND_CIRCUITS.some((circuit) => circuit === circuitId);
 }
 
-async function keyMaterial(circuit: RespondCircuit, verifierKeyHash: string): Promise<ProvingKeyMaterial> {
+async function keyMaterial(
+  circuit: RespondCircuit,
+  verifierKeyHash: string,
+): Promise<ProvingKeyMaterial> {
   const artifact = async (directory: string, extension: string): Promise<Uint8Array> => {
     try {
-      return Uint8Array.from(await readFile(join(signetContractManagedPath, directory, `${circuit}.${extension}`)));
+      return Uint8Array.from(
+        await readFile(join(signetContractManagedPath, directory, `${circuit}.${extension}`)),
+      );
     } catch (cause) {
       throw new PublisherError(
         "contract_mismatch",
@@ -60,19 +65,27 @@ async function keyMaterial(circuit: RespondCircuit, verifierKeyHash: string): Pr
   return { proverKey, verifierKey, ir };
 }
 
-async function post(proofServerUrl: string, path: string, body: Uint8Array): Promise<Uint8Array> {
+async function post(
+  proofServerUrl: string,
+  path: string,
+  body: Uint8Array,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
   const response = await fetch(new URL(path, proofServerUrl), {
     method: "POST",
     headers: { "content-type": "application/octet-stream" },
     body,
+    signal,
   });
   if (response.status !== 200) {
-    throw new Error(`proof server answered ${response.status} to ${path}: ${await response.text()}`);
+    throw new Error(
+      `proof server answered ${response.status} to ${path}: ${await response.text()}`,
+    );
   }
   return new Uint8Array(await response.arrayBuffer());
 }
 
-export function provingProvider(proofServerUrl: string): ProvingProvider {
+export function provingProvider(proofServerUrl: string, signal: AbortSignal): ProvingProvider {
   const material = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> => {
     if (keyLocation.startsWith(BUILTIN_PREFIX)) return undefined;
     const location = parseContractKeyLocation(keyLocation);
@@ -81,7 +94,10 @@ export function provingProvider(proofServerUrl: string): ProvingProvider {
       !isRespondCircuit(location.circuitId) ||
       location.verifierKeyHash !== expectedVk[location.circuitId]
     ) {
-      throw new PublisherError("bad_request", `the intent names an unsupported key location \`${keyLocation}\``);
+      throw new PublisherError(
+        "bad_request",
+        `the intent names an unsupported key location \`${keyLocation}\``,
+      );
     }
     return keyMaterial(location.circuitId, location.verifierKeyHash);
   };
@@ -89,21 +105,48 @@ export function provingProvider(proofServerUrl: string): ProvingProvider {
   return {
     check: async (preimage, keyLocation) =>
       parseCheckResult(
-        await post(proofServerUrl, "/check", createCheckPayload(preimage, (await material(keyLocation))?.ir)),
+        await post(
+          proofServerUrl,
+          "/check",
+          createCheckPayload(preimage, (await material(keyLocation))?.ir),
+          signal,
+        ),
       ),
     prove: async (preimage, keyLocation, overwriteBindingInput) =>
       post(
         proofServerUrl,
         "/prove",
         createProvingPayload(preimage, overwriteBindingInput, await material(keyLocation)),
+        signal,
       ),
     lookupKey: (keyLocation) => material(keyLocation),
   };
 }
 
-export function proveTransaction(
+export async function proveTransaction(
   proofServerUrl: string,
   transaction: UnprovenTransaction,
+  proofBudgetMs: number,
 ): Promise<UnboundTransaction> {
-  return transaction.prove(provingProvider(proofServerUrl), CostModel.initialCostModel());
+  const controller = new AbortController();
+  const timeoutError = new PublisherError(
+    "proving_timeout",
+    `proving exceeded its ${proofBudgetMs} ms budget; no wallet operation started and retry is safe`,
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(timeoutError);
+      controller.abort(timeoutError);
+    }, proofBudgetMs);
+  });
+  try {
+    const proving = transaction.prove(
+      provingProvider(proofServerUrl, controller.signal),
+      CostModel.initialCostModel(),
+    );
+    return await Promise.race([proving, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 
 import { configFromEnv } from "./config.js";
 import { handleLine } from "./protocol.js";
-import { closePublisher } from "./submit.js";
+import { shutdownPublisher } from "./submit.js";
 
 const config = configFromEnv();
 
@@ -16,8 +16,15 @@ console.error(
 // Awaited per line, so a slow circuit run's reply cannot be overtaken by the next request's.
 for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
   if (line.trim().length === 0) continue;
-  process.stdout.write(`${await handleLine(config, line)}\n`);
+  const reply = await handleLine(config, line);
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(`${reply}\n`, (error) => {
+      if (error === undefined || error === null) resolve();
+      else reject(error);
+    });
+  });
 }
 
-// No explicit exit: ending naturally flushes the last reply that an exit would truncate.
-await closePublisher();
+await shutdownPublisher();
+// Every reply write has completed; only SDK handles left by timed-out cleanup can remain.
+process.exit(0);

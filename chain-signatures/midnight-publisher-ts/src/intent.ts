@@ -23,7 +23,7 @@ import {
   communicationCommitmentRandomness,
 } from "@midnightntwrk/ledger-v9";
 import {
-  Contract as SignetContract,
+  type Contract as SignetContract,
   createSignetContractPrivateState,
   expectedVk,
   type SignetContractCircuitId,
@@ -36,19 +36,20 @@ import {
 
 import { PublisherError } from "./errors.js";
 
-export const RESPOND_CIRCUITS = ["respond", "respondBidirectional"] as const satisfies readonly SignetContractCircuitId[];
+export const RESPOND_CIRCUITS = [
+  "respond",
+  "respondBidirectional",
+] as const satisfies readonly SignetContractCircuitId[];
 
 export type RespondCircuit = (typeof RESPOND_CIRCUITS)[number];
 
 type CompiledSignetContract = SignetContract<SignetContractPrivateState>;
 // Compact's branded id widens to every generated circuit, so check each argument
 // tuple against its generated function before passing it to the executor.
-type CircuitArguments<K extends RespondCircuit> = Parameters<CompiledSignetContract["provableCircuits"][K]> extends [
-  unknown,
-  ...infer Arguments,
-]
-  ? Arguments
-  : never;
+type CircuitArguments<K extends RespondCircuit> =
+  Parameters<CompiledSignetContract["provableCircuits"][K]> extends [unknown, ...infer Arguments]
+    ? Arguments
+    : never;
 
 const RESPOND_CIRCUIT_ID = ProvableCircuitId<CompiledSignetContract>("respond");
 const RESPOND_BIDIRECTIONAL_CIRCUIT_ID =
@@ -91,7 +92,9 @@ function executionContext(coinPublicKey: string) {
     ZKFileConfiguration.layer(signetContractManagedPath).pipe(Layer.provide(NodeContext.layer)),
     Layer.provide(
       Configuration.layer,
-      Layer.setConfigProvider(Configuration.configProvider({ keys: { coinPublic: coinPublicKey } })),
+      Layer.setConfigProvider(
+        Configuration.configProvider({ keys: { coinPublic: coinPublicKey } }),
+      ),
     ),
   );
 }
@@ -182,5 +185,7 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
     }),
   );
 
-  return Intent.new(new Date(input.ttlSeconds * 1000)).addCall(prototype).serialize();
+  return Intent.new(new Date(input.ttlSeconds * 1000))
+    .addCall(prototype)
+    .serialize();
 }

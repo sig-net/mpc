@@ -42,12 +42,18 @@ export const STUB_TX_ID = "ab".repeat(32);
 export const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
 export const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
-export async function respondInput(overrides: Partial<BuildIntentInput> = {}): Promise<BuildIntentInput> {
+export async function respondInput(
+  overrides: Partial<BuildIntentInput> = {},
+): Promise<BuildIntentInput> {
   return {
     circuit: "respond",
     contractAddress: SINGLETON,
     requestId: REQUEST_ID,
-    signature: { bigR: { x: "11".repeat(32), y: "22".repeat(32) }, s: "33".repeat(32), recoveryId: 0 },
+    signature: {
+      bigR: { x: "11".repeat(32), y: "22".repeat(32) },
+      s: "33".repeat(32),
+      recoveryId: 0,
+    },
     contractState: await initialSingletonStateHex(),
     ledgerParameters: toHex(LedgerParameters.initialParameters().serialize()),
     coinPublicKey: "44".repeat(32),
@@ -57,7 +63,8 @@ export async function respondInput(overrides: Partial<BuildIntentInput> = {}): P
 }
 
 export interface StubEdges {
-  readonly proveTx?: (tx: unknown) => Promise<unknown>;
+  readonly requireReady?: (timeoutMs: number) => Promise<void>;
+  readonly proveTx?: (tx: unknown, proofBudgetMs: number) => Promise<unknown>;
   readonly balanceTx?: (tx: unknown) => Promise<unknown>;
   readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
   readonly submitTx?: (tx: unknown) => Promise<Landed>;
@@ -67,8 +74,9 @@ export interface StubEdges {
 export function primeStub(edges: StubEdges = {}): void {
   primePublisher(
     Promise.resolve({
-      proveTx: edges.proveTx ?? (async (tx: unknown) => tx),
+      proveTx: edges.proveTx ?? (async (tx: unknown, _proofBudgetMs: number) => tx),
       wallet: {
+        requireReady: edges.requireReady ?? (async () => undefined),
         balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
         finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
         submitTx: edges.submitTx ?? (async () => ({ txId: STUB_TX_ID })),
@@ -78,22 +86,29 @@ export function primeStub(edges: StubEdges = {}): void {
   );
 }
 
-export const decodeIntent = (bytes: Uint8Array) => Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
+export const decodeIntent = (bytes: Uint8Array) =>
+  Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
 
 // Both respond circuits push byte-identical signature-only args; the entry point is the
 // stable route discriminator (their ledger-cell writes also differ, but those indices
 // are compiler-assigned and contract-version-coupled).
 export function calledEntryPoint(bytes: Uint8Array): string {
   const [action] = decodeIntent(bytes).actions;
-  if (!(action instanceof ContractCall)) throw new Error("expected the intent's one action to be a contract call");
+  if (!(action instanceof ContractCall))
+    throw new Error("expected the intent's one action to be a contract call");
   return String(action.entryPoint);
 }
 
 // Values pushed by typed VM operations. Byte goldens cannot compare an entire intent
 // because the communication commitment is fresh on every build.
-export function pushedCells(bytes: Uint8Array, storage: boolean, widths: readonly number[]): string[][] {
+export function pushedCells(
+  bytes: Uint8Array,
+  storage: boolean,
+  widths: readonly number[],
+): string[][] {
   const [action] = decodeIntent(bytes).actions;
-  if (!(action instanceof ContractCall)) throw new Error("expected the intent's one action to be a contract call");
+  if (!(action instanceof ContractCall))
+    throw new Error("expected the intent's one action to be a contract call");
   const program = action.guaranteedTranscript?.program;
   if (program === undefined) throw new Error("expected a guaranteed transcript");
 
@@ -104,7 +119,8 @@ export function pushedCells(bytes: Uint8Array, storage: boolean, widths: readonl
     const actual = pushed.value.content.alignment.map((segment) =>
       segment.tag === "atom" && segment.value.tag === "bytes" ? segment.value.length : undefined,
     );
-    if (actual.length !== widths.length || actual.some((width, index) => width !== widths[index])) return [];
+    if (actual.length !== widths.length || actual.some((width, index) => width !== widths[index]))
+      return [];
     return [pushed.value.content.value.map(toHex)];
   });
 }

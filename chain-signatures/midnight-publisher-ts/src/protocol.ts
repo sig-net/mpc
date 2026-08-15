@@ -1,13 +1,15 @@
-// One JSON object per line each way, `id` echoed, absent `op` meaning `build`. The Rust
-// client mirrors these shapes exactly: renaming or retyping a field breaks both sides at once.
+// One JSON object per line each way, with `id` echoed and an explicit `op`. The Rust integration
+// must mirror these shapes exactly: renaming or retyping a field breaks the seam.
 
 import { z } from "zod";
 
-import { type Config } from "./config.js";
+import type { Config } from "./config.js";
 import { describeFailure, jsonObject, PublisherError, type ErrorCode } from "./errors.js";
 import { buildIntent, RESPOND_CIRCUITS, type BuildIntentInput } from "./intent.js";
-import { handleSubmit, SUBMIT_TIMEOUT_MS } from "./submit.js";
+import { handleSubmit, SUBMIT_TIMEOUT_MS, warmupPublisher } from "./submit.js";
 import { RECIPE_TTL_MS } from "./wallet.js";
+
+export const PUBLISHER_PROTOCOL_VERSION = 1 as const;
 
 export type BuildRequest = { readonly id: number } & Omit<BuildIntentInput, "coinPublicKey">;
 
@@ -18,12 +20,18 @@ export type Response =
       readonly id: number;
       readonly ok: true;
       readonly ready: true;
+      readonly protocolVersion: typeof PUBLISHER_PROTOCOL_VERSION;
       readonly submitTimeoutMs: number;
       readonly recipeTtlMs: number;
     }
   | { readonly id: number; readonly ok: true; readonly intent: string }
   | { readonly id: number; readonly ok: true; readonly txId: string }
-  | { readonly id: number | null; readonly ok: false; readonly code: ErrorCode; readonly message: string };
+  | {
+      readonly id: number | null;
+      readonly ok: false;
+      readonly code: ErrorCode;
+      readonly message: string;
+    };
 
 const MUST_BE_AN_OBJECT = "must be an object";
 const MUST_BE_AN_ID = "must be an integer in 0..=2^53-1";
@@ -55,8 +63,10 @@ const wireId = z
   .max(Number.MAX_SAFE_INTEGER, MUST_BE_AN_ID);
 
 const SubmitSchema = wireObject({ id: wireId, intent: ledgerHex });
-const ReadySchema = wireObject({ id: wireId });
-
+const ReadySchema = wireObject({
+  id: wireId,
+  protocolVersion: z.literal(PUBLISHER_PROTOCOL_VERSION, `must be ${PUBLISHER_PROTOCOL_VERSION}`),
+});
 const BuildSchema = wireObject({
   id: wireId,
   contractAddress: hex32,
@@ -71,7 +81,10 @@ const BuildSchema = wireObject({
 function toBadRequest(error: z.ZodError): PublisherError {
   const issue = error.issues[0]!;
   const path = issue.path.join(".");
-  return new PublisherError("bad_request", `invalid request: ${path.length === 0 ? "" : `\`${path}\` `}${issue.message}`);
+  return new PublisherError(
+    "bad_request",
+    `invalid request: ${path.length === 0 ? "" : `\`${path}\` `}${issue.message}`,
+  );
 }
 
 function readId(body: Record<string, unknown>): number | null {
@@ -79,22 +92,22 @@ function readId(body: Record<string, unknown>): number | null {
   return typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? id : null;
 }
 
-// Absent `op` is `build`: the request predates the discriminator and the Rust client
-// sends none. An unknown op hits `default` before either schema can blame a missing field.
+// An unknown or missing op hits `default` before a schema can blame an unrelated missing field.
 async function answer(config: Config, body: Record<string, unknown>): Promise<Response> {
   switch (body["op"]) {
     case "ready": {
       const parsed = ReadySchema.safeParse(body);
       if (!parsed.success) throw toBadRequest(parsed.error);
+      warmupPublisher(config);
       return {
         id: parsed.data.id,
         ok: true,
         ready: true,
+        protocolVersion: PUBLISHER_PROTOCOL_VERSION,
         submitTimeoutMs: SUBMIT_TIMEOUT_MS,
         recipeTtlMs: RECIPE_TTL_MS,
       };
     }
-    case undefined:
     case "build": {
       const parsed = BuildSchema.safeParse(body);
       if (!parsed.success) throw toBadRequest(parsed.error);
@@ -131,8 +144,15 @@ export async function handleLine(config: Config, line: string): Promise<string> 
     // here, where the wire cannot carry it.
     if (code !== "bad_request") {
       const evidence = named && error.cause !== undefined ? error.cause : error;
-      console.error(`request failed code=${code} id=${id}: ${describeFailure(evidence).slice(0, 4_000)}`);
+      console.error(
+        `request failed code=${code} id=${id}: ${describeFailure(evidence).slice(0, 4_000)}`,
+      );
     }
-    return JSON.stringify({ id, ok: false, code, message: named ? error.message : describeFailure(error) });
+    return JSON.stringify({
+      id,
+      ok: false,
+      code,
+      message: named ? error.message : describeFailure(error),
+    });
   }
 }

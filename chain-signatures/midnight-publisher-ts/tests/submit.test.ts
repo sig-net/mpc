@@ -7,6 +7,11 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { Transaction } from "@midnightntwrk/ledger-v9";
 import { Data, Effect } from "effect";
 
+vi.mock("../src/wallet.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/wallet.js")>();
+  return { ...original, openFundingWallet: vi.fn(original.openFundingWallet) };
+});
+
 import { PublisherError } from "../src/errors.js";
 import { buildIntent } from "../src/intent.js";
 import type { UnboundTransaction } from "../src/prover.js";
@@ -14,10 +19,13 @@ import {
   closePublisher,
   decodeIntent,
   handleSubmit,
+  primePublisher,
+  shutdownPublisher,
   SUBMIT_TIMEOUT_MS,
-  withDeadline,
+  type Publisher,
+  warmupPublisher,
 } from "../src/submit.js";
-import type { Landed } from "../src/wallet.js";
+import { openFundingWallet, type FundingWallet, type Landed } from "../src/wallet.js";
 import {
   primeStub,
   respondInput,
@@ -57,45 +65,84 @@ const refused = async (id: number): Promise<PublisherError> => {
 describe("decodeIntent", () => {
   it("classifies invalid intent bytes as bad requests", () => {
     for (const invalid of [Uint8Array.of(1, 2, 3), intent.subarray(0, 40)]) {
-      expect(() => decodeIntent(invalid)).toThrowError(expect.objectContaining({ code: "bad_request" }) as Error);
+      expect(() => decodeIntent(invalid)).toThrowError(
+        expect.objectContaining({ code: "bad_request" }) as Error,
+      );
     }
+  });
+
+  it("delegates the ledger version tag to the ledger deserializer", () => {
+    const wrongLedger = Uint8Array.from(intent);
+    const versionOffset = Buffer.from(wrongLedger).indexOf("midnight:intent[v9]");
+    expect(versionOffset).toBeGreaterThanOrEqual(0);
+    wrongLedger[versionOffset + "midnight:intent[v".length] = "8".charCodeAt(0);
+
+    expect(() => decodeIntent(wrongLedger)).toThrowError(
+      expect.objectContaining({
+        code: "bad_request",
+        message: expect.stringContaining("did not deserialize"),
+      }) as Error,
+    );
   });
 });
 
-describe("withDeadline", () => {
-  it("rejects with the factory's error once the deadline passes", async () => {
+describe("publisher lifecycle", () => {
+  it("bounds shutdown while the wallet close is pending", async () => {
     vi.useFakeTimers();
-    const hang = new Promise<never>(() => undefined);
-    const deadline = withDeadline(hang, 20, () => new PublisherError("internal", "took too long"));
-    const rejected = expect(deadline).rejects.toMatchObject({ code: "internal" });
+    let closeStarted = false;
+    primePublisher(
+      Promise.resolve({
+        proveTx: async () => {
+          throw new Error("not used");
+        },
+        wallet: {
+          close: () => {
+            closeStarted = true;
+            return new Promise<void>(() => undefined);
+          },
+        },
+      } as unknown as Publisher),
+    );
 
-    await vi.advanceTimersByTimeAsync(20);
-    await rejected;
+    const closing = shutdownPublisher();
+    await vi.runAllTimersAsync();
+
+    expect(closeStarted).toBe(true);
+    await expect(closing).resolves.toBeUndefined();
   });
-
 });
 
 describe("handleSubmit: the flow", () => {
   it("carries the intent through prove, balance, finalize, and submit", async () => {
     const proven = { proven: true } as unknown as UnboundTransaction;
+    const order: string[] = [];
+    let proofBudgetMs: number | undefined;
     let unproven: unknown;
     let balanced: unknown;
     let finalized: unknown;
     let submitted: unknown;
     primeStub({
-      proveTx: async (tx) => {
+      requireReady: async () => {
+        order.push("ready");
+      },
+      proveTx: async (tx, budgetMs) => {
+        order.push("prove");
+        proofBudgetMs = budgetMs;
         unproven = tx;
         return proven;
       },
       balanceTx: async (tx) => {
+        order.push("balance");
         balanced = tx;
         return tx;
       },
       finalizeTx: async (recipe) => {
+        order.push("finalize");
         finalized = recipe;
         return recipe;
       },
       submitTx: async (tx) => {
+        order.push("submit");
         submitted = tx;
         return { txId: STUB_TX_ID };
       },
@@ -108,6 +155,38 @@ describe("handleSubmit: the flow", () => {
     expect(balanced).toBe(proven);
     expect(finalized).toBe(proven);
     expect(submitted).toBe(proven);
+    expect(proofBudgetMs).toBeGreaterThan(0);
+    expect(proofBudgetMs).toBeLessThanOrEqual(SUBMIT_TIMEOUT_MS);
+    expect(order).toEqual(["ready", "prove", "balance", "finalize", "submit"]);
+  });
+
+  it("does not start wallet work when proving consumes the absolute deadline", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const proveTx = vi.fn(async (tx: unknown) => {
+      now = SUBMIT_TIMEOUT_MS;
+      return tx;
+    });
+    const balanceTx = vi.fn(async (tx: unknown) => tx);
+    primeStub({
+      proveTx,
+      balanceTx,
+    });
+
+    try {
+      const refusal = await refused(3);
+      expect(refusal).toMatchObject({
+        code: "proving_timeout",
+        message: expect.stringMatching(/no wallet operation started.*retry is safe/i),
+      });
+      expect(proveTx).toHaveBeenCalledOnce();
+      expect(balanceTx).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+
+    primeStub();
+    await expect(handleSubmit(CONFIG, 4, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
   it("classifies wallet failures for retry policy", async () => {
@@ -126,8 +205,13 @@ describe("handleSubmit: the flow", () => {
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
     // Every node error is wrapped in a constant-message SubmissionError; matching only
     // the rendered message would classify every rejection as a plain `internal`.
-    class SubmissionError extends Data.TaggedError("SubmissionError")<{ message: string; cause?: unknown }> {}
-    class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{ message: string }> {}
+    class SubmissionError extends Data.TaggedError("SubmissionError")<{
+      message: string;
+      cause?: unknown;
+    }> {}
+    class TransactionInvalidError extends Data.TaggedError("TransactionInvalidError")<{
+      message: string;
+    }> {}
     primeStub({
       submitTx: () =>
         Effect.runPromise(
@@ -147,7 +231,101 @@ describe("handleSubmit: the flow", () => {
     expect(refusal.code).toBe("state_conflict");
     expect(refusal.message).toContain("Transaction submission error");
   });
+});
 
+describe("handleSubmit: publisher preflight", () => {
+  it("times out pending startup as wallet_unsynced, leaves the gate free, and reuses the memoized build", async () => {
+    vi.useFakeTimers();
+    await closePublisher();
+    vi.mocked(openFundingWallet).mockClear();
+    const wallet = {
+      requireReady: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    } as unknown as FundingWallet;
+    let release!: (ready: FundingWallet) => void;
+    const opening = new Promise<FundingWallet>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(openFundingWallet).mockReturnValue(opening);
+    let observed: unknown;
+    const first = handleSubmit(CONFIG, 10, intent).then(
+      (landed) => {
+        observed = landed;
+        return landed;
+      },
+      (error: unknown) => {
+        observed = error;
+        return error;
+      },
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(observed).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS - 60_000);
+      expect(observed).toMatchObject({ code: "wallet_unsynced" });
+
+      release(wallet);
+      await opening;
+      warmupPublisher(CONFIG);
+      await Promise.resolve();
+      expect(openFundingWallet).toHaveBeenCalledOnce();
+      await closePublisher();
+
+      primeStub();
+      await expect(handleSubmit(CONFIG, 11, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
+    } finally {
+      release(wallet);
+      await first.catch(() => undefined);
+    }
+  });
+
+  it("counts initial indexing time against the same absolute submit deadline", async () => {
+    vi.useFakeTimers();
+    let releaseBalance!: () => void;
+    const heldBalance = new Promise<void>((resolve) => {
+      releaseBalance = resolve;
+    });
+    let proofBudgetMs: number | undefined;
+    const proveTx = vi.fn(async (tx: unknown, budgetMs: number) => {
+      proofBudgetMs = budgetMs;
+      return tx;
+    });
+    primeStub({
+      requireReady: () => new Promise<void>((resolve) => setTimeout(resolve, 30_000)),
+      proveTx,
+      balanceTx: async (tx) => {
+        await heldBalance;
+        return tx;
+      },
+    });
+    let observed: unknown;
+    const submission = handleSubmit(CONFIG, 14, intent).then(
+      (landed) => {
+        observed = landed;
+        return landed;
+      },
+      (error: unknown) => {
+        observed = error;
+        return error;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    const provedBeforeIndexing = proveTx.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(proveTx).toHaveBeenCalledOnce();
+    expect(proofBudgetMs).toBe(SUBMIT_TIMEOUT_MS - 30_000);
+    await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS - 30_001);
+    expect(observed).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    const outcomeAtAbsoluteDeadline = observed;
+
+    releaseBalance();
+    await submission;
+    expect(provedBeforeIndexing).toBe(0);
+    expect(outcomeAtAbsoluteDeadline).toMatchObject({ code: "ambiguous_submit" });
+  });
 });
 
 describe("handleSubmit: the busy gate", () => {
@@ -184,7 +362,9 @@ describe("handleSubmit: the busy gate", () => {
   it("never claims the gate for a request that fails validation", async () => {
     primeStub();
 
-    await expect(handleSubmit(CONFIG, 1, Uint8Array.of(1, 2, 3))).rejects.toMatchObject({ code: "bad_request" });
+    await expect(handleSubmit(CONFIG, 1, Uint8Array.of(1, 2, 3))).rejects.toMatchObject({
+      code: "bad_request",
+    });
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
@@ -211,5 +391,4 @@ describe("handleSubmit: the busy gate", () => {
     expect(refusal.code).toBe("wallet_busy");
     expect(refusal.message).toContain("request 1");
   });
-
 });

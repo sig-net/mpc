@@ -25,7 +25,9 @@ const REQUIRED = [
 
 describe("configFromEnv", () => {
   it("refuses a deployment without the wallet configuration", () => {
-    expect(() => configFromEnv(BUILDER)).toThrowError(/MIDNIGHT_PUB_NODE_URL[\s\S]*MIDNIGHT_PUB_FUNDING_SEED/);
+    expect(() => configFromEnv(BUILDER)).toThrowError(
+      /MIDNIGHT_PUB_NODE_URL[\s\S]*MIDNIGHT_PUB_FUNDING_SEED/,
+    );
   });
 
   it("starts a deployment that submits, with every endpoint the wallet needs", () => {
@@ -48,17 +50,21 @@ describe("configFromEnv", () => {
   });
 
   it("uses the SDK's 16-to-64-byte hex seed contract and never quotes a rejection", () => {
-    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(17) })).not.toThrow();
+    expect(() =>
+      configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(17) }),
+    ).not.toThrow();
 
     for (const invalid of [
       "ab".repeat(15),
       "ab".repeat(65),
       "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
     ]) {
-      expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid })).toThrowError(
-        /MIDNIGHT_PUB_FUNDING_SEED/,
-      );
-      expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid })).not.toThrowError(invalid);
+      expect(() =>
+        configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid }),
+      ).toThrowError(/MIDNIGHT_PUB_FUNDING_SEED/);
+      expect(() =>
+        configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid }),
+      ).not.toThrowError(invalid);
     }
   });
 
@@ -73,9 +79,9 @@ describe("configFromEnv", () => {
   });
 
   it("names every missing variable at once, not just the first", () => {
-    expect(() => configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944" })).toThrowError(
-      /MIDNIGHT_PUB_PROOF_SERVER_URL[\s\S]*MIDNIGHT_PUB_INDEXER_URL/,
-    );
+    expect(() =>
+      configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944" }),
+    ).toThrowError(/MIDNIGHT_PUB_PROOF_SERVER_URL[\s\S]*MIDNIGHT_PUB_INDEXER_URL/);
   });
 
   it("refuses a network id the library does not know", () => {
@@ -92,7 +98,10 @@ describe("configFromEnv", () => {
 
   it("refuses unsupported endpoint schemes at startup", () => {
     for (const name of REQUIRED.slice(0, 4)) {
-      expect(() => configFromEnv({ ...SUBMITTER, [name]: "file:///tmp/socket" }), name).toThrowError(name);
+      expect(
+        () => configFromEnv({ ...SUBMITTER, [name]: "file:///tmp/socket" }),
+        name,
+      ).toThrowError(name);
     }
   });
 

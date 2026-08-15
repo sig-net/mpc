@@ -48,13 +48,17 @@ function deriveFundingKeys(seed: string, networkId: NetworkId): AccountKeys {
     // The library describes seed shapes. The deployment error must name the variable
     // without quoting secret input or accepting a mnemonic for an unfunded account.
   }
-  throw new Error("MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted");
+  throw new Error(
+    "MIDNIGHT_PUB_FUNDING_SEED must be hex (16 to 64 bytes); a mnemonic is not accepted",
+  );
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
-    const detail = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
     throw new Error(`invalid MIDNIGHT_PUB_* configuration: ${detail}`);
   }
 
