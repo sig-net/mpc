@@ -316,18 +316,19 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// The catchup-live anchor: the first processable finalized head + 1.
+    /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
+        let tag = if self.eth.optimistic_requests {
+            BlockNumberOrTag::Latest
+        } else {
+            BlockNumberOrTag::Finalized
+        };
         retry_until_some(
             cancel,
             Self::RETRY_DELAY,
-            "ethereum finalized head sampling",
-            || async {
-                self.client
-                    .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
-                    .await
-            },
+            "ethereum startup head sampling",
+            || async { self.client.get_block(BlockId::Number(tag)).await },
         )
         .await
         .map(|block| block.header.number.saturating_add(1))
@@ -517,6 +518,32 @@ mod tests {
             Some(43)
         );
         finalized_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn sample_anchor_fetches_latest_head_in_optimistic_mode() {
+        let mut server = Server::new_async().await;
+        let latest_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["latest", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(2, 42).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder.eth.optimistic_requests = true;
+        let indexer = builder.build().await;
+
+        assert_eq!(
+            indexer.sample_anchor(&CancellationToken::new()).await,
+            Some(43)
+        );
+        latest_mock.assert_async().await;
     }
 
     #[tokio::test]
