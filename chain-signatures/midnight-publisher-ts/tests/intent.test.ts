@@ -69,26 +69,26 @@ describe("buildIntent", () => {
     expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, ""]]);
   });
 
-  it("names the mismatch when the deployed contract has no such entry point", async () => {
-    const empty = toHex(new ContractState().serialize());
-
-    await expect(buildIntent(await respondInput({ contractState: empty }))).rejects.toThrow(
-      /exposes no operation `respond`/,
-    );
-  });
-
-  it("rejects a deployed respond whose verifier key differs or is missing", async () => {
+  it("names the mismatch when the deployed respond is absent, proofless, or differently keyed", async () => {
     const differing = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
     const operation = differing.operation("respond")!;
     operation.verifierKey = readFileSync(`${managedDir()}/keys/respondBidirectional.verifier`);
     differing.setOperation("respond", operation);
     const proofless = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
     proofless.setOperation("respond", new ContractOperation());
+    const cases: readonly [ContractState, RegExp][] = [
+      [new ContractState(), /exposes no operation `respond`/],
+      [proofless, /no verifier key/],
+      [differing, /different verifier key/],
+    ];
 
-    for (const state of [differing, proofless]) {
+    for (const [state, detail] of cases) {
       await expect(
         buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
-      ).rejects.toMatchObject({ code: "contract_mismatch" });
+      ).rejects.toMatchObject({
+        code: "contract_mismatch",
+        message: expect.stringMatching(detail),
+      });
     }
   });
 });

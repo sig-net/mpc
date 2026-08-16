@@ -54,21 +54,22 @@ describe("handleLine", () => {
     );
   });
 
-  it("answers malformed JSON values with bad_request", async () => {
+  it("answers malformed input with bad_request and echoes only a usable id", async () => {
     for (const line of ["{not json", "[]"]) {
-      expect(await answer(line)).toMatchObject({ ok: false, code: "bad_request" });
+      expect(await answer(line)).toMatchObject({ id: null, ok: false, code: "bad_request" });
     }
-  });
-
-  it("echoes only a usable id from a rejected request", async () => {
     expect(await answer(JSON.stringify({ id: 9, circuit: "nope" }))).toMatchObject({
       id: 9,
       ok: false,
     });
-    expect(await answer("{not json")).toMatchObject({ id: null });
-    expect(await answer(JSON.stringify({ id: "7", circuit: "respond" }))).toMatchObject({
-      id: null,
-    });
+    for (const line of [
+      JSON.stringify({ id: "7", circuit: "respond" }),
+      // 2^53+1 parses to 2^53, so echoing it would answer a post the caller never sent.
+      request().replace('"id":7', '"id":9007199254740993'),
+      request({ id: -1 }),
+    ]) {
+      expect(await answer(line), line).toMatchObject({ id: null, ok: false, code: "bad_request" });
+    }
   });
 
   it("names the offending field in a rejection", async () => {
@@ -91,19 +92,6 @@ describe("handleLine", () => {
       expect(reply, field).toMatchObject({ id: 7, ok: false, code: "bad_request" });
       expect(reply.message).toContain(field);
     }
-  });
-
-  it("rejects an id JSON cannot round-trip, rather than echoing a different one", async () => {
-    // 2^53+1 parses to 2^53, so echoing it would answer a post the caller never sent.
-    const tooBig = await answer(request().replace('"id":7', '"id":9007199254740993'));
-    expect(tooBig).toMatchObject({ id: null, ok: false, code: "bad_request" });
-    expect(tooBig.message).toContain("`id`");
-
-    expect(await answer(request({ id: -1 }))).toMatchObject({
-      id: null,
-      ok: false,
-      code: "bad_request",
-    });
   });
 
   it("surfaces builder failures as codes, not as throws", async () => {

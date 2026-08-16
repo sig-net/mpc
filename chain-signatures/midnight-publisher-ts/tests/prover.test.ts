@@ -74,6 +74,7 @@ describe("the proving provider", () => {
       expect(material?.verifierKey.length, circuit).toBeGreaterThan(0);
       expect(material?.ir.length, circuit).toBeGreaterThan(0);
     }
+    expect(await provider().lookupKey("midnight/zswap/spend")).toBeUndefined();
   });
 
   it("puts the contract address, circuit, and verifier hash in proof requests", async () => {
@@ -82,10 +83,6 @@ describe("the proving provider", () => {
         keyLocation: contractKeyLocation(circuit),
       });
     }
-  });
-
-  it("leaves the protocol's own circuits to the server", async () => {
-    expect(await provider().lookupKey("midnight/zswap/spend")).toBeUndefined();
   });
 
   it("refuses locations outside the publisher's exact contract surface", async () => {

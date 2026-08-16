@@ -28,8 +28,11 @@ describe("configFromEnv", () => {
     expect(() => configFromEnv(BUILDER)).toThrowError(new RegExp(REQUIRED.join("[\\s\\S]*")));
   });
 
-  it("starts a deployment that submits, with every endpoint the wallet needs", () => {
-    const config = configFromEnv(SUBMITTER);
+  it("starts a deployment that submits, with every endpoint canonicalized for the wallet", () => {
+    const config = configFromEnv({
+      ...SUBMITTER,
+      MIDNIGHT_PUB_PROOF_SERVER_URL: "HTTP://127.0.0.1:6300",
+    });
     expect(config.endpoints).toEqual({
       nodeUrl: "ws://127.0.0.1:9944/",
       proofServerUrl: "http://127.0.0.1:6300/",
@@ -61,23 +64,14 @@ describe("configFromEnv", () => {
     }
   });
 
-  it("refuses a network id the library does not know", () => {
-    expect(() => configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NETWORK_ID: "undeploy" })).toThrowError(
+  it("refuses a network id the library does not know and endpoints of the wrong shape", () => {
+    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_NETWORK_ID: "undeploy" })).toThrowError(
       /MIDNIGHT_PUB_NETWORK_ID/,
     );
-  });
-
-  it("refuses endpoints that are not absolute URLs of a supported scheme", () => {
     for (const name of REQUIRED.slice(0, 4)) {
       for (const value of ["not-a-url", "file:///tmp/socket"]) {
         expect(() => configFromEnv({ ...SUBMITTER, [name]: value }), name).toThrowError(name);
       }
     }
-  });
-
-  it("canonicalizes endpoint schemes before passing them to the wallet SDK", () => {
-    const config = configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_NODE_URL: "HTTP://127.0.0.1:9944" });
-
-    expect(config.endpoints?.nodeUrl).toBe("http://127.0.0.1:9944/");
   });
 });

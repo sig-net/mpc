@@ -17,7 +17,6 @@ import { buildIntent } from "../src/intent.js";
 import type { UnboundTransaction } from "../src/prover.js";
 import {
   closePublisher,
-  decodeIntent,
   handleSubmit,
   primePublisher,
   shutdownPublisher,
@@ -61,16 +60,6 @@ const refused = async (id: number): Promise<PublisherError> => {
   }
   throw new Error("expected the submit to be refused");
 };
-
-describe("decodeIntent", () => {
-  it("classifies invalid intent bytes as bad requests", () => {
-    for (const invalid of [Uint8Array.of(1, 2, 3), intent.subarray(0, 40)]) {
-      expect(() => decodeIntent(invalid)).toThrowError(
-        expect.objectContaining({ code: "bad_request" }) as Error,
-      );
-    }
-  });
-});
 
 describe("publisher lifecycle", () => {
   it("bounds shutdown while the wallet close is pending", async () => {
@@ -357,9 +346,11 @@ describe("handleSubmit: the busy gate", () => {
   it("never claims the gate for a request that fails validation", async () => {
     primeStub();
 
-    await expect(handleSubmit(CONFIG, 1, Uint8Array.of(1, 2, 3))).rejects.toMatchObject({
-      code: "bad_request",
-    });
+    for (const invalid of [Uint8Array.of(1, 2, 3), intent.subarray(0, 40)]) {
+      await expect(handleSubmit(CONFIG, 1, invalid)).rejects.toMatchObject({
+        code: "bad_request",
+      });
+    }
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
