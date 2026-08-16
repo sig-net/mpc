@@ -24,10 +24,8 @@ const REQUIRED = [
 ] as const;
 
 describe("configFromEnv", () => {
-  it("refuses a deployment without the wallet configuration", () => {
-    expect(() => configFromEnv(BUILDER)).toThrowError(
-      /MIDNIGHT_PUB_NODE_URL[\s\S]*MIDNIGHT_PUB_FUNDING_SEED/,
-    );
+  it("names every missing variable at once", () => {
+    expect(() => configFromEnv(BUILDER)).toThrowError(new RegExp(REQUIRED.join("[\\s\\S]*")));
   });
 
   it("starts a deployment that submits, with every endpoint the wallet needs", () => {
@@ -43,18 +41,13 @@ describe("configFromEnv", () => {
     );
   });
 
-  it("refuses a blank funding seed", () => {
-    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "" })).toThrowError(
-      /MIDNIGHT_PUB_FUNDING_SEED/,
-    );
-  });
-
   it("uses the SDK's 16-to-64-byte hex seed contract and never quotes a rejection", () => {
     expect(() =>
       configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(17) }),
     ).not.toThrow();
 
     for (const invalid of [
+      "",
       "ab".repeat(15),
       "ab".repeat(65),
       "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -68,40 +61,17 @@ describe("configFromEnv", () => {
     }
   });
 
-  it("refuses a half-configured submit path at startup, naming what is missing", () => {
-    // Left to the first request, a typo'd endpoint costs a real signature instead of a restart.
-    for (const name of REQUIRED) {
-      const partial: Record<string, string> = { ...SUBMITTER };
-      delete partial[name];
-
-      expect(() => configFromEnv(partial), name).toThrowError(name);
-    }
-  });
-
-  it("names every missing variable at once, not just the first", () => {
-    expect(() =>
-      configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944" }),
-    ).toThrowError(/MIDNIGHT_PUB_PROOF_SERVER_URL[\s\S]*MIDNIGHT_PUB_INDEXER_URL/);
-  });
-
   it("refuses a network id the library does not know", () => {
     expect(() => configFromEnv({ ...BUILDER, MIDNIGHT_PUB_NETWORK_ID: "undeploy" })).toThrowError(
       /MIDNIGHT_PUB_NETWORK_ID/,
     );
   });
 
-  it("refuses malformed endpoint URLs at startup", () => {
+  it("refuses endpoints that are not absolute URLs of a supported scheme", () => {
     for (const name of REQUIRED.slice(0, 4)) {
-      expect(() => configFromEnv({ ...SUBMITTER, [name]: "not-a-url" }), name).toThrowError(name);
-    }
-  });
-
-  it("refuses unsupported endpoint schemes at startup", () => {
-    for (const name of REQUIRED.slice(0, 4)) {
-      expect(
-        () => configFromEnv({ ...SUBMITTER, [name]: "file:///tmp/socket" }),
-        name,
-      ).toThrowError(name);
+      for (const value of ["not-a-url", "file:///tmp/socket"]) {
+        expect(() => configFromEnv({ ...SUBMITTER, [name]: value }), name).toThrowError(name);
+      }
     }
   });
 

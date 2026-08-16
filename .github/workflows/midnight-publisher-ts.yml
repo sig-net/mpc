@@ -1,15 +1,8 @@
-# The midnight intent builder's gate. The TypeScript package builds intents and
-# submits them through a funding wallet. Its deterministic suite runs the real
-# circuit and local HTTP boundary without requiring a full Midnight stack.
-#
-# The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
-# is not on this branch yet; its `intent_seam` differential test and the Rust
-# toolchain steps that run it return in the PR that restores the Rust client, and
-# the `chain-midnight` path filter below is kept so that PR only has to re-add
-# the steps, not the triggers.
-#
-# The live end-to-end path (boot the dockerized stack, deploy a singleton,
-# balance/prove/submit, confirm on chain) is deliberately NOT automated here.
+# The midnight publisher's gate. Its deterministic suite runs the real circuit and
+# local HTTP boundary without a Midnight stack; the live end-to-end path (boot the
+# dockerized stack, deploy a singleton, balance/prove/submit, confirm on chain) is
+# deliberately NOT automated here. `chain-midnight` is in the path filter because
+# the Rust client's differential test reads this package's committed fixture.
 name: Midnight Publisher TS
 
 on:

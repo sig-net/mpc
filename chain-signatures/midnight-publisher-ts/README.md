@@ -11,7 +11,7 @@ Protocol generation 1 uses an explicit readiness handshake. Rust must send `{"id
 Operations are:
 
 - `ready`: validates protocol compatibility, starts background construction and synchronization of the memoized funding wallet, and returns without waiting for wallet readiness. The reply also advertises `submitTimeoutMs` and `recipeTtlMs`.
-- `build`: runs the selected `respond` circuit and returns a serialized ledger intent. It does not open, synchronize, or use the funding wallet. Callers must send `"op":"build"` explicitly.
+- `build`: runs the selected `respond` circuit and returns a serialized ledger intent. It does not open, synchronize, or use the funding wallet.
 - `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID.
 
 The process memoizes one wallet facade, including while it is starting. A single submit gate protects that facade and its DUST UTXO; submissions are never processed concurrently.
@@ -20,10 +20,11 @@ The process memoizes one wallet facade, including while it is starting. A single
 
 Each submit gets one absolute 360-second budget. Wallet startup, DUST readiness, base-transaction proof, DUST balancing, balancing-transaction proof/finalization, and submission all consume that same deadline rather than starting phase-specific clocks. Readiness and base proof still own cancellation at their respective boundaries; wallet-critical work does not.
 
-Three errors have especially important retry semantics:
+Four errors have especially important retry semantics:
 
 - `wallet_unsynced`: wallet startup or DUST readiness exhausted the submit deadline. Nothing was posted, so retrying is safe; the background startup launched by `ready` continues.
 - `proving_timeout`: base proving exhausted the remaining submit deadline. No wallet operation started, so retrying is safe.
+- `state_conflict`: the node refused the transaction as invalid, which is how a stale contract read, an expired TTL, or any other pool rejection surfaces; the node does not report which. Nothing was posted. Rebuild the intent against fresh contract state before retrying.
 - `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background; check the chain for the request before retrying to avoid paying or posting twice.
 
 ## Configuration
@@ -36,6 +37,8 @@ All six variables are required when the process starts, even if a caller initial
 - `MIDNIGHT_PUB_INDEXER_URL`: absolute indexer HTTP(S) URL.
 - `MIDNIGHT_PUB_INDEXER_WS_URL`: absolute indexer WebSocket URL.
 - `MIDNIGHT_PUB_FUNDING_SEED`: raw hexadecimal seed containing 16 to 64 bytes. A mnemonic is not accepted, and rejected seed input is not echoed in errors.
+
+The circuit executor's own configuration (the funding wallet's coin public key, derived from the seed) is bound in code. Ambient `NETWORK` and `KEYS_*` variables, which the platform SDK's default configuration provider would otherwise read ahead of that value, are ignored, so the environment the parent process inherits cannot change what `build` produces.
 
 ## Development
 
@@ -55,4 +58,4 @@ npm test
 
 The runtime image for this sidecar must include the built `dist/` tree, production Node.js dependencies, and the managed contract proving assets (`keys/` and `zkir/`) shipped by `@sig-net/midnight-contract`; proving resolves those assets through the installed package at runtime.
 
-This branch does not yet contain the dependent Rust child-process integration or Docker packaging seam. Its current Rust `MidnightPublisher` is still an unimplemented stub, and the repository Dockerfile neither builds this package nor installs Node.js 22 in the runtime image. When that seam lands, Rust must send and require protocol version 1 in the `ready` handshake before normal build/submit traffic.
+The Rust node spawns this process from that image and must send and require protocol version 1 in the `ready` handshake before any build or submit traffic.

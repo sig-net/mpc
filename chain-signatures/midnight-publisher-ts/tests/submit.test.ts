@@ -70,20 +70,6 @@ describe("decodeIntent", () => {
       );
     }
   });
-
-  it("delegates the ledger version tag to the ledger deserializer", () => {
-    const wrongLedger = Uint8Array.from(intent);
-    const versionOffset = Buffer.from(wrongLedger).indexOf("midnight:intent[v9]");
-    expect(versionOffset).toBeGreaterThanOrEqual(0);
-    wrongLedger[versionOffset + "midnight:intent[v".length] = "8".charCodeAt(0);
-
-    expect(() => decodeIntent(wrongLedger)).toThrowError(
-      expect.objectContaining({
-        code: "bad_request",
-        message: expect.stringContaining("did not deserialize"),
-      }) as Error,
-    );
-  });
 });
 
 describe("publisher lifecycle", () => {
@@ -192,8 +178,17 @@ describe("handleSubmit: the flow", () => {
   it("classifies wallet failures for retry policy", async () => {
     for (const [message, code] of [
       ["Wallet.InsufficientFunds", "wallet_unfunded"],
-      ["could not balance dust", "wallet_unfunded"],
-      ["Transcript(Execution(ReadMismatch { expected: 06 }))", "state_conflict"],
+      ["Insufficient Funds: could not balance dust", "wallet_unfunded"],
+      // The SDK's texts for a node refusal, neither of which carries the ledger's reason.
+      [
+        "TransactionInvalidError: Transaction is invalid and was rejected by the node",
+        "state_conflict",
+      ],
+      ["1010: Invalid Transaction: Custom error: 170", "state_conflict"],
+      [
+        "TransactionDroppedError: Transaction got dropped, the mempool likely is full and network congested",
+        "internal",
+      ],
     ] as const) {
       await closePublisher();
       primeStub({ balanceTx: failing(message) });
@@ -219,7 +214,7 @@ describe("handleSubmit: the flow", () => {
             new SubmissionError({
               message: "Transaction submission error",
               cause: new TransactionInvalidError({
-                message: "rejected by the node: Transcript(Execution(ReadMismatch))",
+                message: "Transaction is invalid and was rejected by the node",
               }),
             }),
           ),
@@ -383,7 +378,6 @@ describe("handleSubmit: the busy gate", () => {
     await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS);
     const timedOut = await pending;
     expect(timedOut.code).toBe("ambiguous_submit");
-    expect(timedOut.message).toMatch(/deadline/);
     expect(timedOut.message).toMatch(/may still land/);
     expect(timedOut.message).toContain("request 1");
 

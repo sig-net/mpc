@@ -3,7 +3,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContractOperation, ContractState } from "@midnight-ntwrk/compact-runtime";
 import { ContractCall } from "@midnightntwrk/ledger-v9";
@@ -26,7 +26,22 @@ const X = "11".repeat(32);
 const Y = "22".repeat(32);
 const S = "33".repeat(32);
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("buildIntent", () => {
+  it("takes its configuration from the caller, never from the process environment", async () => {
+    // These are the names platform-js's own provider would read ahead of the caller's values.
+    vi.stubEnv("NETWORK", "base_sepolia");
+    vi.stubEnv("KEYS_COIN_PUBLIC", "not-a-key");
+    vi.stubEnv("KEYS_SIGNING", "not-a-key");
+    vi.stubEnv("KEYS_SIGNING_KIND", "not-a-kind");
+
+    const bytes = await buildIntent(await respondInput());
+
+    expect(calledEntryPoint(bytes)).toBe("respond");
+    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, ""]]);
+  });
+
   it("builds one guaranteed respond call with the exact wire arguments", async () => {
     const input = await respondInput();
     const bytes = await buildIntent({ ...input, signature: { ...input.signature, recoveryId: 1 } });
@@ -62,23 +77,18 @@ describe("buildIntent", () => {
     );
   });
 
-  it("rejects a deployed circuit with a different verifier key", async () => {
-    const state = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
-    const operation = state.operation("respond")!;
+  it("rejects a deployed respond whose verifier key differs or is missing", async () => {
+    const differing = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
+    const operation = differing.operation("respond")!;
     operation.verifierKey = readFileSync(`${managedDir()}/keys/respondBidirectional.verifier`);
-    state.setOperation("respond", operation);
+    differing.setOperation("respond", operation);
+    const proofless = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
+    proofless.setOperation("respond", new ContractOperation());
 
-    await expect(
-      buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
-    ).rejects.toMatchObject({ code: "contract_mismatch" });
-  });
-
-  it("rejects a deployed response circuit with no verifier key", async () => {
-    const state = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
-    state.setOperation("respond", new ContractOperation());
-
-    await expect(
-      buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
-    ).rejects.toMatchObject({ code: "contract_mismatch" });
+    for (const state of [differing, proofless]) {
+      await expect(
+        buildIntent(await respondInput({ contractState: toHex(state.serialize()) })),
+      ).rejects.toMatchObject({ code: "contract_mismatch" });
+    }
   });
 });

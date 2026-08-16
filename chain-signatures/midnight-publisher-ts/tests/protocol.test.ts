@@ -106,19 +106,17 @@ describe("handleLine", () => {
     });
   });
 
-  it("surfaces a builder failure as its own code, not as a throw", async () => {
-    const reply = await answer(request({ contractState: toHex(new ContractState().serialize()) }));
+  it("surfaces builder failures as codes, not as throws", async () => {
+    const mismatch = await answer(
+      request({ contractState: toHex(new ContractState().serialize()) }),
+    );
+    expect(mismatch).toMatchObject({ id: 7, ok: false, code: "contract_mismatch" });
+    expect(mismatch.message).toContain("respond");
 
-    expect(reply).toMatchObject({ id: 7, ok: false, code: "contract_mismatch" });
-    expect(reply.message).toContain("respond");
-  });
-
-  it("answers `internal` when the request is well formed but the bytes are not", async () => {
     // Valid hex of the wrong thing: the failure comes out of the ledger's own deserializer.
-    const reply = await answer(request({ contractState: "00".repeat(64) }));
-
-    expect(reply).toMatchObject({ id: 7, ok: false, code: "internal" });
-    expect(reply.message.length).toBeGreaterThan(0);
+    const undecodable = await answer(request({ contractState: "00".repeat(64) }));
+    expect(undecodable).toMatchObject({ id: 7, ok: false, code: "internal" });
+    expect(undecodable.message.length).toBeGreaterThan(0);
   });
 });
 
@@ -151,20 +149,10 @@ describe("handleLine: the operation discriminator", () => {
     expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
   });
 
-  it("requires an explicit build operation", async () => {
-    const missing = await answer(JSON.stringify({ id: 7, ...BUILD }));
-    const explicit = await answer(request());
-
-    expect(missing).toMatchObject({ id: 7, ok: false, code: "bad_request" });
-    expect(missing.message).toContain("`op`");
-    expect(explicit).toMatchObject({ id: 7, ok: true });
-    expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
-  });
-
-  it("names `op` when it is neither, rather than reporting a missing circuit", async () => {
-    for (const op of ["publish", "warmup"]) {
-      const reply = await answer(JSON.stringify({ id: 7, op, intent: "00" }));
-      expect(reply, op).toMatchObject({ id: 7, ok: false, code: "bad_request" });
+  it("names `op` when it is unknown or missing, rather than reporting a missing field", async () => {
+    for (const op of ["publish", undefined]) {
+      const reply = await answer(JSON.stringify({ id: 7, op, ...BUILD }));
+      expect(reply, String(op)).toMatchObject({ id: 7, ok: false, code: "bad_request" });
       expect(reply.message).toContain("`op`");
     }
     expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
@@ -179,21 +167,14 @@ describe("handleLine: the operation discriminator", () => {
     expect(reply).toEqual({ id: 21, ok: true, txId: STUB_TX_ID });
   });
 
-  it("names `intent` when it is not the hex the wire admits", async () => {
-    const cases = ["", "abc", "ZZ", "AB".repeat(32), null, 7];
+  it("names `intent` when it is not the hex the wire admits, or not an intent at all", async () => {
+    const cases = ["", "abc", "ZZ", "AB".repeat(32), null, 7, "00".repeat(64)];
 
     for (const intent of cases) {
       const reply = await answer(JSON.stringify({ id: 22, op: "submit", intent }));
       expect(reply, String(intent)).toMatchObject({ id: 22, ok: false, code: "bad_request" });
-      expect(reply.message).toContain("intent");
+      expect(reply.message).toContain("`intent`");
     }
-  });
-
-  it("names `intent` when the hex is fine and the bytes are not an intent", async () => {
-    const reply = await answer(JSON.stringify({ id: 23, op: "submit", intent: "00".repeat(64) }));
-
-    expect(reply).toMatchObject({ id: 23, ok: false, code: "bad_request" });
-    expect(reply.message).toContain("`intent`");
   });
 });
 

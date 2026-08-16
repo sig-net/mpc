@@ -35,17 +35,12 @@ interface DustStateStub {
 function stubFacade(dustState = new Subject<DustStateStub>()) {
   return {
     start: vi.fn(async () => undefined),
-    waitForSyncedState: vi.fn(async () => ({})),
     stop: vi.fn(async () => undefined),
     dust: { state: dustState },
     balanceUnboundTransaction: vi.fn(),
     signRecipe: vi.fn(),
     finalizeRecipe: vi.fn(),
     submitTransaction: vi.fn(async () => "ab".repeat(32)),
-    submissionService: {
-      submitTransaction: vi.fn(async () => ({ blockHash: `0x${"cd".repeat(32)}` })),
-    },
-    revert: vi.fn(async () => undefined),
   } as unknown as WalletFacade;
 }
 
@@ -55,25 +50,20 @@ afterEach(() => {
 });
 
 describe("openFundingWallet", () => {
-  it("starts once and opens while full-facade synchronization remains pending", async () => {
-    vi.useFakeTimers();
+  it("opens as soon as the facade has started, without waiting for it to sync", async () => {
     const facade = stubFacade();
-    vi.mocked(facade.waitForSyncedState).mockReturnValueOnce(new Promise(() => undefined));
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
 
-    const opening = openFundingWallet(KEYS, "undeployed", ENDPOINTS);
-    const outcome = Promise.race([
-      opening.then(() => "opened"),
-      new Promise<"stalled">((resolve) => setTimeout(() => resolve("stalled"), 1)),
-    ]);
-    await vi.advanceTimersByTimeAsync(1);
+    await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
 
-    await expect(outcome).resolves.toBe("opened");
+    expect(sdk.initialiseWalletFacade).toHaveBeenCalledWith(KEYS, {
+      ...ENDPOINTS,
+      networkId: "undeployed",
+    });
     expect(facade.start).toHaveBeenCalledExactlyOnceWith(
       KEYS.shieldedSecretKeys,
       KEYS.dustSecretKey,
     );
-    expect(facade.waitForSyncedState).not.toHaveBeenCalled();
     expect(facade.stop).not.toHaveBeenCalled();
   });
 
@@ -86,8 +76,6 @@ describe("openFundingWallet", () => {
       "dust wallet unavailable",
     );
 
-    expect(facade.start).toHaveBeenCalledOnce();
-    expect(facade.waitForSyncedState).not.toHaveBeenCalled();
     expect(facade.stop).toHaveBeenCalledOnce();
   });
 
@@ -125,25 +113,21 @@ describe("openFundingWallet", () => {
     await expect(retry).resolves.toBeUndefined();
     expect(complete.progress.isStrictlyComplete).toHaveBeenCalledOnce();
     expect(dustState.observed).toBe(false);
-    expect(facade.waitForSyncedState).not.toHaveBeenCalled();
     expect(facade.stop).not.toHaveBeenCalled();
   });
 
-  it("submits through the facade so pending transaction state is tracked", async () => {
+  it("submits through the facade, which tracks the pending transaction, and stops it on close", async () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
     const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
     const tx = { identifiers: () => ["ab".repeat(32)] } as unknown as FinalizedTransaction;
 
-    expect(sdk.initialiseWalletFacade).toHaveBeenCalledWith(KEYS, {
-      ...ENDPOINTS,
-      networkId: "undeployed",
-    });
-
     await expect(wallet.submitTx(tx)).resolves.toEqual({ txId: "ab".repeat(32) });
+    await expect(
+      wallet.submitTx({ identifiers: () => [] } as unknown as FinalizedTransaction),
+    ).rejects.toThrow("carries no identifier");
+    expect(facade.submitTransaction).toHaveBeenCalledExactlyOnceWith(tx);
 
-    expect(facade.submitTransaction).toHaveBeenCalledWith(tx);
-    expect(facade.submissionService.submitTransaction).not.toHaveBeenCalled();
     await wallet.close();
     expect(facade.stop).toHaveBeenCalledOnce();
   });
@@ -172,15 +156,5 @@ describe("openFundingWallet", () => {
     expect(options.ttl.getTime()).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1_000);
     expect(facade.signRecipe).toHaveBeenCalledWith(recipe, expect.any(Function));
     await expect(wallet.finalizeTx(signed)).resolves.toBe(finalized);
-  });
-
-  it("does not submit a transaction with no identifier", async () => {
-    const facade = stubFacade();
-    sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
-    const tx = { identifiers: () => [] } as unknown as FinalizedTransaction;
-
-    await expect(wallet.submitTx(tx)).rejects.toThrow("carries no identifier");
-    expect(facade.submitTransaction).not.toHaveBeenCalled();
   });
 });

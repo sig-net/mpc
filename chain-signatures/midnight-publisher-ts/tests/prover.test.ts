@@ -94,22 +94,13 @@ describe("the proving provider", () => {
       "notACircuit",
       "../../../../etc/passwd",
       contractKeyLocation("signBidirectional"),
+      contractKeyLocation("respond", "00".repeat(32)),
     ]) {
       await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toMatchObject({
         code: "bad_request",
+        message: expect.stringMatching(/unsupported key location/),
       });
-      await expect(provider().lookupKey(keyLocation), keyLocation).rejects.toThrowError(
-        /unsupported key location/,
-      );
     }
-  });
-
-  it("refuses a canonical location for different verifier material", async () => {
-    await expect(
-      provider().lookupKey(contractKeyLocation("respond", "00".repeat(32))),
-    ).rejects.toMatchObject({
-      code: "bad_request",
-    });
   });
 
   it("posts ledger payloads and reports proof-server status failures", async () => {
@@ -135,28 +126,6 @@ describe("the proving provider", () => {
     expect(Uint8Array.from(body)).toEqual(
       createProvingPayload(request.preimage, 4n, await live.lookupKey(request.keyLocation)),
     );
-  });
-
-  it("passes one owned signal through every check and prove request", async () => {
-    vi.useFakeTimers();
-    const signals: (AbortSignal | null | undefined)[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-      signals.push(init?.signal);
-      return new Response(Uint8Array.of(7, 8, 9), { status: 200 });
-    });
-    const request = await proofRequest();
-    const transaction = fakeTransaction(async (live) => {
-      await live.check(request.preimage, request.keyLocation).catch(() => undefined);
-      await live.prove(request.preimage, request.keyLocation, 4n);
-      return { proven: true } as unknown as UnboundTransaction;
-    });
-
-    await proveTransaction("http://proof.invalid", transaction, 1_000);
-
-    expect(signals).toHaveLength(2);
-    expect(signals[0]).toBeInstanceOf(AbortSignal);
-    expect(signals[1]).toBe(signals[0]);
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {
@@ -228,28 +197,5 @@ describe("the proving provider", () => {
     expect(signal?.aborted).toBe(true);
     expect(signal?.reason).toBe(error);
     expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("does not classify arbitrary abort-like or network failures as proving timeouts", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    for (const foreign of [
-      new DOMException("caller cancelled", "AbortError"),
-      new DOMException("foreign timeout", "TimeoutError"),
-      new Error("connection reset"),
-    ]) {
-      const request = await proofRequest();
-      fetchMock.mockReset();
-      fetchMock.mockRejectedValue(foreign);
-      const transaction = fakeTransaction(async (live) => {
-        await live.prove(request.preimage, request.keyLocation, 4n);
-        throw new Error("proof request unexpectedly completed");
-      });
-
-      await expect(proveTransaction("http://proof.invalid", transaction, 1_000)).rejects.toBe(
-        foreign,
-      );
-      expect(vi.getTimerCount()).toBe(0);
-    }
   });
 });

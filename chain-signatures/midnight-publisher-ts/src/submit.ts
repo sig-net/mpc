@@ -88,12 +88,15 @@ export async function shutdownPublisher(): Promise<void> {
   ).catch(() => undefined);
 }
 
-// The only place this process matches on dependency error text; both wallet_unfunded
-// spellings mean back off, ReadMismatch means rebuild against fresh state.
+// The only place this process matches on dependency error text. Both wallet_unfunded
+// spellings mean back off. A node refusal carries no ledger reason on this side, only the
+// SDK's `TransactionInvalidError` or the RPC's `Invalid Transaction` text: nothing was
+// posted, rebuild against fresh state. Dropped/usurped were not refused and stay `internal`.
 const REFINEMENTS: readonly (readonly [pattern: string, code: ErrorCode])[] = [
   ["Wallet.InsufficientFunds", "wallet_unfunded"],
   ["could not balance dust", "wallet_unfunded"],
-  ["ReadMismatch", "state_conflict"],
+  ["TransactionInvalidError", "state_conflict"],
+  ["Invalid Transaction", "state_conflict"],
 ];
 
 function asPublisherError(error: unknown): PublisherError {

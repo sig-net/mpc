@@ -40,7 +40,7 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
 export const STUB_TX_ID = "ab".repeat(32);
 
 export const SINGLETON = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
-export const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
+const REQUEST_ID = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
 
 export async function respondInput(
   overrides: Partial<BuildIntentInput> = {},

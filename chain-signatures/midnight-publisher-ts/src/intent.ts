@@ -1,7 +1,8 @@
 // Runs a Compact circuit to obtain its Impact transcript, the one step that cannot move
-// to Rust: compactc emits TypeScript and nothing else. Pure: every input arrives from the caller.
+// to Rust: the compiled contract's bindings and executor are JavaScript. Pure: every input
+// arrives from the caller.
 
-import { Effect, Layer } from "effect";
+import { ConfigProvider, Effect, Layer } from "effect";
 import { NodeContext } from "@effect/platform-node";
 import {
   ContractExecutable,
@@ -85,24 +86,20 @@ function signatureStruct(signature: WireSignature) {
   };
 }
 
-// `Configuration.Keys` is required even though respond signs nothing: the one executable
-// also serves the maintenance operations, and it reads `keys.coinPublic` off the provider.
+// `Configuration.Keys` is required even though respond signs nothing: the executable reads
+// `keys.coinPublic`. Bound from this JSON alone, because platform-js's own provider reads
+// the process environment (`NETWORK`, `KEYS_*`) ahead of it.
 function executionContext(coinPublicKey: string) {
   return Layer.mergeAll(
     ZKFileConfiguration.layer(signetContractManagedPath).pipe(Layer.provide(NodeContext.layer)),
     Layer.provide(
       Configuration.layer,
-      Layer.setConfigProvider(
-        Configuration.configProvider({ keys: { coinPublic: coinPublicKey } }),
-      ),
+      Layer.setConfigProvider(ConfigProvider.fromJson({ keys: { coinPublic: coinPublicKey } })),
     ),
   );
 }
 
-/**
- * NOT byte-deterministic: the communication commitment is sampled per call. Assert on
- * the decoded call, never the bytes.
- */
+/** Not byte-deterministic: the communication commitment is sampled per call. */
 export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> {
   const contractState = ContractState.deserialize(fromHex(input.contractState));
 
@@ -114,8 +111,7 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
     );
   }
   const deployedVerifierKey = operation.verifierKey;
-  // Both publisher entry points are provable, so a same-named proofless operation
-  // cannot be the implementation this process was compiled to call.
+  // Both entry points are provable, so a proofless same-named operation cannot be ours.
   if (deployedVerifierKey === undefined || deployedVerifierKey.length === 0) {
     throw new PublisherError(
       "contract_mismatch",
