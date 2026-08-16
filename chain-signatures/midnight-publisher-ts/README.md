@@ -2,6 +2,8 @@
 
 `midnight-publisher` is a private, persistent Node.js 22.13+ stdio child process or sidecar for the Rust MPC node. It is a publishing mechanism, not an authority: Rust and the MPC flow decide what to publish and supply the contract state, ledger parameters, request, threshold signature, and absolute TTL. The TypeScript process only runs the Compact circuit and, when asked, funds and submits the resulting Midnight transaction.
 
+It is TypeScript because the pieces it wraps are: the Compact compiler emits the contract's bindings and circuit executor as JavaScript, and the Midnight wallet and proving SDKs are TypeScript libraries. Rust keeps the orchestration and drives this process over its stdin/stdout.
+
 ## Process and protocol
 
 The process speaks newline-delimited JSON (NDJSON) over stdio, with exactly one JSON object per line in each direction. `stdout` is reserved for protocol replies; startup and failure diagnostics go to `stderr`. Every usable request `id` is echoed in its reply, and requests are handled sequentially so replies cannot overtake one another.
@@ -13,6 +15,8 @@ Operations are:
 - `ready`: validates protocol compatibility, starts background construction and synchronization of the memoized funding wallet, and returns without waiting for wallet readiness. The reply also advertises `submitTimeoutMs` and `recipeTtlMs`.
 - `build`: runs the selected `respond` circuit and returns a serialized ledger intent. It does not open, synchronize, or use the funding wallet.
 - `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID.
+
+`build` and `submit` are separate operations so that the intent is built from the contract state Rust has already read and verified for the request, rather than from state a wallet SDK would fetch on its own, and so that only `submit` ever touches the funding wallet.
 
 The process memoizes one wallet facade, including while it is starting. A single submit gate protects that facade and its DUST UTXO; submissions are never processed concurrently.
 
