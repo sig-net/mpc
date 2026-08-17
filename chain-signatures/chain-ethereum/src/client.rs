@@ -447,13 +447,6 @@ impl EthereumClient {
         )
     }
 
-    pub async fn get_latest_block_number(&self) -> anyhow::Result<Option<u64>> {
-        Ok(self
-            .get_block(BlockId::Number(BlockNumberOrTag::Latest))
-            .await?
-            .map(|block| block.header.number))
-    }
-
     pub fn clamp_oldest_supported(
         &self,
         requested_start: u64,
