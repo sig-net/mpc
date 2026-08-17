@@ -31,6 +31,8 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 /// How the legacy backend renders a `state_call` at a hash the node cannot serve.
 const UNKNOWN_BLOCK_MSG: &str = "UnknownBlock";
+const TIMESTAMP_PALLET: &str = "Timestamp";
+const TIMESTAMP_NOW: &str = "Now";
 
 /// The classified read failures, travelling as marker text because `retry_rpc!`
 /// flattens error chains to their message; when the retry layer preserves sources,
@@ -240,6 +242,31 @@ impl MidnightRpc {
         Ok(hex_0x(self.reads.finalized_head().await?))
     }
 
+    /// The timestamp stored by `pallet_timestamp` at one explicit block. The Midnight
+    /// ledger floors milliseconds to seconds when it validates an intent's TTL.
+    pub(crate) async fn block_timestamp_seconds(
+        &self,
+        at_block_hash_0x: &str,
+    ) -> anyhow::Result<u64> {
+        let at = parse_block_hash(at_block_hash_0x)?;
+        let address = subxt::dynamic::storage(
+            TIMESTAMP_PALLET,
+            TIMESTAMP_NOW,
+            Vec::<subxt::dynamic::Value>::new(),
+        );
+        let key = self
+            .client
+            .storage()
+            .address_bytes(&address)
+            .context("midnight runtime metadata has no Timestamp.Now storage entry")?;
+        let encoded = self
+            .reads
+            .storage(&key, at)
+            .await?
+            .with_context(|| format!("midnight block {at_block_hash_0x} has no timestamp"))?;
+        decode_timestamp_seconds(&encoded)
+    }
+
     /// The ledger parameters at `at_block_hash_0x`. Fees drift per block, so a
     /// caller proving against a state must read these at that state's own hash.
     pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
@@ -330,6 +357,20 @@ fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         1 => Ok(None),
         other => anyhow::bail!("runtime api returned Result variant {other}"),
     }
+}
+
+fn decode_timestamp_seconds(encoded: &[u8]) -> anyhow::Result<u64> {
+    use subxt::ext::codec::Decode as _;
+
+    let mut payload = encoded;
+    let timestamp_millis =
+        u64::decode(&mut payload).context("midnight block timestamp is not a SCALE-encoded u64")?;
+    anyhow::ensure!(
+        payload.is_empty(),
+        "midnight block timestamp has {} trailing bytes",
+        payload.len()
+    );
+    Ok(timestamp_millis / 1_000)
 }
 
 /// The one-shot reads over explicit transports, so the offline tests can drive
@@ -440,6 +481,16 @@ impl Reads {
                 )
             }
         )?;
+        Self::resolve(fetched)
+    }
+
+    async fn storage(&self, key: &[u8], at: H256) -> anyhow::Result<Option<Vec<u8>>> {
+        let fetched = retry_rpc!(self.request_timeout, self.retry, "midnight_storage", {
+            self.classify(
+                self.legacy.state_get_storage(key, Some(at)).await,
+                "failed to fetch midnight runtime storage",
+            )
+        })?;
         Self::resolve(fetched)
     }
 
@@ -922,5 +973,17 @@ mod tests {
         trailing.extend(vec![0xaau8].encode());
         trailing.push(0x99);
         assert!(unwrap_runtime_api_result(&trailing).is_err());
+    }
+
+    #[test]
+    fn block_timestamp_matches_the_ledger_s_second_floor() {
+        use subxt::ext::codec::Encode as _;
+
+        assert_eq!(decode_timestamp_seconds(&1_000u64.encode()).unwrap(), 1);
+        assert_eq!(decode_timestamp_seconds(&1_999u64.encode()).unwrap(), 1);
+
+        let mut trailing = 1_000u64.encode();
+        trailing.push(0xff);
+        assert!(decode_timestamp_seconds(&trailing).is_err());
     }
 }

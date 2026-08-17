@@ -35,12 +35,35 @@ const RESPOND: &str = "respond";
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
 const RECONCILE_POLL: Duration = Duration::from_secs(2);
 
+#[derive(Debug)]
+struct RetryableExpiredSubmit;
+
+impl std::fmt::Display for RetryableExpiredSubmit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "finalized chain time is past the ambiguous transaction's expiry; it may be retried",
+        )
+    }
+}
+
+impl std::error::Error for RetryableExpiredSubmit {}
+
+enum FinalizedResponse {
+    Present(String),
+    Absent {
+        at_hash: String,
+        timestamp_seconds: u64,
+    },
+}
+
 /// The reads the respond path pins. A trait because `MidnightRpc` cannot be built
 /// without a node: its `OnlineClient` fetches metadata at construction.
 #[async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     /// The node's current finalized head, `0x` prefixed.
     async fn finalized_head(&self) -> anyhow::Result<String>;
+    /// The finalized block's timestamp, floored to Unix seconds as the ledger does.
+    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
     /// `None` when no contract lives at `address_64hex` at that block.
     async fn contract_state(
         &self,
@@ -54,6 +77,10 @@ pub(crate) trait PinnedReads: Send + Sync {
 impl PinnedReads for MidnightRpc {
     async fn finalized_head(&self) -> anyhow::Result<String> {
         MidnightRpc::finalized_head_0x(self).await
+    }
+
+    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
+        MidnightRpc::block_timestamp_seconds(self, at_hash_0x).await
     }
 
     async fn contract_state(
@@ -267,8 +294,8 @@ impl MidnightPublisher {
         original: anyhow::Error,
     ) -> anyhow::Result<()> {
         loop {
-            match self.finalized_response_present(call).await {
-                Ok(Some(at_hash)) => {
+            match self.finalized_response(call).await {
+                Ok(FinalizedResponse::Present(at_hash)) => {
                     tracing::warn!(
                         circuit = call.circuit,
                         request_id = %call.request_id,
@@ -277,7 +304,18 @@ impl MidnightPublisher {
                     );
                     return Ok(());
                 }
-                Ok(None) => {}
+                Ok(FinalizedResponse::Absent {
+                    at_hash,
+                    timestamp_seconds,
+                }) if timestamp_seconds > expires_at => {
+                    return Err(original
+                        .context(format!(
+                            "the exact response was absent at finalized block {at_hash}, whose \
+                             unix timestamp {timestamp_seconds} is past intent expiry {expires_at}"
+                        ))
+                        .context(RetryableExpiredSubmit));
+                }
+                Ok(FinalizedResponse::Absent { .. }) => {}
                 Err(error) => tracing::warn!(
                     circuit = call.circuit,
                     request_id = %call.request_id,
@@ -285,27 +323,16 @@ impl MidnightPublisher {
                 ),
             }
 
-            let now = unix_now()?;
-            if now >= expires_at {
-                return Err(original.context(format!(
-                    "the exact response was absent from finalized state through intent expiry \
-                     at unix second {expires_at}"
-                )));
-            }
-            let wait = RECONCILE_POLL.min(Duration::from_secs(expires_at - now));
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     return Err(original.context("midnight reconciliation cancelled"));
                 }
-                _ = tokio::time::sleep(wait) => {}
+                _ = tokio::time::sleep(RECONCILE_POLL) => {}
             }
         }
     }
 
-    async fn finalized_response_present(
-        &self,
-        call: &RespondCall,
-    ) -> anyhow::Result<Option<String>> {
+    async fn finalized_response(&self, call: &RespondCall) -> anyhow::Result<FinalizedResponse> {
         let at_hash = self.reads.finalized_head().await?;
         let state = self
             .reads
@@ -317,7 +344,14 @@ impl MidnightPublisher {
                     self.central_address
                 )
             })?;
-        response_present(&state, call).map(|present| present.then_some(at_hash))
+        if response_present(&state, call)? {
+            return Ok(FinalizedResponse::Present(at_hash));
+        }
+        let timestamp_seconds = self.reads.block_timestamp_seconds(&at_hash).await?;
+        Ok(FinalizedResponse::Absent {
+            at_hash,
+            timestamp_seconds,
+        })
     }
 }
 
@@ -327,8 +361,8 @@ impl ChainPublisher for MidnightPublisher {
         self.publish_inner(action).await
     }
 
-    fn should_retry(&self, _error: &anyhow::Error) -> bool {
-        true
+    fn should_retry(&self, error: &anyhow::Error) -> bool {
+        error.downcast_ref::<RetryableExpiredSubmit>().is_some() || !is_ambiguous_submit(error)
     }
 }
 
@@ -514,6 +548,7 @@ mod tests {
         calls: Mutex<Vec<Read>>,
         heads_served: Mutex<usize>,
         contract_state: Mutex<Vec<u8>>,
+        finalized_timestamp_seconds: std::sync::atomic::AtomicU64,
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
     }
@@ -553,6 +588,11 @@ mod tests {
         fn set_state(&self, state: Vec<u8>) {
             *self.contract_state.lock().unwrap() = state;
         }
+
+        fn set_finalized_timestamp(&self, timestamp_seconds: u64) {
+            self.finalized_timestamp_seconds
+                .store(timestamp_seconds, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -562,6 +602,13 @@ mod tests {
             *served += 1;
             self.record("finalized_head", "");
             Ok(if *served == 1 { HEAD_ONE } else { HEAD_TWO }.to_string())
+        }
+
+        async fn block_timestamp_seconds(&self, at_hash: &str) -> anyhow::Result<u64> {
+            self.record("block_timestamp_seconds", at_hash);
+            Ok(self
+                .finalized_timestamp_seconds
+                .load(std::sync::atomic::Ordering::SeqCst))
         }
 
         async fn contract_state(
@@ -1158,6 +1205,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unresolved_ambiguous_submit_is_not_automatically_retried() {
+        let recorder = Recorder::new("ambiguous-retry-policy");
+        let config = config(granting_child(&recorder));
+        let publisher = publisher(&config, StubReads::new(), StubSubmitter::new()).await;
+        let error = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
+
+        assert!(
+            !publisher.should_retry(&error),
+            "an unresolved transaction may still land"
+        );
+        assert!(
+            publisher.should_retry(&anyhow::anyhow!("temporary node failure")),
+            "ordinary publisher failures keep the existing retry policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finalized_head_at_the_intent_ttl_does_not_release_ambiguity() {
+        let reads = StubReads::new();
+        reads.set_finalized_timestamp(1);
+        let recorder = Recorder::new("ttl-equality");
+        let config = config(granting_child(&recorder));
+        let publisher = publisher(&config, reads.clone(), StubSubmitter::new()).await;
+        let call = respond_call(&respond_action()).expect("the action maps to a response");
+        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                publisher.reconcile_ambiguous(&call, 1, original),
+            )
+            .await
+            .is_err(),
+            "a transaction remains valid when finalized block time equals its TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalized_expiry_without_the_response_allows_a_fresh_attempt() {
+        let reads = StubReads::new();
+        reads.set_finalized_timestamp(2);
+        let recorder = Recorder::new("finalized-expiry");
+        let config = config(granting_child(&recorder));
+        let publisher = publisher(&config, reads.clone(), StubSubmitter::new()).await;
+        let call = respond_call(&respond_action()).expect("the action maps to a response");
+        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
+
+        let error = publisher
+            .reconcile_ambiguous(&call, 1, original)
+            .await
+            .expect_err("the expired attempt did not finalize the response");
+        assert!(
+            is_ambiguous_submit(&error),
+            "the original submit diagnosis must survive expiry: {error:#}"
+        );
+        assert!(
+            publisher.should_retry(&error),
+            "a finalized head past the TTL makes a fresh transaction safe: {error:#}"
+        );
+        let pinned_hashes: Vec<_> = reads
+            .reads()
+            .into_iter()
+            .filter(|read| read.method != "finalized_head")
+            .map(|read| read.at_hash)
+            .collect();
+        assert_eq!(
+            pinned_hashes,
+            vec![HEAD_ONE.to_string(); 2],
+            "absence and timestamp must come from the same finalized block"
+        );
+    }
+
+    #[tokio::test]
     async fn the_submit_step_is_handed_the_node_s_own_shutdown_token() {
         // A step handed a fresh token instead of the node's own is indistinguishable in
         // every other observation and keeps proving straight through a shutdown.
@@ -1206,7 +1326,9 @@ mod tests {
         );
         assert_eq!(backstop, config.submit_timeout + config.request_timeout);
 
-        let publisher = publisher(&config, StubReads::new(), StubSubmitter::slow()).await;
+        let reads = StubReads::new();
+        reads.set_finalized_timestamp(u64::MAX);
+        let publisher = publisher(&config, reads, StubSubmitter::slow()).await;
 
         let started = std::time::Instant::now();
         let err = publisher
