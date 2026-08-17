@@ -16,7 +16,8 @@ use mpc_contract::config::{
     min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
 };
 use mpc_contract::primitives::{
-    CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
+    CandidateInfo, CandidatesView as CandidatesById, ParticipantInfo,
+    Participants as ParticipantsById,
 };
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
@@ -144,9 +145,11 @@ impl MpcFixtureBuilder {
         let prepared_nodes: Vec<_> = (0..num_nodes).map(MpcFixtureNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)
-        let mut candidates_by_id = CandidatesById::new();
+        let mut candidates_by_id = CandidatesById {
+            candidates: Default::default(),
+        };
         for node in &prepared_nodes {
-            candidates_by_id.insert(
+            candidates_by_id.candidates.insert(
                 node.candidate_info.account_id.clone(),
                 node.candidate_info.clone(),
             );

@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use mpc_contract::{
     config::Config,
-    primitives::{CandidateInfo, Candidates, Participants, SignRequest},
+    primitives::{CandidateInfo, CandidatesView as Candidates, Participants, SignRequest},
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
@@ -133,7 +133,9 @@ pub fn init_running_command(
 }
 
 pub fn dummy_candidates() -> Candidates {
-    let mut candidates = Candidates::new();
+    let mut candidates = Candidates {
+        candidates: Default::default(),
+    };
     let names: Vec<AccountId> = vec![
         "alice.near".parse().unwrap(),
         "bob.near".parse().unwrap(),
@@ -141,7 +143,7 @@ pub fn dummy_candidates() -> Candidates {
     ];
 
     for account_id in names {
-        candidates.insert(
+        candidates.candidates.insert(
             account_id.clone(),
             CandidateInfo {
                 account_id,

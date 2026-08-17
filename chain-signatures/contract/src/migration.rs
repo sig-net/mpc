@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
-    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, StorageKey,
+    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, PkVotes, StorageKey,
     ThresholdVotes, Votes,
 };
 use crate::state::{
@@ -14,13 +14,34 @@ use borsh::BorshDeserialize;
 use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
+use std::collections::BTreeMap;
 
-fn migrate_candidates(candidates: Candidates) -> IterableMap<AccountId, CandidateInfo> {
-    let mut migrated = IterableMap::new(StorageKey::Candidates);
+#[derive(BorshDeserialize)]
+pub struct LegacyCandidates {
+    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+}
+
+fn migrate_candidates(candidates: LegacyCandidates) -> Candidates {
+    let mut migrated = Candidates::new();
     for (account_id, info) in candidates.candidates {
         migrated.insert(account_id, info);
     }
     migrated
+}
+
+#[derive(BorshDeserialize)]
+pub struct LegacyInitializingContractState {
+    pub candidates: LegacyCandidates,
+    pub threshold: usize,
+    pub pk_votes: PkVotes,
+}
+
+fn migrate_initializing(state: LegacyInitializingContractState) -> InitializingContractState {
+    InitializingContractState {
+        candidates: migrate_candidates(state.candidates),
+        threshold: state.threshold,
+        pk_votes: state.pk_votes,
+    }
 }
 
 #[derive(BorshDeserialize)]
@@ -29,7 +50,7 @@ pub struct OldRunningContractState {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: Candidates,
+    pub candidates: LegacyCandidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
 }
@@ -37,7 +58,7 @@ pub struct OldRunningContractState {
 #[derive(BorshDeserialize)]
 pub enum OldProtocolContractState {
     NotInitialized,
-    Initializing(InitializingContractState),
+    Initializing(LegacyInitializingContractState),
     Running(OldRunningContractState),
     Resharing(ResharingContractState),
 }
@@ -45,7 +66,9 @@ pub enum OldProtocolContractState {
 fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
     match old {
         OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-        OldProtocolContractState::Initializing(state) => ProtocolContractState::Initializing(state),
+        OldProtocolContractState::Initializing(state) => {
+            ProtocolContractState::Initializing(migrate_initializing(state))
+        }
         OldProtocolContractState::Running(state) => {
             ProtocolContractState::Running(RunningContractState {
                 epoch: state.epoch,
@@ -68,7 +91,7 @@ struct InlineRunningContractState {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: Candidates,
+    pub candidates: LegacyCandidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
     pub threshold_votes: ThresholdVotes,
@@ -77,7 +100,7 @@ struct InlineRunningContractState {
 #[derive(BorshDeserialize)]
 enum InlineProtocolContractState {
     NotInitialized,
-    Initializing(InitializingContractState),
+    Initializing(LegacyInitializingContractState),
     Running(InlineRunningContractState),
     Resharing(ResharingContractState),
 }
@@ -86,7 +109,7 @@ fn upgrade_inline_protocol_state(old: InlineProtocolContractState) -> ProtocolCo
     match old {
         InlineProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
         InlineProtocolContractState::Initializing(state) => {
-            ProtocolContractState::Initializing(state)
+            ProtocolContractState::Initializing(migrate_initializing(state))
         }
         InlineProtocolContractState::Running(state) => {
             ProtocolContractState::Running(RunningContractState {
@@ -266,6 +289,44 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    fn migrating_inline_initializing_state_preserves_candidates_and_pk_votes() {
+        testing_env!(VMContextBuilder::new().build());
+
+        let candidate_id: AccountId = "candidate.near".parse().unwrap();
+        let candidate = CandidateInfo {
+            account_id: candidate_id.clone(),
+            url: "https://candidate.example".to_owned(),
+            cipher_pk: [7; 32],
+            sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
+                .unwrap(),
+        };
+        let mut pk_votes = PkVotes::new();
+        pk_votes
+            .entry(candidate.sign_pk.clone())
+            .insert(candidate_id.clone());
+
+        let migrated = upgrade_inline_protocol_state(InlineProtocolContractState::Initializing(
+            LegacyInitializingContractState {
+                candidates: LegacyCandidates {
+                    candidates: [(candidate_id.clone(), candidate.clone())].into(),
+                },
+                threshold: 2,
+                pk_votes,
+            },
+        ));
+
+        let ProtocolContractState::Initializing(initializing) = migrated else {
+            panic!("expected initializing state");
+        };
+        assert_eq!(initializing.candidates.get(&candidate_id), Some(&candidate));
+        assert!(initializing
+            .pk_votes
+            .votes
+            .get(&candidate.sign_pk)
+            .is_some_and(|votes| votes.contains(&candidate_id)));
+    }
+
+    #[test]
     fn migrating_inline_running_state_preserves_candidates_and_join_votes() {
         testing_env!(VMContextBuilder::new().build());
 
@@ -278,8 +339,9 @@ mod tests {
             sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
                 .unwrap(),
         };
-        let mut candidates = Candidates::new();
-        candidates.insert(candidate_id.clone(), candidate.clone());
+        let candidates = LegacyCandidates {
+            candidates: [(candidate_id.clone(), candidate.clone())].into(),
+        };
         let mut join_votes = Votes::new();
         join_votes
             .entry(candidate_id.clone())

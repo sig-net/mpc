@@ -2,12 +2,11 @@ use std::collections::HashSet;
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{CandidateInfo, Candidates, Participants, PkVotes, ThresholdVotes, Votes};
+use crate::primitives::{Candidates, CandidatesView, Participants, PkVotes, ThresholdVotes, Votes};
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct InitializingContractState {
     pub candidates: Candidates,
     pub threshold: usize,
@@ -20,9 +19,7 @@ pub struct RunningContractState {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    /// Must be cleared before replacing the running state to remove its entries
-    /// from contract storage.
-    pub candidates: IterableMap<AccountId, CandidateInfo>,
+    pub candidates: Candidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
     /// Active votes to change the running threshold without otherwise
@@ -80,6 +77,23 @@ pub struct RunningContractStateView {
     pub threshold_votes: ThresholdVotes,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct InitializingContractStateView {
+    pub candidates: CandidatesView,
+    pub threshold: usize,
+    pub pk_votes: PkVotes,
+}
+
+impl From<&InitializingContractState> for InitializingContractStateView {
+    fn from(state: &InitializingContractState) -> Self {
+        Self {
+            candidates: (&state.candidates).into(),
+            threshold: state.threshold,
+            pk_votes: state.pk_votes.clone(),
+        }
+    }
+}
+
 impl From<&RunningContractState> for RunningContractStateView {
     fn from(state: &RunningContractState) -> Self {
         RunningContractStateView {
@@ -97,7 +111,7 @@ impl From<&RunningContractState> for RunningContractStateView {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub enum ProtocolContractStateView {
     NotInitialized,
-    Initializing(InitializingContractState),
+    Initializing(InitializingContractStateView),
     Running(RunningContractStateView),
     Resharing(ResharingContractState),
 }

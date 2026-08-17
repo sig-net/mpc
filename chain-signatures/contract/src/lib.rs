@@ -39,8 +39,9 @@ use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
 pub use state::{
-    InitializingContractState, ProtocolContractState, ProtocolContractStateView,
-    ResharingContractState, RunningContractState, RunningContractStateView,
+    InitializingContractState, InitializingContractStateView, ProtocolContractState,
+    ProtocolContractStateView, ResharingContractState, RunningContractState,
+    RunningContractStateView,
 };
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
@@ -117,9 +118,13 @@ impl MpcContract {
         candidates: BTreeMap<AccountId, CandidateInfo>,
         config: Option<Config>,
     ) -> Self {
+        let mut stored_candidates = Candidates::new();
+        for (account_id, info) in candidates {
+            stored_candidates.insert(account_id, info);
+        }
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: Candidates { candidates },
+                candidates: stored_candidates,
                 threshold,
                 pk_votes: PkVotes::new(),
             }),
@@ -574,12 +579,14 @@ impl VersionedMpcContract {
                 let voted = pk_votes.entry(public_key.clone());
                 voted.insert(voter);
                 if voted.len() >= *threshold {
+                    let participants = Participants::from(&*candidates);
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: 0,
-                        participants: candidates.clone().into(),
+                        participants,
                         threshold: *threshold,
                         public_key,
-                        candidates: IterableMap::new(StorageKey::Candidates),
+                        candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
@@ -626,7 +633,7 @@ impl VersionedMpcContract {
                         participants: new_participants.clone(),
                         threshold: *new_threshold,
                         public_key: public_key.clone(),
-                        candidates: IterableMap::new(StorageKey::Candidates),
+                        candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
@@ -668,7 +675,7 @@ impl VersionedMpcContract {
                         participants: old_participants.clone(),
                         threshold: *threshold,
                         public_key: public_key.clone(),
-                        candidates: IterableMap::new(StorageKey::Candidates),
+                        candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
@@ -815,7 +822,7 @@ impl VersionedMpcContract {
                 participants,
                 threshold,
                 public_key,
-                candidates: IterableMap::new(StorageKey::Candidates),
+                candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
@@ -847,7 +854,7 @@ impl VersionedMpcContract {
         match self.state_ref() {
             ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
             ProtocolContractState::Initializing(state) => {
-                ProtocolContractStateView::Initializing(state.clone())
+                ProtocolContractStateView::Initializing(state.into())
             }
             ProtocolContractState::Running(state) => {
                 ProtocolContractStateView::Running(state.into())

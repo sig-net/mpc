@@ -6,6 +6,7 @@ use crate::state::ProtocolContractStateView;
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
 use signet_primitives::{borsh_scalar, SignId, Signature};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
@@ -152,10 +153,20 @@ impl Default for Participants {
     }
 }
 
-impl From<Candidates> for Participants {
-    fn from(candidates: Candidates) -> Self {
+impl From<&Candidates> for Participants {
+    fn from(candidates: &Candidates) -> Self {
         let mut participants = Participants::new();
-        for (account_id, candidate_info) in candidates.into_iter() {
+        for (account_id, candidate_info) in candidates.iter() {
+            participants.insert(account_id.clone(), candidate_info.clone().into());
+        }
+        participants
+    }
+}
+
+impl From<CandidatesView> for Participants {
+    fn from(candidates: CandidatesView) -> Self {
+        let mut participants = Participants::new();
+        for (account_id, candidate_info) in candidates.candidates {
             participants.insert(account_id, candidate_info.into());
         }
         participants
@@ -241,9 +252,10 @@ impl IntoIterator for Participants {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct Candidates {
-    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+    /// Must be cleared before replacing its owning protocol state.
+    pub candidates: IterableMap<AccountId, CandidateInfo>,
 }
 
 impl Default for Candidates {
@@ -255,7 +267,7 @@ impl Default for Candidates {
 impl Candidates {
     pub fn new() -> Self {
         Candidates {
-            candidates: BTreeMap::new(),
+            candidates: IterableMap::new(StorageKey::Candidates),
         }
     }
 
@@ -271,20 +283,24 @@ impl Candidates {
         self.candidates.remove(account_id);
     }
 
+    pub fn clear(&mut self) {
+        self.candidates.clear();
+    }
+
     pub fn get(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
         self.candidates.get(account_id)
     }
 
-    pub fn iter(&self) -> btree_map::Iter<'_, AccountId, CandidateInfo> {
+    pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
     }
 
-    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, CandidateInfo> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&AccountId, &mut CandidateInfo)> {
         self.candidates.iter_mut()
     }
 
     pub fn len(&self) -> usize {
-        self.candidates.len()
+        self.candidates.len() as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -292,30 +308,19 @@ impl Candidates {
     }
 }
 
-impl<'a> IntoIterator for &'a Candidates {
-    type Item = (&'a AccountId, &'a CandidateInfo);
-    type IntoIter = btree_map::Iter<'a, AccountId, CandidateInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter()
-    }
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct CandidatesView {
+    pub candidates: BTreeMap<AccountId, CandidateInfo>,
 }
 
-impl<'a> IntoIterator for &'a mut Candidates {
-    type Item = (&'a AccountId, &'a mut CandidateInfo);
-    type IntoIter = btree_map::IterMut<'a, AccountId, CandidateInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter_mut()
-    }
-}
-
-impl IntoIterator for Candidates {
-    type Item = (AccountId, CandidateInfo);
-    type IntoIter = btree_map::IntoIter<AccountId, CandidateInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.into_iter()
+impl From<&Candidates> for CandidatesView {
+    fn from(candidates: &Candidates) -> Self {
+        Self {
+            candidates: candidates
+                .iter()
+                .map(|(account_id, info)| (account_id.clone(), info.clone()))
+                .collect(),
+        }
     }
 }
 
