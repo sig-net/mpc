@@ -4,15 +4,16 @@ use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::FinalizedHeadWatcher;
 use crate::EthConfig;
+use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, Log};
+use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::retry_until_ok;
+use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
@@ -320,21 +321,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// The catchup-live anchor: the first initialized processable head + 1.
-    /// Returns `None` on cancellation.
-    async fn sample_anchor(
-        &self,
-        watcher: &mut FinalizedHeadWatcher,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<Option<u64>> {
-        tokio::select! {
-            _ = cancel.cancelled() => Ok(None),
-            head = watcher.wait_initialized() => match head {
-                Ok(head) => Ok(Some(head.saturating_add(1))),
-                Err(_err) if cancel.is_cancelled() => Ok(None),
-                Err(err) => Err(anyhow::anyhow!("head watcher exited: {err:?}")),
+    /// The catchup-live anchor: the finalized head at startup + 1 (exclusive
+    /// catchup end and first live block), sampled via a direct RPC retrying
+    /// until it succeeds. Returns `None` on cancellation.
+    async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
+        retry_until_some(
+            cancel,
+            Self::RETRY_DELAY,
+            "ethereum finalized block",
+            || async {
+                let block = self
+                    .client
+                    .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
+                    .await?;
+                Ok(block.map(|block| block.header.number))
             },
-        }
+        )
+        .await
+        .map(|finalized| finalized.saturating_add(1))
     }
 
     /// Wait until `next` is processable (the head covers it), returning the
@@ -410,9 +414,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             cancel.clone(),
         );
 
-        // Anchor = tip-at-startup + 1: the catchup-live boundary.
-        let Some(anchor) = self.sample_anchor(&mut finalized_watcher, &cancel).await? else {
-            tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
+        // Anchor = finalized-at-startup + 1: the catchup-live boundary.
+        let Some(anchor) = self.sample_anchor(&cancel).await else {
+            tracing::debug!("ethereum indexer cancelled before the startup finalized head was sampled");
             return Ok(());
         };
 
@@ -429,7 +433,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         if next < anchor {
             tracing::info!(
                 start = next,
-                tip = anchor.saturating_sub(1),
+                finalized = anchor.saturating_sub(1),
                 blocks = anchor - next,
                 "ethereum indexer starting catchup"
             );
