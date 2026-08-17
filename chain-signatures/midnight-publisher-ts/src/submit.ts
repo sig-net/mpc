@@ -91,7 +91,8 @@ export async function shutdownPublisher(): Promise<void> {
 // The only place this process matches on dependency error text. Both wallet_unfunded
 // spellings mean back off. A node refusal carries no ledger reason on this side, only the
 // SDK's `TransactionInvalidError` or the RPC's `Invalid Transaction` text: nothing was
-// posted, rebuild against fresh state. Dropped/usurped were not refused and stay `internal`.
+// posted, rebuild against fresh state. `spend` treats any unclassified submit failure as
+// ambiguous because the transaction may already have left this process.
 const REFINEMENTS: readonly (readonly [pattern: string, code: ErrorCode])[] = [
   ["Wallet.InsufficientFunds", "wallet_unfunded"],
   ["could not balance dust", "wallet_unfunded"],
@@ -110,13 +111,28 @@ function asPublisherError(error: unknown): PublisherError {
   return new PublisherError(code ?? "internal", described, { cause: error });
 }
 
-async function spend(ready: Publisher, proven: UnboundTransaction): Promise<Landed> {
+function ambiguousSubmit(id: number, reason: string, cause?: unknown): PublisherError {
+  return new PublisherError(
+    "ambiguous_submit",
+    `${reason}; the transaction may still land, so check the chain for request ${id} before retrying`,
+    { cause },
+  );
+}
+
+async function spend(ready: Publisher, proven: UnboundTransaction, id: number): Promise<Landed> {
+  let finalized: Parameters<FundingWallet["submitTx"]>[0];
   try {
     const recipe = await ready.wallet.balanceTx(proven);
-    const finalized = await ready.wallet.finalizeTx(recipe);
-    return await ready.wallet.submitTx(finalized);
+    finalized = await ready.wallet.finalizeTx(recipe);
   } catch (error) {
     throw asPublisherError(error);
+  }
+  try {
+    return await ready.wallet.submitTx(finalized);
+  } catch (error) {
+    const classified = asPublisherError(error);
+    if (classified.code !== "internal") throw classified;
+    throw ambiguousSubmit(id, "transaction submission returned no definitive answer", error);
   }
 }
 
@@ -184,7 +200,7 @@ export async function handleSubmit(
   if (remaining() <= 0) throw provingTimeout;
 
   inFlightId = id;
-  const work = spend(ready, proven);
+  const work = spend(ready, proven, id);
   // The gate follows the WORK, not the answer: an abandoned submit is still spending.
   const release = (): void => {
     inFlightId = undefined;
@@ -193,12 +209,8 @@ export async function handleSubmit(
 
   // Balance, finalize and submit are not cancellable, so work past the deadline keeps
   // spending; the caller has to learn its post may land anyway.
-  const ambiguousSubmit = new PublisherError(
-    "ambiguous_submit",
-    `submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline; if it had reached submit the transaction ` +
-      `may still land, so check the chain for request ${id} before retrying`,
-  );
+  const timeout = ambiguousSubmit(id, `submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
   const answerBudgetMs = remaining();
-  if (answerBudgetMs <= 0) throw ambiguousSubmit;
-  return withDeadline(work, answerBudgetMs, ambiguousSubmit);
+  if (answerBudgetMs <= 0) throw timeout;
+  return withDeadline(work, answerBudgetMs, timeout);
 }

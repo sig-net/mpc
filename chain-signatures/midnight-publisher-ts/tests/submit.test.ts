@@ -354,9 +354,12 @@ describe("handleSubmit: the busy gate", () => {
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
-  it("does not let a refused submit leave the gate claimed", async () => {
+  it("classifies an unknown submit failure as ambiguous and releases the gate", async () => {
     primeStub({ submitTx: failing("transaction rejected") as StubEdges["submitTx"] });
-    expect((await refused(1)).code).toBe("internal");
+    const failure = await refused(1);
+    expect(failure.code).toBe("ambiguous_submit");
+    expect(failure.message).toMatch(/may still land/);
+    expect(failure.message).toContain("request 1");
 
     primeStub();
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
