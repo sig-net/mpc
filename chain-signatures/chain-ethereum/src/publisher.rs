@@ -95,6 +95,7 @@ impl EthClient {
     async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<PublishAction>) {
         let mut actions_batch: Vec<PublishAction> =
             Vec::with_capacity(self.publisher.max_batch_size);
+        // Starts with a sleep of Duration::MAX, which will be reset when the first action is received.
         let flush_timer = tokio::time::sleep(Duration::MAX);
         tokio::pin!(flush_timer);
 
