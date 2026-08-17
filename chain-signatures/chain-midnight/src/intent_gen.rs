@@ -239,7 +239,8 @@ impl IntentGen {
         ))
     }
 
-    /// One pass. A pass that breaks empties the slot, killing the child: nothing later reads its pipe.
+    /// One pass. A broken exchange or ambiguous submit empties the slot, killing the
+    /// child: nothing later reads its pipe.
     async fn attempt<T: Serialize>(
         &self,
         session: &mut Option<Session>,
@@ -267,6 +268,16 @@ impl IntentGen {
             &self.redactor,
         )
         .await;
+        if matches!(
+            &outcome,
+            Exchange::Answered(Err(error))
+                if error.downcast_ref::<AmbiguousSubmit>().is_some()
+        ) {
+            // The wallet work may still be running after its answer times out, so no
+            // later request may reuse this child.
+            *session = None;
+            return outcome;
+        }
         let Exchange::Broken { error, retry } = outcome else {
             return outcome;
         };
@@ -1101,6 +1112,10 @@ mod tests {
             "unexpected error: {error:#}"
         );
         assert!(format!("{error:#}").contains("may still land"));
+        assert!(
+            builder.session.lock().await.is_none(),
+            "an ambiguous submit answer must retire its child"
+        );
     }
 
     #[tokio::test]
