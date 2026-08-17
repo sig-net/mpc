@@ -626,11 +626,17 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         jitter: true,
     };
 
-    let publish_res = retry_rpc!(
-        Duration::MAX, // Prevent from timing out
-        retry_config,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
+    let mut attempt = 0usize;
+    let publish = || publisher.publish_signature(&action);
+    use mpc_chain_integration_core::backon::Retryable as _;
+    let publish_res = publish
+        .retry(&retry_config.build())
+        .when(|error| publisher.should_retry(error))
+        .notify(|err, sleep| {
+            attempt += 1;
+            crate::metrics::requests::SIGN_PUBLISH_FAILED_ATTEMPTS
+                .with_label_values(&[chain.as_str()])
+                .inc();
             tracing::warn!(
                 ?sign_id,
                 retry_count = attempt,
@@ -638,18 +644,15 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
                 ?chain,
                 "failed to publish ({err}), retrying in {sleep:?}"
             );
-        },
-        // Try to publish the signature
-        { publisher.publish_signature(&action).await }
-    );
+        })
+        .await;
 
-    // TODO: Consider adding a metric update for failed publish attempts here, if needed.
-    // Log error if the publish failed after all retries
+    // Log an error when the publisher classifies a failure as terminal.
     if publish_res.is_err() {
         tracing::error!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
-            "exceeded max retries, trashing publish request"
+            "publisher declined to retry, trashing publish request"
         );
     }
 }
@@ -847,6 +850,36 @@ mod tests {
         }
     }
 
+    /// Fails the first `n` calls, then succeeds.
+    struct FailNTimesPublisher {
+        remaining: AtomicUsize,
+        retry: bool,
+    }
+
+    impl FailNTimesPublisher {
+        fn new(failures: usize, retry: bool) -> Self {
+            Self {
+                remaining: AtomicUsize::new(failures),
+                retry,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for FailNTimesPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            if self.remaining.load(Ordering::SeqCst) > 0 {
+                self.remaining.fetch_sub(1, Ordering::SeqCst);
+                anyhow::bail!("intentional publish failure")
+            }
+            Ok(())
+        }
+
+        fn should_retry(&self, _error: &anyhow::Error) -> bool {
+            self.retry
+        }
+    }
+
     fn test_participants() -> Participants {
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -1022,6 +1055,35 @@ mod tests {
         }
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Metrics are process-global, so the counter is asserted as a delta, never
+    /// an absolute value. Paused tokio time fast-forwards the 5s publish backoff
+    /// between attempts, keeping the test instant.
+    #[tokio::test(start_paused = true)]
+    async fn failed_publish_attempts_are_counted_per_chain() {
+        let before = crate::metrics::requests::SIGN_PUBLISH_FAILED_ATTEMPTS
+            .with_label_values(&["Ethereum"])
+            .get();
+        // A publisher that fails twice then succeeds: the counter must advance by
+        // exactly the number of failed attempts.
+        let publisher = Arc::new(FailNTimesPublisher::new(2, true));
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([7u8; 32]));
+        execute_publish(publisher.clone(), action).await;
+        let after = crate::metrics::requests::SIGN_PUBLISH_FAILED_ATTEMPTS
+            .with_label_values(&["Ethereum"])
+            .get();
+        assert_eq!(after - before, 2.0);
+    }
+
+    #[tokio::test]
+    async fn publisher_retry_policy_can_make_a_failure_terminal() {
+        let publisher = Arc::new(FailNTimesPublisher::new(2, false));
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([8u8; 32]));
+
+        execute_publish(publisher.clone(), action).await;
+
+        assert_eq!(publisher.remaining.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

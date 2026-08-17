@@ -47,7 +47,7 @@ COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
 RUN cargo build --release --package mpc-node --features helios
 
-FROM debian:stable-slim AS runtime
+FROM midnight-publisher-runtime AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
 
 RUN update-ca-certificates
@@ -55,6 +55,7 @@ RUN update-ca-certificates
 COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
 COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
+RUN mpc-node --help > /dev/null
 
 # Create a script to start both Redis and the Rust app
 RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec env RUST_LOG=${RUST_LOG:-mpc=debug,helios=info} mpc-node start" > /start.sh \

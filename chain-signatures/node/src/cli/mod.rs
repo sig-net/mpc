@@ -28,6 +28,7 @@ pub use args::{
     solana::SolArgs,
 };
 
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -37,7 +38,9 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
+use mpc_chain_midnight::{
+    IntentGen, MidnightConfig, MidnightIndexer, MidnightPublisher, MidnightRpc,
+};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
@@ -46,6 +49,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -299,6 +303,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
+            // The process-wide shutdown token: publishers hold proving runs and child
+            // processes open, and those must stop when the node stops.
+            let shutdown = CancellationToken::new();
+
             let RpcHandles {
                 near_client,
                 near_governance_client,
@@ -311,8 +319,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 signer,
                 &chains,
+                shutdown.clone(),
             )
-            .await;
+            .await?;
 
             let (sync_channel, sync_task) = SyncTask::new(
                 &node_client,
@@ -396,6 +405,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
+            shutdown.cancel();
             system_handle.abort();
             tracing::info!("spinning down");
         }
@@ -500,9 +510,12 @@ impl ChainConfigs {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured. A client that fails to build is
-    /// logged and skipped rather than aborting startup.
-    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    /// each other chain is added only when configured.
+    async fn publishers(
+        &self,
+        near: NearClient,
+        shutdown: CancellationToken,
+    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -534,15 +547,41 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
         }
-        // MidnightPublisher is a unit struct: there is no publish path yet, and
-        // its publish_signature bails so a request keeps retrying rather than
-        // settling as published.
-        if self.midnight.is_some() {
-            publishers.insert(Chain::Midnight, Arc::new(MidnightPublisher));
+        if let Some(midnight) = &self.midnight {
+            if midnight.publisher.is_some() {
+                publishers.insert(
+                    Chain::Midnight,
+                    midnight_publisher(midnight, shutdown.clone()).await?,
+                );
+            }
         }
 
-        publishers
+        Ok(publishers)
     }
+}
+
+async fn midnight_publisher(
+    config: &MidnightConfig,
+    shutdown: CancellationToken,
+) -> anyhow::Result<Arc<MidnightPublisher>> {
+    let publisher_config = config
+        .publisher
+        .as_ref()
+        .context("midnight publisher requested without publisher configuration")?;
+    // A second connection to the node the indexer also dials (`MidnightIndexer` opens
+    // its own inside `run()` and does not expose it); the builder is spawned only
+    // here, so this stays the single child process.
+    let rpc = Arc::new(MidnightRpc::connect(config).await?);
+    let network_id = rpc.network_id().await?;
+    let intent_gen = Arc::new(IntentGen::spawn(publisher_config, &network_id).await?);
+    Ok(Arc::new(MidnightPublisher::new(
+        publisher_config,
+        config.central_address.clone(),
+        rpc,
+        intent_gen,
+        Arc::new(NodeTelemetry::new(Chain::Midnight)),
+        shutdown,
+    )))
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -646,7 +685,8 @@ impl RpcHandles {
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         chains: &ChainConfigs,
-    ) -> Self {
+        shutdown: CancellationToken,
+    ) -> anyhow::Result<Self> {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
         // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
@@ -665,15 +705,15 @@ impl RpcHandles {
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone()).await;
+        let publishers = chains.publishers(near_client.clone(), shutdown).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Self {
+        Ok(Self {
             near_client,
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        }
+        })
     }
 }
 
@@ -1130,7 +1170,15 @@ mod tests {
     /// fixtures use the values a developer running a local stack exports,
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
-        for var in ["MPC_MIDNIGHT_NODE_WS_URL", "MPC_MIDNIGHT_CENTRAL_ADDRESS"] {
+        for var in [
+            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_FUNDING_SEED",
+            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
+            "MPC_MIDNIGHT_PROOF_SERVER_URL",
+            "MPC_MIDNIGHT_INDEXER_URL",
+            "MPC_MIDNIGHT_INDEXER_WS_URL",
+        ] {
             assert!(
                 std::env::var_os(var).is_none(),
                 "{var} is set: these tests require an unpolluted environment"
@@ -1149,6 +1197,8 @@ mod tests {
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
         let central_address = "ab".repeat(32);
+        let funding_seed = "0f".repeat(32);
+        let intent_gen_command = r#"["midnight-publisher"]"#;
         let argv = [
             "mpc-node",
             "start",
@@ -1168,6 +1218,16 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
+            "--midnight-funding-seed",
+            &funding_seed,
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1176,6 +1236,16 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
+            "--midnight-funding-seed",
+            funding_seed.as_str(),
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
         ] {
             assert!(
                 out.contains(&expected.to_string()),
@@ -1221,7 +1291,10 @@ mod tests {
             signer,
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         );
-        let publishers = chains.publishers(near).await;
+        let publishers = chains
+            .publishers(near, CancellationToken::new())
+            .await
+            .expect("an unconfigured Midnight publisher cannot fail startup");
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),

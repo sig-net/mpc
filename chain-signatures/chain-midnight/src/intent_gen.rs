@@ -34,6 +34,10 @@ impl std::fmt::Display for AmbiguousSubmit {
 
 impl std::error::Error for AmbiguousSubmit {}
 
+pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<AmbiguousSubmit>().is_some()
+}
+
 /// One respond call, in the shape the child validates. Every byte field is bare
 /// lowercase hex with no `0x`; the child converts nothing and rejects anything else.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1107,10 +1111,7 @@ mod tests {
             .await
             .expect_err("an ambiguous child answer is not a receipt");
 
-        assert!(
-            error.downcast_ref::<AmbiguousSubmit>().is_some(),
-            "unexpected error: {error:#}"
-        );
+        assert!(is_ambiguous_submit(&error), "unexpected error: {error:#}");
         assert!(format!("{error:#}").contains("may still land"));
         assert!(
             builder.session.lock().await.is_none(),
