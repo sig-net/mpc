@@ -362,10 +362,10 @@ async fn test_vote_leave() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Resharing(r) => {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
             assert!(!r
                 .new_participants
                 .participants
@@ -393,10 +393,10 @@ async fn test_vote_leave() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_success());
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
             assert!(
                 !r.participants.contains_key(accounts[0].id()),
                 "removed participant must not be in participants"
@@ -501,10 +501,10 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
     assert!(execution.is_success());
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Resharing(r) => {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
             assert!(r.new_participants.participants.contains_key(alice.id()));
         }
         _ => panic!("should be in resharing state"),
@@ -556,10 +556,10 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
             assert!(r.epoch == 1);
             assert!(r.participants.contains_key(alice.id()));
             // The reshared key adopts the new threshold for 4 participants.
@@ -576,9 +576,9 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
 async fn test_cancel_resharing() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
-    let initial_state: mpc_contract::ProtocolContractState =
+    let initial_state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
-    let mpc_contract::ProtocolContractState::Running(initial_state) = initial_state else {
+    let mpc_contract::ProtocolContractStateView::Running(initial_state) = initial_state else {
         panic!("expected running state");
     };
 
@@ -617,10 +617,10 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     assert!(
-        matches!(state, mpc_contract::ProtocolContractState::Resharing(_)),
+        matches!(state, mpc_contract::ProtocolContractStateView::Resharing(_)),
         "should be in resharing state",
     );
 
@@ -644,10 +644,10 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let cancel_pass: bool = execution.json().unwrap();
     assert!(cancel_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(running_state) => {
+        mpc_contract::ProtocolContractStateView::Running(running_state) => {
             assert_eq!(running_state.epoch, initial_state.epoch);
             // Cancelling leaves the key shares untouched, so the threshold is the
             // exact original value.
@@ -672,11 +672,13 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
 async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
-    async fn running(contract: &near_workspaces::Contract) -> mpc_contract::RunningContractState {
-        let state: mpc_contract::ProtocolContractState =
+    async fn running(
+        contract: &near_workspaces::Contract,
+    ) -> mpc_contract::RunningContractStateView {
+        let state: mpc_contract::ProtocolContractStateView =
             contract.view("state").await.unwrap().json().unwrap();
         match state {
-            mpc_contract::ProtocolContractState::Running(r) => r,
+            mpc_contract::ProtocolContractStateView::Running(r) => r,
             other => panic!("expected running state, got {}", other.name()),
         }
     }
@@ -808,10 +810,10 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
     let pass: bool = execution.json().unwrap();
     assert!(!pass, "a single vote must not start resharing");
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(running) => {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
             assert_eq!(
                 running.threshold_votes.tally(6),
                 1,
@@ -841,10 +843,10 @@ async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
         assert!(execution.is_success());
     }
     // The 5th vote should have triggered resharing.
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     assert!(
-        matches!(state, mpc_contract::ProtocolContractState::Resharing(_)),
+        matches!(state, mpc_contract::ProtocolContractStateView::Resharing(_)),
         "5 votes must trigger resharing when threshold is 5"
     );
 
@@ -878,10 +880,10 @@ async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_success());
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match &state {
-        mpc_contract::ProtocolContractState::Running(running) => {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
             assert_eq!(
                 running.threshold_votes.tally(8),
                 1,
@@ -904,10 +906,10 @@ async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_success());
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match &state {
-        mpc_contract::ProtocolContractState::Running(running) => {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
             assert_eq!(
                 running.threshold_votes.tally(8),
                 0,
@@ -937,9 +939,9 @@ async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
-    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+    if let mpc_contract::ProtocolContractStateView::Running(running) = &state {
         assert_eq!(running.threshold_votes.tally(8), 1);
     } else {
         panic!("expected running state");
@@ -953,9 +955,9 @@ async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
-    if let mpc_contract::ProtocolContractState::Running(running) = &state {
+    if let mpc_contract::ProtocolContractStateView::Running(running) = &state {
         assert_eq!(
             running.threshold_votes.tally(8),
             0,
@@ -1045,10 +1047,10 @@ async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
         assert!(execution.is_success());
     }
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Resharing(r) => {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
             // Same participant set, just a new threshold.
             assert_eq!(
                 r.old_participants.participants,
@@ -1074,10 +1076,10 @@ async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
         assert!(execution.is_success());
     }
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
             assert_eq!(r.threshold, 6, "running state adopts the new threshold");
             assert_eq!(r.epoch, 1, "epoch must bump after resharing");
             assert_eq!(r.participants.participants.len(), 7);

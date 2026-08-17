@@ -2,28 +2,26 @@ use std::collections::HashSet;
 
 use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
+use crate::primitives::{CandidateInfo, Candidates, Participants, PkVotes, ThresholdVotes, Votes};
 
-/// Stored `Initializing` state. Candidates are held in the top-level
-/// `MpcContract::candidates` map, not here (see [`InitializingContractStateView`]
-/// for what external callers receive).
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct InitializingContractState {
+    pub candidates: Candidates,
     pub threshold: usize,
     pub pk_votes: PkVotes,
 }
 
-/// Stored `Running` state. The candidate registry and its join votes live in the
-/// top-level `MpcContract::candidates` map (see `CandidateEntry`); only the
-/// bounded, participant-gated `leave_votes`/`threshold_votes` remain inline.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
+    pub candidates: IterableMap<AccountId, CandidateInfo>,
+    pub join_votes: Votes,
     pub leave_votes: Votes,
     /// Active votes to change the running threshold without otherwise
     /// modifying the participant set. Once one proposed threshold reaches the
@@ -50,7 +48,7 @@ pub struct ResharingContractState {
     pub cancel_votes: HashSet<AccountId>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum ProtocolContractState {
     NotInitialized,
     Initializing(InitializingContractState),
@@ -69,20 +67,16 @@ impl ProtocolContractState {
     }
 }
 
-/// A `Running` state as exposed to external callers: only the fields a node
-/// actually consumes (`epoch`, `participants`, `threshold`, `public_key`). The
-/// stored `RunningContractState` additionally holds the vote maps
-/// (`candidates`, `join_votes`, `leave_votes`, `threshold_votes`); those are
-/// omitted here — the attacker-writable `candidates`/`join_votes` could inflate
-/// this payload past the RPC view-execution limit, and no node reads any vote
-/// map from the polled state. A joining node reads its own candidacy through
-/// the `candidate_info` view instead.
+/// Running state exposed to external callers. The unbounded candidate registry
+/// and its join votes are available through the keyed `candidate_info` view.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractStateView {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
+    pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
 }
 
 impl From<&RunningContractState> for RunningContractStateView {
@@ -95,31 +89,29 @@ impl From<&RunningContractState> for RunningContractStateView {
             participants: state.participants.clone(),
             threshold: state.threshold,
             public_key: state.public_key.clone(),
+            leave_votes: state.leave_votes.clone(),
+            threshold_votes: state.threshold_votes.clone(),
         }
     }
 }
 
-/// `Initializing` state as exposed to external callers. Unlike the stored
-/// [`InitializingContractState`], it carries `candidates` (assembled from the
-/// top-level map), because a joining node needs the founding set to bootstrap
-/// key generation. The genesis candidate set is curated and `join()`-disabled,
-/// so it is bounded and safe to return in full.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
-pub struct InitializingContractStateView {
-    pub candidates: Candidates,
-    pub threshold: usize,
-    pub pk_votes: PkVotes,
-}
-
-/// Lean projection of [`ProtocolContractState`] for external reads. `Running`
-/// omits the vote maps (see [`RunningContractStateView`]); `Initializing`
-/// carries candidates from the top-level map; `Resharing` (bounded participant
-/// sets) is carried verbatim. Assembled by `VersionedMpcContract::view_state`,
-/// which has access to the top-level candidate map.
+/// Projection of stored protocol state for external reads. Only the unbounded
+/// running candidate data is omitted.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub enum ProtocolContractStateView {
     NotInitialized,
-    Initializing(InitializingContractStateView),
+    Initializing(InitializingContractState),
     Running(RunningContractStateView),
     Resharing(ResharingContractState),
+}
+
+impl ProtocolContractStateView {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ProtocolContractStateView::NotInitialized => "NotInitialized",
+            ProtocolContractStateView::Initializing(_) => "Initializing",
+            ProtocolContractStateView::Running(_) => "Running",
+            ProtocolContractStateView::Resharing(_) => "Resharing",
+        }
+    }
 }

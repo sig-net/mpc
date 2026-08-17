@@ -7,7 +7,7 @@ use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_chain::{ChainEventFilter, MockChain};
-use crate::mpc_fixture::mock_governance::{MockGovernance, SharedThresholdVotes};
+use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 
@@ -24,7 +24,7 @@ use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
-use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, ThresholdVotes};
+use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::presignature::Presignature;
@@ -201,6 +201,8 @@ impl MpcFixtureBuilder {
                 public_key,
                 participants: self.participants.clone(),
                 threshold: self.threshold,
+                leave_votes: Default::default(),
+                threshold_votes: Default::default(),
             });
 
             for node in &mut self.prepared_nodes {
@@ -253,12 +255,6 @@ impl MpcFixtureBuilder {
         let (contract_state_watchers, shared_contract_state_tx) =
             ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
 
-        // Shared threshold-vote tally for the mock governance. The node-side
-        // state mirror no longer carries vote maps, so the tally lives here and
-        // is shared across every node's `MockGovernance`.
-        let shared_threshold_votes: SharedThresholdVotes =
-            Arc::new(std::sync::Mutex::new(ThresholdVotes::default()));
-
         // Start each node's tokio tasks
         for (node, contract_state) in self.prepared_nodes.drain(..).zip(contract_state_watchers) {
             let node_context = MockedNodeContext {
@@ -274,7 +270,6 @@ impl MpcFixtureBuilder {
                 .start(
                     node_context,
                     shared_contract_state_tx.clone(),
-                    shared_threshold_votes.clone(),
                     &mut fixture_input,
                     &output,
                     mock_chain.clone(),
@@ -289,7 +284,6 @@ impl MpcFixtureBuilder {
             nodes,
             output,
             shared_contract_state: shared_contract_state_tx,
-            shared_threshold_votes,
             mock_chain,
         }
     }
@@ -527,7 +521,6 @@ impl MpcFixtureNodeBuilder {
         mut self,
         context: MockedNodeContext,
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
-        threshold_votes: SharedThresholdVotes,
         fixture_input: &mut Option<FixtureInput>,
         shared_output: &SharedOutput,
         mock_chain: Option<MockChain>,
@@ -582,7 +575,6 @@ impl MpcFixtureNodeBuilder {
             MockGovernance {
                 me: account_id.clone(),
                 protocol_state_tx,
-                threshold_votes,
             },
             context.contract_state.clone(),
             mesh_rx.clone(),

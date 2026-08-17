@@ -16,7 +16,7 @@ use crate::local::NodeEnvConfig;
 use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
-use mpc_contract::{ProtocolContractState, RunningContractState};
+use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
 use mpc_node::web::{BenchMetrics, StateView};
 
 use anyhow::Context;
@@ -95,8 +95,8 @@ impl Cluster {
         self.nodes.contract()
     }
 
-    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractState> {
-        let state: ProtocolContractState = self
+    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractStateView> {
+        let state: ProtocolContractStateView = self
             .contract()
             .view("state")
             .finality(Finality::Final)
@@ -106,9 +106,9 @@ impl Cluster {
         Ok(state)
     }
 
-    pub async fn expect_running(&self) -> anyhow::Result<RunningContractState> {
+    pub async fn expect_running(&self) -> anyhow::Result<RunningContractStateView> {
         let state = self.contract_state().await?;
-        if let ProtocolContractState::Running(state) = state {
+        if let ProtocolContractStateView::Running(state) = state {
             Ok(state)
         } else {
             anyhow::bail!("expected running state, got {:?}", state)
@@ -133,7 +133,7 @@ impl Cluster {
     }
 
     pub async fn root_public_key(&self) -> anyhow::Result<near_sdk::PublicKey> {
-        let state: RunningContractState = self.expect_running().await?;
+        let state: RunningContractStateView = self.expect_running().await?;
         Ok(state.public_key)
     }
 

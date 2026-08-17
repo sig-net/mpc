@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
-    CandidateEntry, Candidates, CheckpointVotes, Participants, PendingRequest, PkVotes, StorageKey,
+    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, StorageKey,
     ThresholdVotes, Votes,
 };
 use crate::state::{
@@ -15,46 +15,14 @@ use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 
-/// Move an inline candidate registry (`candidates` + optional `join_votes`) into
-/// the top-level [`CandidateEntry`] map, folding each candidate's votes into its
-/// entry. Used by every migration path, since previous layouts stored candidates
-/// inline in `ProtocolContractState`.
-fn build_candidate_map(
-    candidates: Candidates,
-    mut join_votes: Votes,
-) -> IterableMap<AccountId, CandidateEntry> {
-    let mut map = IterableMap::new(StorageKey::Candidates);
+fn migrate_candidates(candidates: Candidates) -> IterableMap<AccountId, CandidateInfo> {
+    let mut migrated = IterableMap::new(StorageKey::Candidates);
     for (account_id, info) in candidates.candidates {
-        let votes = join_votes.votes.remove(&account_id).unwrap_or_default();
-        map.insert(
-            account_id,
-            CandidateEntry {
-                info,
-                join_votes: votes,
-            },
-        );
+        migrated.insert(account_id, info);
     }
-    map
+    migrated
 }
 
-fn empty_candidate_map() -> IterableMap<AccountId, CandidateEntry> {
-    IterableMap::new(StorageKey::Candidates)
-}
-
-// ---------------------------------------------------------------------------
-// Inline `Initializing` state (candidates stored inline) — shared by all
-// previous layouts.
-// ---------------------------------------------------------------------------
-#[derive(BorshDeserialize)]
-pub struct InlineInitializingContractState {
-    pub candidates: Candidates,
-    pub threshold: usize,
-    pub pk_votes: PkVotes,
-}
-
-// ---------------------------------------------------------------------------
-// Older `Running` layout: inline candidates/join_votes, no `threshold_votes`.
-// ---------------------------------------------------------------------------
 #[derive(BorshDeserialize)]
 pub struct OldRunningContractState {
     pub epoch: u64,
@@ -69,50 +37,31 @@ pub struct OldRunningContractState {
 #[derive(BorshDeserialize)]
 pub enum OldProtocolContractState {
     NotInitialized,
-    Initializing(InlineInitializingContractState),
+    Initializing(InitializingContractState),
     Running(OldRunningContractState),
     Resharing(ResharingContractState),
 }
 
-fn upgrade_old_protocol_state(
-    old: OldProtocolContractState,
-) -> (
-    ProtocolContractState,
-    IterableMap<AccountId, CandidateEntry>,
-) {
+fn upgrade_old_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
     match old {
-        OldProtocolContractState::NotInitialized => {
-            (ProtocolContractState::NotInitialized, empty_candidate_map())
-        }
-        OldProtocolContractState::Initializing(state) => (
-            ProtocolContractState::Initializing(InitializingContractState {
-                threshold: state.threshold,
-                pk_votes: state.pk_votes,
-            }),
-            build_candidate_map(state.candidates, Votes::new()),
-        ),
-        OldProtocolContractState::Running(state) => (
+        OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+        OldProtocolContractState::Initializing(state) => ProtocolContractState::Initializing(state),
+        OldProtocolContractState::Running(state) => {
             ProtocolContractState::Running(RunningContractState {
                 epoch: state.epoch,
                 participants: state.participants,
                 threshold: state.threshold,
                 public_key: state.public_key,
+                candidates: migrate_candidates(state.candidates),
+                join_votes: state.join_votes,
                 leave_votes: state.leave_votes,
                 threshold_votes: ThresholdVotes::new(),
-            }),
-            build_candidate_map(state.candidates, state.join_votes),
-        ),
-        OldProtocolContractState::Resharing(state) => (
-            ProtocolContractState::Resharing(state),
-            empty_candidate_map(),
-        ),
+            })
+        }
+        OldProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Current `Running` layout (immediately prior to this upgrade): inline
-// candidates/join_votes, WITH `threshold_votes`.
-// ---------------------------------------------------------------------------
 #[derive(BorshDeserialize)]
 pub struct InlineRunningContractState {
     pub epoch: u64,
@@ -128,53 +77,33 @@ pub struct InlineRunningContractState {
 #[derive(BorshDeserialize)]
 pub enum InlineProtocolContractState {
     NotInitialized,
-    Initializing(InlineInitializingContractState),
+    Initializing(InitializingContractState),
     Running(InlineRunningContractState),
     Resharing(ResharingContractState),
 }
 
-fn upgrade_inline_protocol_state(
-    old: InlineProtocolContractState,
-) -> (
-    ProtocolContractState,
-    IterableMap<AccountId, CandidateEntry>,
-) {
+fn upgrade_inline_protocol_state(old: InlineProtocolContractState) -> ProtocolContractState {
     match old {
-        InlineProtocolContractState::NotInitialized => {
-            (ProtocolContractState::NotInitialized, empty_candidate_map())
+        InlineProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+        InlineProtocolContractState::Initializing(state) => {
+            ProtocolContractState::Initializing(state)
         }
-        InlineProtocolContractState::Initializing(state) => (
-            ProtocolContractState::Initializing(InitializingContractState {
-                threshold: state.threshold,
-                pk_votes: state.pk_votes,
-            }),
-            build_candidate_map(state.candidates, Votes::new()),
-        ),
-        InlineProtocolContractState::Running(state) => (
+        InlineProtocolContractState::Running(state) => {
             ProtocolContractState::Running(RunningContractState {
                 epoch: state.epoch,
                 participants: state.participants,
                 threshold: state.threshold,
                 public_key: state.public_key,
+                candidates: migrate_candidates(state.candidates),
+                join_votes: state.join_votes,
                 leave_votes: state.leave_votes,
                 threshold_votes: state.threshold_votes,
-            }),
-            build_candidate_map(state.candidates, state.join_votes),
-        ),
-        InlineProtocolContractState::Resharing(state) => (
-            ProtocolContractState::Resharing(state),
-            empty_candidate_map(),
-        ),
+            })
+        }
+        InlineProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Full-contract previous layouts. None had a top-level `candidates` field;
-// `upgrade` splits the inline candidates into it.
-// ---------------------------------------------------------------------------
-
-/// Layout in effect immediately before this upgrade: `threshold_votes` present,
-/// checkpoints present, candidates still inline.
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousInline {
     protocol_state: InlineProtocolContractState,
@@ -187,23 +116,13 @@ pub(crate) struct PreviousInline {
 
 impl PreviousInline {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
-        } = self;
-        let (protocol_state, candidates) = upgrade_inline_protocol_state(protocol_state);
         MpcContract {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
-            candidates,
+            protocol_state: upgrade_inline_protocol_state(self.protocol_state),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
         }
     }
 }
@@ -220,23 +139,13 @@ pub(crate) struct PreviousDevnet {
 
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
-        } = self;
-        let (protocol_state, candidates) = upgrade_old_protocol_state(protocol_state);
         MpcContract {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
-            candidates,
+            protocol_state: upgrade_old_protocol_state(self.protocol_state),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
         }
     }
 }
@@ -251,21 +160,13 @@ pub(crate) struct PreviousTestnet {
 
 impl PreviousTestnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-        } = self;
-        let (protocol_state, candidates) = upgrade_old_protocol_state(protocol_state);
         MpcContract {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
+            protocol_state: upgrade_old_protocol_state(self.protocol_state),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
-            candidates,
         }
     }
 }
@@ -280,21 +181,13 @@ pub(crate) struct PreviousMainnet {
 
 impl PreviousMainnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-        } = self;
-        let (protocol_state, candidates) = upgrade_old_protocol_state(protocol_state);
         MpcContract {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
+            protocol_state: upgrade_old_protocol_state(self.protocol_state),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
-            candidates,
         }
     }
 }
@@ -319,7 +212,6 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error>
         return Ok(current);
     }
 
-    // Layout immediately prior to hoisting candidates out of the protocol state.
     if let Ok(VersionedPreviousInline::V0(previous)) =
         VersionedPreviousInline::try_from_slice(state_bytes)
     {
@@ -343,4 +235,56 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error>
     }
 
     Err(InvalidState::ContractStateIsMissing.message("Failed to deserialize contract state"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+    use std::str::FromStr;
+
+    #[test]
+    fn migrating_inline_running_state_preserves_candidates_and_join_votes() {
+        testing_env!(VMContextBuilder::new().build());
+
+        let candidate_id: AccountId = "candidate.near".parse().unwrap();
+        let voter_id: AccountId = "voter.near".parse().unwrap();
+        let candidate = CandidateInfo {
+            account_id: candidate_id.clone(),
+            url: "https://candidate.example".to_owned(),
+            cipher_pk: [7; 32],
+            sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
+                .unwrap(),
+        };
+        let mut candidates = Candidates::new();
+        candidates.insert(candidate_id.clone(), candidate.clone());
+        let mut join_votes = Votes::new();
+        join_votes
+            .entry(candidate_id.clone())
+            .insert(voter_id.clone());
+
+        let migrated = upgrade_inline_protocol_state(InlineProtocolContractState::Running(
+            InlineRunningContractState {
+                epoch: 3,
+                participants: Participants::new(),
+                threshold: 2,
+                public_key: candidate.sign_pk.clone(),
+                candidates,
+                join_votes,
+                leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
+            },
+        ));
+
+        let ProtocolContractState::Running(running) = migrated else {
+            panic!("expected running state");
+        };
+        assert_eq!(running.candidates.get(&candidate_id), Some(&candidate));
+        assert!(running
+            .join_votes
+            .votes
+            .get(&candidate_id)
+            .is_some_and(|votes| votes.contains(&voter_id)));
+    }
 }

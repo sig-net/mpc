@@ -1,6 +1,6 @@
 pub mod primitives;
 
-use self::primitives::{Candidates, Participants, PkVotes};
+use self::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
 use crate::{rpc::GovernanceInfo, util::NearPublicKeyExt as _};
 
 use mpc_contract::ProtocolContractStateView;
@@ -16,8 +16,8 @@ pub struct InitializingContractState {
     pub pk_votes: PkVotes,
 }
 
-impl From<mpc_contract::InitializingContractStateView> for InitializingContractState {
-    fn from(value: mpc_contract::InitializingContractStateView) -> Self {
+impl From<mpc_contract::InitializingContractState> for InitializingContractState {
+    fn from(value: mpc_contract::InitializingContractState) -> Self {
         InitializingContractState {
             candidates: value.candidates.into(),
             threshold: value.threshold,
@@ -26,18 +26,14 @@ impl From<mpc_contract::InitializingContractStateView> for InitializingContractS
     }
 }
 
-/// The node's model of the contract's `Running` state, mirroring the lean
-/// `RunningContractStateView` the contract exposes: only the fields a node
-/// consumes. The stored contract state additionally holds vote maps
-/// (`candidates`, `join_votes`, `leave_votes`, `threshold_votes`) that no node
-/// reads from the polled state, so they are not carried here — a joining node
-/// reads its own candidacy via the `candidate_info` view instead.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
+    pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
 }
 
 impl From<mpc_contract::RunningContractStateView> for RunningContractState {
@@ -47,6 +43,8 @@ impl From<mpc_contract::RunningContractStateView> for RunningContractState {
             participants: value.participants.into(),
             threshold: value.threshold,
             public_key: value.public_key.into_affine_point(),
+            leave_votes: value.leave_votes.into(),
+            threshold_votes: value.threshold_votes,
         }
     }
 }

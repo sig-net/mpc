@@ -997,6 +997,8 @@ mod tests {
             participants,
             threshold,
             public_key: AffinePoint::default(),
+            leave_votes: Default::default(),
+            threshold_votes: Default::default(),
         })
     }
 
@@ -1087,6 +1089,8 @@ mod tests {
             participants,
             threshold: 3,
             public_key: different_pk,
+            leave_votes: Default::default(),
+            threshold_votes: Default::default(),
         });
 
         let mut uninit_ctx = std::mem::MaybeUninit::<MpcSignProtocol>::uninit();

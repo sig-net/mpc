@@ -132,10 +132,8 @@ pub struct CandidateInfo {
     pub sign_pk: PublicKey,
 }
 
-/// A candidate together with the participants that have voted to admit it,
-/// stored as one value in the top-level `candidates` map. Folding the votes
-/// into the entry keeps the candidate and its `join_votes` in a single storage
-/// slot so they can never desync (they are inserted/removed as a unit).
+/// Candidate information returned by the keyed `candidate_info` view, together
+/// with the participants that have voted to admit it.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Debug)]
 pub struct CandidateEntry {
     pub info: CandidateInfo,
