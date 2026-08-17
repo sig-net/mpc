@@ -9,7 +9,7 @@ use crate::types::CheckpointWatcher;
 
 pub use config::HydrationConfig;
 
-use alloy_sol_types::SolValue;
+use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};

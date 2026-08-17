@@ -6,7 +6,6 @@ description = "Canton chain integration for MPC"
 
 [dependencies]
 alloy.workspace = true
-alloy-sol-types.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true

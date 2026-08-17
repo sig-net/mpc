@@ -437,18 +437,21 @@ async fn require_checkpoint(
     chain: Chain,
     block_height: u64,
 ) -> anyhow::Result<Checkpoint> {
-    tokio::time::timeout(Duration::from_secs(10), async move {
-        loop {
-            let checkpoints = nodes.fetch_checkpoints(id).await?;
-            if let Some(checkpoint) = checkpoints.get(&chain) {
-                if checkpoint.block_height >= block_height {
-                    return Ok(checkpoint.clone());
-                }
+    let is_ready = || async {
+        let checkpoints = nodes.fetch_checkpoints(id).await?;
+        if let Some(checkpoint) = checkpoints.get(&chain) {
+            if checkpoint.block_height >= block_height {
+                return Ok(checkpoint.clone());
             }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        anyhow::bail!("node(id={id}) {chain:?} checkpoint not yet at height {block_height}");
+    };
+
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_secs(1))
+        .with_max_times(10);
+
+    is_ready.retry(&strategy).await.with_context(|| {
+        format!("node {id} did not reach {chain:?} checkpoint >= {block_height} in time")
     })
-    .await
-    .unwrap()
 }

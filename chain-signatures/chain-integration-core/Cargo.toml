@@ -5,8 +5,7 @@ version.workspace = true
 description = "Core traits and types for the MPC chain integration including signature publishing and indexing."
 
 [dependencies]
-alloy-primitives.workspace = true
-alloy-sol-types.workspace = true
+alloy.workspace = true
 backon.workspace = true
 # TODO: replace anyhow with thiserror
 anyhow.workspace = true

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Notify};
 
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,
@@ -56,6 +56,9 @@ pub struct MpcFixtureNode {
 pub struct SharedOutput {
     pub msg_log: Arc<Mutex<dyn CollectMessages + Send>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+    /// Signaled whenever an RPC action is recorded, so `wait_for_actions`
+    /// reacts on the event instead of polling.
+    pub actions_changed: Arc<Notify>,
 }
 
 impl MpcFixture {
@@ -173,8 +176,6 @@ impl MpcFixture {
     }
 
     pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
-        let interval = Duration::from_millis(100);
-
         loop {
             let actions = self.output.rpc_actions.lock().await;
 
@@ -183,7 +184,9 @@ impl MpcFixture {
             }
 
             drop(actions);
-            tokio::time::sleep(interval).await;
+
+            // Wait for a notification that the RPC actions changed
+            self.output.actions_changed.notified().await;
         }
     }
 
@@ -214,6 +217,13 @@ impl MpcFixture {
             self.print_actions().await;
         }
         result.expect("should produce enough signatures")
+    }
+
+    /// Send the same `SignCommand` to every node's `sign_tx`.
+    pub async fn broadcast(&self, request: &SignCommand) {
+        for node in &self.nodes {
+            node.sign_tx.send(request.clone()).await.unwrap();
+        }
     }
 
     pub async fn print_triples(&self) {
@@ -262,11 +272,15 @@ impl MpcFixture {
 
 impl MpcFixtureNode {
     pub async fn wait_for_running(&self) {
+        let mut watcher = self.state.clone();
         loop {
-            if matches!(self.state.status(), NodeStatus::Running { .. }) {
+            // watcher.status() parks the task until the status changes, so this only resumes when the status changes.
+            if matches!(watcher.status(), NodeStatus::Running { .. }) {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if watcher.changed().await.is_err() {
+                return;
+            }
         }
     }
 
@@ -409,6 +423,7 @@ impl SharedOutput {
         Self {
             msg_log: Arc::new(Mutex::new(M::default())),
             rpc_actions: Arc::new(Mutex::new(HashSet::new())),
+            actions_changed: Arc::new(Notify::new()),
         }
     }
 }
@@ -418,6 +433,7 @@ impl Default for SharedOutput {
         Self {
             msg_log: Arc::new(Mutex::new(MessagePrinter)),
             rpc_actions: Default::default(),
+            actions_changed: Arc::new(Notify::new()),
         }
     }
 }

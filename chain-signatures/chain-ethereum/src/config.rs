@@ -1,5 +1,5 @@
 use alloy::primitives::Address;
-use alloy_signer_local::PrivateKeySigner;
+use alloy::signers::local::PrivateKeySigner;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use reqwest::Url;
 use std::fmt;
