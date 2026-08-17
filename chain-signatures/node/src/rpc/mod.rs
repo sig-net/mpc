@@ -194,8 +194,8 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                threshold,
                 leave_votes: Default::default(),
+                threshold,
                 threshold_votes: Default::default(),
             }),
         )
@@ -776,8 +776,8 @@ mod tests {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            threshold: 1,
             leave_votes,
+            threshold: 1,
             threshold_votes: Default::default(),
         };
 
@@ -861,8 +861,8 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            threshold: 2,
             leave_votes: Default::default(),
+            threshold: 2,
             threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(initial))).unwrap();
@@ -893,8 +893,8 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            threshold: 2,
             leave_votes: Default::default(),
+            threshold: 2,
             threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();

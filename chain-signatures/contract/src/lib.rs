@@ -342,7 +342,7 @@ impl VersionedMpcContract {
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 participants,
-                candidates,
+                ref mut candidates,
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
@@ -387,8 +387,12 @@ impl VersionedMpcContract {
                     return Err(JoinError::RevokeNotCandidate.into());
                 }
 
+                // cleanup the existing votes
                 join_votes.remove(&signer_account_id);
+
+                // remove from candidates
                 candidates.remove(&signer_account_id);
+
                 Ok(())
             }
             _ => Err(InvalidState::ProtocolStateNotRunning.into()),

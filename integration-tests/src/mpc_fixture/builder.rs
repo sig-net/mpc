@@ -200,8 +200,8 @@ impl MpcFixtureBuilder {
                 epoch: 0,
                 public_key,
                 participants: self.participants.clone(),
-                threshold: self.threshold,
                 leave_votes: Default::default(),
+                threshold: self.threshold,
                 threshold_votes: Default::default(),
             });
 

@@ -42,7 +42,7 @@ pub enum OldProtocolContractState {
     Resharing(ResharingContractState),
 }
 
-fn upgrade_old_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
+fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
     match old {
         OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
         OldProtocolContractState::Initializing(state) => ProtocolContractState::Initializing(state),
@@ -149,7 +149,7 @@ impl PreviousDevnet {
         } = self;
 
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(protocol_state),
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
@@ -176,7 +176,7 @@ impl PreviousTestnet {
             config,
         } = self;
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(protocol_state),
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
@@ -203,7 +203,7 @@ impl PreviousMainnet {
             config,
         } = self;
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(protocol_state),
+            protocol_state: upgrade_protocol_state(protocol_state),
             pending_requests,
             proposed_updates,
             config,
