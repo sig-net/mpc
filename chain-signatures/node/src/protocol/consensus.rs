@@ -815,8 +815,6 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                 })
             }
             ProtocolState::Running(contract_state) => {
-                // The `Running` state view no longer carries the (unbounded)
-                // candidate set, so fetch our own candidacy by key instead.
                 let candidacy = match gov.candidate_info(&ctx.my_account_id).await {
                     Ok(candidacy) => candidacy,
                     Err(err) => {

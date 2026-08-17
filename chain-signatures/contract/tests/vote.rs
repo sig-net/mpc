@@ -7,7 +7,6 @@ use mpc_contract::primitives::CandidateEntry;
 use near_workspaces::types::NearToken;
 use near_workspaces::{AccountId, Contract};
 
-/// Candidacy of `account_id` via the keyed `candidate_info` view.
 async fn candidate_info(contract: &Contract, account_id: &AccountId) -> Option<CandidateEntry> {
     contract
         .view("candidate_info")
@@ -36,11 +35,6 @@ async fn test_join() -> anyhow::Result<()> {
         .await?;
 
     assert!(execution.is_success());
-
-    assert!(
-        candidate_info(&contract, alice.id()).await.is_some(),
-        "alice should be a candidate"
-    );
 
     let candidate = candidate_info(&contract, alice.id())
         .await

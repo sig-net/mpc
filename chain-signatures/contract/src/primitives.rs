@@ -132,9 +132,8 @@ pub struct CandidateInfo {
     pub sign_pk: PublicKey,
 }
 
-/// Candidate information returned by the keyed `candidate_info` view, together
-/// with the participants that have voted to admit it.
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, Debug)]
+/// A candidate and the participants that voted to admit it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CandidateEntry {
     pub info: CandidateInfo,
     pub join_votes: HashSet<AccountId>,

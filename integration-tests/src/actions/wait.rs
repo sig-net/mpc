@@ -274,8 +274,6 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 
         match &state {
             ContractState::Candidate(candidate, present) => {
-                // Candidates are no longer part of the running state view; query
-                // the keyed `candidate_info` view instead.
                 let info: Option<mpc_contract::primitives::CandidateEntry> = nodes
                     .contract()
                     .view("candidate_info")

@@ -840,7 +840,18 @@ impl VersionedMpcContract {
     }
 
     pub fn state(&self) -> ProtocolContractStateView {
-        self.view_state()
+        match self.state_ref() {
+            ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
+            ProtocolContractState::Initializing(state) => {
+                ProtocolContractStateView::Initializing(state.clone())
+            }
+            ProtocolContractState::Running(state) => {
+                ProtocolContractStateView::Running(state.into())
+            }
+            ProtocolContractState::Resharing(state) => {
+                ProtocolContractStateView::Resharing(state.clone())
+            }
+        }
     }
 
     pub fn config(&self) -> &Config {
@@ -853,23 +864,9 @@ impl VersionedMpcContract {
         self.latest_checkpoints().get(&chain)
     }
 
-    /// The queried account's candidate information and admission votes, or
-    /// `None` if it is not a candidate. Keyed by account id, so its size is
-    /// independent of the total candidate count.
-    ///
-    /// A joining node uses this to check whether its `join()` has registered and
-    /// how many participants have voted for it, without pulling the full
-    /// candidate set that the `Running` state view no longer exposes.
+    /// Returns information and admission votes for a running candidate.
     pub fn candidate_info(&self, account_id: AccountId) -> Option<CandidateEntry> {
         match self.state_ref() {
-            ProtocolContractState::Initializing(state) => state
-                .candidates
-                .get(&account_id)
-                .cloned()
-                .map(|info| CandidateEntry {
-                    info,
-                    join_votes: HashSet::new(),
-                }),
             ProtocolContractState::Running(state) => {
                 state.candidates.get(&account_id).cloned().map(|info| {
                     let join_votes = state
@@ -885,28 +882,12 @@ impl VersionedMpcContract {
         }
     }
 
-    /// Protocol-state projection that omits the unbounded running candidate data.
-    fn view_state(&self) -> ProtocolContractStateView {
-        match self.state_ref() {
-            ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
-            ProtocolContractState::Initializing(state) => {
-                ProtocolContractStateView::Initializing(state.clone())
-            }
-            ProtocolContractState::Running(state) => {
-                ProtocolContractStateView::Running(state.into())
-            }
-            ProtocolContractState::Resharing(state) => {
-                ProtocolContractStateView::Resharing(state.clone())
-            }
-        }
-    }
-
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
         let mut views = Vec::with_capacity(reads.len());
 
         for read in reads {
             let view = match read {
-                Read::State => View::State(self.view_state()),
+                Read::State => View::State(self.state()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()

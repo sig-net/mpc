@@ -101,6 +101,8 @@ impl Governance for MockGovernance {
                         let public_key = state.public_key;
                         let epoch = state.epoch;
                         let old_threshold = state.threshold;
+                        // Threshold-change resharing keeps the participant
+                        // set unchanged; only `new_threshold` differs.
                         let resharing = mpc_node::protocol::contract::ResharingContractState {
                             old_epoch: epoch,
                             old_participants: participants.clone(),
@@ -115,6 +117,8 @@ impl Governance for MockGovernance {
                         result = true;
                         true
                     } else {
+                        // `vote()` always modifies state (removing prior
+                        // votes and recording the new one).
                         true
                     }
                 }

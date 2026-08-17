@@ -20,6 +20,8 @@ pub struct RunningContractState {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
+    /// Must be cleared before replacing the running state to remove its entries
+    /// from contract storage.
     pub candidates: IterableMap<AccountId, CandidateInfo>,
     pub join_votes: Votes,
     pub leave_votes: Votes,
@@ -67,8 +69,7 @@ impl ProtocolContractState {
     }
 }
 
-/// Running state exposed to external callers. The unbounded candidate registry
-/// and its join votes are available through the keyed `candidate_info` view.
+/// Public running state. Candidate data is available through `candidate_info`.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractStateView {
     pub epoch: u64,
@@ -80,9 +81,6 @@ pub struct RunningContractStateView {
 }
 
 impl From<&RunningContractState> for RunningContractStateView {
-    /// Converts from a borrow, cloning only the retained fields. This avoids
-    /// copying the (potentially bloated) `candidates`/`join_votes` maps just to
-    /// drop them — the whole point of the lean view.
     fn from(state: &RunningContractState) -> Self {
         RunningContractStateView {
             epoch: state.epoch,
@@ -95,8 +93,7 @@ impl From<&RunningContractState> for RunningContractStateView {
     }
 }
 
-/// Projection of stored protocol state for external reads. Only the unbounded
-/// running candidate data is omitted.
+/// Public protocol state returned by contract views.
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub enum ProtocolContractStateView {
     NotInitialized,

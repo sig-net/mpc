@@ -63,7 +63,7 @@ fn upgrade_old_protocol_state(old: OldProtocolContractState) -> ProtocolContract
 }
 
 #[derive(BorshDeserialize)]
-pub struct InlineRunningContractState {
+struct InlineRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
@@ -75,7 +75,7 @@ pub struct InlineRunningContractState {
 }
 
 #[derive(BorshDeserialize)]
-pub enum InlineProtocolContractState {
+enum InlineProtocolContractState {
     NotInitialized,
     Initializing(InitializingContractState),
     Running(InlineRunningContractState),
@@ -139,13 +139,22 @@ pub(crate) struct PreviousDevnet {
 
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
+        let Self {
+            protocol_state,
+            pending_requests,
+            proposed_updates,
+            config,
+            latest_checkpoints,
+            checkpoint_votes,
+        } = self;
+
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(self.protocol_state),
-            pending_requests: self.pending_requests,
-            proposed_updates: self.proposed_updates,
-            config: self.config,
-            latest_checkpoints: self.latest_checkpoints,
-            checkpoint_votes: self.checkpoint_votes,
+            protocol_state: upgrade_old_protocol_state(protocol_state),
+            pending_requests,
+            proposed_updates,
+            config,
+            latest_checkpoints,
+            checkpoint_votes,
         }
     }
 }
@@ -160,11 +169,17 @@ pub(crate) struct PreviousTestnet {
 
 impl PreviousTestnet {
     fn upgrade(self) -> MpcContract {
+        let Self {
+            protocol_state,
+            pending_requests,
+            proposed_updates,
+            config,
+        } = self;
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(self.protocol_state),
-            pending_requests: self.pending_requests,
-            proposed_updates: self.proposed_updates,
-            config: self.config,
+            protocol_state: upgrade_old_protocol_state(protocol_state),
+            pending_requests,
+            proposed_updates,
+            config,
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         }
@@ -181,11 +196,17 @@ pub(crate) struct PreviousMainnet {
 
 impl PreviousMainnet {
     fn upgrade(self) -> MpcContract {
+        let Self {
+            protocol_state,
+            pending_requests,
+            proposed_updates,
+            config,
+        } = self;
         MpcContract {
-            protocol_state: upgrade_old_protocol_state(self.protocol_state),
-            pending_requests: self.pending_requests,
-            proposed_updates: self.proposed_updates,
-            config: self.config,
+            protocol_state: upgrade_old_protocol_state(protocol_state),
+            pending_requests,
+            proposed_updates,
+            config,
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         }
