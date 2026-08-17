@@ -732,6 +732,7 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:1".to_string(),
             central_address: central_address(),
+            publisher: None,
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -2096,6 +2097,7 @@ mod tests {
         let config = MidnightConfig {
             node_ws_url: String::new(),
             central_address: "ab".repeat(32),
+            publisher: None,
             rpc: Default::default(),
             indexer: Default::default(),
         };
