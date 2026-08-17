@@ -3,8 +3,9 @@
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::reader::{
-    decode_notification, resolve_verified_record, signet_field_node_by_path, signet_map_key_rid,
-    unpack_notification_v1, Node, Resolved,
+    decode_notification, decode_response_entry, resolve_verified_record, signet_field_node_by_path,
+    signet_map_key_rid, unpack_notification_v1, Node, Resolved, CENTRAL_LEDGER_FIELDS,
+    NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
 use crate::rpc::{BlockRef, ReadFailure};
 use crate::source::{ChainSource, ContractState, LiveSource};
@@ -18,14 +19,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
+use mpc_primitives::{
+    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const RETRY_DELAY: Duration = Duration::from_millis(500);
-
-/// The central singleton's notification map ordinal, the only field the diff reads.
-const NOTIFICATION_MAP_FIELD: u8 = 1;
 
 /// Marker context on a central state the ledger deserializer refused: this build can
 /// no longer read the chain, so the block-level retry must halt on it, not spin.
@@ -56,11 +56,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
+pub(crate) fn unix_now() -> anyhow::Result<u64> {
+    Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .context("the system clock is before the unix epoch")?
+        .as_secs())
 }
 
 /// One entry of a central map, keyed by the composite `SignetMapKey`.
@@ -70,13 +70,30 @@ pub(crate) struct MapEntry {
     pub value: Node,
 }
 
+#[derive(Clone, Default)]
+struct CentralEntries {
+    notifications: Vec<MapEntry>,
+    responses: Vec<MapEntry>,
+    bidirectional_responses: Vec<MapEntry>,
+}
+
+type CentralCache = Option<(String, CentralEntries)>;
+
+fn new_entries<'a>(entries: &'a [MapEntry], parent: &[MapEntry]) -> Vec<&'a MapEntry> {
+    let parent_keys: HashSet<&AlignedValue> = parent.iter().map(|entry| &entry.key).collect();
+    entries
+        .iter()
+        .filter(|entry| !parent_keys.contains(&entry.key))
+        .collect()
+}
+
 /// One drop, one WARN, one distinct reason label.
-fn drop_entry(
+fn drop_entry<T>(
     reason: &'static str,
     height: u64,
     request_id: Option<[u8; 32]>,
     detail: &str,
-) -> Option<IndexedSignRequest> {
+) -> Option<T> {
     tracing::warn!(
         reason,
         height,
@@ -87,12 +104,12 @@ fn drop_entry(
 }
 
 /// [`drop_entry`] at ERROR: the failure may be node-local, not the caller's.
-fn drop_entry_unattributed(
+fn drop_entry_unattributed<T>(
     reason: &'static str,
     height: u64,
     request_id: Option<[u8; 32]>,
     detail: &str,
-) -> Option<IndexedSignRequest> {
+) -> Option<T> {
     tracing::error!(
         reason,
         height,
@@ -233,18 +250,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// Field-1 entries of an already-fetched central tree. The field's position and
-    /// its map shape are fixed by our own singleton, so a failure here is
-    /// binary-vs-contract drift (or a wrong central address): it halts indexing loudly
-    /// rather than dropping every request while the checkpoint advances.
-    fn notification_entries(tree: &Node) -> anyhow::Result<Vec<MapEntry>> {
-        let node = signet_field_node_by_path(tree, &[NOTIFICATION_MAP_FIELD])
-            .context("central signBidirectionalEventNotificationMap field")?;
+    fn map_entries(
+        tree: &Node,
+        field: u8,
+        field_name: &'static str,
+    ) -> anyhow::Result<Vec<MapEntry>> {
+        let node = signet_field_node_by_path(tree, &[field])
+            .with_context(|| format!("central {field_name} field"))?;
         let StateValue::Map(entries) = node else {
-            anyhow::bail!(
-                "central field {NOTIFICATION_MAP_FIELD} (signBidirectionalEventNotificationMap) \
-                 is not a map"
-            );
+            anyhow::bail!("central field {field} ({field_name}) is not a map");
         };
         Ok(entries
             .iter()
@@ -258,48 +272,117 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .collect())
     }
 
-    /// Per-block processing, shared by catchup and live: diff the notification map
-    /// against the parent block's, evaluate the new entries.
+    /// The three append logs consumed by the node, all from one finalized central tree.
+    /// Their positions and map shapes are fixed by the deployed singleton, so drift
+    /// halts before the block checkpoint can advance.
+    fn central_entries(tree: &Node) -> anyhow::Result<CentralEntries> {
+        let StateValue::Array(fields) = tree else {
+            anyhow::bail!("central singleton state root is not an array");
+        };
+        anyhow::ensure!(
+            fields.len() == CENTRAL_LEDGER_FIELDS,
+            "central singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
+            fields.len()
+        );
+        Ok(CentralEntries {
+            notifications: Self::map_entries(
+                tree,
+                NOTIFICATION_MAP_FIELD,
+                "signBidirectionalEventNotificationMap",
+            )?,
+            responses: Self::map_entries(tree, RESPOND_MAP_FIELD, "respondMap")?,
+            bidirectional_responses: Self::map_entries(
+                tree,
+                RESPOND_BIDIRECTIONAL_MAP_FIELD,
+                "respondBidirectionalMap",
+            )?,
+        })
+    }
+
+    /// Per-block processing, shared by catchup and live: diff all three central event
+    /// maps against the parent block and translate their new entries.
     async fn process_block<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut Option<(String, Vec<MapEntry>)>,
+        cache: &mut CentralCache,
         block: &BlockRef,
-    ) -> anyhow::Result<Vec<IndexedSignRequest>> {
+    ) -> anyhow::Result<Vec<ChainEvent>> {
         // An absent central is ordinary during catchup from before deployment.
-        let entries: Vec<MapEntry> = match self.central_tree(source, &block.hash).await? {
-            Some(tree) => Self::notification_entries(&tree)?,
-            None => Vec::new(),
+        let entries = match self.central_tree(source, &block.hash).await? {
+            Some(tree) => Self::central_entries(&tree)?,
+            None => CentralEntries::default(),
         };
-        let parent_entries: Vec<MapEntry> = match cache.take() {
+        let parent_entries = match cache.take() {
             Some((hash, entries)) if hash == block.parent_hash => entries,
             _ => match self.central_tree(source, &block.parent_hash).await? {
-                Some(tree) => Self::notification_entries(&tree)?,
-                None => Vec::new(),
+                Some(tree) => Self::central_entries(&tree)?,
+                None => CentralEntries::default(),
             },
         };
-        let parent_keys: HashSet<&AlignedValue> =
-            parent_entries.iter().map(|entry| &entry.key).collect();
-        let new_entries: Vec<&MapEntry> = entries
-            .iter()
-            .filter(|entry| !parent_keys.contains(&entry.key))
-            .collect();
 
-        let mut requests = Vec::new();
-        if !new_entries.is_empty() {
-            let indexed_ts = unix_now();
-            for entry in new_entries {
+        let mut events = Vec::new();
+        let notification_entries =
+            new_entries(&entries.notifications, &parent_entries.notifications);
+        if !notification_entries.is_empty() {
+            let indexed_ts = unix_now().unwrap_or(0);
+            for entry in notification_entries {
                 if let Some(request) = self
                     .process_entry(source, entry, &block.hash, block.number, indexed_ts)
                     .await?
                 {
-                    requests.push(request);
+                    events.push(ChainEvent::SignRequest {
+                        request,
+                        block_timestamp: None,
+                    });
                 }
             }
         }
 
+        for entry in new_entries(&entries.responses, &parent_entries.responses) {
+            let event: Option<ChainEvent> = match decode_response_entry(&entry.key, &entry.value) {
+                Ok((request_id, signature)) => Some(ChainEvent::Respond(SignatureRespondedEvent {
+                    request_id,
+                    signature,
+                    chain: Chain::Midnight,
+                })),
+                Err(err) => drop_entry(
+                    "response-entry-malformed",
+                    block.number,
+                    signet_map_key_rid(&entry.key),
+                    &format!("respondMap: {err:#}"),
+                ),
+            };
+            if let Some(event) = event {
+                events.push(event);
+            }
+        }
+
+        for entry in new_entries(
+            &entries.bidirectional_responses,
+            &parent_entries.bidirectional_responses,
+        ) {
+            let event: Option<ChainEvent> = match decode_response_entry(&entry.key, &entry.value) {
+                Ok((request_id, signature)) => Some(ChainEvent::RespondBidirectional(
+                    RespondBidirectionalEvent {
+                        request_id,
+                        signature,
+                        chain: Chain::Midnight,
+                    },
+                )),
+                Err(err) => drop_entry(
+                    "response-entry-malformed",
+                    block.number,
+                    signet_map_key_rid(&entry.key),
+                    &format!("respondBidirectionalMap: {err:#}"),
+                ),
+            };
+            if let Some(event) = event {
+                events.push(event);
+            }
+        }
+
         *cache = Some((block.hash.clone(), entries));
-        Ok(requests)
+        Ok(events)
     }
 
     /// One notification entry: decode and unpack it, read the caller's ledger at
@@ -465,10 +548,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut Option<(String, Vec<MapEntry>)>,
+        cache: &mut CentralCache,
         block: &BlockRef,
         cancel: &CancellationToken,
-    ) -> Retried<Vec<IndexedSignRequest>> {
+    ) -> Retried<Vec<ChainEvent>> {
         loop {
             let result = tokio::select! {
                 _ = cancel.cancelled() => return Retried::Cancelled,
@@ -508,7 +591,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     async fn index_height<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut Option<(String, Vec<MapEntry>)>,
+        cache: &mut CentralCache,
         events_tx: &mpsc::Sender<ChainEvent>,
         number: u64,
         cancel: &CancellationToken,
@@ -531,7 +614,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     async fn index_block<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut Option<(String, Vec<MapEntry>)>,
+        cache: &mut CentralCache,
         events_tx: &mpsc::Sender<ChainEvent>,
         block: &BlockRef,
         cancel: &CancellationToken,
@@ -540,8 +623,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .process_block_retrying(source, cache, block, cancel)
             .await
         {
-            Retried::Done(requests) => {
-                self.emit_block(events_tx, block, requests).await?;
+            Retried::Done(events) => {
+                self.emit_block(events_tx, block, events).await?;
                 Ok(Indexed::Done)
             }
             Retried::Cancelled => Ok(Indexed::Cancelled),
@@ -550,7 +633,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// Emits a block's requests, then its Block event, then records telemetry.
+    /// Emits a block's lifecycle events, then its Block event, then records telemetry.
     ///
     /// The Block event is the whole progress report: the node advances the persisted
     /// height only after CONSUMING it, which is what makes a supervised restart
@@ -561,16 +644,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         block: &BlockRef,
-        requests: Vec<IndexedSignRequest>,
+        events: Vec<ChainEvent>,
     ) -> anyhow::Result<()> {
-        for request in requests {
+        for event in events {
             events_tx
-                .send(ChainEvent::SignRequest {
-                    request,
-                    block_timestamp: None,
-                })
+                .send(event)
                 .await
-                .context("failed to send a midnight sign request event")?;
+                .context("failed to send a midnight lifecycle event")?;
         }
         events_tx
             .send(ChainEvent::Block(block.number))
@@ -598,7 +678,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             return Ok(());
         };
 
-        let mut cache: Option<(String, Vec<MapEntry>)> = None;
+        let mut cache: CentralCache = None;
         let mut last_processed = checkpoint;
         if checkpoint == 0 {
             // A fresh node has no gap to close, and walking from genesis would
@@ -773,15 +853,45 @@ mod tests {
         )
     }
 
+    fn response_entry(
+        count: u8,
+        rid: &[u8; 32],
+        signature: &mpc_primitives::Signature,
+    ) -> (AlignedValue, Node) {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = signature.big_r.to_encoded_point(false);
+        (
+            signet_map_key(count, rid),
+            cell_from_atoms(
+                &[
+                    trim(encoded.x().expect("affine x")),
+                    trim(encoded.y().expect("affine y")),
+                    trim(signature.s.to_bytes().as_slice()),
+                    trim(&[signature.recovery_id]),
+                ],
+                &[32, 32, 32, 1],
+            ),
+        )
+    }
+
     /// The central singleton: six flat fields, notification map at ordinal 1.
     fn central_state(entries: Vec<(AlignedValue, Node)>) -> Node {
+        central_state_with_responses(entries, vec![], vec![])
+    }
+
+    fn central_state_with_responses(
+        notifications: Vec<(AlignedValue, Node)>,
+        responses: Vec<(AlignedValue, Node)>,
+        bidirectional_responses: Vec<(AlignedValue, Node)>,
+    ) -> Node {
         array_of(vec![
-            StateValue::Null,
-            map_of(entries),
-            StateValue::Null,
-            StateValue::Null,
-            StateValue::Null,
-            StateValue::Null,
+            map_of(vec![]),
+            map_of(notifications),
+            map_of(vec![]),
+            map_of(responses),
+            map_of(vec![]),
+            map_of(bidirectional_responses),
         ])
     }
 
@@ -1125,6 +1235,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_maps_emit_both_lifecycle_events_before_the_block() {
+        let respond_rid = [0x31; 32];
+        let bidirectional_rid = [0x32; 32];
+        let malformed_rid = [0x30; 32];
+        let respond_signature = mpc_primitives::Signature::new(
+            k256::AffinePoint::GENERATOR,
+            k256::Scalar::from(9u64),
+            0,
+        );
+        let bidirectional_signature = mpc_primitives::Signature::new(
+            k256::AffinePoint::GENERATOR,
+            k256::Scalar::from(10u64),
+            1,
+        );
+        let central = central_address();
+        let mut source = FixtureSource {
+            head: 8,
+            ..Default::default()
+        };
+        source.set_state(&central, 8, central_state(vec![]));
+        let response_state = central_state_with_responses(
+            vec![],
+            vec![
+                (
+                    signet_map_key(1, &malformed_rid),
+                    cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+                ),
+                response_entry(2, &respond_rid, &respond_signature),
+            ],
+            vec![response_entry(
+                1,
+                &bidirectional_rid,
+                &bidirectional_signature,
+            )],
+        );
+        source.set_state(&central, 9, response_state);
+        let repeated_response_state = central_state_with_responses(
+            vec![],
+            vec![
+                (
+                    signet_map_key(1, &malformed_rid),
+                    cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+                ),
+                response_entry(2, &respond_rid, &respond_signature),
+                response_entry(3, &respond_rid, &respond_signature),
+            ],
+            vec![response_entry(
+                1,
+                &bidirectional_rid,
+                &bidirectional_signature,
+            )],
+        );
+        source.set_state(&central, 10, repeated_response_state.clone());
+        source.set_state(&central, 11, repeated_response_state);
+        let (live_tx, live_rx) = mpsc::channel(8);
+        source.live = tokio::sync::Mutex::new(Some(live_rx));
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+
+        live_tx.send(block_ref(9)).await.expect("send live block");
+        match harness.next_event().await {
+            ChainEvent::Respond(event) => {
+                assert_eq!(event.request_id, respond_rid);
+                assert_eq!(event.signature, respond_signature);
+                assert_eq!(event.chain, Chain::Midnight);
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+        match harness.next_event().await {
+            ChainEvent::RespondBidirectional(event) => {
+                assert_eq!(event.request_id, bidirectional_rid);
+                assert_eq!(event.signature, bidirectional_signature);
+                assert_eq!(event.chain, Chain::Midnight);
+            }
+            other => panic!("expected RespondBidirectional, got {other:?}"),
+        }
+        assert_block(&harness.next_event().await, 9);
+        live_tx
+            .send(block_ref(10))
+            .await
+            .expect("send repeat block");
+        match harness.next_event().await {
+            ChainEvent::Respond(event) => {
+                assert_eq!(event.request_id, respond_rid);
+                assert_eq!(event.signature, respond_signature);
+            }
+            other => panic!("expected repeated Respond, got {other:?}"),
+        }
+        assert_block(&harness.next_event().await, 10);
+        live_tx
+            .send(block_ref(11))
+            .await
+            .expect("send unchanged block");
+        assert_block(&harness.next_event().await, 11);
+        harness.cancel_and_join().await;
+    }
+
+    #[tokio::test]
     async fn process_entry_drops_undecodable_caller_state() {
         let (_record, rid) = caller_record_and_rid();
         let central = central_address();
@@ -1236,9 +1448,13 @@ mod tests {
         let central = crate::state::decode_contract_state(CAPTURED_SINGLETON_POST)
             .expect("the captured singleton state decodes");
         let entries =
-            TestIndexer::notification_entries(&central).expect("field 1 is the notification map");
-        assert_eq!(entries.len(), 1, "the capture holds exactly one notify");
-        let entry = &entries[0];
+            TestIndexer::central_entries(&central).expect("the captured central event maps decode");
+        assert_eq!(
+            entries.notifications.len(),
+            1,
+            "the capture holds exactly one notify"
+        );
+        let entry = &entries.notifications[0];
         assert_eq!(
             signet_map_key_rid(&entry.key),
             Some(captured_rid()),
@@ -1293,21 +1509,30 @@ mod tests {
 
     #[tokio::test]
     async fn process_block_errors_on_central_schema_drift() {
-        // Field 1 not being a map cannot come from a caller: it is drift or a wrong
-        // central address, and must halt loudly rather than drop requests forever.
+        // None of the three event-map fields can change shape through a caller: a
+        // non-map is contract drift or a wrong central address and must halt loudly.
         let central = central_address();
-        let mut source = FixtureSource::default();
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, array_of(vec![StateValue::Null; 6]));
-
         let indexer = direct_indexer().await;
-        let mut cache = None;
-        let err = indexer
-            .process_block(&source, &mut cache, &block_ref(9))
-            .await
-            .expect_err("a non-map central field must error, never degrade")
-            .to_string();
-        assert!(err.contains("is not a map"), "err: {err}");
+        for field in [
+            usize::from(NOTIFICATION_MAP_FIELD),
+            usize::from(RESPOND_MAP_FIELD),
+            usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
+        ] {
+            let mut source = FixtureSource::default();
+            source.set_state(&central, 8, central_state(vec![]));
+            let mut fields: Vec<Node> =
+                (0..CENTRAL_LEDGER_FIELDS).map(|_| map_of(vec![])).collect();
+            fields[field] = StateValue::Null;
+            source.set_state(&central, 9, array_of(fields));
+
+            let mut cache = None;
+            let err = indexer
+                .process_block(&source, &mut cache, &block_ref(9))
+                .await
+                .expect_err("a non-map central field must error, never degrade")
+                .to_string();
+            assert!(err.contains("is not a map"), "field {field}, err: {err}");
+        }
     }
 
     #[tokio::test]
@@ -1389,12 +1614,12 @@ mod tests {
         source.set_state(&hex::encode(captured_caller()), CAPTURED_HEIGHT, caller);
         let indexer = direct_indexer().await;
         let mut cache = None;
-        let requests = indexer
+        let events = indexer
             .process_block(&source, &mut cache, &block_ref(CAPTURED_HEIGHT))
             .await
             .expect("the captured block processes");
-        let [request] = requests.as_slice() else {
-            panic!("exactly one captured request, got {}", requests.len())
+        let [ChainEvent::SignRequest { request, .. }] = events.as_slice() else {
+            panic!("exactly one captured request, got {events:?}")
         };
         assert_eq!(request.id, SignId::new(captured_rid()));
         let path_hex = "63616c6c65722d70617468000000000000000000000000000000000000000000";
@@ -1927,7 +2152,7 @@ mod tests {
             harness.state.get_processed_block(Chain::Midnight).await,
             Some(5),
             "the indexer only READS the checkpoint at startup; emitting Block is how it \
-             reports progress"
+         reports progress"
         );
         harness.cancel_and_join().await;
         drop(live_tx);
