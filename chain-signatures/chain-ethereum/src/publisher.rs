@@ -49,43 +49,56 @@ impl From<&Signature> for ChainSignatures::Signature {
 /// This client is separate from the client used by the indexer (separation of concerns: read vs write).
 #[derive(Clone)]
 pub struct EthClient {
-    /// The contract instance for interacting with the ChainSignatures contract
-    contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
     /// Channel used to send actions to the background batching task
     batch_tx: mpsc::Sender<PublishAction>,
+}
+
+/// Publishing machinery for the background batching task.
+///
+/// Kept separate from `EthClient` so the spawned task owns no channel sender —
+/// otherwise the channel could never close and the batching loop could never
+/// shut down. Once every `EthClient` clone is dropped, the channel closes and
+/// the loop flushes any leftover batch and exits.
+#[derive(Clone)]
+struct BatchPublisher {
+    /// The contract instance for interacting with the ChainSignatures contract
+    contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
     /// Telemetry interface for recording metrics related to publishing signatures
     telemetry: Arc<dyn PublisherTelemetry>,
     /// Gas configuration for estimating and clamping gas limits
     gas: GasConfig,
     /// Publisher configuration for controlling batching and retry behavior
-    publisher: PublisherConfig,
+    config: PublisherConfig,
 }
 
 impl EthClient {
     pub fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
+        let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
+
+        // Spawn the background batching loop; it owns no sender, so it can shut
+        // down once every EthClient is dropped.
+        let batcher = BatchPublisher::new(eth, telemetry);
+        tokio::spawn(async move {
+            batcher.run_batch_respond(batch_rx).await;
+        });
+
+        Self { batch_tx }
+    }
+}
+
+impl BatchPublisher {
+    fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
         let wallet = EthereumWallet::from(eth.account_sk.clone());
         let provider = ProviderBuilder::new()
             .wallet(wallet)
             .connect_http(eth.execution_rpc_http_url.clone());
 
-        let contract = ChainSignatures::new(eth.contract_address, provider);
-
-        let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
-        let client = Self {
-            contract,
-            batch_tx,
+        Self {
+            contract: ChainSignatures::new(eth.contract_address, provider),
             telemetry,
             gas: eth.gas.clone(),
-            publisher: eth.publisher.clone(),
-        };
-
-        // Spawn the background batching loop
-        let client_clone = client.clone();
-        tokio::spawn(async move {
-            client_clone.run_batch_respond(batch_rx).await;
-        });
-
-        client
+            config: eth.publisher.clone(),
+        }
     }
 
     /// Run the background batching loop that collects publish actions and sends them in batches to the Ethereum contract.
@@ -93,8 +106,7 @@ impl EthClient {
     /// A batch is flushed once it reaches `max_batch_size`, or `batch_flush_interval` after its
     /// first action was queued.
     async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<PublishAction>) {
-        let mut actions_batch: Vec<PublishAction> =
-            Vec::with_capacity(self.publisher.max_batch_size);
+        let mut actions_batch: Vec<PublishAction> = Vec::with_capacity(self.config.max_batch_size);
         // Starts with a sleep of Duration::MAX, which will be reset when the first action is received.
         let flush_timer = tokio::time::sleep(Duration::MAX);
         tokio::pin!(flush_timer);
@@ -105,7 +117,7 @@ impl EthClient {
 
             // Determine the capacity for receiving new actions based on the current batch size and max batch size.
             let capacity = self
-                .publisher
+                .config
                 .max_batch_size
                 .saturating_sub(actions_batch.len())
                 .max(1);
@@ -123,7 +135,7 @@ impl EthClient {
                     if is_empty {
                         flush_timer
                             .as_mut()
-                            .reset(tokio::time::Instant::now() + self.publisher.batch_flush_interval);
+                            .reset(tokio::time::Instant::now() + self.config.batch_flush_interval);
                     }
                 }
                 // Flush the batch if the flush timer has elapsed and the batch is not empty.
@@ -133,7 +145,7 @@ impl EthClient {
             }
 
             // Flush the batch if it has reached the maximum batch size.
-            if actions_batch.len() >= self.publisher.max_batch_size {
+            if actions_batch.len() >= self.config.max_batch_size {
                 self.execute_batch_publish(&mut actions_batch).await;
             }
         }
@@ -152,7 +164,7 @@ impl EthClient {
 
         let res = retry_rpc!(
             Duration::MAX, // Prevent from timing out
-            self.publisher.batch_publish_retry,
+            self.config.batch_publish_retry,
             |attempt, err, sleep| {
                 tracing::warn!(
                     "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
@@ -180,8 +192,8 @@ impl EthClient {
         sign_ids: &[SignId],
     ) -> anyhow::Result<TransactionReceipt> {
         retry_rpc!(
-            self.publisher.receipt_timeout,
-            self.publisher.receipt_retry,
+            self.config.receipt_timeout,
+            self.config.receipt_retry,
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
@@ -219,8 +231,8 @@ impl EthClient {
         sign_ids: &[SignId],
     ) -> anyhow::Result<B256> {
         retry_rpc!(
-            self.publisher.send_timeout,
-            self.publisher.send_retry,
+            self.config.send_timeout,
+            self.config.send_retry,
             |attempt, err, sleep| {
                 tracing::warn!(
                     ?sign_ids,
@@ -304,7 +316,7 @@ impl EthClient {
         }
     }
 
-    pub async fn batch_publish_signatures(
+    async fn batch_publish_signatures(
         &self,
         actions: &[PublishAction],
         signatures: &HashMap<SignId, Signature>,
@@ -591,11 +603,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
-        let receipt = client
+        let receipt = publisher
             .wait_for_transaction_receipt(tx_hash, &[SignId::new([2u8; 32])])
             .await
             .unwrap();
@@ -630,13 +642,13 @@ mod tests {
             .expect_at_least(2)
             .create_async().await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
         // Attempt to send
-        let result = client
+        let result = publisher
             .send_responses(vec![], 21000, &[SignId::new([3u8; 32])])
             .await;
 
@@ -694,13 +706,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
         // Execute the full publish pipeline
-        let result = client
+        let result = publisher
             .execute_publish(vec![], 21000, &[SignId::new([4u8; 32])])
             .await;
 
@@ -753,12 +765,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
-        let result = client
+        let result = publisher
             .execute_publish(vec![], 21000, &[SignId::new([5u8; 32])])
             .await;
 
@@ -784,13 +796,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
         // 500_000 * 12 / 10 == 600_000
-        let gas = client.estimate_batch_gas(&[], 1).await;
+        let gas = publisher.estimate_batch_gas(&[], 1).await;
         assert_eq!(gas, 600_000);
     }
 
@@ -810,12 +822,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
-        let gas = client.estimate_batch_gas(&[], 1).await;
+        let gas = publisher.estimate_batch_gas(&[], 1).await;
         assert_eq!(gas, GasConfig::default().base_gas_limit);
     }
 
@@ -840,13 +852,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(
+        let publisher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
 
         // 3 requests -> static heuristic = max(40_000, 20_000 * 3) = 60_000.
-        let gas = client.estimate_batch_gas(&[], 3).await;
+        let gas = publisher.estimate_batch_gas(&[], 3).await;
         assert_eq!(gas, 60_000);
     }
 
@@ -857,16 +869,16 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 2).await;
 
-        let mut client = EthClient::new(
+        let mut batcher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
-        client.publisher.max_batch_size = 10;
+        batcher.config.max_batch_size = 10;
         // Disable the interval so only batch-fullness triggers a flush.
-        client.publisher.batch_flush_interval = Duration::from_secs(3600);
+        batcher.config.batch_flush_interval = Duration::from_secs(3600);
 
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(client.run_batch_respond(rx));
+        tokio::spawn(batcher.run_batch_respond(rx));
 
         // 20 actions: two full batches must be published without waiting on the interval.
         for i in 0u8..20 {
@@ -883,15 +895,15 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 1).await;
 
-        let mut client = EthClient::new(
+        let mut batcher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
-        client.publisher.max_batch_size = 10;
-        client.publisher.batch_flush_interval = Duration::from_millis(200);
+        batcher.config.max_batch_size = 10;
+        batcher.config.batch_flush_interval = Duration::from_millis(200);
 
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(client.run_batch_respond(rx));
+        tokio::spawn(batcher.run_batch_respond(rx));
 
         // Fewer actions than a full batch: must still flush once the interval elapses.
         for i in 0u8..3 {
@@ -908,18 +920,20 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 1).await;
 
-        let mut client = EthClient::new(
+        let mut batcher = BatchPublisher::new(
             &mock_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
         );
-        client.publisher.max_batch_size = 10;
+        batcher.config.max_batch_size = 10;
         // Interval longer than the test: only the channel close may trigger the flush.
-        client.publisher.batch_flush_interval = Duration::from_secs(3600);
+        batcher.config.batch_flush_interval = Duration::from_secs(3600);
 
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(client.run_batch_respond(rx));
+        tokio::spawn(batcher.run_batch_respond(rx));
 
         tx.send(mock_publish_action(1)).await.unwrap();
+        // Drop the only sender: the channel closes, so the loop must flush the
+        // leftover batch and exit.
         drop(tx);
 
         wait_for_hits(&send_mock, Duration::from_secs(5)).await;
