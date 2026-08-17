@@ -209,8 +209,9 @@ struct SignatureRequestedEvent {
     params: String,
 }
 
-/// Derive the on-chain `request_id` for a sign request: `keccak256` over the
-/// ABI encoding of the [`SignatureRequestedEncoding`] event fields.
+/// Derive the `request_id` identifying a sign request: `keccak256` over the
+/// ABI encoding of the [`SignatureRequestedEncoding`] event fields. The
+/// contract never computes this itself (must be calculated off-chain)
 #[allow(clippy::too_many_arguments)]
 pub fn generate_request_id(
     sender: Address,
@@ -327,9 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn generate_request_id_matches_contract_value() {
-        // Pinned to the value the ChainSignatures contract derives (legacy
-        // ethabi golden, ported from integration-tests).
+    fn generate_request_id_matches_legacy_ethabi_golden() {
+        // Pinned to the historical off-chain derivation (legacy ethabi
+        // golden, ported from integration-tests); the contract computes no
+        // request id itself.
         let id = generate_request_id(
             Address::ZERO,
             &[0x42; 32],
