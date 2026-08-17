@@ -530,8 +530,8 @@ mod tests {
 
         // 32-block catchup: blocks have empty blooms so the batch issues exactly
         // 1 eth_getBlockByNumber(batch) and ZERO eth_getLogs (bloom gate skips).
-        let blocks: Vec<_> = (1..=32)
-            .map(|n| test_utils::block_response(n as u64, n as u64))
+        let blocks: Vec<_> = (0..32)
+            .map(|n| test_utils::block_response(n, n + 1))
             .collect();
         let blocks_mock = server
             .mock("POST", "/")
@@ -594,8 +594,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response(1, 10),
-                    test_utils::block_response(2, 11)
+                    test_utils::block_response(0, 10),
+                    test_utils::block_response(1, 11)
                 ])
                 .to_string(),
             )
@@ -710,7 +710,7 @@ mod tests {
             .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(json!([test_utils::block_response(1, block_number)]).to_string())
+            .with_body(json!([test_utils::block_response(0, block_number)]).to_string())
             .expect(1)
             .create_async()
             .await;
