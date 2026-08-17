@@ -2,13 +2,14 @@
 //! submission).
 
 use crate::abi::{ChainSignatures, ChainSignaturesConstructor};
+use crate::event_parsing::parse_filtered_logs;
 use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::{Provider, WalletProvider};
-use alloy::rpc::types::request::TransactionRequest;
-use alloy::sol_types::SolValue;
+use alloy::rpc::types::{request::TransactionRequest, Filter};
+use alloy::sol_types::{SolEvent, SolValue};
 use anyhow::{Context, Result};
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -56,6 +57,9 @@ where
 }
 
 /// Submit a `sign` request on-chain and return its derived `request_id`.
+///
+/// The emitted `SignatureRequested` log and its `SignId` are cross-checked
+/// against the off-chain derivation
 pub async fn submit_sign_request<P>(
     contract: &ChainSignatures::ChainSignaturesInstance<P>,
     seed: usize,
@@ -108,7 +112,26 @@ where
             .await
         {
             Ok(pending) => {
-                pending.get_receipt().await.context("sign receipt")?;
+                // Run receipt through the production log parser and check the derived id matches the off-chain derivation.
+                let receipt = pending.get_receipt().await.context("sign receipt")?;
+                let block = receipt
+                    .block_number
+                    .context("sign receipt missing block number")?;
+                let filter = Filter::new()
+                    .from_block(block)
+                    .to_block(block)
+                    .address(*contract.address())
+                    .event_signature(ChainSignatures::SignatureRequested::SIGNATURE_HASH);
+                let logs = provider
+                    .get_logs(&filter)
+                    .await
+                    .context("fetch SignatureRequested logs")?;
+                let parsed = parse_filtered_logs(logs);
+                let expected = SignId::new(request_id.into());
+                anyhow::ensure!(
+                    parsed.iter().any(|r| r.id == expected),
+                    "emitted SignatureRequested log parsed to {parsed:?}, expected id {expected:?}"
+                );
                 return Ok(request_id);
             }
             Err(err) => {
