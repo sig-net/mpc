@@ -29,6 +29,9 @@ tracing.workspace = true
 [features]
 helios = ["dep:helios"]
 bench = []
+# Gate for deploy/submit helpers and the Hardhat artifact (via include_bytes!).
+contract-test = []
+integration = ["alloy/provider-anvil-node", "contract-test"]
 
 [dev-dependencies]
 mockito.workspace = true

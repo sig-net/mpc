@@ -77,7 +77,7 @@ impl TestIndexerBuilder {
                 network: "sepolia".to_string(),
                 helios_data_path: "/tmp/helios-test".to_string(),
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
-                optimistic_requests: true,
+                optimistic_requests: false,
                 light_client: false,
                 rpc: Default::default(),
                 gas: Default::default(),
@@ -115,6 +115,18 @@ impl TestIndexerBuilder {
             client,
             Address::ZERO,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestIndexerBuilder;
+
+    #[test]
+    fn builder_defaults_to_finalized_requests() {
+        let builder = TestIndexerBuilder::new("http://127.0.0.1:1");
+
+        assert!(!builder.eth.optimistic_requests);
     }
 }
 
