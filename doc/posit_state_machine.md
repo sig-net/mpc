@@ -26,19 +26,15 @@ stateDiagram-v2
     Done --> [*]
 ```
 
-A task enters `Organizing` when `SignatureSpawner` spawns it for a newly indexed sign request at round 0. 
+A task enters `Organizing` when `SignatureSpawner` spawns it for a newly indexed
+request, at round 0. If governance is not `Running`, the request is retained and
+`spawn_tasks` starts it once governance is; a respawn on a governance change
+re-enters `Organizing` at the round carried in `SignEntry.round`, not 0.
 
-If governance is
-not `Running` at that moment the request is retained but no task is spawned. 
-`spawn_tasks` starts it once governance is running, and respawns every retained request on a governance change. 
-A respawn re-enters `Organizing` too, but at the
-round carried in `SignEntry.round` rather than at 0.
-
-Every recoverable failure leads to the same transition back to phase
-"Organizing", via `state.reorganize()`. It bumps the round, resets the round
-timeout, releases the proposer's concurrency permit if one is held, and
-re-enters `Organizing`. There is no other back edge, and no failure path leaves
-the machine. The three detail diagrams below say what triggers each one.
+Every recoverable failure calls `state.reorganize()`: bump the round, reset the
+round timeout, release the proposer's permit if held, re-enter `Organizing`.
+That is the only back edge, and no failure leaves the machine. The detail
+diagrams below say what triggers each one.
 
 ## 2. Inside Organizing
 
@@ -74,11 +70,11 @@ round, with a different proposer.
 
 ## 3. Inside Posit
 
-Posit is two independent machines, one per role, and a node runs exactly one of
-them for round `r`. Which one is decided by `is_proposer`, a pure function of `r`
-(§6), so the two never interleave: the proposer never waits for `START`, the
-deliberator never tallies votes. Each starts from `Organizing`, and each ends
-either at `Generating` (agreement reached) or back at `Organizing` (a new round).
+Posit is two independent machines, one per role; a node runs exactly one for
+round `r`, chosen by `is_proposer` (a pure function of `r`, §6). They never
+interleave: the proposer never waits for `START`, the deliberator never tallies.
+Each starts at `Organizing` and ends at `Generating` (agreement) or back at
+`Organizing` (new round).
 
 ### 3a. Proposer
 
@@ -144,19 +140,17 @@ where it may be elected proposer and reserve a *second* presignature for a
 request that is already being signed. That is the waste the `pause_proposing_until`
 flag exists to limit after the fact.
 
-So yes, sending `PROPOSE` to every member would be an improvement, and a cheaper
-one than it looks: the tally is keyed on `SinglePositCounter::participants`, and
-`process_action` already drops anything from a sender outside that set, so extra
-replies could not move `enough_rejects` or `meets_totality`. The message would
-be a notification for the excluded, not a vote.
+Broadcasting `PROPOSE` to every member would help, cheaply: the tally is keyed
+on `SinglePositCounter::participants` and `process_action` drops senders outside
+that set, so extra replies cannot move `enough_rejects` or `meets_totality`. It
+would be a notification, not a vote.
 
-Two caveats before doing it. A member that happens to hold the presignature but
-was not in the active set at reservation time would reply `ACCEPT`, not be
-counted, and then wait for a `START` it will never receive, so it gains nothing
-over silence. And the excluded member still has no way to tell "round `r`
-succeeded without me" from "round `r` is still running", which is the actual
-question it needs answered; a `PROPOSE` it cannot act on does not answer it. The
-narrow addressing is a symptom, the missing round-outcome signal is the cause.
+It only half-solves the problem, though. A member holding the presignature but
+absent from the active set at reservation time would `ACCEPT`, go uncounted, and
+wait for a `START` that never comes. And the excluded member still cannot tell
+"round `r` succeeded without me" from "round `r` still running", which is what it
+needs. The narrow addressing is a symptom; the missing round-outcome signal is
+the cause.
 
 ## 4. Inside Generating
 
@@ -264,7 +258,6 @@ because the round timeout ran out.
 - **Exactly one proposer per round**, because election reads only `r`,
   membership and entropy — never the local active set. Filtering by local state
   is what caused the permanent divergence in #907.
-- **A node walks one lane of `Posit` per round**, never both.
 - **`Accept` is sent exactly once per round**, on the edge out of
   `Propose received`.
 - **The proposer's `Start` set is a subset of the accepters**, so every node in
@@ -277,11 +270,11 @@ because the round timeout ran out.
 Stated as consequences of the machine, not as bug reports.
 
 1. **The new-round edge has no exit but another round.** No round cap, no
-   deadline spanning rounds, and `round_timeout` saturates at 600s rather than
-   growing without bound. The one failure terminal, `Complete(Err(Aborted))`,
-   needs a closed proposer semaphore, and `Semaphore::close` is never called, so
-   no request ever fails from inside the machine. A wedged request rotates until
-   something outside removes it; the delayed watcher only increments a metric.
+   cross-round deadline, and `round_timeout` saturates at 600s. The one failure
+   terminal (`Complete(Err(Aborted))`) needs a closed proposer semaphore, which
+   nothing closes, so no request ever fails from inside the machine. A wedged
+   request rotates until something outside removes it; the delayed watcher only
+   bumps a metric.
 2. **A late accepter burns a full round.** A node that catches up mid-round
    sends `Accept` after the proposer already broadcast `Start`. The proposer is
    in `Generating` and drops `Accept` there, so the late node waits out its
