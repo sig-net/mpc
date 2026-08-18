@@ -1180,6 +1180,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use anchor_lang::AnchorSerialize;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1274,6 +1275,73 @@ mod tests {
         })
     }
 
+    fn cpi_event_instruction<T: AnchorSerialize + Discriminator>(event: &T) -> String {
+        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
+        data.extend_from_slice(T::DISCRIMINATOR);
+        event.serialize(&mut data).unwrap();
+        solana_sdk::bs58::encode(data).into_string()
+    }
+
+    fn event_transaction(
+        program_id: Pubkey,
+        signature: Signature,
+        instruction: &str,
+        event_data: String,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "meta": {
+                "err": null,
+                "status": { "Ok": null },
+                "fee": 5_000,
+                "preBalances": [],
+                "postBalances": [],
+                "innerInstructions": [{
+                    "index": 0,
+                    "instructions": [{
+                        "accounts": [],
+                        "data": event_data,
+                        "programId": program_id.to_string(),
+                        "stackHeight": 2
+                    }]
+                }],
+                "logMessages": [
+                    format!("Program {program_id} invoke [1]"),
+                    format!("Program log: Instruction: {instruction}"),
+                    format!("Program {program_id} success")
+                ],
+                "preTokenBalances": [],
+                "postTokenBalances": [],
+                "rewards": null,
+                "loadedAddresses": { "readonly": [], "writable": [] },
+                "computeUnitsConsumed": 0
+            },
+            "transaction": {
+                "message": {
+                    "accountKeys": [{
+                        "pubkey": program_id.to_string(),
+                        "signer": false,
+                        "source": "transaction",
+                        "writable": false
+                    }],
+                    "instructions": [],
+                    "recentBlockhash": "11111111111111111111111111111111"
+                },
+                "signatures": [signature.to_string()]
+            },
+            "version": "legacy"
+        })
+    }
+
+    fn event_block_response(
+        id: usize,
+        slot: u64,
+        transaction: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut response = block_response(id, slot);
+        response["result"]["transactions"] = serde_json::json!([transaction]);
+        response
+    }
+
     /// Match a JSON-RPC block batch whose first `getBlock` request is for `slot`.
     fn block_batch_starting_at(slot: u64) -> mockito::Matcher {
         mockito::Matcher::Regex(format!(r#""params"\s*:\s*\[\s*{slot}\s*,"#))
@@ -1306,7 +1374,7 @@ mod tests {
 
         assert_eq!(config.max_supported_transaction_version, Some(0));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
-        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::JsonParsed));
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|commitment| commitment.commitment),
@@ -1518,6 +1586,118 @@ mod tests {
                 "expected Block({expected}), got {event:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn catchup_parses_request_and_response_cpi_events() {
+        let mut server = mockito::Server::new_async().await;
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
+        let response = SignatureRespondedEvent {
+            request_id,
+            responder: Pubkey::new_unique(),
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: hex::decode(
+                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                    y: hex::decode(
+                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                },
+                s: [1; 32],
+                recovery_id: 0,
+            },
+        };
+
+        let entries: Vec<_> = [8, 7, 5].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([
+            event_block_response(
+                0,
+                7,
+                event_transaction(
+                    indexer.program_id,
+                    Signature::new_unique(),
+                    "Sign",
+                    cpi_event_instruction(&request),
+                ),
+            ),
+            event_block_response(
+                1,
+                8,
+                event_transaction(
+                    indexer.program_id,
+                    Signature::new_unique(),
+                    "Respond",
+                    cpi_event_instruction(&response),
+                ),
+            ),
+        ]);
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#""method":"getBlock".*"encoding":"jsonParsed""#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks.to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        let mut catchup = indexer.catchup_blocks(9).await.unwrap();
+        while let Some(item) = catchup.next().await {
+            let (slot, block) = item.unwrap();
+            indexer
+                .process_catchup_item(&events_tx, slot, &block)
+                .await
+                .unwrap();
+        }
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Respond(event)) if event.request_id == request_id
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(8))));
     }
 
     #[tokio::test]

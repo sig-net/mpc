@@ -206,3 +206,47 @@ jobs:
           IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
           IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
+
+  # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
+  anvil-integration-test:
+    name: Anvil Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: anvil-integration-test
+          cache-targets: true
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+      - name: Build eth contract artifact   # required by deploy_chain_signatures' include_bytes!
+        working-directory: ./chain-signatures/contract-eth
+        run: npm ci && npx hardhat compile
+
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Clippy (integration-gated code)
+        run: cargo clippy -p mpc-chain-ethereum --tests --features integration -- -Dclippy::all
+
+      - name: Test
+        run: cargo test -p mpc-chain-ethereum --features integration --tests
