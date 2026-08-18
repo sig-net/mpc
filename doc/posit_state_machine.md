@@ -50,9 +50,13 @@ Running these machines needs little memory. Per in-flight request a node holds:
 - optionally **`pause_proposing_until`**, a deadline until which it declines to
   propose.
 
-Only `r` and `highest_seen_round` cross a round boundary (and a respawn, via
-`SignEntry.round`); the timeout clock, permit, buffer, and the proposer's
-ACCEPT/REJECT tally are reset or rebuilt each round.
+A round bump resets only the timeout clock and releases the permit. Everything
+else in the list carries across it: `r`, `highest_seen_round`, the buffer (which
+is why it exists — it waits for the node to reach `highest_seen_round`), and
+`pause_proposing_until`. A respawn keeps less: only `r` survives, via
+`SignEntry.round`; `highest_seen_round`, the buffer, and the pause all start
+empty again. The proposer's ACCEPT/REJECT tally is transient, rebuilt inside each
+`Propose sent`.
 
 Not per request: the mesh's active set (a shared `watch`) and the static
 membership, threshold, and entropy that election reads. Per node across requests:
@@ -90,6 +94,8 @@ deliberator's wait for `PROPOSE` are each given the time left in the round, whic
 is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
+
+
 
 ## 3. Inside Posit
 
