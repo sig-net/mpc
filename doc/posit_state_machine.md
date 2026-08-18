@@ -1,6 +1,6 @@
 # Posit state machine
 
-Represents current implementation from 
+Describes the current implementation in
 `chain-signatures/node/src/protocol/request/` (`task.rs`, `organize.rs`,
 `posit.rs`, `state.rs`) plus the generation tail in `protocol/signature.rs`. The
 cait-sith signing math and the presignature/triple pipelines are not depicted here.
@@ -42,7 +42,7 @@ Running these machines needs little memory. Per in-flight request a node holds:
 
 - **the current phase** — where it is in the diagrams above;
 - **`r`, the round** — the one real driver: it fixes the proposer and the round
-  timeout, and every node agrees on it without messaging (§6);
+  timeout, and every node agrees on it without messaging (§5);
 - **`highest_seen_round`** — the largest round any peer has mentioned, so one
   bump can jump straight to it;
 - **the round's timeout clock**, and, for a proposer, its concurrency permit;
@@ -58,8 +58,9 @@ is why it exists — it waits for the node to reach `highest_seen_round`), and
 empty again. The proposer's ACCEPT/REJECT tally is transient, rebuilt inside each
 `Propose sent`.
 
-Not per request: the mesh's active set (a shared `watch`) and the static
-membership, threshold, and entropy that election reads. Per node across requests:
+Not per request: the mesh's active set (a shared `watch`) and the governance
+membership and threshold; the third election input, entropy, comes with the
+request itself. Per node across requests:
 an LRU of finished `sign_id`s, so a late posit for a done request is dropped
 instead of starting a fresh machine.
 
@@ -89,8 +90,8 @@ mesh channel closes.
 
 The round timeout `round_timeout(r)` is already running while it waits, because
 it started when the round began. If the wait outlasts the round timeout, the
-states after it get no time at all: the proposer's presignature fetch and the
-deliberator's wait for `PROPOSE` are each given the time left in the round, which
+states after it get no time at all: the proposer's permit wait and presignature
+fetch and the deliberator's wait for `PROPOSE` are each given the time left in the round, which
 is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
@@ -110,7 +111,7 @@ stateDiagram-v2
     state "Organizing" as OrgIn
     state "<b>Propose sent</b>
     1. tally ACCEPT and REJECT
-    2. once enough ACCEPTs send START to accepters " as ProposeSent
+    2. once enough ACCEPTs send START to accepters" as ProposeSent
     state "Generating" as GenOut
 
     OrgIn --> ProposeSent: proposer, PROPOSE sent
@@ -147,13 +148,13 @@ stateDiagram-v2
     WaitingForStart --> GenOut: START with at least t participants
 
     WaitingForPropose --> OrgIn: no PROPOSE in time
-    WaitingForStart --> OrgIn: no START with at least t participants in max(remaining timeout, 2x ACCEPT_POSIT_TIMEOUT)
+    WaitingForStart --> OrgIn: START below t, or no START in max(remaining timeout, 2x ACCEPT_POSIT_TIMEOUT)
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut outside
 ```
 
-See later section for more info on timeout.
+Timeout details are in §6.
 
 `Propose received` is the only instantaneous state; the others can hold for the
 full round timeout.
@@ -238,7 +239,8 @@ generation-wide deadline, not a per-round one.
 
 ## 5. Bumping rounds
 
-A node with round r processes every incoming posit message from a peer with peer_round r' as follows. It first passes the same three-way test before any state above sees it.
+A node at round `r` runs every incoming posit message, carrying its sender's
+round `r'`, through a three-way test before any state above sees it.
 
 ```mermaid
 stateDiagram-v2
@@ -251,6 +253,15 @@ stateDiagram-v2
     Buffer --> [*]
     Process --> [*]
 ```
+
+Three rules make this work:
+
+1. A node never jumps forward to a peer's round on sight. If it did, any peer
+   could name a round that makes itself proposer and do so every time. It
+   finishes its own round first and only catches up at the next bump.
+2. A `StaleRound` REJECT carries the rejector's round, so the lagging node
+   catches up in one bump instead of one round at a time.
+3. A REJECT is never answered with a REJECT, otherwise two nodes ping-pong.
 
 Buffering keeps one slot per sender, and a message above `highest_seen_round`
 clears the whole buffer and raises `highest_seen_round` to `r'`; one below it is
@@ -274,15 +285,6 @@ the bad interleaving unlikely rather than impossible — START follows the node'
 own ACCEPT, which follows PROPOSE, so losing the START needs a PROPOSE delayed
 past a full round trip. The consequence is a lost round, not a wrong signature
 (§8.4).
-
-Three rules make this work:
-
-1. A node never jumps forward to a peer's round on sight. If it did, any peer
-   could name a round that makes itself proposer and do so every time. It
-   finishes its own round first and only catches up at the next bump.
-2. A `StaleRound` REJECT carries the rejector's round, so the lagging node
-   catches up in one bump instead of one round at a time.
-3. A REJECT is never answered with a REJECT, otherwise two nodes ping-pong.
 
 The two round-surviving variables, in detail:
 
@@ -326,11 +328,12 @@ because the round timeout ran out.
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
   only write path.
-- **Exactly one proposer per round**, because election reads only `r`,
-  membership and entropy — never the local active set. Filtering by local state
-  is what caused the permanent divergence in #907.
-- **`ACCEPT` is sent exactly once per round**, on the edge out of
-  `Propose received`.
+- **At most one proposer per round**: exactly one node is elected, though it
+  may decline (§8.6). Election reads only `r`, membership and entropy — never
+  the local active set. Filtering by local state is what caused the permanent
+  divergence in #907.
+- **`ACCEPT` is sent at most once per round**, on the edge out of
+  `Propose received`; a deliberator that never gets a `PROPOSE` sends nothing.
 - **The proposer's `START` set is a subset of the accepters**, so every node in
   `Generating` has agreed to the same presignature for the same round.
 - **`Generating` is not preempted by a new round**; a node only leaves it by
