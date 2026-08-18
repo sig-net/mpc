@@ -223,8 +223,13 @@ stateDiagram-v2
 `Recording` has no exit to a new round. Reconstruction failure returns `None`
 from `build_publish_state`, which skips the backlog marking, but the proposer's
 `rpc.publish` call sits outside that branch and runs anyway, and the task
-returns `Ok` either way. Only the proposer submits; every node marks the
-backlog.
+returns `Ok` either way.
+
+Only the proposer submits, though every node reconstructs the signature and
+marks the backlog. That asymmetry has no failover: if the proposer goes offline
+before its respond transaction lands, no other node takes over, even though
+each of them holds the complete signature. See
+[#1063](https://github.com/sig-net/mpc/issues/1063).
 
 The round timeout does not reach here, but generation is not untimed: every
 `recv` in the generator is wrapped in a deadline measured from when the
@@ -259,10 +264,16 @@ one, and the per-round buffer above. The design argument for why one slot
 suffices is that a sender never has two live messages for one round: to a
 proposer a peer sends only ACCEPT or REJECT, and to a deliberator the proposer
 sends PROPOSE and then START, where START is only ever sent to a node whose
-ACCEPT it already received. That argument is causal, not ordering-based, so it
-holds only while the transport does not deliver a sender's later message before
-its earlier one. Nothing in the buffers detects such a reordering; the loser is
-simply dropped.
+ACCEPT it already received.
+
+**That argument assumes per-sender delivery order, which this system does not
+have.** Posit messages travel over HTTP, so two messages from one sender can
+arrive in either order, and neither buffer detects it: the later arrival simply
+overwrites the earlier and the loser is dropped without a trace. Causality makes
+the bad interleaving unlikely rather than impossible — START follows the node's
+own ACCEPT, which follows PROPOSE, so losing the START needs a PROPOSE delayed
+past a full round trip. The consequence is a lost round, not a wrong signature
+(§8.4).
 
 Three rules make this work:
 
@@ -340,18 +351,20 @@ Stated as consequences of the machine, not as bug reports.
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
 3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
-4. **One slot per sender assumes the transport preserves per-sender order.**
-   Both buffers overwrite on arrival, including for an equal round, so if a
-   sender's `PROPOSE` and `START` for one round ever arrive out of order the
-   earlier-sent one wins and the other is lost, costing that node the round.
-   Causality normally prevents it — `START` follows the node's own `ACCEPT`,
-   which follows `PROPOSE` — so it needs a `PROPOSE` delayed past a full round
-   trip. It is unguarded rather than impossible, and it is the constraint to
-   revisit before sending more messages per sender per round (§3).
+4. **One slot per sender assumes an ordering HTTP does not provide.** Both
+   buffers overwrite on arrival, including for an equal round, so if a sender's
+   `PROPOSE` and `START` for one round arrive out of order the later arrival
+   wins and the other is dropped silently, costing that node the round.
+   Causality makes it unlikely, not impossible: `START` follows the node's own
+   `ACCEPT`, which follows `PROPOSE`, so it takes a `PROPOSE` delayed past a
+   full round trip. This is the constraint to revisit before sending more
+   messages per sender per round (§3).
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
-   spawner and indexer, not in this machine.
+   spawner and indexer, not in this machine — and publishing has no failover,
+   so a proposer that dies here stalls the request
+   ([#1063](https://github.com/sig-net/mpc/issues/1063)).
 6. **`pause_proposing_until` is a hidden mode.** For up to `generation_timeout`
    a node declines proposership and takes the deliberator edge out of
    `Waiting for participants`. Since election is by round, nobody else proposes
