@@ -36,6 +36,30 @@ round timeout, release the proposer's permit if held, re-enter `Organizing`.
 That is the only back edge, and no failure leaves the machine. The detail
 diagrams below say what triggers each one.
 
+### State each node keeps
+
+Running these machines needs little memory. Per in-flight request a node holds:
+
+- **the current phase** — where it is in the diagrams above;
+- **`r`, the round** — the one real driver: it fixes the proposer and the round
+  timeout, and every node agrees on it without messaging (§6);
+- **`highest_seen_round`** — the largest round any peer has mentioned, so one
+  bump can jump straight to it;
+- **the round's timeout clock**, and, for a proposer, its concurrency permit;
+- **a one-slot-per-sender buffer** of messages for a future round (§5);
+- optionally **`pause_proposing_until`**, a deadline until which it declines to
+  propose.
+
+Only `r` and `highest_seen_round` cross a round boundary (and a respawn, via
+`SignEntry.round`); the timeout clock, permit, buffer, and the proposer's
+ACCEPT/REJECT tally are reset or rebuilt each round. A node in `Generating` also
+holds the reserved presignature and the cait-sith generator.
+
+Not per request: the mesh's active set (a shared `watch`) and the static
+membership, threshold, and entropy that election reads. Per node across requests:
+an LRU of finished `sign_id`s, so a late posit for a done request is dropped
+instead of starting a fresh machine.
+
 ## 2. Inside Organizing
 
 ```mermaid
@@ -213,7 +237,7 @@ Buffered messages are replayed only in `Waiting for Propose`, and only once
 
 ## 6. State variables
 
-Two variables survive a round; everything else is rebuilt.
+The two round-surviving variables, in detail:
 
 | Variable | Lives in | Changes when |
 |---|---|---|
