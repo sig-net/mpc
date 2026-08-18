@@ -165,16 +165,14 @@ impl Checkpoints {
             return Ok(true);
         }
 
-        match self
-            .storage
-            .promote_pending(chain, checkpoint.block_height)
-            .await
-        {
+        let height = checkpoint.block_height;
+        match self.storage.promote_pending(chain, height).await {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(
                     ?chain,
                     ?digest,
+                    height,
                     "pending checkpoint disappeared before promotion"
                 );
                 return Ok(false);
@@ -183,12 +181,8 @@ impl Checkpoints {
                 return Err(CheckpointError::Storage { chain, source });
             }
         }
-        self.update_pending(chain, checkpoint.block_height).await;
-        tracing::info!(
-            ?chain,
-            height = checkpoint.block_height,
-            "consensus checkpoint confirmed"
-        );
+        self.update_pending(chain, height).await;
+        tracing::info!(?chain, ?digest, height, "consensus checkpoint confirmed");
         Ok(true)
     }
 
@@ -207,14 +201,24 @@ impl Checkpoints {
     /// The returned checkpoint is the resume point: the newest pending
     /// checkpoint (restoring the pre-crash in-flight state and skipping
     /// re-derivation of lower blocks), or the confirmed latest when no pending
-    /// checkpoint remains.
+    /// checkpoint remains. If loading pending checkpoints fails, this falls back
+    /// to the confirmed latest checkpoint.
     pub(super) async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         let latest = self.storage.load_latest(chain).await?;
         let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
-        let pending = self
-            .storage
-            .load_pending(chain)
-            .await?
+        let pending = match self.storage.load_pending(chain).await {
+            Ok(pending) => pending,
+            Err(err) => {
+                tracing::warn!(
+                    ?chain,
+                    %err,
+                    "failed to load pending checkpoints; falling back to confirmed checkpoint"
+                );
+                return Ok(latest);
+            }
+        };
+
+        let pending = pending
             .into_iter()
             .filter(|checkpoint| {
                 latest_height.is_none_or(|height| checkpoint.block_height > height)
@@ -627,5 +631,19 @@ mod tests {
                 .unwrap(),
             Some(checkpoint)
         );
+    }
+
+    #[tokio::test]
+    async fn load_local_falls_back_to_latest_when_pending_storage_fails() {
+        let storage = CheckpointStorage::failing_pending();
+        let confirmed = checkpoint(2);
+        storage.persist(&confirmed).await.unwrap();
+
+        let checkpoints = Checkpoints::new(storage);
+        assert_eq!(
+            checkpoints.load_local(confirmed.chain).await.unwrap(),
+            Some(confirmed.clone())
+        );
+        assert_eq!(checkpoints.count(confirmed.chain).await, 0);
     }
 }

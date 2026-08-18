@@ -20,6 +20,11 @@ pub enum CheckpointStorage {
     /// A storage that fails every operation, used to exercise error paths in tests.
     #[cfg(test)]
     Failing,
+    /// A storage that returns the latest checkpoint but fails pending operations.
+    #[cfg(test)]
+    FailingPending {
+        latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
+    },
 }
 
 impl Default for CheckpointStorage {
@@ -41,6 +46,13 @@ impl CheckpointStorage {
         Self::Failing
     }
 
+    #[cfg(test)]
+    pub fn failing_pending() -> Self {
+        Self::FailingPending {
+            latest: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     fn checkpoint_key(&self, chain: Chain) -> String {
         match self {
             CheckpointStorage::Redis(_, account_id) => {
@@ -51,7 +63,9 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:latest:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:latest:{chain}"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                format!("checkpoint:latest:{chain}")
+            }
         }
     }
 
@@ -65,7 +79,9 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:pending:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:pending:{chain}"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                format!("checkpoint:pending:{chain}")
+            }
         }
     }
 
@@ -79,7 +95,9 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:pending_digest:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:pending_digest:{chain}"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                format!("checkpoint:pending_digest:{chain}")
+            }
         }
     }
 
@@ -106,6 +124,13 @@ impl CheckpointStorage {
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::FailingPending { latest, .. } => {
+                latest
+                    .write()
+                    .await
+                    .insert(checkpoint.chain, checkpoint.clone());
+            }
         }
         Ok(())
     }
@@ -156,7 +181,9 @@ impl CheckpointStorage {
                 checkpoints.insert(checkpoint.block_height, checkpoint.clone());
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                anyhow::bail!("failing storage")
+            }
         }
         Ok(())
     }
@@ -187,7 +214,9 @@ impl CheckpointStorage {
                 .map(|checkpoints| checkpoints.values().cloned().collect())
                 .unwrap_or_default()),
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                anyhow::bail!("failing storage")
+            }
         }
     }
 
@@ -236,7 +265,9 @@ impl CheckpointStorage {
                 }))
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                anyhow::bail!("failing storage")
+            }
         }
     }
 
@@ -297,7 +328,9 @@ impl CheckpointStorage {
                 Ok(true)
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing | CheckpointStorage::FailingPending { .. } => {
+                anyhow::bail!("failing storage")
+            }
         }
     }
 
@@ -333,6 +366,13 @@ impl CheckpointStorage {
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::FailingPending { latest, .. } => {
+                latest
+                    .write()
+                    .await
+                    .insert(checkpoint.chain, checkpoint.clone());
+            }
         }
         Ok(())
     }
@@ -359,6 +399,10 @@ impl CheckpointStorage {
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::FailingPending { latest, .. } => {
+                Ok(latest.read().await.get(&chain).cloned())
+            }
         }
     }
 }
