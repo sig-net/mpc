@@ -1,0 +1,50 @@
+# The midnight publisher's gate. Its deterministic suite runs the real circuit and
+# local HTTP boundary without a Midnight stack; the live end-to-end path (boot the
+# dockerized stack, deploy a singleton, balance/prove/submit, confirm on chain) is
+# deliberately NOT automated here. `chain-midnight` is in the path filter because
+# the Rust client's differential test reads this package's committed fixture.
+name: Midnight Publisher TS
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
+  pull_request:
+  merge_group:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-publisher-ts
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint TypeScript
+        run: npm run lint
+
+      - name: Typecheck TypeScript
+        run: npm run typecheck
+
+      # `npm test` runs the package's pretest build because the child-process
+      # tests execute the emitted `dist/main.js` entry point.
+      - name: Build and test TypeScript publisher
+        run: npm test
