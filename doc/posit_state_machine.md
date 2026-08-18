@@ -52,8 +52,7 @@ Running these machines needs little memory. Per in-flight request a node holds:
 
 Only `r` and `highest_seen_round` cross a round boundary (and a respawn, via
 `SignEntry.round`); the timeout clock, permit, buffer, and the proposer's
-ACCEPT/REJECT tally are reset or rebuilt each round. A node in `Generating` also
-holds the reserved presignature and the cait-sith generator.
+ACCEPT/REJECT tally are reset or rebuilt each round.
 
 Not per request: the mesh's active set (a shared `watch`) and the static
 membership, threshold, and entropy that election reads. Per node across requests:
