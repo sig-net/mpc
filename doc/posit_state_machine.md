@@ -74,26 +74,44 @@ round, with a different proposer.
 
 ## 3. Inside Posit
 
+Posit is two independent machines, one per role, and a node runs exactly one of
+them for round `r`. Which one is decided by `is_proposer`, a pure function of `r`
+(§6), so the two never interleave: the proposer never waits for `START`, the
+deliberator never tallies votes. Each starts from `Organizing`, and each ends
+either at `Generating` (agreement reached) or back at `Organizing` (a new round).
+
+### 3a. Proposer
+
+```mermaid
+stateDiagram-v2
+    state "<b>Propose sent</b><br/>1. tally ACCEPT and REJECT<br/>2. send START to the accepters once enough ACCEPTs" as ProposeSent
+    state "Organizing" as OrgIn
+    state "Generating" as GenOut
+
+    OrgIn --> ProposeSent: proposer, PROPOSE broadcast
+    ProposeSent --> GenOut: enough ACCEPTs, START broadcast
+    ProposeSent --> OrgIn: too many REJECTs, or timeout
+
+    classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
+    class OrgIn,GenOut outside
+```
+
+### 3b. Deliberator
+
 ```mermaid
 stateDiagram-v2
     state "<b>Waiting for Propose</b><br/>1. wait for PROPOSE from the elected proposer<br/>2. reject any other proposer as InvalidRequest" as WaitingForPropose
     state "<b>Propose received</b><br/>1. check I hold the proposed presignature<br/>2. send ACCEPT to the proposer" as ProposeReceived
     state "<b>Waiting for Start</b><br/>1. ACCEPT already sent, stays binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>2. wait for START from the proposer" as WaitingForStart
-    state "<b>Propose sent</b><br/>1. tally ACCEPT and REJECT<br/>2. send START to the accepters once enough ACCEPTs" as ProposeSent
     state "Organizing" as OrgIn
     state "Generating" as GenOut
 
-    OrgIn --> ProposeSent: I am the proposer
-    OrgIn --> WaitingForPropose: I am a deliberator
-
+    OrgIn --> WaitingForPropose: deliberator
     WaitingForPropose --> ProposeReceived: PROPOSE from the elected proposer
     ProposeReceived --> WaitingForStart: ACCEPT sent
     ProposeReceived --> WaitingForPropose: presignature missing, REJECT MissingArtifact sent
-
-    ProposeSent --> GenOut: enough ACCEPTs, START broadcast
     WaitingForStart --> GenOut: START with at least t participants
 
-    ProposeSent --> OrgIn: too many REJECTs, or timeout
     WaitingForPropose --> OrgIn: no PROPOSE in time
     WaitingForStart --> OrgIn: no START, or START too small
 
@@ -101,9 +119,8 @@ stateDiagram-v2
     class OrgIn,GenOut outside
 ```
 
-The two lanes never meet. A node takes one or the other per round, decided by
-`is_proposer`, which is a pure function of `r`. `Propose received` is the only
-instantaneous state; the other three can hold for the full round timeout.
+`Propose received` is the only instantaneous state; the others can hold for the
+full round timeout.
 
 The edge back from `Propose received` to `Waiting for Propose` is not an abort:
 the round is not bumped. A deliberator that lacks the presignature sends
