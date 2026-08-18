@@ -98,8 +98,8 @@ round, with a different proposer.
 ## 3. Inside Posit
 
 Posit is two independent machines, one per role; a node runs exactly one for
-round `r`, chosen by `is_proposer` (the round's elected proposer — §6 — unless it
-is throttling, §9.6). 
+round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5), unless it
+is throttling (§8.6). 
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
@@ -108,8 +108,8 @@ Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 ```mermaid
 stateDiagram-v2
     state "Organizing" as OrgIn
-    state "<b>Propose sent</b><br/>
-    1. tally ACCEPT and REJECT<br/>
+    state "<b>Propose sent</b>
+    1. tally ACCEPT and REJECT
     2. once enough ACCEPTs send START to accepters " as ProposeSent
     state "Generating" as GenOut
 
@@ -126,23 +126,34 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     state "Organizing" as OrgIn
-    state "<b>Waiting for Propose</b><br/>1. wait for PROPOSE from the elected proposer<br/>2. reject any other proposer as InvalidRequest" as WaitingForPropose
-    state "<b>Propose received</b><br/>1. check I hold the proposed presignature<br/>2. send ACCEPT to the proposer" as ProposeReceived
-    state "<b>Waiting for Start</b><br/>1. ACCEPT already sent, stays binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>2. wait for START from the proposer" as WaitingForStart
+    
+    state "<b>Waiting for Propose</b>
+    1. wait for PROPOSE from the elected proposer
+    2. reject any other proposer for r" as WaitingForPropose
+    
+    state "<b>Propose received</b>
+    1. check I hold proposed presignature
+    2. send ACCEPT to the proposer" as ProposeReceived
+    
+    state "<b>Waiting for Start</b>
+    1. wait for START from the proposer" as WaitingForStart
+    
     state "Generating" as GenOut
 
     OrgIn --> WaitingForPropose: deliberator
-    WaitingForPropose --> ProposeReceived: PROPOSE from the elected proposer
+    WaitingForPropose --> ProposeReceived: PROPOSE from elected proposer
     ProposeReceived --> WaitingForStart: ACCEPT sent
     ProposeReceived --> WaitingForPropose: presignature missing, REJECT MissingArtifact sent
     WaitingForStart --> GenOut: START with at least t participants
 
     WaitingForPropose --> OrgIn: no PROPOSE in time
-    WaitingForStart --> OrgIn: no START, or START too small
+    WaitingForStart --> OrgIn: no START with at least t participants in max(remaining timeout, 2x ACCEPT_POSIT_TIMEOUT)
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut outside
 ```
+
+See later section for more info on timeout.
 
 `Propose received` is the only instantaneous state; the others can hold for the
 full round timeout.
@@ -181,6 +192,10 @@ wait for a `START` that never comes. And the excluded member still cannot tell
 needs. The narrow addressing is a symptom; the missing round-outcome signal is
 the cause.
 
+Open question: whether to send every message to every member, rejects included.
+Doing so needs the one-slot-per-sender buffers (§5) revisited first, since more
+messages per sender per round is exactly what they cannot represent.
+
 ## 4. Inside Generating
 
 ```mermaid
@@ -211,22 +226,43 @@ from `build_publish_state`, which skips the backlog marking, but the proposer's
 returns `Ok` either way. Only the proposer submits; every node marks the
 backlog.
 
-## 5. The round filter
+The round timeout does not reach here, but generation is not untimed: every
+`recv` in the generator is wrapped in a deadline measured from when the
+generator was built, and expiry aborts the attempt into a new round. That is one
+generation-wide deadline, not a per-round one.
 
-Every incoming posit message passes the same three-way test before any state
-above sees it:
+## 5. Bumping rounds
+
+A node with round r processes every incoming posit message from a peer with peer_round r' as follows. It first passes the same three-way test before any state above sees it.
 
 ```mermaid
 stateDiagram-v2
     state peer_round <<choice>>
     [*] --> peer_round
-    peer_round --> Reject: peer_round below r<br/>reply REJECT StaleRound carrying r
-    peer_round --> Buffer: peer_round above r<br/>keep one message per sender
-    peer_round --> Process: peer_round equals r
+    peer_round --> Reject: peer_round r' < r<br/>reply REJECT StaleRound(r)
+    peer_round --> Buffer: peer_round r' > r<br/>keep one message per sender
+    peer_round --> Process: peer_round r' = r
     Reject --> [*]
     Buffer --> [*]
     Process --> [*]
 ```
+
+Buffering keeps one slot per sender, and a message above `highest_seen_round`
+clears the whole buffer and raises `highest_seen_round` to `r'`; one below it is
+dropped. On replay the node takes senders in arbitrary order, and only once
+`highest_seen_round == r`, in `Waiting for Propose`.
+
+One slot per sender means a second message from the same sender for the same
+round overwrites the first, in arrival order. Two layers do this: the ingress
+`PositMailbox`, which overwrites whenever the new round is `>=` the buffered
+one, and the per-round buffer above. The design argument for why one slot
+suffices is that a sender never has two live messages for one round: to a
+proposer a peer sends only ACCEPT or REJECT, and to a deliberator the proposer
+sends PROPOSE and then START, where START is only ever sent to a node whose
+ACCEPT it already received. That argument is causal, not ordering-based, so it
+holds only while the transport does not deliver a sender's later message before
+its earlier one. Nothing in the buffers detects such a reordering; the loser is
+simply dropped.
 
 Three rules make this work:
 
@@ -237,11 +273,6 @@ Three rules make this work:
    catches up in one bump instead of one round at a time.
 3. A REJECT is never answered with a REJECT, otherwise two nodes ping-pong.
 
-Buffered messages are replayed only in `Waiting for Propose`, and only once
-`highest_seen_round == r`.
-
-## 6. State variables
-
 The two round-surviving variables, in detail:
 
 | Variable | Lives in | Changes when |
@@ -249,22 +280,22 @@ The two round-surviving variables, in detail:
 | `r` — round | `SignState.round`, mirrored into `SignEntry.round` (`Arc<AtomicUsize>`) | a new round: `r := max(r+1, highest_seen_round)`. Never decreases, and survives a task respawn. |
 | `highest_seen_round` | `SignState` | a peer message or a `StaleRound` reject reports a round above it. Raising it also clears the buffer. |
 
-Derived from `r` alone, with no messaging:
+Both the proposer and the round length follow from `r` alone, with no messaging,
+which is why agreeing on `r` is all the nodes need:
 
 - proposer of the round: `participants[(entropy[0] + r) % n]` (`organize.rs`)
-- round timeout: `round_timeout(r)` (`mod.rs`). Round 0 gets 20s; round 1 starts
-  at a 2s floor and each later round grows 1.15x up to a 600s ceiling. Short
-  early rounds rotate quickly past dead proposers, long later rounds outlast
-  the skew between nodes that indexed the request at different times.
+- round length: `round_timeout(r)` (§6)
 
-So all nodes agree on who proposes and how long the round lasts as soon as they
-agree on `r`. Rounds are the only synchronisation the protocol has.
-
-## 7. The round timeout
+## 6. The round timeout
 
 `round_timeout(r)` starts when the round begins: at the round bump
 (`bump_round`), or at task spawn for round 0. It starts before `t` participants
 are known, and every state shares whatever is left of it.
+
+Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
+up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
+long later rounds outlast the skew between nodes that indexed the request at
+different times.
 
 | State | Time limit |
 |---|---|
@@ -279,7 +310,7 @@ are known, and every state shares whatever is left of it.
 keeps an `ACCEPT` binding: a node that promised to participate cannot leave just
 because the round timeout ran out.
 
-## 8. Invariants worth checking
+## 7. Invariants
 
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
@@ -294,7 +325,7 @@ because the round timeout ran out.
 - **`Generating` is not preempted by a new round**; a node only leaves it by
   finishing or failing.
 
-## 9. Observations the model surfaces
+## 8. Observations the model surfaces
 
 Stated as consequences of the machine, not as bug reports.
 
@@ -309,11 +340,14 @@ Stated as consequences of the machine, not as bug reports.
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
 3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
-4. **The buffer holds one message per sender.** If a sender's later message for
-   the same future round overwrites its `PROPOSE`, the deliberator reaches that
-   round with nothing to act on. Today only the proposer sends both, and it
-   sends `START` only to nodes that accepted (which a lagging node cannot have
-   done), so this is currently unreachable rather than guarded against.
+4. **One slot per sender assumes the transport preserves per-sender order.**
+   Both buffers overwrite on arrival, including for an equal round, so if a
+   sender's `PROPOSE` and `START` for one round ever arrive out of order the
+   earlier-sent one wins and the other is lost, costing that node the round.
+   Causality normally prevents it — `START` follows the node's own `ACCEPT`,
+   which follows `PROPOSE` — so it needs a `PROPOSE` delayed past a full round
+   trip. It is unguarded rather than impossible, and it is the constraint to
+   revisit before sending more messages per sender per round (§3).
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
@@ -326,12 +360,3 @@ Stated as consequences of the machine, not as bug reports.
 7. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
 
-## 10. Files
-
-- `request/task.rs` — `SignPhase`, the driver loop
-- `request/organize.rs` — election, permit, presignature reservation, `PROPOSE`
-- `request/posit.rs` — `PROPOSE`/`ACCEPT`/`START`, the round filter
-- `request/state.rs` — round, timeout, buffering
-- `protocol/signature.rs` — the generation tail and publish
-- `protocol/posit.rs` — shared vote types; the `Posits` map there is used by the
-  triple and presignature protocols, signing uses `SinglePositCounter`
