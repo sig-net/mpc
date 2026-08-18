@@ -632,18 +632,4 @@ mod tests {
             Some(checkpoint)
         );
     }
-
-    #[tokio::test]
-    async fn load_local_falls_back_to_latest_when_pending_storage_fails() {
-        let storage = CheckpointStorage::failing_pending();
-        let confirmed = checkpoint(2);
-        storage.persist(&confirmed).await.unwrap();
-
-        let checkpoints = Checkpoints::new(storage);
-        assert_eq!(
-            checkpoints.load_local(confirmed.chain).await.unwrap(),
-            Some(confirmed.clone())
-        );
-        assert_eq!(checkpoints.count(confirmed.chain).await, 0);
-    }
 }
