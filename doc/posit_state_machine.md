@@ -35,15 +35,15 @@ the machine. The three detail diagrams below say what triggers each one.
 
 ```mermaid
 stateDiagram-v2
-    state "Waiting for participants<br/>Pre - round r fixed, budget round_timeout(r) already ticking<br/>Action - wait for t active peers, then elect the proposer from r<br/>Post - t active known, role decided" as WaitingForParticipants
-    state "Reserving<br/>Pre - I am the round's proposer<br/>Action - take one of 4 permits, reserve a presignature whose holders meet the active set at t<br/>Post - Propose broadcast to that set" as Reserving
+    state "Waiting for participants<br/>Pre: round_timeout(r) started ticking<br/>Action: wait for t active peers<br/>Post: t active, role for r decided" as WaitingForParticipants
+    state "Reserving<br/>Pre: I am proposer<br/>Action: take one of 4 permits, reserve a presignature with at least t active holders<br/>Post: send PROPOSE to holders" as Reserving
     state "Posit" as PositOut
     state "New round" as AbortOut
 
     [*] --> WaitingForParticipants
     WaitingForParticipants --> Reserving: I am the proposer
     WaitingForParticipants --> PositOut: I am a deliberator
-    Reserving --> PositOut: Propose broadcast
+    Reserving --> PositOut: PROPOSE broadcast
 
     WaitingForParticipants --> AbortOut: mesh channel closed
     Reserving --> AbortOut: no permit, or no presignature, within the budget
@@ -52,20 +52,30 @@ stateDiagram-v2
     class PositOut,AbortOut outside
 ```
 
-`Waiting for participants` is the one state in the whole machine that consumes
-budget without checking it: it waits on `mesh_state.changed()` with no timeout
-at all. If the mesh gate holds longer than `round_timeout(r)`, the budget is
-already zero when it returns, and the round that follows fails on its first
-await without a message being sent.
+This state cannot time out. It waits on `mesh_state.changed()` with no timeout
+wrapped around it, and the only way out other than `t` peers becoming active is
+the mesh channel closing.
+
+Round `r`'s budget keeps running throughout that wait. If the wait lasts longer
+than `round_timeout(r)`, then `budget.remaining()` is already zero at the moment
+`t` peers become active, and the *remaining states of round `r`* get no time at
+all: the proposer's presignature fetch and the deliberator's wait for `Propose`
+are each wrapped in a `timeout(remaining, ...)` that is now `timeout(0, ...)`,
+so both fail on their first poll. Round `r` therefore ends without the proposer
+ever broadcasting `Propose`.
+
+Bumping to `r+1` restarts the clock, so the cost is one wasted round rather than
+a permanent stall. Every node also rotates to a different proposer while paying
+it.
 
 ## 3. Inside Posit
 
 ```mermaid
 stateDiagram-v2
-    state "Waiting for Propose<br/>Pre - I am a deliberator this round<br/>Action - wait for Propose from the elected proposer, answer any other proposer with InvalidRequest<br/>Post - Propose from the elected proposer" as WaitingForPropose
-    state "Propose received<br/>Pre - Propose from the elected proposer for round r<br/>Action - check that I hold the proposed presignature<br/>Post - Accept sent to the proposer" as ProposeReceived
-    state "Waiting for Start<br/>Pre - Accept sent, binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>Action - wait for the proposer to fix the set<br/>Post - Start with at least t participants received" as WaitingForStart
-    state "Propose sent<br/>Pre - I am the round's proposer, Propose already broadcast<br/>Action - tally Accept and RejectWithReason<br/>Post - Start broadcast to the accepters" as ProposeSent
+    state "Waiting for Propose<br/>Pre: I am deliberator<br/>Action: wait for PROPOSE from the elected proposer, reject any other proposer as InvalidRequest<br/>Post: PROPOSE from the elected proposer received" as WaitingForPropose
+    state "Propose received<br/>Pre: PROPOSE from the elected proposer for round r<br/>Action: check that I hold the proposed presignature<br/>Post: send ACCEPT to the proposer" as ProposeReceived
+    state "Waiting for Start<br/>Pre: ACCEPT sent, binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>Action: wait for the proposer to fix the set<br/>Post: START with at least t participants received" as WaitingForStart
+    state "Propose sent<br/>Pre: I am proposer, PROPOSE broadcast<br/>Action: tally ACCEPT and REJECT<br/>Post: send START to the accepters" as ProposeSent
     state "Organizing" as OrgIn
     state "Generating" as GenOut
     state "New round" as AbortOut
@@ -73,16 +83,16 @@ stateDiagram-v2
     OrgIn --> ProposeSent: I am the proposer
     OrgIn --> WaitingForPropose: I am a deliberator
 
-    WaitingForPropose --> ProposeReceived: Propose from the elected proposer
-    ProposeReceived --> WaitingForStart: Accept sent
-    ProposeReceived --> WaitingForPropose: presignature missing, MissingArtifact sent
+    WaitingForPropose --> ProposeReceived: PROPOSE from the elected proposer
+    ProposeReceived --> WaitingForStart: ACCEPT sent
+    ProposeReceived --> WaitingForPropose: presignature missing, REJECT MissingArtifact sent
 
-    ProposeSent --> GenOut: enough Accepts, Start broadcast
-    WaitingForStart --> GenOut: Start with at least t participants
+    ProposeSent --> GenOut: enough ACCEPTs, START broadcast
+    WaitingForStart --> GenOut: START with at least t participants
 
-    ProposeSent --> AbortOut: too many Rejects, or deadline
-    WaitingForPropose --> AbortOut: no Propose within the budget
-    WaitingForStart --> AbortOut: no Start in time, or Start too small
+    ProposeSent --> AbortOut: too many REJECTs, or deadline
+    WaitingForPropose --> AbortOut: no PROPOSE within the budget
+    WaitingForStart --> AbortOut: no START in time, or START too small
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut,AbortOut outside
@@ -97,18 +107,49 @@ the round is not bumped. A deliberator that lacks the presignature sends
 `MissingArtifact` and resumes waiting for a `Propose` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
 
+### Who each message goes to
+
+None of the four messages is a cluster-wide broadcast.
+
+| Message | Recipients |
+|---|---|
+| `PROPOSE` | the holders of the reserved presignature intersected with the active set, not all members |
+| `ACCEPT` | the proposer only |
+| `START` | the accepters only, a subset of the `PROPOSE` set |
+| `REJECT` | whoever sent the message being rejected |
+
+A member outside the `PROPOSE` set is never told that round `r` is running. It
+sits in `Waiting for Propose` until its budget expires and bumps to `r+1`,
+where it may be elected proposer and reserve a *second* presignature for a
+request that is already being signed. That is the waste the `pause_proposing_until`
+flag exists to limit after the fact.
+
+So yes, sending `PROPOSE` to every member would be an improvement, and a cheaper
+one than it looks: the tally is keyed on `SinglePositCounter::participants`, and
+`process_action` already drops anything from a sender outside that set, so extra
+replies could not move `enough_rejects` or `meets_totality`. The message would
+be a notification for the excluded, not a vote.
+
+Two caveats before doing it. A member that happens to hold the presignature but
+was not in the active set at reservation time would reply `ACCEPT`, not be
+counted, and then wait for a `START` it will never receive, so it gains nothing
+over silence. And the excluded member still has no way to tell "round `r`
+succeeded without me" from "round `r` is still running", which is the actual
+question it needs answered; a `PROPOSE` it cannot act on does not answer it. The
+narrow addressing is a symptom, the missing round-outcome signal is the cause.
+
 ## 4. Inside Generating
 
 ```mermaid
 stateDiagram-v2
-    state "Acquiring<br/>Pre - participant set fixed by Start<br/>Action - the proposer commits its reservation, a deliberator fetches the presignature from storage<br/>Post - presignature in hand, generator built" as Acquiring
-    state "Signing<br/>Pre - presignature in hand<br/>Action - poke cait-sith, relay SendMany and SendPrivate, answer late Propose with AlreadyGenerating<br/>Post - Action Return carrying big_r and s" as Signing
-    state "Recording<br/>Pre - signature shares combined<br/>Action - reconstruct against the derived key, mark the request publishing in the backlog, the proposer submits it<br/>Post - request complete" as Recording
+    state "Acquiring<br/>Pre: participant set fixed by START<br/>Action: proposer commits its reservation, deliberator fetches the presignature from storage<br/>Post: presignature in hand, generator built" as Acquiring
+    state "Signing<br/>Pre: presignature in hand<br/>Action: poke cait-sith, relay SendMany and SendPrivate, answer late PROPOSE with REJECT AlreadyGenerating<br/>Post: Action Return carrying big_r and s" as Signing
+    state "Recording<br/>Pre: signature shares combined<br/>Action: reconstruct against the derived key, mark the request publishing in the backlog, proposer submits it<br/>Post: request complete" as Recording
     state "Posit" as PositIn
     state "Done" as DoneOut
     state "New round" as AbortOut
 
-    PositIn --> Acquiring: Start agreed
+    PositIn --> Acquiring: START agreed
 
     Acquiring --> Signing: presignature in hand
     Signing --> Recording: Action Return
@@ -136,7 +177,7 @@ above sees it:
 stateDiagram-v2
     state peer_round <<choice>>
     [*] --> peer_round
-    peer_round --> Reject: peer_round below r<br/>reply StaleRound carrying r
+    peer_round --> Reject: peer_round below r<br/>reply REJECT StaleRound carrying r
     peer_round --> Buffer: peer_round above r<br/>keep one message per sender
     peer_round --> Process: peer_round equals r
     Reject --> [*]
