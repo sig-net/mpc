@@ -68,7 +68,7 @@ instead of starting a fresh machine.
 ```mermaid
 stateDiagram-v2
     state "<b>Waiting for participants</b><br/>1. round timeout starts ticking<br/>2. wait for t active peers<br/>3. determine role" as WaitingForParticipants
-    state "<b>Reserving</b><br/>1. take one of 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to holders" as Reserving
+    state "<b>Reserving</b><br/>1. take one of 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
     state "Posit" as PositOut
 
     [*] --> WaitingForParticipants
@@ -95,11 +95,14 @@ is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
 
+TODO: what about sending PROPOSE to all peers or all active holders
+
 ## 3. Inside Posit
 
 Posit is two independent machines, one per role; a node runs exactly one for
-round `r`, chosen by `is_proposer` (a pure function of `r`, §6). They never
-interleave: the proposer never waits for `START`, the deliberator never tallies.
+round `r`, chosen by `is_proposer` (the round's elected proposer — §6 — unless it
+is throttling, §9.6). They never interleave: the proposer never waits for
+`START`, the deliberator never tallies.
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
