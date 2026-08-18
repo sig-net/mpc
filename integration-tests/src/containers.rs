@@ -27,7 +27,7 @@ use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
@@ -178,6 +178,7 @@ impl Node {
             sol: sol_args,
             hydration: hydration_args,
             canton: canton_args,
+            midnight: MidnightArgs::from_config(None),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),

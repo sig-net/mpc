@@ -428,9 +428,8 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::primitives::Bytes>> {
-        // TODO: trace_transaction_output can be slow, consider a longer timeout than the configured RPC timeout if necessary
         retry_rpc_gated!(
-            self.rpc.timeout,
+            self.rpc.trace_timeout,
             self.rpc.retry,
             self.shared_backoff,
             "trace_transaction_output",
@@ -446,13 +445,6 @@ impl EthereumClient {
                 }
             }
         )
-    }
-
-    pub async fn get_latest_block_number(&self) -> anyhow::Result<Option<u64>> {
-        Ok(self
-            .get_block(BlockId::Number(BlockNumberOrTag::Latest))
-            .await?
-            .map(|block| block.header.number))
     }
 
     pub fn clamp_oldest_supported(

@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alloy_sol_types::SolValue;
+use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
@@ -48,7 +48,7 @@ use solana_transaction_status::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::SolanaCatchupBlock;
+use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::{SolConfig, SolanaClient};
 
 const CPI_EVENT_HINTS: &[&str] = &[
@@ -106,12 +106,88 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
     > {
         let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
+            tracing::info!(anchor_slot = anchor_height, "solana catchup not required");
             return Ok(Box::pin(stream::empty()));
         };
 
-        let pages =
+        tracing::info!(
+            anchor_slot = anchor_height,
+            start_slot,
+            end_slot,
+            "solana catchup started"
+        );
+
+        let newest_first_pages =
             Self::paginate_slots(self.client.clone(), self.program_id, start_slot, end_slot);
-        Ok(Self::fetch_blocks_for_pages(self.client.clone(), pages))
+        let ordered_pages = Self::order_and_chunk_pages(
+            newest_first_pages,
+            start_slot,
+            end_slot,
+            CATCHUP_PAGE_SIZE,
+        );
+
+        Ok(Self::fetch_blocks_for_pages(
+            self.client.clone(),
+            ordered_pages,
+        ))
+    }
+
+    /// Collect newest-first signature pages and emit globally ascending,
+    /// deduplicated slot chunks. Keeping this as a lazy stream lets the caller
+    /// cancel catchup while signature pagination is still in progress.
+    fn order_and_chunk_pages(
+        pages: impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static,
+        start_slot: u64,
+        end_slot: u64,
+        chunk_size: usize,
+    ) -> impl Stream<Item = anyhow::Result<BTreeSet<u64>>> + Send + 'static {
+        stream::once(async move {
+            futures_util::pin_mut!(pages);
+
+            let started_at = Instant::now();
+            let mut signature_pages = 0usize;
+            let mut ordered_slots = BTreeSet::new();
+            while let Some(page) = pages.next().await {
+                signature_pages += 1;
+                ordered_slots.extend(page?);
+            }
+
+            tracing::info!(
+                start_slot,
+                end_slot,
+                signature_pages,
+                unique_slots = ordered_slots.len(),
+                elapsed = ?started_at.elapsed(),
+                "solana catchup signature pagination complete"
+            );
+
+            Ok::<_, anyhow::Error>(Self::chunk_slots(ordered_slots, chunk_size))
+        })
+        .flat_map(|result| {
+            let chunks: Vec<anyhow::Result<BTreeSet<u64>>> = match result {
+                Ok(chunks) => chunks.into_iter().map(Ok).collect(),
+                Err(err) => vec![Err(err)],
+            };
+            stream::iter(chunks)
+        })
+    }
+
+    /// Split globally ordered slots into bounded, ascending chunks. Collecting
+    /// all slot numbers first is necessary because Solana signature pages are
+    /// returned newest-to-oldest, while request lifecycle events must be
+    /// replayed oldest-to-newest.
+    fn chunk_slots(slots: BTreeSet<u64>, chunk_size: usize) -> Vec<BTreeSet<u64>> {
+        debug_assert!(chunk_size > 0, "catchup slot chunk size must be positive");
+
+        slots.into_iter().fold(Vec::new(), |mut chunks, slot| {
+            match chunks.last_mut() {
+                Some(chunk) if chunk.len() < chunk_size => {
+                    chunk.insert(slot);
+                }
+                _ => chunks.push(BTreeSet::from([slot])),
+            }
+            chunks
+        })
     }
 
     /// Range of slots that still need to be caught up, inclusive on both ends.
@@ -208,6 +284,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                     Err(e) => Some(Err(e)),
                 }
             })
+            // This must remain sequential and order-preserving: lifecycle
+            // events in older slots must reach the backlog before newer ones.
+            // Using buffer_unordered here would undo global slot ordering.
             .then(move |res| {
                 let client = client.clone();
                 async move {
@@ -220,7 +299,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                             (s, block)
                         })
                         .collect();
-                    Ok(items)
+                    Ok::<_, anyhow::Error>(items)
                 }
             })
             .map(|res| match res {
@@ -359,6 +438,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             anchor = anchor_rx => anchor.context("solana live subscription ended before resolving anchor slot")?,
         };
 
+        let catchup_started_at = Instant::now();
         let mut catchup_iter = self.catchup_blocks(anchor).await?;
         loop {
             let item = tokio::select! {
@@ -371,6 +451,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
                 .await;
         }
+
+        tracing::info!(
+            anchor_slot = anchor,
+            elapsed = ?catchup_started_at.elapsed(),
+            "solana catchup complete"
+        );
 
         events_tx
             .send(ChainEvent::CatchupCompleted)
@@ -1094,6 +1180,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use anchor_lang::AnchorSerialize;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1188,6 +1275,78 @@ mod tests {
         })
     }
 
+    fn cpi_event_instruction<T: AnchorSerialize + Discriminator>(event: &T) -> String {
+        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
+        data.extend_from_slice(T::DISCRIMINATOR);
+        event.serialize(&mut data).unwrap();
+        solana_sdk::bs58::encode(data).into_string()
+    }
+
+    fn event_transaction(
+        program_id: Pubkey,
+        signature: Signature,
+        instruction: &str,
+        event_data: String,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "meta": {
+                "err": null,
+                "status": { "Ok": null },
+                "fee": 5_000,
+                "preBalances": [],
+                "postBalances": [],
+                "innerInstructions": [{
+                    "index": 0,
+                    "instructions": [{
+                        "accounts": [],
+                        "data": event_data,
+                        "programId": program_id.to_string(),
+                        "stackHeight": 2
+                    }]
+                }],
+                "logMessages": [
+                    format!("Program {program_id} invoke [1]"),
+                    format!("Program log: Instruction: {instruction}"),
+                    format!("Program {program_id} success")
+                ],
+                "preTokenBalances": [],
+                "postTokenBalances": [],
+                "rewards": null,
+                "loadedAddresses": { "readonly": [], "writable": [] },
+                "computeUnitsConsumed": 0
+            },
+            "transaction": {
+                "message": {
+                    "accountKeys": [{
+                        "pubkey": program_id.to_string(),
+                        "signer": false,
+                        "source": "transaction",
+                        "writable": false
+                    }],
+                    "instructions": [],
+                    "recentBlockhash": "11111111111111111111111111111111"
+                },
+                "signatures": [signature.to_string()]
+            },
+            "version": "legacy"
+        })
+    }
+
+    fn event_block_response(
+        id: usize,
+        slot: u64,
+        transaction: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut response = block_response(id, slot);
+        response["result"]["transactions"] = serde_json::json!([transaction]);
+        response
+    }
+
+    /// Match a JSON-RPC block batch whose first `getBlock` request is for `slot`.
+    fn block_batch_starting_at(slot: u64) -> mockito::Matcher {
+        mockito::Matcher::Regex(format!(r#""params"\s*:\s*\[\s*{slot}\s*,"#))
+    }
+
     #[test]
     fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
@@ -1215,7 +1374,7 @@ mod tests {
 
         assert_eq!(config.max_supported_transaction_version, Some(0));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
-        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::JsonParsed));
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|commitment| commitment.commitment),
@@ -1237,6 +1396,23 @@ mod tests {
 
         let slots: Vec<_> = from_signatures.into_keys().collect();
         assert_eq!(slots, vec![8, 9, 10, 12]);
+    }
+
+    #[test]
+    fn globally_ordered_slots_are_split_into_bounded_chunks() {
+        let chunks = SolanaIndexer::<MockStateManager, NoopChainTelemetry>::chunk_slots(
+            BTreeSet::from([5, 1, 4, 2, 3]),
+            2,
+        );
+
+        assert_eq!(
+            chunks,
+            vec![
+                BTreeSet::from([1, 2]),
+                BTreeSet::from([3, 4]),
+                BTreeSet::from([5]),
+            ]
+        );
     }
 
     /// Check we can still parse the old format for failed transactions.
@@ -1352,7 +1528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_processes_slots_in_order() {
+    async fn single_page_catchup_processes_slots_in_order() {
         let mut server = mockito::Server::new_async().await;
 
         // Signatures walk back from the anchor: slots 9..=6 are in range,
@@ -1410,6 +1586,254 @@ mod tests {
                 "expected Block({expected}), got {event:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn catchup_parses_request_and_response_cpi_events() {
+        let mut server = mockito::Server::new_async().await;
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
+        let response = SignatureRespondedEvent {
+            request_id,
+            responder: Pubkey::new_unique(),
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: hex::decode(
+                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                    y: hex::decode(
+                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                },
+                s: [1; 32],
+                recovery_id: 0,
+            },
+        };
+
+        let entries: Vec<_> = [8, 7, 5].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([
+            event_block_response(
+                0,
+                7,
+                event_transaction(
+                    indexer.program_id,
+                    Signature::new_unique(),
+                    "Sign",
+                    cpi_event_instruction(&request),
+                ),
+            ),
+            event_block_response(
+                1,
+                8,
+                event_transaction(
+                    indexer.program_id,
+                    Signature::new_unique(),
+                    "Respond",
+                    cpi_event_instruction(&response),
+                ),
+            ),
+        ]);
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#""method":"getBlock".*"encoding":"jsonParsed""#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks.to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        let mut catchup = indexer.catchup_blocks(9).await.unwrap();
+        while let Some(item) = catchup.next().await {
+            let (slot, block) = item.unwrap();
+            indexer
+                .process_catchup_item(&events_tx, slot, &block)
+                .await
+                .unwrap();
+        }
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Respond(event)) if event.request_id == request_id
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(8))));
+    }
+
+    #[tokio::test]
+    async fn block_fetch_pages_preserve_slot_order() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Delay the older page. Sequential fetching must still emit it before
+        // the immediately available newer page.
+        let _older_blocks = server
+            .mock("POST", "/")
+            .match_body(block_batch_starting_at(1))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_chunked_body(|writer| {
+                std::thread::sleep(Duration::from_millis(100));
+                writer.write_all(b"[]")
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let _newer_blocks = server
+            .mock("POST", "/")
+            .match_body(block_batch_starting_at(3))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let pages = stream::iter([Ok(BTreeSet::from([1, 2])), Ok(BTreeSet::from([3, 4]))]);
+        let mut blocks =
+            SolanaIndexer::<MockStateManager, NoopChainTelemetry>::fetch_blocks_for_pages(
+                indexer.client,
+                pages,
+            );
+
+        let mut slots = Vec::new();
+        while let Some(item) = blocks.next().await {
+            slots.push(item.unwrap().0);
+        }
+
+        assert_eq!(slots, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn multipage_catchup_does_not_lose_response_before_older_request() {
+        let mut server = mockito::Server::new_async().await;
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        // getSignaturesForAddress paginates newest-to-oldest. The response is
+        // in the first (newer) page, while its request is in the second (older)
+        // page. Slot 5 is below the catchup start and terminates pagination.
+        let newest_page: Vec<_> = [9, 8].into_iter().map(signature_entry).collect();
+        // Slot 8 appears on both pages to verify global deduplication at a page
+        // boundary. Fetching its block once still discovers every transaction
+        // in that slot.
+        let older_page: Vec<_> = [8, 7, 6, 5].into_iter().map(signature_entry).collect();
+        let before_cursor = newest_page
+            .last()
+            .and_then(|entry| entry["signature"].as_str())
+            .expect("newest page should have a cursor signature");
+
+        let _newest_page = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "method": "getSignaturesForAddress",
+                "params": [indexer.program_id.to_string(), { "before": null }],
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&newest_page))
+            .expect(1)
+            .create_async()
+            .await;
+        let _older_page = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "method": "getSignaturesForAddress",
+                "params": [indexer.program_id.to_string(), { "before": before_cursor }],
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&older_page))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let ordered_blocks = serde_json::json!([
+            block_response(0, 6),
+            block_response(1, 7),
+            block_response(2, 8),
+            block_response(3, 9),
+        ])
+        .to_string();
+
+        let _ordered_blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ordered_blocks)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut catchup = indexer.catchup_blocks(10).await.unwrap();
+
+        let mut replayed_slots = Vec::new();
+        let mut request_pending = false;
+        let mut response_applied = false;
+
+        while let Some(item) = catchup.next().await {
+            let (slot, _block) = item.unwrap();
+            replayed_slots.push(slot);
+            match slot {
+                // The request is created in the older block.
+                7 => request_pending = true,
+                // This mirrors process_respond_event: if the request is not
+                // in the backlog yet, the response is skipped permanently.
+                8 if request_pending => {
+                    request_pending = false;
+                    response_applied = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(replayed_slots, vec![6, 7, 8, 9]);
+        assert!(
+            response_applied && !request_pending,
+            "catchup replayed slots as {replayed_slots:?}; the response was processed before its request and lost"
+        );
     }
 
     #[tokio::test]

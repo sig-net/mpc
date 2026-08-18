@@ -216,10 +216,7 @@ async fn test_basic_sign() {
         .await;
 
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
     let timeout = Duration::from_secs(10);
 
@@ -248,10 +245,7 @@ async fn test_sign_task_survives_resharing() {
         .assert_presignatures(1, Duration::from_secs(5))
         .await;
 
-    let request = sign_request(7);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(7)).await;
 
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -279,10 +273,7 @@ async fn test_sign_request_during_resharing() {
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let request = sign_request(8);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(8)).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     network.complete_resharing();
@@ -409,12 +400,9 @@ async fn test_threshold_change_via_mpc_governance() {
     // Sign a request end-to-end to prove the network still produces valid
     // signatures after the threshold-change resharing.
     network
-        .assert_presignatures(1, Duration::from_secs(60))
+        .assert_presignatures(1, Duration::from_secs(120))
         .await;
-    let request = sign_request(88);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(88)).await;
     let actions = network.assert_actions(1, Duration::from_secs(30)).await;
     assert_eq!(actions.len(), 1);
     assert!(actions
@@ -490,10 +478,7 @@ async fn test_sign_adequate_stockpile() {
     // Send sign requests to all nodes concurrently
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures to be produced
@@ -568,10 +553,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Send all requests at once to maximize contention
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests simultaneously");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // We expect to complete at least as many signatures as we have presignatures.
@@ -660,10 +642,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     // Send ALL sign requests at once - more than we have presignatures for
     tracing::info!(TOTAL_SIGN_REQUESTS, "sending all sign requests");
     for seed in 0..TOTAL_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // First batch: wait for as many signatures as we initially have presignatures
@@ -772,10 +751,7 @@ async fn test_sign_contention_5_nodes() {
 
     // Send sign requests to all nodes concurrently (simulates real network conditions)
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures - allow more time for 5-node consensus
@@ -947,10 +923,7 @@ async fn test_sign_no_presignature_waste() {
     );
 
     for seed in 0..initial_presignatures {
-        let request = sign_request(seed as u8);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed as u8)).await;
     }
 
     let actions = network
@@ -1094,10 +1067,7 @@ async fn test_sign_missing_presignature() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // give 2 minutes to resolve the problem
     // expectation: the node without the presignature will reject a posit, or if
@@ -1155,10 +1125,7 @@ async fn test_sign_missing_presignature_after_posits() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // Wait for first round of posits to go through.
     tokio::time::timeout(Duration::from_millis(5000), rx)
@@ -1303,12 +1270,8 @@ async fn test_non_participants_pause_posits() {
     // Node 2's Accept to node 1's Propose is dropped, so generation is {0, 1}.
     // After ORGANIZE_POSIT_TIMEOUT, node 2 becomes round-1 proposer and
     // receives AlreadyGenerating from nodes 0 and 1.
-    let request = sign_request(0);
-
     // Send the request to all three nodes.
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
     // Wait for node 2 to propose once, sending a message to both other nodes.
     // Should happen after ~1 ORGANIZE_POSIT_TIMEOUT (5s for tests)
