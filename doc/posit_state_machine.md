@@ -95,8 +95,6 @@ is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
 
-
-
 ## 3. Inside Posit
 
 Posit is two independent machines, one per role; a node runs exactly one for
