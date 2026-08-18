@@ -9,6 +9,7 @@ use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
+use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_node::sign_bidirectional::public_key_to_address;
@@ -347,7 +348,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        eth::submit_sign_request(&eth_contract, i).await?;
+        submit_sign_request(&eth_contract, i).await?;
     }
 
     let active_idx = 1usize;
@@ -370,7 +371,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     // Submit a few requests, then pump empty blocks so checkpoint progression
     // does not depend on signature throughput under test load.
     for seed in 100usize..103usize {
-        eth::submit_sign_request(&eth_contract, seed).await?;
+        submit_sign_request(&eth_contract, seed).await?;
     }
 
     produce_empty_eth_blocks_for_duration(&eth_client, Duration::from_secs(12)).await?;
