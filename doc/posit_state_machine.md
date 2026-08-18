@@ -74,7 +74,7 @@ stateDiagram-v2
     [*] --> WaitingForParticipants
     WaitingForParticipants --> Reserving: I am the proposer
     WaitingForParticipants --> PositOut: I am a deliberator
-    Reserving --> PositOut: PROPOSE broadcast
+    Reserving --> PositOut: PROPOSE sent
 
     WaitingForParticipants --> WaitingForParticipants: mesh channel closed
     Reserving --> WaitingForParticipants: no permit or presignature
@@ -94,8 +94,6 @@ deliberator's wait for `PROPOSE` are each given the time left in the round, whic
 is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
-
-TODO: what about sending PROPOSE to all peers or all active holders
 
 ## 3. Inside Posit
 
