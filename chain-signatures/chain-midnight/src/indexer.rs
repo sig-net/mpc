@@ -701,6 +701,7 @@ mod tests {
         array_of, ascii_padded, cell_from_atoms, cell_from_record, key_of, map_of, sample_record,
         trim,
     };
+    use crate::PublisherConfig;
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_primitives::SignId;
     use mpc_utils::task::AbortOnDrop;
@@ -732,7 +733,13 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:1".to_string(),
             central_address: central_address(),
-            publisher: Default::default(),
+            publisher: PublisherConfig {
+                funding_seed: "ab".repeat(32),
+                proof_server_url: "http://127.0.0.1:1".to_string(),
+                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                ..Default::default()
+            },
             rpc: Default::default(),
             indexer: Default::default(),
         }

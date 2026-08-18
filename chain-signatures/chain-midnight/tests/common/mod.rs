@@ -14,8 +14,27 @@ fn path_arg(path: &Path) -> String {
         .to_string()
 }
 
-/// The builder as the node runs it in production. Checked here because a missing entry
-/// point exits `node` at boot, reading like a protocol fault instead of an unbuilt package.
+fn node_executable() -> String {
+    let output = std::process::Command::new("node")
+        .args(["--print", "process.execPath"])
+        .output()
+        .expect("node must be installed to run the ignored TypeScript seam tests");
+    assert!(
+        output.status.success(),
+        "resolving the Node executable failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = String::from_utf8(output.stdout).expect("Node's executable path must be UTF-8");
+    let path = path.trim();
+    assert!(
+        Path::new(path).is_absolute(),
+        "Node returned a non-absolute executable path: {path}"
+    );
+    path.to_string()
+}
+
+/// The compiled builder used by the ignored seam tests. A missing entry point exits
+/// `node` at boot, reading like a protocol fault instead of an unbuilt package.
 pub fn base_live_config() -> MidnightConfig {
     let package = publisher_package();
     let entry = package.join("dist/main.js");
@@ -29,7 +48,7 @@ pub fn base_live_config() -> MidnightConfig {
         node_ws_url: "ws://127.0.0.1:9944".to_string(),
         central_address: "ab".repeat(32),
         publisher: PublisherConfig {
-            intent_gen_command: vec!["node".to_string(), path_arg(&entry)],
+            intent_gen_command: vec![node_executable(), path_arg(&entry)],
             funding_seed: "ab".repeat(32),
             proof_server_url: "http://127.0.0.1:6300".to_string(),
             indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),

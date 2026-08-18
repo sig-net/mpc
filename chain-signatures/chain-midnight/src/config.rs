@@ -3,8 +3,11 @@
 use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 use url::Url;
+
+const PUBLISHER_NETWORK_IDS: &[&str] = &["undeployed", "stagenet", "preview", "preprod", "mainnet"];
 
 /// Timeouts and retry budget for the subxt node RPC client.
 #[derive(Clone, Debug, PartialEq)]
@@ -73,7 +76,7 @@ pub struct PublisherConfig {
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
-            // The `bin` name the TypeScript package installs, resolved on PATH.
+            // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
             proof_server_url: String::new(),
@@ -144,14 +147,66 @@ impl MidnightConfig {
 
 impl PublisherConfig {
     fn validate(&self) -> anyhow::Result<()> {
+        let program = self
+            .intent_gen_command
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default();
         anyhow::ensure!(
-            self.intent_gen_command
-                .first()
-                .is_some_and(|program| !program.is_empty()),
+            !program.is_empty(),
             "midnight config: publisher.intent_gen_command must name a program"
         );
+        let path = Path::new(program);
+        anyhow::ensure!(
+            path.is_absolute()
+                || path
+                    .file_name()
+                    .is_some_and(|name| name == path.as_os_str()),
+            "midnight config: publisher.intent_gen_command program must be a bare name or an \
+             absolute path"
+        );
+        validate_funding_seed(&self.funding_seed)?;
+        validate_url(
+            "publisher.proof_server_url",
+            &self.proof_server_url,
+            &["http", "https"],
+        )?;
+        validate_url(
+            "publisher.indexer_url",
+            &self.indexer_url,
+            &["http", "https"],
+        )?;
+        validate_url(
+            "publisher.indexer_ws_url",
+            &self.indexer_ws_url,
+            &["ws", "wss"],
+        )?;
         Ok(())
     }
+}
+
+fn validate_funding_seed(value: &str) -> anyhow::Result<()> {
+    let trimmed = value.trim();
+    let compact = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    anyhow::ensure!(
+        compact.len() >= 32
+            && compact.len() <= 128
+            && compact.len().is_multiple_of(2)
+            && compact.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "midnight config: publisher.funding_seed must be 16 to 64 bytes of hex"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_publisher_network_id(value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        PUBLISHER_NETWORK_IDS.contains(&value),
+        "midnight config: network_id is not supported by the publisher SDK"
+    );
+    Ok(())
 }
 
 fn validate_url(field: &str, value: &str, schemes: &[&str]) -> anyhow::Result<()> {
@@ -218,6 +273,27 @@ mod tests {
     }
 
     #[test]
+    fn publisher_command_is_a_bare_name_or_an_absolute_path() {
+        for program in ["midnight-publisher", "/opt/midnight-publisher"] {
+            let mut config = valid_config();
+            config.publisher.intent_gen_command[0] = program.to_string();
+            config
+                .validate()
+                .expect("the command shape is deterministic");
+        }
+
+        for program in ["./publisher", "tools/publisher"] {
+            let mut relative = valid_config();
+            relative.publisher.intent_gen_command[0] = program.to_string();
+            let error = relative.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("intent_gen_command"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_names_offending_field() {
         for invalid in ["", "http://127.0.0.1:9944"] {
             let mut bad_ws = valid_config();
@@ -254,5 +330,68 @@ mod tests {
             err.contains("intent_gen_command"),
             "unexpected error: {err}"
         );
+
+        for (field, apply) in [
+            (
+                "funding_seed",
+                (|config: &mut MidnightConfig| {
+                    config.publisher.funding_seed = "not hex".to_string();
+                }) as fn(&mut MidnightConfig),
+            ),
+            ("proof_server_url", |config: &mut MidnightConfig| {
+                config.publisher.proof_server_url = "ws://127.0.0.1:6300".to_string();
+            }),
+            ("indexer_url", |config: &mut MidnightConfig| {
+                config.publisher.indexer_url = "not a URL".to_string();
+            }),
+            ("indexer_ws_url", |config: &mut MidnightConfig| {
+                config.publisher.indexer_ws_url = "http://127.0.0.1:8088".to_string();
+            }),
+        ] {
+            let mut invalid = valid_config();
+            apply(&mut invalid);
+            let err = invalid.validate().unwrap_err().to_string();
+            assert!(err.contains(field), "unexpected error for {field}: {err}");
+        }
+    }
+
+    #[test]
+    fn publisher_seed_uses_the_sdk_hex_contract() {
+        for valid in [
+            "ab".repeat(16),
+            "ab".repeat(64),
+            format!("0X{}", "AB".repeat(32)),
+        ] {
+            let mut config = valid_config();
+            config.publisher.funding_seed = valid;
+            config.validate().expect("the SDK accepts this hex seed");
+        }
+
+        for invalid in [
+            "".to_string(),
+            "ab".repeat(15),
+            "ab".repeat(65),
+            "a".repeat(33),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+                .to_string(),
+        ] {
+            let mut config = valid_config();
+            config.publisher.funding_seed = invalid.clone();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("funding_seed"), "unexpected error: {error}");
+            assert!(
+                invalid.is_empty() || !error.contains(&invalid),
+                "the rejected seed reached its error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn publisher_network_ids_match_the_sdk() {
+        for network_id in PUBLISHER_NETWORK_IDS {
+            validate_publisher_network_id(network_id).expect("the SDK supports this network");
+        }
+        let error = validate_publisher_network_id("unknown-network").unwrap_err();
+        assert!(error.to_string().contains("network_id"), "{error:#}");
     }
 }
