@@ -10,6 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
     utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
@@ -140,8 +141,7 @@ impl EthereumTestEnvironment {
         });
 
         let contract_address =
-            eth::deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit())
-                .await?;
+            deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit()).await?;
 
         Ok(Self {
             _spawner: spawner,

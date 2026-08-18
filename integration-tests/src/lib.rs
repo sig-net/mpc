@@ -21,6 +21,7 @@ use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::EthConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
@@ -381,8 +382,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.chain_id,
         )?;
         let contract_address =
-            eth::deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO)
-                .await?;
+            deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO).await?;
 
         let rpc_endpoint = if cfg!(feature = "docker-test") {
             sandbox.internal_http_endpoint.clone()
