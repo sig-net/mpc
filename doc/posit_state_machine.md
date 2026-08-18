@@ -1,11 +1,11 @@
-# Posit: a hierarchical state machine
+# Posit state machine
 
-Scope: one sign request, one node, as implemented in
+Represents current implementation from 
 `chain-signatures/node/src/protocol/request/` (`task.rs`, `organize.rs`,
 `posit.rs`, `state.rs`) plus the generation tail in `protocol/signature.rs`. The
-cait-sith signing math and the presignature/triple pipelines are out of scope.
+cait-sith signing math and the presignature/triple pipelines are not depicted here.
 
-Two levels. The top level is the `SignPhase` enum, one name per state. Each
+The top level state machine matches the `SignPhase` enum. Each
 phase then gets its own diagram showing what happens inside it and where it can
 leave. States drawn grey and dashed in a detail diagram belong to another phase;
 they are there to show where the edges land.
@@ -26,17 +26,27 @@ stateDiagram-v2
     Done --> [*]
 ```
 
-Every recoverable failure is the same transition, `state.reorganize()`: bump the
-round, reset the budget, release the permit, re-enter `Organizing`. There is no
-other back edge, no state is skipped going forward, and no failure path leaves
-the machine. The three detail diagrams below say what triggers each one.
+A task enters `Organizing` when `SignatureSpawner` spawns it for a newly indexed sign request at round 0. 
+
+If governance is
+not `Running` at that moment the request is retained but no task is spawned. 
+`spawn_tasks` starts it once governance is running, and respawns every retained request on a governance change. 
+A respawn re-enters `Organizing` too, but at the
+round carried in `SignEntry.round` rather than at 0.
+
+Every recoverable failure leads to the same transition back to phase
+"Organizing", via `state.reorganize()`. It bumps the round, resets the time
+budget for the round, releases the proposer's concurrency permit if one is held,
+and re-enters `Organizing`. There is no other back edge, and no failure path
+leaves the machine. The three detail diagrams below say what triggers each one.
 
 ## 2. Inside Organizing
 
 ```mermaid
 stateDiagram-v2
-    state "Waiting for participants<br/>Pre: round_timeout(r) started ticking<br/>Action: wait for t active peers<br/>Post: t active, role for r decided" as WaitingForParticipants
-    state "Reserving<br/>Pre: I am proposer<br/>Action: take one of 4 permits, reserve a presignature with at least t active holders<br/>Post: send PROPOSE to holders" as Reserving
+    state "<b>Waiting for participants</b><br/>Pre: round_timeout(r) started ticking<br/>Action: wait for t active peers<br/>Post: t active, role for r decided" as WaitingForParticipants
+
+    state "<b>Reserving</b><br/>Pre: I am proposer<br/>Action: take one of 4 permits, reserve a presignature with at least t active holders<br/>Post: send PROPOSE to holders" as Reserving
     state "Posit" as PositOut
     state "New round" as AbortOut
 
@@ -46,13 +56,14 @@ stateDiagram-v2
     Reserving --> PositOut: PROPOSE broadcast
 
     WaitingForParticipants --> AbortOut: mesh channel closed
-    Reserving --> AbortOut: no permit, or no presignature, within the budget
+    Reserving --> AbortOut: no permit or no presignature within timeout
+    AbortOut --> WaitingForParticipants: r bumped, budget reset
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class PositOut,AbortOut outside
 ```
 
-This state cannot time out. It waits on `mesh_state.changed()` with no timeout
+The waiting state cannot time out. It waits on `mesh_state.changed()` with no timeout
 wrapped around it, and the only way out other than `t` peers becoming active is
 the mesh channel closing.
 
@@ -72,10 +83,10 @@ it.
 
 ```mermaid
 stateDiagram-v2
-    state "Waiting for Propose<br/>Pre: I am deliberator<br/>Action: wait for PROPOSE from the elected proposer, reject any other proposer as InvalidRequest<br/>Post: PROPOSE from the elected proposer received" as WaitingForPropose
-    state "Propose received<br/>Pre: PROPOSE from the elected proposer for round r<br/>Action: check that I hold the proposed presignature<br/>Post: send ACCEPT to the proposer" as ProposeReceived
-    state "Waiting for Start<br/>Pre: ACCEPT sent, binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>Action: wait for the proposer to fix the set<br/>Post: START with at least t participants received" as WaitingForStart
-    state "Propose sent<br/>Pre: I am proposer, PROPOSE broadcast<br/>Action: tally ACCEPT and REJECT<br/>Post: send START to the accepters" as ProposeSent
+    state "<b>Waiting for Propose</b><br/>Pre: I am deliberator<br/>Action: wait for PROPOSE from the elected proposer, reject any other proposer as InvalidRequest<br/>Post: PROPOSE from the elected proposer received" as WaitingForPropose
+    state "<b>Propose received</b><br/>Pre: PROPOSE from the elected proposer for round r<br/>Action: check that I hold the proposed presignature<br/>Post: send ACCEPT to the proposer" as ProposeReceived
+    state "<b>Waiting for Start</b><br/>Pre: ACCEPT sent, binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>Action: wait for the proposer to fix the set<br/>Post: START with at least t participants received" as WaitingForStart
+    state "<b>Propose sent</b><br/>Pre: I am proposer, PROPOSE broadcast<br/>Action: tally ACCEPT and REJECT<br/>Post: send START to the accepters" as ProposeSent
     state "Organizing" as OrgIn
     state "Generating" as GenOut
     state "New round" as AbortOut
@@ -93,6 +104,7 @@ stateDiagram-v2
     ProposeSent --> AbortOut: too many REJECTs, or deadline
     WaitingForPropose --> AbortOut: no PROPOSE within the budget
     WaitingForStart --> AbortOut: no START in time, or START too small
+    AbortOut --> OrgIn: r bumped, budget reset
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut,AbortOut outside
@@ -142,12 +154,13 @@ narrow addressing is a symptom, the missing round-outcome signal is the cause.
 
 ```mermaid
 stateDiagram-v2
-    state "Acquiring<br/>Pre: participant set fixed by START<br/>Action: proposer commits its reservation, deliberator fetches the presignature from storage<br/>Post: presignature in hand, generator built" as Acquiring
-    state "Signing<br/>Pre: presignature in hand<br/>Action: poke cait-sith, relay SendMany and SendPrivate, answer late PROPOSE with REJECT AlreadyGenerating<br/>Post: Action Return carrying big_r and s" as Signing
-    state "Recording<br/>Pre: signature shares combined<br/>Action: reconstruct against the derived key, mark the request publishing in the backlog, proposer submits it<br/>Post: request complete" as Recording
+    state "<b>Acquiring</b><br/>Pre: participant set fixed by START<br/>Action: proposer commits its reservation, deliberator fetches the presignature from storage<br/>Post: presignature in hand, generator built" as Acquiring
+    state "<b>Signing</b><br/>Pre: presignature in hand<br/>Action: poke cait-sith, relay SendMany and SendPrivate, answer late PROPOSE with REJECT AlreadyGenerating<br/>Post: Action Return carrying big_r and s" as Signing
+    state "<b>Recording</b><br/>Pre: signature shares combined<br/>Action: reconstruct against the derived key, mark the request publishing in the backlog, proposer submits it<br/>Post: request complete" as Recording
     state "Posit" as PositIn
     state "Done" as DoneOut
     state "New round" as AbortOut
+    state "Organizing" as OrgOut
 
     PositIn --> Acquiring: START agreed
 
@@ -157,9 +170,10 @@ stateDiagram-v2
 
     Acquiring --> AbortOut: commit failed, or the generator could not be built
     Signing --> AbortOut: poke error, receive timeout, or inbox closed
+    AbortOut --> OrgOut: r bumped, budget reset
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
-    class PositIn,DoneOut,AbortOut outside
+    class PositIn,DoneOut,AbortOut,OrgOut outside
 ```
 
 `Recording` has no exit to a new round. Reconstruction failure returns `None`
