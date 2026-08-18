@@ -99,8 +99,7 @@ round, with a different proposer.
 
 Posit is two independent machines, one per role; a node runs exactly one for
 round `r`, chosen by `is_proposer` (the round's elected proposer — §6 — unless it
-is throttling, §9.6). They never interleave: the proposer never waits for
-`START`, the deliberator never tallies.
+is throttling, §9.6). 
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
@@ -108,12 +107,14 @@ Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 
 ```mermaid
 stateDiagram-v2
-    state "<b>Propose sent</b><br/>1. tally ACCEPT and REJECT<br/>2. send START to the accepters once enough ACCEPTs" as ProposeSent
     state "Organizing" as OrgIn
+    state "<b>Propose sent</b><br/>
+    1. tally ACCEPT and REJECT<br/>
+    2. once enough ACCEPTs send START to accepters " as ProposeSent
     state "Generating" as GenOut
 
     OrgIn --> ProposeSent: proposer, PROPOSE sent
-    ProposeSent --> GenOut: enough ACCEPTs, START broadcast
+    ProposeSent --> GenOut: START sent
     ProposeSent --> OrgIn: too many REJECTs, or timeout
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
@@ -124,10 +125,10 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
+    state "Organizing" as OrgIn
     state "<b>Waiting for Propose</b><br/>1. wait for PROPOSE from the elected proposer<br/>2. reject any other proposer as InvalidRequest" as WaitingForPropose
     state "<b>Propose received</b><br/>1. check I hold the proposed presignature<br/>2. send ACCEPT to the proposer" as ProposeReceived
     state "<b>Waiting for Start</b><br/>1. ACCEPT already sent, stays binding for at least 2x ACCEPT_POSIT_TIMEOUT<br/>2. wait for START from the proposer" as WaitingForStart
-    state "Organizing" as OrgIn
     state "Generating" as GenOut
 
     OrgIn --> WaitingForPropose: deliberator
@@ -148,7 +149,7 @@ full round timeout.
 
 The edge back from `Propose received` to `Waiting for Propose` is not an abort:
 the round is not bumped. A deliberator that lacks the presignature sends
-`MissingArtifact` and resumes waiting for a `Propose` that a correct proposer
+`REJECT MissingArtifact` and resumes waiting for a `PROPOSE` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
 
 ### Who each message goes to
@@ -168,7 +169,7 @@ where it may be elected proposer and reserve a *second* presignature for a
 request that is already being signed. That is the waste the `pause_proposing_until`
 flag exists to limit after the fact.
 
-Broadcasting `PROPOSE` to every member would help, cheaply: the tally is keyed
+Sending `PROPOSE` to every member would help, cheaply: the tally is keyed
 on `SinglePositCounter::participants` and `process_action` drops senders outside
 that set, so extra replies cannot move `enough_rejects` or `meets_totality`. It
 would be a notification, not a vote.
@@ -232,9 +233,9 @@ Three rules make this work:
 1. A node never jumps forward to a peer's round on sight. If it did, any peer
    could name a round that makes itself proposer and do so every time. It
    finishes its own round first and only catches up at the next bump.
-2. A `StaleRound` reject carries the rejector's round, so the lagging node
+2. A `StaleRound` REJECT carries the rejector's round, so the lagging node
    catches up in one bump instead of one round at a time.
-3. Rejects are never answered with a reject, otherwise two nodes ping-pong.
+3. A REJECT is never answered with a REJECT, otherwise two nodes ping-pong.
 
 Buffered messages are replayed only in `Waiting for Propose`, and only once
 `highest_seen_round == r`.
@@ -286,9 +287,9 @@ because the round timeout ran out.
 - **Exactly one proposer per round**, because election reads only `r`,
   membership and entropy — never the local active set. Filtering by local state
   is what caused the permanent divergence in #907.
-- **`Accept` is sent exactly once per round**, on the edge out of
+- **`ACCEPT` is sent exactly once per round**, on the edge out of
   `Propose received`.
-- **The proposer's `Start` set is a subset of the accepters**, so every node in
+- **The proposer's `START` set is a subset of the accepters**, so every node in
   `Generating` has agreed to the same presignature for the same round.
 - **`Generating` is not preempted by a new round**; a node only leaves it by
   finishing or failing.
@@ -304,14 +305,14 @@ Stated as consequences of the machine, not as bug reports.
    request rotates until something outside removes it; the delayed watcher only
    bumps a metric.
 2. **A late accepter burns a full round.** A node that catches up mid-round
-   sends `Accept` after the proposer already broadcast `Start`. The proposer is
-   in `Generating` and drops `Accept` there, so the late node waits out its
+   sends `ACCEPT` after the proposer already sent `START`. The proposer is
+   in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
-3. **`MissingArtifact` costs a whole round**, for the reason given under §3.
+3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
 4. **The buffer holds one message per sender.** If a sender's later message for
-   the same future round overwrites its `Propose`, the deliberator reaches that
+   the same future round overwrites its `PROPOSE`, the deliberator reaches that
    round with nothing to act on. Today only the proposer sends both, and it
-   sends `Start` only to nodes that accepted (which a lagging node cannot have
+   sends `START` only to nodes that accepted (which a lagging node cannot have
    done), so this is currently unreachable rather than guarded against.
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
@@ -320,7 +321,7 @@ Stated as consequences of the machine, not as bug reports.
 6. **`pause_proposing_until` is a hidden mode.** For up to `generation_timeout`
    a node declines proposership and takes the deliberator edge out of
    `Waiting for participants`. Since election is by round, nobody else proposes
-   that round either, so the round is spent waiting for a `Propose` that will
+   that round either, so the round is spent waiting for a `PROPOSE` that will
    not come.
 7. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
@@ -328,8 +329,8 @@ Stated as consequences of the machine, not as bug reports.
 ## 10. Files
 
 - `request/task.rs` — `SignPhase`, the driver loop
-- `request/organize.rs` — election, permit, presignature reservation, `Propose`
-- `request/posit.rs` — `Propose`/`Accept`/`Start`, the round filter
+- `request/organize.rs` — election, permit, presignature reservation, `PROPOSE`
+- `request/posit.rs` — `PROPOSE`/`ACCEPT`/`START`, the round filter
 - `request/state.rs` — round, timeout, buffering
 - `protocol/signature.rs` — the generation tail and publish
 - `protocol/posit.rs` — shared vote types; the `Posits` map there is used by the
