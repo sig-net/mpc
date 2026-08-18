@@ -112,7 +112,7 @@ stateDiagram-v2
     state "Organizing" as OrgIn
     state "Generating" as GenOut
 
-    OrgIn --> ProposeSent: proposer, PROPOSE broadcast
+    OrgIn --> ProposeSent: proposer, PROPOSE sent
     ProposeSent --> GenOut: enough ACCEPTs, START broadcast
     ProposeSent --> OrgIn: too many REJECTs, or timeout
 
