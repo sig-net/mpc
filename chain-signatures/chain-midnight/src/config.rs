@@ -57,9 +57,6 @@ pub struct PublisherConfig {
     pub intent_gen_command: Vec<String>,
     /// Funds respond transactions.
     pub funding_seed: String,
-    /// Duplicates `MidnightConfig::node_ws_url`: `into_config` fills both from one flag
-    /// so they cannot disagree.
-    pub node_ws_url: String,
     /// These contracts are zkir-v3, which cannot be proven in process.
     pub proof_server_url: String,
     /// Spendable DUST derives only from the ledger events the indexer serves.
@@ -79,7 +76,6 @@ impl Default for PublisherConfig {
             // The `bin` name the TypeScript package installs, resolved on PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
-            node_ws_url: String::new(),
             proof_server_url: String::new(),
             indexer_url: String::new(),
             indexer_ws_url: String::new(),
@@ -104,7 +100,6 @@ impl fmt::Debug for PublisherConfig {
         f.debug_struct("PublisherConfig")
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
-            .field("node_ws_url", &self.node_ws_url)
             .field("proof_server_url", &self.proof_server_url)
             .field("indexer_url", &self.indexer_url)
             .field("indexer_ws_url", &self.indexer_ws_url)
@@ -121,8 +116,7 @@ pub struct MidnightConfig {
     pub node_ws_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
-    /// `None` is an indexer-only node. `Some` is a complete responder configuration.
-    pub publisher: Option<PublisherConfig>,
+    pub publisher: PublisherConfig,
     pub rpc: RpcConfig,
     pub indexer: IndexerConfig,
 }
@@ -144,14 +138,7 @@ impl MidnightConfig {
             "midnight config: central_address must be lowercase hex, the canonical form \
              every comparison site assumes"
         );
-        if let Some(publisher) = &self.publisher {
-            publisher.validate()?;
-            anyhow::ensure!(
-                publisher.node_ws_url == self.node_ws_url,
-                "midnight config: publisher.node_ws_url must match node_ws_url"
-            );
-        }
-        Ok(())
+        self.publisher.validate()
     }
 }
 
@@ -187,28 +174,16 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
-            publisher: None,
+            publisher: PublisherConfig {
+                funding_seed: "0f".repeat(32),
+                proof_server_url: "http://127.0.0.1:6300".to_string(),
+                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+                ..Default::default()
+            },
             rpc: Default::default(),
             indexer: Default::default(),
         }
-    }
-
-    /// A node that answers as well as indexes: the whole submit half filled.
-    fn responding_config() -> MidnightConfig {
-        let mut config = valid_config();
-        config.publisher = Some(PublisherConfig {
-            funding_seed: "0f".repeat(32),
-            node_ws_url: config.node_ws_url.clone(),
-            proof_server_url: "http://127.0.0.1:6300".to_string(),
-            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
-            ..Default::default()
-        });
-        config
-    }
-
-    fn publisher_mut(config: &mut MidnightConfig) -> &mut PublisherConfig {
-        config.publisher.as_mut().expect("the test config responds")
     }
 
     #[test]
@@ -222,8 +197,8 @@ mod tests {
     #[test]
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
-        let mut config = responding_config();
-        publisher_mut(&mut config).funding_seed = seed.to_string();
+        let mut config = valid_config();
+        config.publisher.funding_seed = seed.to_string();
 
         let rendered = format!("{config:?}");
         assert!(
@@ -238,13 +213,8 @@ mod tests {
     }
 
     #[test]
-    fn indexer_only_and_responding_shapes_validate() {
-        valid_config()
-            .validate()
-            .expect("an indexer-only node has no publisher config");
-        responding_config()
-            .validate()
-            .expect("the publisher's owned values are valid");
+    fn a_complete_config_validates() {
+        valid_config().validate().expect("every field is valid");
     }
 
     #[test]
@@ -277,13 +247,8 @@ mod tests {
         let err = uppercase.validate().unwrap_err().to_string();
         assert!(err.contains("lowercase"), "unexpected error: {err}");
 
-        let mut mismatched_node = responding_config();
-        publisher_mut(&mut mismatched_node).node_ws_url = "ws://127.0.0.1:9999".to_string();
-        let err = mismatched_node.validate().unwrap_err().to_string();
-        assert!(err.contains("must match"), "unexpected error: {err}");
-
-        let mut empty_command = responding_config();
-        publisher_mut(&mut empty_command).intent_gen_command.clear();
+        let mut empty_command = valid_config();
+        empty_command.publisher.intent_gen_command.clear();
         let err = empty_command.validate().unwrap_err().to_string();
         assert!(
             err.contains("intent_gen_command"),

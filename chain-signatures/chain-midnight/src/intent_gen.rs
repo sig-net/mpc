@@ -18,7 +18,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::PublisherConfig;
+use crate::config::{MidnightConfig, PublisherConfig};
 
 #[derive(Debug)]
 pub(crate) struct AmbiguousSubmit;
@@ -154,7 +154,7 @@ impl Operation {
 
 /// Builds intents and posts them, by driving one persistent child process.
 pub struct IntentGen {
-    config: PublisherConfig,
+    config: MidnightConfig,
     network_id: String,
     redactor: SeedRedactor,
     /// Two interleaved requests on one pipe have no correct reading, so the lock is the
@@ -164,11 +164,11 @@ pub struct IntentGen {
 
 impl IntentGen {
     /// Starts the builder eagerly: a command that cannot run fails here, not on the first signature.
-    pub async fn spawn(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Self> {
+    pub async fn spawn(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Self> {
         Ok(Self {
             config: config.clone(),
             network_id: network_id.to_string(),
-            redactor: SeedRedactor::new(&config.funding_seed),
+            redactor: SeedRedactor::new(&config.publisher.funding_seed),
             session: Mutex::new(Some(spawn_session(config, network_id).await?)),
         })
     }
@@ -235,7 +235,7 @@ impl IntentGen {
     fn blame_the_command(&self, error: anyhow::Error) -> anyhow::Error {
         error.context(format!(
             "midnight intent builder command [{}]",
-            self.config.intent_gen_command.join(" ")
+            self.config.publisher.intent_gen_command.join(" ")
         ))
     }
 
@@ -263,7 +263,7 @@ impl IntentGen {
             live,
             request,
             operation,
-            &self.config,
+            &self.config.publisher,
             cancel,
             &self.redactor,
         )
@@ -413,14 +413,14 @@ where
 }
 
 /// Starts the builder under the restart budget.
-async fn spawn_session(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
+async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
     retry_rpc!(
-        config.request_timeout,
-        config.restart_backoff,
+        config.publisher.request_timeout,
+        config.publisher.restart_backoff,
         "midnight_intent_gen_spawn",
         {
             let session = spawn_child(config, network_id)?;
-            verify_ready(session, config).await
+            verify_ready(session, &config.publisher).await
         }
     )
 }
@@ -481,13 +481,13 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
     Ok(session)
 }
 
-fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
+fn spawn_child(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
     let inherited = publisher_vars(std::env::vars_os().map(|(name, _)| name));
     let mut command = intent_gen_command(config, network_id, &inherited)?;
     let mut child = command.spawn().with_context(|| {
         format!(
             "spawning the midnight intent builder ({})",
-            config.intent_gen_command.join(" ")
+            config.publisher.intent_gen_command.join(" ")
         )
     })?;
 
@@ -512,7 +512,7 @@ fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Ses
         _child: child,
         stderr_drain: AbortOnDrop(tokio::spawn(drain_stderr(
             stderr,
-            SeedRedactor::new(&config.funding_seed),
+            SeedRedactor::new(&config.publisher.funding_seed),
             tail,
         ))),
     })
@@ -520,11 +520,12 @@ fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Ses
 
 /// Configured but not spawned, so a test can read back the environment the child would get.
 fn intent_gen_command(
-    config: &PublisherConfig,
+    config: &MidnightConfig,
     network_id: &str,
     inherited: &[std::ffi::OsString],
 ) -> anyhow::Result<Command> {
     let (program, args) = config
+        .publisher
         .intent_gen_command
         .split_first()
         .context("midnight publisher config: intent_gen_command is empty")?;
@@ -540,14 +541,20 @@ fn intent_gen_command(
     }
 
     command
-        .env("MIDNIGHT_PUB_FUNDING_SEED", &config.funding_seed)
+        .env("MIDNIGHT_PUB_FUNDING_SEED", &config.publisher.funding_seed)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
         // Written unconditionally: a name left unwritten is one the `env_remove`
         // above took away.
         .env("MIDNIGHT_PUB_NODE_URL", &config.node_ws_url)
-        .env("MIDNIGHT_PUB_PROOF_SERVER_URL", &config.proof_server_url)
-        .env("MIDNIGHT_PUB_INDEXER_URL", &config.indexer_url)
-        .env("MIDNIGHT_PUB_INDEXER_WS_URL", &config.indexer_ws_url)
+        .env(
+            "MIDNIGHT_PUB_PROOF_SERVER_URL",
+            &config.publisher.proof_server_url,
+        )
+        .env("MIDNIGHT_PUB_INDEXER_URL", &config.publisher.indexer_url)
+        .env(
+            "MIDNIGHT_PUB_INDEXER_WS_URL",
+            &config.publisher.indexer_ws_url,
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Piped: an unread stderr pipe eventually blocks the child mid-proof.
@@ -749,42 +756,49 @@ struct WireReply {
 mod tests {
     use super::*;
 
-    use crate::config::PublisherConfig;
+    use crate::config::{MidnightConfig, PublisherConfig};
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     const NETWORK_ID: &str = "undeployed";
+    const NODE_WS_URL: &str = "ws://127.0.0.1:9944";
 
     /// A shell stub in place of the real Node child; a test reading an unpinned field
     /// must pin its own, or it silently tests the default.
-    fn stub_config(script: &str) -> PublisherConfig {
+    fn stub_config(script: &str) -> MidnightConfig {
         let script = format!(
             r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
-        PublisherConfig {
-            intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
-            request_timeout: Duration::from_secs(5),
-            restart_backoff: RetryConfig {
-                min_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(5),
-                max_times: 2,
-                jitter: false,
+        MidnightConfig {
+            node_ws_url: NODE_WS_URL.to_string(),
+            central_address: "ab".repeat(32),
+            publisher: PublisherConfig {
+                intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
+                request_timeout: Duration::from_secs(5),
+                restart_backoff: RetryConfig {
+                    min_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(5),
+                    max_times: 2,
+                    jitter: false,
+                },
+                ..Default::default()
             },
-            ..Default::default()
+            rpc: Default::default(),
+            indexer: Default::default(),
         }
     }
 
-    async fn spawn_stub(config: &PublisherConfig) -> IntentGen {
+    async fn spawn_stub(config: &MidnightConfig) -> IntentGen {
         IntentGen::spawn(config, NETWORK_ID)
             .await
             .expect("the stub spawns")
     }
 
-    fn ready_reply_config(reply: &str) -> PublisherConfig {
+    fn ready_reply_config(reply: &str) -> MidnightConfig {
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec![
+        config.publisher.intent_gen_command = vec![
             "sh".to_string(),
             "-c".to_string(),
             format!("read -r ready; printf '%s\\n' '{reply}'; sleep 30"),
@@ -942,7 +956,7 @@ mod tests {
         // End-of-input read as a zero-length line would look like an unreadable reply minutes later.
         let mut config = stub_config(r#"read line; exec 1>&-; sleep 30"#);
         // Long enough that the timeout cannot be what saves this test.
-        config.request_timeout = Duration::from_secs(30);
+        config.publisher.request_timeout = Duration::from_secs(30);
         let builder = spawn_stub(&config).await;
         let started = Instant::now();
         let err = builder
@@ -1004,7 +1018,7 @@ mod tests {
             counter.prologue()
         ));
         // Long enough that the closed pipe, not the deadline, is what ends this.
-        config.submit_timeout = Duration::from_secs(30);
+        config.publisher.submit_timeout = Duration::from_secs(30);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1033,7 +1047,7 @@ mod tests {
         // The deadline-blown loss: the wedged child is killed, just not asked again.
         let counter = SpawnCounter::new("submit-timeout");
         let mut config = stub_config(&format!("{} sleep 30", counter.prologue()));
-        config.submit_timeout = Duration::from_millis(50);
+        config.publisher.submit_timeout = Duration::from_millis(50);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1122,8 +1136,8 @@ mod tests {
     async fn a_submit_is_bounded_by_the_submit_budget_and_not_the_build_one() {
         // Bounding a submit by the build's budget would kill the child mid-prove on every real post.
         let mut config = stub_config("sleep 30");
-        config.request_timeout = Duration::from_millis(50);
-        config.submit_timeout = Duration::from_millis(400);
+        config.publisher.request_timeout = Duration::from_millis(50);
+        config.publisher.submit_timeout = Duration::from_millis(400);
         let builder = spawn_stub(&config).await;
 
         let started = Instant::now();
@@ -1149,7 +1163,7 @@ mod tests {
             ECHO_ID_REPLY
         ));
         // Wide enough that a fresh `sh -c` spawn beats it even on a loaded machine.
-        config.request_timeout = Duration::from_millis(500);
+        config.publisher.request_timeout = Duration::from_millis(500);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1215,7 +1229,7 @@ mod tests {
             counter.prologue(),
             ECHO_ID_REPLY
         ));
-        config.request_timeout = Duration::from_millis(500);
+        config.publisher.request_timeout = Duration::from_millis(500);
         let builder = std::sync::Arc::new(spawn_stub(&config).await);
         counter.wait_for(1).await;
 
@@ -1273,7 +1287,8 @@ mod tests {
     #[tokio::test]
     async fn a_child_that_exits_before_readiness_fails_startup() {
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
+        config.publisher.intent_gen_command =
+            vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
 
         let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
             panic!("an exited process is not a ready publisher")
@@ -1288,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_deadline_that_reaches_the_rust_backstop_fails_startup() {
         let mut config = stub_config("unreachable");
-        config.submit_timeout = Duration::from_millis(2);
+        config.publisher.submit_timeout = Duration::from_millis(2);
 
         let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
             panic!("the Rust supervisor must outlive the child submit deadline")
@@ -1304,7 +1319,7 @@ mod tests {
     async fn a_command_that_does_not_exist_fails_at_startup_and_names_itself() {
         // The case the eager spawn does catch: a missing binary is learned at startup.
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["mpc-midnight-no-such-binary".to_string()];
+        config.publisher.intent_gen_command = vec!["mpc-midnight-no-such-binary".to_string()];
 
         let started = Instant::now();
         let Err(err) = IntentGen::spawn(&config, NETWORK_ID).await else {
@@ -1348,10 +1363,9 @@ mod tests {
         let mut config = stub_config(
             r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"net=%s node=%s prover=%s indexer=%s ws=%s"}\n' "$MIDNIGHT_PUB_NETWORK_ID" "$MIDNIGHT_PUB_NODE_URL" "$MIDNIGHT_PUB_PROOF_SERVER_URL" "$MIDNIGHT_PUB_INDEXER_URL" "$MIDNIGHT_PUB_INDEXER_WS_URL""#,
         );
-        config.node_ws_url = "ws://127.0.0.1:9944".to_string();
-        config.proof_server_url = "http://127.0.0.1:6300".to_string();
-        config.indexer_url = "http://127.0.0.1:8088/api/v3/graphql".to_string();
-        config.indexer_ws_url = "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string();
+        config.publisher.proof_server_url = "http://127.0.0.1:6300".to_string();
+        config.publisher.indexer_url = "http://127.0.0.1:8088/api/v3/graphql".to_string();
+        config.publisher.indexer_ws_url = "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string();
         let builder = spawn_stub(&config).await;
 
         let err = builder
@@ -1388,7 +1402,7 @@ mod tests {
         let mut config = stub_config(
             r#"printf 'invalid MIDNIGHT_PUB_* configuration: missing MIDNIGHT_PUB_INDEXER_URL (wallet %s)\n' "$MIDNIGHT_PUB_FUNDING_SEED" >&2; exit 1"#,
         );
-        config.funding_seed = SEED.to_string();
+        config.publisher.funding_seed = SEED.to_string();
         let builder = spawn_stub(&config).await;
 
         let err = builder
@@ -1448,7 +1462,7 @@ mod tests {
         let mut config = stub_config(
             r#"read -r line; printf '{"id":0,"ok":false,"code":"internal","message":"wallet rejected %s"}\n' "$MIDNIGHT_PUB_FUNDING_SEED""#,
         );
-        config.funding_seed = SEED.to_string();
+        config.publisher.funding_seed = SEED.to_string();
         let builder = spawn_stub(&config).await;
 
         let err = builder
@@ -1530,7 +1544,8 @@ mod tests {
     async fn readiness_sends_and_requires_protocol_generation_one() {
         let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":1}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        config.publisher.intent_gen_command =
+            vec!["sh".to_string(), "-c".to_string(), script.to_string()];
 
         IntentGen::spawn(&config, NETWORK_ID)
             .await

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mpc_chain_midnight::PublisherConfig;
+use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
 
 fn publisher_package() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../midnight-publisher-ts")
@@ -16,7 +16,7 @@ fn path_arg(path: &Path) -> String {
 
 /// The builder as the node runs it in production. Checked here because a missing entry
 /// point exits `node` at boot, reading like a protocol fault instead of an unbuilt package.
-pub fn base_live_config() -> PublisherConfig {
+pub fn base_live_config() -> MidnightConfig {
     let package = publisher_package();
     let entry = package.join("dist/main.js");
     assert!(
@@ -25,13 +25,18 @@ pub fn base_live_config() -> PublisherConfig {
         entry.display(),
         package.display()
     );
-    PublisherConfig {
-        intent_gen_command: vec!["node".to_string(), path_arg(&entry)],
-        funding_seed: "ab".repeat(32),
+    MidnightConfig {
         node_ws_url: "ws://127.0.0.1:9944".to_string(),
-        proof_server_url: "http://127.0.0.1:6300".to_string(),
-        indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-        indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
-        ..Default::default()
+        central_address: "ab".repeat(32),
+        publisher: PublisherConfig {
+            intent_gen_command: vec!["node".to_string(), path_arg(&entry)],
+            funding_seed: "ab".repeat(32),
+            proof_server_url: "http://127.0.0.1:6300".to_string(),
+            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+            ..Default::default()
+        },
+        rpc: Default::default(),
+        indexer: Default::default(),
     }
 }

@@ -1,7 +1,8 @@
 use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
 
-/// CLI arguments for the Midnight indexer.
+/// CLI arguments for the Midnight integration. The node url requires the whole
+/// publisher group; only `--midnight-intent-gen-command` has a default.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_midnight_options")]
 pub struct MidnightArgs {
@@ -9,7 +10,13 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_NODE_WS_URL"),
-        requires = "midnight_central_address"
+        requires_all = [
+            "midnight_central_address",
+            "midnight_funding_seed",
+            "midnight_proof_server_url",
+            "midnight_indexer_url",
+            "midnight_indexer_ws_url",
+        ]
     )]
     pub midnight_node_ws_url: Option<String>,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
@@ -89,63 +96,39 @@ impl MidnightArgs {
         args
     }
 
-    /// These fields are `String`, so the boundary check is `validate()` after the
-    /// structural publisher group is assembled.
+    /// String fields, so the boundary check is `validate()`; clap's `requires_all`
+    /// on the node url makes the flags all-or-nothing before this runs.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
-        let (Some(node_ws_url), Some(central_address)) =
-            (self.midnight_node_ws_url, self.midnight_central_address)
+        let (
+            Some(node_ws_url),
+            Some(central_address),
+            Some(funding_seed),
+            Some(proof_server_url),
+            Some(indexer_url),
+            Some(indexer_ws_url),
+        ) = (
+            self.midnight_node_ws_url,
+            self.midnight_central_address,
+            self.midnight_funding_seed,
+            self.midnight_proof_server_url,
+            self.midnight_indexer_url,
+            self.midnight_indexer_ws_url,
+        )
         else {
             return Ok(None);
         };
-        let publisher_requested = self.midnight_funding_seed.is_some()
-            || self.midnight_intent_gen_command.is_some()
-            || self.midnight_proof_server_url.is_some()
-            || self.midnight_indexer_url.is_some()
-            || self.midnight_indexer_ws_url.is_some();
-        let publisher = if publisher_requested {
-            let missing = [
-                (
-                    "--midnight-funding-seed",
-                    self.midnight_funding_seed.is_none(),
-                ),
-                (
-                    "--midnight-proof-server-url",
-                    self.midnight_proof_server_url.is_none(),
-                ),
-                (
-                    "--midnight-indexer-url",
-                    self.midnight_indexer_url.is_none(),
-                ),
-                (
-                    "--midnight-indexer-ws-url",
-                    self.midnight_indexer_ws_url.is_none(),
-                ),
-            ]
-            .into_iter()
-            .filter_map(|(name, absent)| absent.then_some(name))
-            .collect::<Vec<_>>();
-            anyhow::ensure!(
-                missing.is_empty(),
-                "midnight config: responding also requires {}",
-                missing.join(", ")
-            );
-            let mut publisher = PublisherConfig {
-                funding_seed: self.midnight_funding_seed.expect("checked above"),
-                node_ws_url: node_ws_url.clone(),
-                proof_server_url: self.midnight_proof_server_url.expect("checked above"),
-                indexer_url: self.midnight_indexer_url.expect("checked above"),
-                indexer_ws_url: self.midnight_indexer_ws_url.expect("checked above"),
-                ..Default::default()
-            };
-            if let Some(command) = self.midnight_intent_gen_command {
-                publisher.intent_gen_command = serde_json::from_str(&command).with_context(|| {
-                    format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
-                })?;
-            }
-            Some(publisher)
-        } else {
-            None
+        let mut publisher = PublisherConfig {
+            funding_seed,
+            proof_server_url,
+            indexer_url,
+            indexer_ws_url,
+            ..Default::default()
         };
+        if let Some(command) = self.midnight_intent_gen_command {
+            publisher.intent_gen_command = serde_json::from_str(&command).with_context(|| {
+                format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
+            })?;
+        }
         let config = MidnightConfig {
             node_ws_url,
             central_address,
@@ -160,41 +143,36 @@ impl MidnightArgs {
     pub fn from_config(config: Option<MidnightConfig>) -> Self {
         match config {
             Some(c) => {
-                // The tuning sub-structs have no CLI flags; into_config
-                // reinstates their defaults on the other side.
+                // No flags for the tuning fields. Destructured in full so a new
+                // field fails to compile here rather than silently miss the round trip.
                 let MidnightConfig {
                     node_ws_url,
                     central_address,
-                    publisher,
+                    publisher:
+                        PublisherConfig {
+                            intent_gen_command,
+                            funding_seed,
+                            proof_server_url,
+                            indexer_url,
+                            indexer_ws_url,
+                            request_timeout: _,
+                            submit_timeout: _,
+                            restart_backoff: _,
+                        },
                     rpc: _,
                     indexer: _,
                 } = c;
-                let (
-                    funding_seed,
-                    intent_gen_command,
-                    proof_server_url,
-                    indexer_url,
-                    indexer_ws_url,
-                ) = publisher.map_or((None, None, None, None, None), |publisher| {
-                    (
-                        Some(publisher.funding_seed),
-                        Some(
-                            serde_json::to_string(&publisher.intent_gen_command)
-                                .expect("a Vec<String> always serializes"),
-                        ),
-                        Some(publisher.proof_server_url),
-                        Some(publisher.indexer_url),
-                        Some(publisher.indexer_ws_url),
-                    )
-                });
                 MidnightArgs {
                     midnight_node_ws_url: Some(node_ws_url),
                     midnight_central_address: Some(central_address),
-                    midnight_funding_seed: funding_seed,
-                    midnight_intent_gen_command: intent_gen_command,
-                    midnight_proof_server_url: proof_server_url,
-                    midnight_indexer_url: indexer_url,
-                    midnight_indexer_ws_url: indexer_ws_url,
+                    midnight_funding_seed: Some(funding_seed),
+                    midnight_intent_gen_command: Some(
+                        serde_json::to_string(&intent_gen_command)
+                            .expect("a Vec<String> always serializes"),
+                    ),
+                    midnight_proof_server_url: Some(proof_server_url),
+                    midnight_indexer_url: Some(indexer_url),
+                    midnight_indexer_ws_url: Some(indexer_ws_url),
                 }
             }
             None => MidnightArgs {
@@ -223,7 +201,7 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
-            publisher: Some(PublisherConfig {
+            publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
                 // A space and a leading dash, which only a structured encoding gets back out intact.
                 intent_gen_command: vec![
@@ -234,10 +212,8 @@ mod tests {
                 proof_server_url: "http://127.0.0.1:6300".into(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
-                // `into_config` copies it off `--midnight-node-ws-url`.
-                node_ws_url: "ws://127.0.0.1:9944".into(),
                 ..Default::default()
-            }),
+            },
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -252,6 +228,7 @@ mod tests {
         let mut cfg = configured();
         cfg.indexer.live_block_buffer = 77;
         cfg.indexer.stall_timeout = Duration::from_secs(7);
+        cfg.publisher.submit_timeout = Duration::from_secs(7);
         assert_ne!(
             cfg.indexer,
             IndexerConfig::default(),
@@ -274,6 +251,11 @@ mod tests {
             IndexerConfig::default(),
             "tuning does not traverse the CLI; if this fails, flags were added and this test should become a round-trip assert"
         );
+        assert_eq!(
+            reparsed.publisher.submit_timeout,
+            PublisherConfig::default().submit_timeout,
+            "publisher tuning does not traverse the CLI either"
+        );
     }
 
     #[test]
@@ -292,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn the_publisher_flags_are_gated_on_the_node_ws_url() {
+    fn the_midnight_flags_are_all_or_nothing() {
         // A publisher flag accepted on its own would let a node carry a funding
         // seed with no chain configured to spend it on, unnoticed.
         crate::cli::tests::assert_midnight_env_unset();
@@ -311,6 +293,27 @@ mod tests {
                 "{flag} is not gated on the node ws url: {err}"
             );
         }
+
+        let central_address = "ab".repeat(32);
+        let err = MidnightArgs::try_parse_from([
+            "test",
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:9944",
+            "--midnight-central-address",
+            &central_address,
+        ])
+        .expect_err("clap must demand the publisher group with the node url");
+        for flag in [
+            "--midnight-funding-seed",
+            "--midnight-proof-server-url",
+            "--midnight-indexer-url",
+            "--midnight-indexer-ws-url",
+        ] {
+            assert!(
+                err.to_string().contains(flag),
+                "clap must name {flag} as missing: {err}"
+            );
+        }
     }
 
     #[test]
@@ -323,53 +326,6 @@ mod tests {
             err.to_string().contains("unexpected argument"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn the_builder_s_node_url_is_taken_from_the_one_flag_that_names_the_node() {
-        // The assertion that keeps it from gaining a flag of its own.
-        crate::cli::tests::assert_midnight_env_unset();
-
-        let cfg = configured();
-        let rendered = MidnightArgs::from_config(Some(cfg.clone())).into_str_args();
-        assert!(
-            !rendered.iter().any(|a| a.contains("publisher-node")),
-            "the builder's node url must render no flag of its own: {rendered:?}"
-        );
-
-        let reparsed =
-            MidnightArgs::try_parse_from(std::iter::once("test".to_string()).chain(rendered))
-                .unwrap()
-                .into_config()
-                .expect("a valid config passes the boundary check")
-                .expect("all the gating fields are set");
-        assert_eq!(
-            reparsed
-                .publisher
-                .expect("the test config responds")
-                .node_ws_url,
-            cfg.node_ws_url
-        );
-    }
-
-    #[test]
-    fn a_node_that_only_indexes_is_handed_no_endpoint_at_all() {
-        // An indexer-only deployment carrying the node url alone would be four
-        // values short of a builder that boots.
-        crate::cli::tests::assert_midnight_env_unset();
-
-        let mut cfg = configured();
-        cfg.publisher = None;
-        let reparsed = MidnightArgs::try_parse_from(
-            std::iter::once("test".to_string())
-                .chain(MidnightArgs::from_config(Some(cfg.clone())).into_str_args()),
-        )
-        .unwrap()
-        .into_config()
-        .expect("a node with no seed and no endpoints is a legal deployment")
-        .expect("all the gating fields are set");
-
-        assert_eq!(reparsed.publisher, None);
     }
 
     #[test]
