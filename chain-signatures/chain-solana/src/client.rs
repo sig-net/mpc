@@ -178,7 +178,7 @@ impl SolanaClient {
 
     pub fn block_fetch_config() -> RpcBlockConfig {
         RpcBlockConfig {
-            encoding: Some(UiTransactionEncoding::Json),
+            encoding: Some(UiTransactionEncoding::JsonParsed),
             transaction_details: Some(TransactionDetails::Full),
             rewards: Some(false),
             commitment: Some(CommitmentConfig::confirmed()),
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn block_fetch_config_fields() {
         let config = SolanaClient::block_fetch_config();
-        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::JsonParsed));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
