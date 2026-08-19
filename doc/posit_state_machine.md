@@ -95,6 +95,7 @@ fetch and the deliberator's wait for `PROPOSE` are each given the time left in t
 is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
+Optimization: start round timeout when enough active peers.
 
 ## 3. Inside Posit
 
@@ -163,6 +164,8 @@ The edge back from `Propose received` to `Waiting for Propose` is not an abort:
 the round is not bumped. A deliberator that lacks the presignature sends
 `REJECT MissingArtifact` and resumes waiting for a `PROPOSE` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
+
+TODO: shrink local holder set when receiving `REJECT MissingArtifact`
 
 ### Who each message goes to
 
@@ -382,9 +385,20 @@ because the round timeout ran out.
 (12 nodes), testnet (9 nodes), mainnet (1 of the 7 participant nodes runs in
 our cluster).
 
-- **Reconstruction failure (§8.5): zero occurrences anywhere.** The
+Good news
+- **Presignature pipeline is healthy.** ~964 completions
+  per hour on devnet, start:completed exactly 1:1 on both networks, and the two
+  proposer-side starvation signals ("skipping presignature due to inactive
+  participants", "proposer timeout waiting for presignature") are zero in
+  steady state. Both fire only in a burst coinciding with the shared devnet
+  Redis master being replaced (each cluster runs one shared Redis, so a node
+  cannot lose its storage alone). Steady-state churn is therefore not pool
+  starvation.
+- **No reconstruction failures (§8.5).** The
   silent-success branch has never been observed firing; fixing it is insurance
   against a latent path, not an active leak.
+
+Requiring some more thoughts
 - **Duplicate deliveries are real (§8.4).** Devnet logged ~20k
   "posit ACCEPT duplicate ignored" in episodic bursts (half from one node), in
   the shared posit layer the presignature protocol uses. Zero REJECT
@@ -397,49 +411,30 @@ our cluster).
   ever arrived.
 - **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
   in 48h.
-
 - **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
   on testnet (§8.1);** on testnet each node logs the same delayed request, so
   the per-node uniform count is one request counted nine times.
-- **Mainnet: no signing traffic at all** reached our node in the window, so its
-  zeros mean no data, not health.
-- **Follow-up sweep: the presignature pipeline is healthy.** ~964 completions
-  per hour on devnet, start:completed exactly 1:1 on both networks, and the two
-  proposer-side starvation signals ("skipping presignature due to inactive
-  participants", "proposer timeout waiting for presignature") are zero in
-  steady state. Both fire only in a burst coinciding with the shared devnet
-  Redis master being replaced (each cluster runs one shared Redis, so a node
-  cannot lose its storage alone). Steady-state churn is therefore not pool
-  starvation.
-- **Per-request verification refuted the zombie reading.** The three worst
-  midday rotators each lived ~19 minutes and ended in one successful
-  signature: ~100-140 reorganizes and 9-11 generation attempts per request,
-  then "sign request completed successfully" on 6-7 pods within seconds, and
-  zero reorganizes afterwards — completion propagation works. The churn is
-  heavy but bounded per request; why rounds stay silent for those minutes is
-  not identified yet (4 of the 12 dev pods log no signing traffic at all).
-  Side findings: requests reach the nodes ~15 minutes after the contract
-  first sees them, making end-to-end latency ~34 minutes in that hour.
 
 Proposals against the churn, in order of expected impact. Requests never
 expire by design, so the rotation has to be ended by information, not time:
 
-1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+1. **Prune the pool.** Discard a presignature that cannot reach `t` live
+   holders (MissingArtifact replies shrink its effective holder set; repeated
+   active-set skips finish it). This is not the steady-state churn driver
+   since the pool is healthy, but it frees stockpile slots (`len_mine` counts
+   unusable entries toward `min_presignatures`) and speeds recovery after 
+   storage incidents. 
+2.  **SKIP.** A proposer that cannot propose (no presignature, no permit,
    paused) says so; receivers end round `r` at once instead of timing out on
    silence. Silent rounds dominate the churn and their cause is unidentified;
    SKIP both shortens them and sharpens the diagnosis, since a round that
    stays silent after SKIP has an absent proposer, not an unwilling one.
-2. **Answer posits for completed requests.** `dead_ids` silently drops them
+3. **Answer posits for completed requests.** `dead_ids` silently drops them
    today; replying REJECT Completed lets a straggler end its task on the next
-   message it sends. One new reject reason, no new message type. Verification
+   message it sends. To be Byzantine fault tolerant, f+1 such rejects should
+   be seen before moving on. 
+   One new reject reason, no new message type. Verification
    showed completion propagating well, so this is insurance for a node the
    Completion event misses, and the minimal form of the round-outcome signal
-   (§3).
-3. **Prune the pool.** Discard a presignature that cannot reach `t` live
-   holders (MissingArtifact replies shrink its effective holder set; repeated
-   active-set skips finish it). Not the steady-state churn driver — the pool
-   is healthy — but it frees stockpile slots (`len_mine` counts unusable
-   entries toward `min_presignatures`) and speeds recovery after storage
-   incidents like the Redis-master replacement. Sync's `remove_outdated`
-   handles the owner-lost direction; this direction is handled by nothing.
+   (§3). 
 
