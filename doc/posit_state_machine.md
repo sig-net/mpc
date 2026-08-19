@@ -404,31 +404,43 @@ our cluster).
   the per-node uniform count is one request counted nine times.
 - **Mainnet: no signing traffic at all** reached our node in the window, so its
   zeros mean no data, not health.
+- **Follow-up sweep: the presignature pipeline is healthy.** ~964 completions
+  per hour on devnet, start:completed exactly 1:1 on both networks, and the two
+  proposer-side starvation signals ("skipping presignature due to inactive
+  participants", "proposer timeout waiting for presignature") are zero in
+  steady state. Both fire only in a burst coinciding with the shared devnet
+  Redis master being replaced (each cluster runs one shared Redis, so a node
+  cannot lose its storage alone). Steady-state churn is therefore not pool
+  starvation. Best fit for the silent rounds: participants that already
+  completed the request (signature produced, publish never confirmed, #1063)
+  drop late posits via `dead_ids` without replying, so the excluded few rotate
+  through mostly-silent proposers forever — which also explains the observed
+  1-3 accept counts against threshold 9. Per-request verification pending.
 
 Proposals against the churn, in order of expected impact. Requests never
-expire by design, so the churn has to be fixed at its supply side:
+expire by design, so the rotation has to be ended by information, not time:
 
-1. **Prune the pool.** Discard a presignature that cannot reach `t` live
-   holders: when MissingArtifact replies shrink its effective holder set (the
-   owner removes the rejector from the stored holder list), and when the
-   proposer's active-set skip keeps hitting it. Freeing the slot is the point:
-   stockpiling refuses to generate while `len_mine >= min_presignatures`, so
-   today an unusable presignature counts as stock and blocks its own
-   replacement — pruning lets the pipeline refill with live holders. The
-   reverse direction (owner lost it, holders clean up) is already handled by
-   sync's `remove_outdated`; this direction is handled by nothing.
+1. **Answer posits for completed requests.** `dead_ids` silently drops them
+   today; replying REJECT Completed lets a rotating node end its task on the
+   next message it sends. One new reject reason, no new message type. Directly
+   targets the best-fit zombie mechanism, and is the minimal form of the
+   round-outcome signal (§3).
 2. **SKIP.** A proposer that cannot propose (no presignature, no permit,
-   paused) says so; receivers end round `r` at once, instead of 83% of
-   reorganizes being a timeout on silence. With 1 in place such rounds should
-   be rare; alone it only makes futile rotation faster.
-3. **Park.** Safety net if 1 does not end the rotation: after K rounds without
-   a PROPOSE, stop rotating and retry when the presignature pool changes (in
-   the data the pool is the scarce input; the active set is healthy in steady
-   state).
-4. **Name the cause.** With a healthy mesh, "never received" is a narrow
-   window (a completed generation leaves a share with every participant; only
-   a crash between computing and persisting loses one). The real split is
-   "deleted (consumed / outdated)" vs "storage lost since generation". A
-   tombstone of deleted ids answers the first and does not survive a storage
-   wipe, so pair it with a storage birth marker: a proposed id older than the
-   node's storage means "lost my storage".
+   paused) says so; receivers end round `r` at once instead of timing out on
+   silence. Does not help when the proposer is silent because it finished the
+   request — that is case 1.
+3. **Prune the pool.** Discard a presignature that cannot reach `t` live
+   holders (MissingArtifact replies shrink its effective holder set; repeated
+   active-set skips finish it). Not the steady-state churn driver — the pool
+   is healthy — but it frees stockpile slots (`len_mine` counts unusable
+   entries toward `min_presignatures`) and speeds recovery after storage
+   incidents like the Redis-master replacement. Sync's `remove_outdated`
+   handles the owner-lost direction; this direction is handled by nothing.
+4. **Park.** Last resort if 1-3 leave residual rotation: after K rounds
+   without a PROPOSE, stop rotating. With the pool healthy its retry trigger
+   is unclear, which is itself a reason to prefer 1.
+5. **Name the cause.** With a healthy mesh, "never received" is a narrow
+   window (a completed generation leaves a share with every participant). The
+   real split is "deleted (consumed / outdated)" vs "storage lost": a
+   tombstone of deleted ids answers the first; a storage birth marker covers
+   the wipe case the tombstone cannot.
