@@ -1,5 +1,6 @@
 use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+use secrecy::{ExposeSecret as _, SecretString};
 
 /// CLI arguments for the Midnight integration. The node url requires the whole
 /// publisher group; only `--midnight-intent-gen-command` has a default.
@@ -32,7 +33,7 @@ pub struct MidnightArgs {
         env("MPC_MIDNIGHT_FUNDING_SEED"),
         requires = "midnight_node_ws_url"
     )]
-    pub midnight_funding_seed: Option<String>,
+    pub midnight_funding_seed: Option<SecretString>,
     /// argv of the intent builder child process, JSON-encoded:
     /// `["node","dist/main.js"]`. One clap value rather than a multi-value
     /// flag, whose forms stop at anything flag-shaped; JSON escapes instead
@@ -79,7 +80,10 @@ impl MidnightArgs {
             args.extend(["--midnight-central-address".to_string(), v]);
         }
         if let Some(v) = self.midnight_funding_seed {
-            args.extend(["--midnight-funding-seed".to_string(), v]);
+            args.extend([
+                "--midnight-funding-seed".to_string(),
+                v.expose_secret().to_string(),
+            ]);
         }
         if let Some(v) = self.midnight_intent_gen_command {
             args.extend(["--midnight-intent-gen-command".to_string(), v]);
@@ -118,7 +122,7 @@ impl MidnightArgs {
             return Ok(None);
         };
         let mut publisher = PublisherConfig {
-            funding_seed,
+            funding_seed: funding_seed.expose_secret().to_string(),
             proof_server_url,
             indexer_url,
             indexer_ws_url,
@@ -165,7 +169,7 @@ impl MidnightArgs {
                 MidnightArgs {
                     midnight_node_ws_url: Some(node_ws_url),
                     midnight_central_address: Some(central_address),
-                    midnight_funding_seed: Some(funding_seed),
+                    midnight_funding_seed: Some(funding_seed.into()),
                     midnight_intent_gen_command: Some(
                         serde_json::to_string(&intent_gen_command)
                             .expect("a Vec<String> always serializes"),
@@ -217,6 +221,22 @@ mod tests {
             rpc: Default::default(),
             indexer: Default::default(),
         }
+    }
+
+    #[test]
+    fn debug_redacts_the_funding_seed() {
+        let config = configured();
+        let funding_seed = config.publisher.funding_seed.clone();
+        let rendered = format!("{:?}", MidnightArgs::from_config(Some(config)));
+
+        assert!(
+            !rendered.contains(&funding_seed),
+            "the funding seed reached Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "the secret field must render as redacted: {rendered}"
+        );
     }
 
     #[test]

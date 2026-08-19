@@ -31,5 +31,5 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-midnight-ledger-v9.workspace = true
-midnight-transient-crypto.workspace = true
+midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-transient-crypto = "3.0.0"

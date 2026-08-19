@@ -319,7 +319,7 @@ impl Exchange {
     /// The pipe failed under us; only an operation that left nothing on chain may be asked again.
     fn lost(error: anyhow::Error, operation: Operation) -> Self {
         Self::Broken {
-            error: unanswered(error, operation),
+            error,
             retry: operation.is_repeatable(),
         }
     }
@@ -334,8 +334,8 @@ impl Exchange {
 }
 
 /// `error`, plus what an operation that cannot be asked again leaves behind. Applied
-/// wherever a pass breaks PAST THE WRITE and nowhere else: from there a lost answer
-/// and a landed transaction are indistinguishable, before it an alarm would be false.
+/// to every locally broken exchange after encoding: from there the transport may have
+/// been attempted, so a lost answer and a landed transaction are indistinguishable.
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     match operation {
         Operation::Submit => error.context(AmbiguousSubmit),
@@ -501,7 +501,7 @@ async fn drain_stderr(stderr: ChildStderr, tail: StderrTail) {
     }
 }
 
-/// One line out, one line in; anything leaving the pipe in an unknown state reports `Broken`.
+/// Encodes one request and applies the post-encoding uncertainty policy once.
 async fn exchange<T: Serialize>(
     session: &mut Session,
     request: &T,
@@ -509,7 +509,6 @@ async fn exchange<T: Serialize>(
     config: &PublisherConfig,
     cancel: &CancellationToken,
 ) -> Exchange {
-    let deadline = operation.deadline(config);
     let id = take_wire_id(&mut session.next_id);
     let line = match encode_request(request, id, operation) {
         Ok(line) => line,
@@ -517,18 +516,37 @@ async fn exchange<T: Serialize>(
         Err(error) => return Exchange::Answered(Err(error)),
     };
 
+    match exchange_inner(session, &line, id, operation, config, cancel).await {
+        Exchange::Broken { error, retry } => Exchange::Broken {
+            error: unanswered(error, operation),
+            retry,
+        },
+        answered => answered,
+    }
+}
+
+/// One line out, one line in; anything leaving the pipe in an unknown state reports `Broken`.
+async fn exchange_inner(
+    session: &mut Session,
+    line: &str,
+    id: u64,
+    operation: Operation,
+    config: &PublisherConfig,
+    cancel: &CancellationToken,
+) -> Exchange {
+    let deadline = operation.deadline(config);
     let reply = tokio::select! {
         // Nothing here can tell a cancel that raced the write from one that beat it,
         // so a cancelled submit reports what it may have left behind.
         _ = cancel.cancelled() => {
-            return Exchange::give_up(unanswered(
-                anyhow::anyhow!("midnight {} cancelled", operation.name()),
-                operation,
+            return Exchange::give_up(anyhow::anyhow!(
+                "midnight {} cancelled",
+                operation.name(),
             ))
         }
         // A timed-out child is a dead publisher if kept: a wedged circuit run wedges the
         // process while it still looks healthy. `Broken` kills it; a submit is still not reissued.
-        result = tokio::time::timeout(deadline, round_trip(session, &line)) => match result {
+        result = tokio::time::timeout(deadline, round_trip(session, line)) => match result {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => return Exchange::lost(error, operation),
             Err(_) => return Exchange::lost(
@@ -537,14 +555,7 @@ async fn exchange<T: Serialize>(
             ),
         },
     };
-    match decode_reply(&reply, id) {
-        // The child's verdict passes through; an unpairable reply leaves the doubt a dead pipe does.
-        answered @ Exchange::Answered(_) => answered,
-        Exchange::Broken { error, retry } => Exchange::Broken {
-            error: unanswered(error, operation),
-            retry,
-        },
-    }
+    decode_reply(&reply, id)
 }
 
 async fn round_trip(session: &mut Session, line: &str) -> anyhow::Result<String> {
@@ -907,6 +918,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tx_id, hex::encode(SAMPLE_INTENT));
+    }
+
+    #[tokio::test]
+    async fn a_submit_reply_for_another_request_is_ambiguous() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":7,"ok":true,"txId":"ab","blockHash":"cd"}\n'"#,
+        ))
+        .await;
+        let err = builder
+            .submit(SAMPLE_INTENT, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+
+        assert!(rendered.contains("id 7"), "got: {rendered}");
+        assert!(
+            rendered.contains("check it for this request before posting again"),
+            "an unpairable submit reply must preserve the on-chain uncertainty: {rendered}"
+        );
     }
 
     #[tokio::test]
