@@ -378,3 +378,32 @@ Stated as consequences of the machine, not as bug reports.
 7. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
 
+
+## 9. What the logs show
+
+48h Cloud Logging sweep, 2026-08-17 to 2026-08-19, all three networks: devnet
+(12 nodes), testnet (9 nodes), mainnet (1 of the 7 participant nodes runs in
+our cluster).
+
+- **Reconstruction failure (§8.5): zero occurrences anywhere.** The
+  silent-success branch has never been observed firing; fixing it is insurance
+  against a latent path, not an active leak.
+- **Duplicate deliveries are real (§8.4).** Devnet logged ~20k
+  "posit ACCEPT duplicate ignored" in episodic bursts (half from one node), in
+  the shared posit layer the presignature protocol uses. Zero REJECT
+  duplicates, zero START-from-non-proposer, zero conflicting-proposer events
+  anywhere, so reordering damage has not been observed — but the retry/duplicate
+  precondition for §8.4 is met.
+- **Round churn is currently a devnet phenomenon.** ~100k reorganizes in 48h on
+  devnet against exactly zero on testnet. Devnet steady state concentrates in
+  ~79 stuck requests each rotating 1.5-2x per minute (§8.1, the zombie
+  pattern). ~83% of reorganize reasons are "deliberator timeout waiting for
+  Propose": rounds ending because no PROPOSE ever arrived, which is the case a
+  round-outcome signal (§3) would address.
+- **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
+  in 48h.
+- **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
+  on testnet (§8.1);** on testnet each node logs the same delayed request, so
+  the per-node uniform count is one request counted nine times.
+- **Mainnet: no signing traffic at all** reached our node in the window, so its
+  zeros mean no data, not health.
