@@ -239,13 +239,18 @@ pub(crate) fn signet_map_key_rid(key: &AlignedValue) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(rid.clone()).ok()
 }
 
-/// Decode a counted response-map entry into the signature type consumed by the
-/// shared lifecycle. The deployed singleton uses the same key and value layout for
-/// both response maps.
+pub(crate) struct DecodedResponseEntry {
+    pub request_id: [u8; 32],
+    pub signature: anyhow::Result<mpc_primitives::Signature>,
+}
+
+/// Decode the deployed singleton's complete response shape before interpreting its
+/// caller-controlled signature values. An outer error is contract-schema drift; an
+/// inner signature error is one invalid candidate that a later counted entry may replace.
 pub(crate) fn decode_response_entry(
     key: &AlignedValue,
     value: &Node,
-) -> anyhow::Result<([u8; 32], mpc_primitives::Signature)> {
+) -> anyhow::Result<DecodedResponseEntry> {
     use k256::elliptic_curve::sec1::FromEncodedPoint as _;
     use mpc_primitives::ScalarExt as _;
 
@@ -273,12 +278,8 @@ pub(crate) fn decode_response_entry(
     };
     let x = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.x")?);
     let y = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.y")?);
-    let encoded = k256::EncodedPoint::from_affine_coordinates(&x, &y, false);
-    let big_r = Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(&encoded))
-        .ok_or_else(|| anyhow::anyhow!("response bigR is not a secp256k1 point"))?;
-    let s = k256::Scalar::from_bytes(bytes_n::<32>(cursor, "response s")?)
-        .ok_or_else(|| anyhow::anyhow!("response s is not a secp256k1 scalar"))?;
-    let recovery_id = bounded_enum(cursor, "response recovery_id")?;
+    let s = bytes_n::<32>(cursor, "response s")?;
+    let recovery_id = uint::<u8>(cursor, 1, "response recovery_id")?;
     anyhow::ensure!(
         cursor.pos == cell.value.0.len(),
         "response signature decoded {} of {} atoms",
@@ -286,10 +287,24 @@ pub(crate) fn decode_response_entry(
         cell.value.0.len()
     );
 
-    Ok((
+    let signature = (|| {
+        let encoded = k256::EncodedPoint::from_affine_coordinates(&x, &y, false);
+        let big_r =
+            Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(&encoded))
+                .ok_or_else(|| anyhow::anyhow!("response bigR is not a secp256k1 point"))?;
+        let s = k256::Scalar::from_bytes(s)
+            .ok_or_else(|| anyhow::anyhow!("response s is not a secp256k1 scalar"))?;
+        anyhow::ensure!(
+            recovery_id <= 1,
+            "response recovery_id: {recovery_id} exceeds the maximum 1"
+        );
+        Ok(mpc_primitives::Signature::new(big_r, s, recovery_id))
+    })();
+
+    Ok(DecodedResponseEntry {
         request_id,
-        mpc_primitives::Signature::new(big_r, s, recovery_id),
-    ))
+        signature,
+    })
 }
 
 /// Decode the two-atom notification cell: version, then the 128-byte payload. Every
@@ -634,27 +649,47 @@ mod tests {
         let mut y = [0u8; 32];
         y.copy_from_slice(encoded.y().expect("generator y"));
         let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
-        let (decoded_rid, signature) =
-            decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 1))
-                .expect("the contract's response shape decodes");
-        assert_eq!(decoded_rid, rid);
+        let decoded = decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 1))
+            .expect("the contract's response shape decodes");
+        assert_eq!(decoded.request_id, rid);
+        let signature = decoded.signature.expect("the signature values are valid");
         assert_eq!(signature.big_r, k256::AffinePoint::GENERATOR);
         assert_eq!(signature.s, k256::Scalar::from(9u64));
         assert_eq!(signature.recovery_id, 1);
 
         let bad_widths = cell_from_atoms(&[trim(&x), trim(&y), trim(&s), vec![]], &[32, 32, 31, 1]);
         assert!(decode_response_entry(&response_key(3, rid), &bad_widths).is_err());
+        assert!(
+            decode_response_entry(&AlignedValue::from(rid), &response_value(x, y, s, 1)).is_err(),
+            "a key that is not a counted SignetMapKey is structural drift"
+        );
         assert!(decode_response_entry(
             &response_key(3, rid),
             &response_value([0xff; 32], [0xff; 32], s, 1),
         )
+        .expect("the invalid point still has the contract's shape")
+        .signature
         .is_err());
         assert!(
             decode_response_entry(&response_key(3, rid), &response_value(x, y, [0xff; 32], 1),)
+                .expect("the invalid scalar still has the contract's shape")
+                .signature
                 .is_err()
         );
         assert!(
-            decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 2),).is_err()
+            decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 2),)
+                .expect("recovery id 2 still fits the contract's Uint<8>")
+                .signature
+                .is_err()
+        );
+
+        let invalid_point_with_extra_atom = cell_from_atoms(
+            &[vec![0xff; 32], vec![0xff; 32], trim(&s), vec![], vec![1]],
+            &[32, 32, 32, 1, 1],
+        );
+        assert!(
+            decode_response_entry(&response_key(3, rid), &invalid_point_with_extra_atom).is_err(),
+            "the complete contract shape is checked before cryptographic values"
         );
     }
 
