@@ -983,7 +983,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                         continue;
                     }
-                    backlog.insert(Arc::new(request.clone())).await;
+                    backlog.insert(request).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -1028,7 +1028,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                     continue;
                 }
-                backlog.insert(Arc::new(request.clone())).await;
+                backlog.insert(request).await;
 
                 if saw_new_checkpoint {
                     break;

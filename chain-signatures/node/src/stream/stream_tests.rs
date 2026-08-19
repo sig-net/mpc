@@ -92,7 +92,7 @@ async fn test_stream_handles_sign_and_respond() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: request.clone(),
+            request: Arc::new(request),
             block_timestamp: None,
         }),
         Some(ChainEvent::Respond(sig_responded)),
@@ -210,7 +210,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: (*request).clone(),
+            request: Arc::clone(&request),
             block_timestamp: None,
         }),
         None,
@@ -496,7 +496,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
     let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
-            request: replacement,
+            request: Arc::new(replacement),
             block_timestamp: None,
         }),
         Some(ChainEvent::CatchupCompleted),

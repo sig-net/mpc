@@ -138,7 +138,7 @@ impl InnerMockStream {
             }
 
             block.push(ChainEvent::SignRequest {
-                request: request.clone(),
+                request: Arc::new(request.clone()),
                 block_timestamp: None,
             });
         }

@@ -519,7 +519,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    let err = process_sign_request(request, &ctx)
+    let err = process_sign_request(Arc::new(request), &ctx)
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
@@ -558,7 +558,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request((*request).clone(), &ctx)
+    let err = process_sign_request(request, &ctx)
         .await
         .expect_err("empty serialized_transaction should be rejected at ingestion");
     assert!(err.to_string().contains("empty serialized_transaction"));
@@ -586,7 +586,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
 
     // First emission inserts a new entry.
-    let was_new = process_sign_request((*request).clone(), &ctx)
+    let was_new = process_sign_request(Arc::clone(&request), &ctx)
         .await
         .expect("first sign request should be accepted");
     assert!(was_new, "first insert must report a new entry");
@@ -594,7 +594,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 
     // Replay: the indexer re-emitted the same SignId
     // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
-    let is_new = process_sign_request((*request).clone(), &ctx)
+    let is_new = process_sign_request(request, &ctx)
         .await
         .expect("replayed sign request should be accepted");
     assert!(!is_new, "replayed insert must report an existing entry");

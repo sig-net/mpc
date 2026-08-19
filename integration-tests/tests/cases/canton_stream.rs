@@ -38,7 +38,7 @@ async fn run_canton_indexer(
 async fn wait_for_sign_request(
     indexer: &mut ChainIndexerStream,
     timeout_secs: u64,
-) -> Result<IndexedSignRequest> {
+) -> Result<Arc<IndexedSignRequest>> {
     timeout(Duration::from_secs(timeout_secs), async {
         loop {
             match indexer.next_event().await {
@@ -253,7 +253,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
                     saw_sign_request = true;
-                    backlog.insert(Arc::new(request)).await;
+                    backlog.insert(request).await;
                 }
                 ChainEvent::Block(height) => {
                     if let Some(persisted_checkpoint) = backlog
@@ -306,7 +306,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         match timeout(Duration::from_secs(5), indexer2.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => {
                 sign_request_ids.push(request.id.request_id);
-                backlog.insert(Arc::new(request)).await;
+                backlog.insert(request).await;
                 if saw_new_checkpoint {
                     break;
                 }

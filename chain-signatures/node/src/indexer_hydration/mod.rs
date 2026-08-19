@@ -30,6 +30,7 @@ use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
+use std::sync::Arc;
 use std::time::Duration;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
@@ -557,7 +558,7 @@ pub async fn run<T: ChainTelemetry>(
                     };
 
                     if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
+                        crate::stream::ops::process_sign_request(Arc::new(sign_request), &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }
@@ -608,7 +609,7 @@ pub async fn run<T: ChainTelemetry>(
                     };
 
                     if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
+                        crate::stream::ops::process_sign_request(Arc::new(sign_request), &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }

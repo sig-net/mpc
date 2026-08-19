@@ -14,7 +14,7 @@ use mpc_primitives::{
 };
 
 pub(crate) async fn process_sign_request(
-    sign_request: IndexedSignRequest,
+    sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
 ) -> anyhow::Result<bool> {
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
@@ -35,7 +35,6 @@ pub(crate) async fn process_sign_request(
         }
     }
 
-    let sign_request = Arc::new(sign_request);
     // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
     let is_new = ctx
         .backlog

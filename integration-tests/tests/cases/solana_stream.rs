@@ -58,7 +58,9 @@ async fn run_solana_indexer_with_backlog(
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(indexer: &mut ChainIndexerStream) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(
+    indexer: &mut ChainIndexerStream,
+) -> Result<Arc<IndexedSignRequest>> {
     loop {
         match timeout(Duration::from_secs(6), indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),

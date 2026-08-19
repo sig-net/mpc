@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     bidirectional::RespondBidirectionalEvent, BidirectionalTxId, Chain, IndexedSignRequest, SignId,
     Signature,
@@ -9,7 +11,7 @@ use crate::{
 pub enum ChainEvent {
     SignRequest {
         /// The sign request that was observed on the chain.
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         /// Optional block timestamp of the request, if available. This is used for metrics reporting.
         block_timestamp: Option<u64>,
     },

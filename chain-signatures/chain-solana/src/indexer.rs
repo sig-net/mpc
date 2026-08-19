@@ -1083,7 +1083,7 @@ async fn emit_events(
                     );
                     events_tx
                         .send(ChainEvent::SignRequest {
-                            request,
+                            request: Arc::new(request),
                             block_timestamp: None,
                         })
                         .await?;
