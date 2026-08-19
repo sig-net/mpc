@@ -324,11 +324,10 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
 ) {
-    let threshold = contract_watcher.wait_threshold().await;
-    crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
-
-    // Load local checkpoint from storage first
-    match backlog.storage.load_latest(Chain::Hydration).await {
+    // Hydrate the local checkpoint before aligning: the web server (spawned
+    // independently) can then serve durable pending bodies to peers during
+    // startup. `load_local` only reads local storage and does not need the mesh.
+    match backlog.load_local(Chain::Hydration).await {
         Ok(Some(checkpoint)) => {
             tracing::info!(
                 chain = ?Chain::Hydration,
@@ -347,6 +346,10 @@ pub async fn run<T: ChainTelemetry>(
         }
     }
 
+    // Wait for the contract (and its checkpoint digest) to be available before
+    // aligning; this also yields the root public key used in the event loop.
+    let root_pk = contract_watcher.wait_public_key().await;
+
     // Align with consensus
     crate::backlog::consensus::align_backlog_with_consensus(
         Chain::Hydration,
@@ -357,8 +360,6 @@ pub async fn run<T: ChainTelemetry>(
         contract_watcher.account_id(),
     )
     .await;
-
-    let root_pk = contract_watcher.wait_public_key().await;
 
     // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)
     let ctx = {

@@ -23,19 +23,23 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    // If we can find the consensus checkpoint locally, confirm it and return.
-    if let Some(matched) = backlog
-        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+    match backlog
+        .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        tracing::info!(
-            ?chain,
-            matched_height = matched.block_height,
-            consensus_height = checkpoint_digest.height,
-            "consensus checkpoint matches a local checkpoint; confirming"
-        );
-        backlog.on_consensus_confirmed(chain, &matched).await;
-        return None;
+        Ok(found) => {
+            if found {
+                return None;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error confirming consensus checkpoint; retrying later"
+            );
+            return None;
+        }
     }
 
     tracing::warn!(
@@ -55,14 +59,8 @@ pub async fn align_backlog_with_consensus(
 
     let height = fetched_checkpoint.block_height;
 
-    // Persist the recovered checkpoint as the latest consensus checkpoint
-    // before overwriting the local backlog, so the node has a fallback on restart.
-    if let Err(err) = backlog.storage.persist(&fetched_checkpoint).await {
-        tracing::warn!(?chain, %err, "failed to persist regressed checkpoint");
-    }
-
-    if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
+    if let Err(err) = backlog.regress(fetched_checkpoint).await {
+        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 
@@ -373,7 +371,11 @@ mod tests {
                 }
 
                 for &height in &case.local_checkpoints {
-                    fixture.backlog.set_processed_block(chain, height).await;
+                    fixture
+                        .backlog
+                        .set_processed_block(chain, height)
+                        .await
+                        .unwrap();
                     let cp = fixture.backlog.checkpoint(chain).await.unwrap();
                     local_digests.push(cp.digest());
                 }
@@ -459,7 +461,12 @@ mod tests {
             );
 
             // 6. Assert persisted state
-            let persisted = fixture.backlog.storage.load_latest(chain).await.unwrap();
+            let persisted = fixture
+                .backlog
+                .checkpoint_storage()
+                .load_latest(chain)
+                .await
+                .unwrap();
             if let Some(expected_height) = case.expected_persisted_height {
                 assert!(
                     persisted.is_some(),
@@ -580,7 +587,11 @@ mod tests {
         }));
 
         // Create a local checkpoint at 100
-        fixture.backlog.set_processed_block(chain, 100).await;
+        fixture
+            .backlog
+            .set_processed_block(chain, 100)
+            .await
+            .unwrap();
         let _cp = fixture.backlog.checkpoint(chain).await.unwrap();
 
         let backlog_clone = fixture.backlog.clone();

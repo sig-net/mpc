@@ -123,7 +123,7 @@ pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>
 
 /// Build a test [`StreamContext`] and return the checkpoint / mesh watch
 /// senders so callers can drive them. `threshold` is the contract-watcher's
-/// signing threshold — pass `0` to skip the mesh wait in `recover_backlog`.
+/// signing threshold.
 pub fn make_test_stream_context(
     backlog: Backlog,
     sign_tx: mpsc::Sender<SignCommand>,

@@ -442,8 +442,9 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
-        .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+        .await
+        .unwrap();
+    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
@@ -488,8 +489,9 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
-        .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+        .await
+        .unwrap();
+    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     let replacement =
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);

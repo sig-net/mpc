@@ -442,9 +442,12 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .checkpoint(Chain::Solana)
         .await
         .expect("checkpoint creation should succeed");
-    seeded_backlog
-        .on_consensus_confirmed(Chain::Solana, &checkpoint)
-        .await;
+    assert!(matches!(
+        seeded_backlog
+            .confirm_consensus(Chain::Solana, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let recovered_backlog = Backlog::persisted(storage);
     let indexer = SolanaIndexer::new(config, recovered_backlog.clone(), NoopChainTelemetry)
