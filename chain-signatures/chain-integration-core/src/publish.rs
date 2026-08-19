@@ -33,11 +33,10 @@ pub struct PublishAction {
 impl PublishAction {
     pub fn new(
         public_key: PublicKey,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) -> Option<Self> {
-        let request: Arc<IndexedSignRequest> = request.into();
         let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
         let signature = mpc_crypto::reconstruct_signature(
             &expected_public_key,
@@ -79,7 +78,7 @@ mod tests {
             SignId::new([0u8; 32]),
         );
 
-        assert!(PublishAction::new(pk, request, output, vec![]).is_some());
+        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_some());
     }
 
     #[test]
@@ -99,6 +98,6 @@ mod tests {
             SignId::new([0u8; 32]),
         );
 
-        assert!(PublishAction::new(pk, request, output, vec![]).is_none());
+        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_none());
     }
 }

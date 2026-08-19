@@ -475,7 +475,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<BacklogEntry, BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -483,7 +483,7 @@ impl Backlog {
             .requests
             .get_mut(id)
             .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.transition_to_bidirectional_response(request.into())?;
+        entry.transition_to_bidirectional_response(request)?;
         Ok(entry.clone())
     }
 
@@ -912,9 +912,8 @@ impl BacklogEntry {
     /// identifiers diverge, which is the only way to reach this rejection.
     fn transition_to_bidirectional_response(
         &mut self,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
-        let request = request.into();
         if self.request.id != request.id
             || !matches!(&request.kind, SignKind::RespondBidirectional(_))
         {
@@ -1669,7 +1668,7 @@ mod tests {
         );
 
         entry
-            .transition_to_bidirectional_response(response_request)
+            .transition_to_bidirectional_response(Arc::new(response_request))
             .unwrap();
 
         assert!(matches!(
@@ -1702,7 +1701,7 @@ mod tests {
         );
 
         let err = entry
-            .transition_to_bidirectional_response(response_request)
+            .transition_to_bidirectional_response(Arc::new(response_request))
             .unwrap_err();
 
         assert!(matches!(

@@ -102,11 +102,10 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
-        let request: Arc<IndexedSignRequest> = request.into();
         let sign_id = request.id;
         let Some(action) = PublishAction::new(public_key, request, output, participants) else {
             tracing::error!(
@@ -126,11 +125,10 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
-        let request: Arc<IndexedSignRequest> = request.into();
         let rpc = self.clone();
         tokio::spawn(async move {
             if let Err(err) = rpc

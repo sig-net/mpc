@@ -160,10 +160,9 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
-        let request: Arc<IndexedSignRequest> = request.into();
         let sign_id = request.id;
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
@@ -612,7 +611,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
+        let request = Arc::new(IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0));
 
         let probe_id = SignId::new([43u8; 32]);
         let probe_request = IndexedSignRequest::sign(
@@ -643,7 +642,7 @@ mod tests {
         });
 
         // Step 1: Spawn → mailbox created, request retained, not dead
-        spawner.add_request(&governance, request.clone(), cfg.clone());
+        spawner.add_request(&governance, Arc::clone(&request), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
