@@ -3,7 +3,7 @@
 //! type, and drift in their shape is caught by the child's own submit-side decode and
 //! the wire tests its package pins from the TypeScript side. The two seams are traits
 //! because the things behind them cannot exist in a unit test: [`PinnedReads`] hides
-//! `MidnightRpc`, which needs a running node, and [`IntentSubmitter`] hides the ledger
+//! `MidnightPublisherRpc`, which needs a running node, and [`IntentSubmitter`] hides the ledger
 //! transaction, which needs a wallet and a proving run.
 
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use crate::reader::{
     decode_response_entry, CENTRAL_LEDGER_FIELDS, RESPOND_BIDIRECTIONAL_MAP_FIELD,
     RESPOND_MAP_FIELD,
 };
-use crate::rpc::MidnightRpc;
+use crate::rpc::MidnightPublisherRpc;
 use crate::state::decode_contract_state;
 
 /// The deployed entry point for a phase-1 signature response.
@@ -56,7 +56,7 @@ enum FinalizedResponse {
     },
 }
 
-/// The reads the respond path pins. A trait because `MidnightRpc` cannot be built
+/// The reads the respond path pins. A trait because `MidnightPublisherRpc` cannot be built
 /// without a node: its `OnlineClient` fetches metadata at construction.
 #[async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
@@ -74,13 +74,13 @@ pub(crate) trait PinnedReads: Send + Sync {
 }
 
 #[async_trait]
-impl PinnedReads for MidnightRpc {
+impl PinnedReads for MidnightPublisherRpc {
     async fn finalized_head(&self) -> anyhow::Result<String> {
-        MidnightRpc::finalized_head_0x(self).await
+        MidnightPublisherRpc::finalized_head_0x(self).await
     }
 
     async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-        MidnightRpc::block_timestamp_seconds(self, at_hash_0x).await
+        MidnightPublisherRpc::block_timestamp_seconds(self, at_hash_0x).await
     }
 
     async fn contract_state(
@@ -90,11 +90,11 @@ impl PinnedReads for MidnightRpc {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         // The two surfaces disagree about `0x`; both are decoded to bytes inside
         // `rpc.rs`, so nothing above it may reintroduce the distinction.
-        MidnightRpc::contract_state(self, address_64hex, at_hash_0x).await
+        MidnightPublisherRpc::contract_state(self, address_64hex, at_hash_0x).await
     }
 
     async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        MidnightRpc::ledger_parameters(self, at_hash_0x).await
+        MidnightPublisherRpc::ledger_parameters(self, at_hash_0x).await
     }
 }
 
@@ -149,7 +149,7 @@ impl MidnightPublisher {
     pub fn new(
         config: &PublisherConfig,
         central_address: String,
-        rpc: Arc<MidnightRpc>,
+        rpc: Arc<MidnightPublisherRpc>,
         intent_gen: Arc<IntentGen>,
         telemetry: Arc<dyn PublisherTelemetry>,
         cancel: CancellationToken,
