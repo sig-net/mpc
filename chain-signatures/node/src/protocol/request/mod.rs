@@ -117,7 +117,7 @@ const MAX_DEAD_IDS: usize = 4096;
 /// task incarnation and read by the deadline watcher; `round` carries the
 /// posit round across respawns.
 struct SignEntry {
-    request: IndexedSignRequest,
+    request: Arc<IndexedSignRequest>,
     is_proposer: Arc<AtomicBool>,
     round: Arc<AtomicUsize>,
 }
@@ -160,9 +160,10 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: impl Into<Arc<IndexedSignRequest>>,
         cfg: ProtocolConfig,
     ) {
+        let request: Arc<IndexedSignRequest> = request.into();
         let sign_id = request.id;
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
@@ -171,7 +172,7 @@ impl SignatureSpawner {
         self.requests.insert(
             sign_id,
             SignEntry {
-                request: request.clone(),
+                request: Arc::clone(&request),
                 is_proposer: Arc::clone(&is_proposer),
                 round: Arc::new(AtomicUsize::new(0)),
             },
@@ -217,7 +218,7 @@ impl SignatureSpawner {
     fn spawn_task(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
         let sign_id = request.id;
@@ -260,10 +261,10 @@ impl SignatureSpawner {
     /// have aborted previous incarnations. Not a retirement: mailboxes,
     /// watchers, and dedup state survive.
     fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
-        let requests: Vec<IndexedSignRequest> = self
+        let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
             .values()
-            .map(|entry| entry.request.clone())
+            .map(|entry| Arc::clone(&entry.request))
             .collect();
         tracing::info!(
             count = requests.len(),
@@ -631,7 +632,7 @@ mod tests {
         spawner.requests.insert(
             probe_id,
             SignEntry {
-                request: probe_request,
+                request: Arc::new(probe_request),
                 is_proposer: Arc::new(AtomicBool::new(false)),
                 round: Arc::new(AtomicUsize::new(0)),
             },

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 
 use crate::respond_bidirectional::CompletedTx;
@@ -33,8 +35,13 @@ pub(crate) async fn process_sign_request(
         }
     }
 
+    let sign_request = Arc::new(sign_request);
     // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
-    let is_new = ctx.backlog.insert(sign_request.clone()).await.is_none();
+    let is_new = ctx
+        .backlog
+        .insert(Arc::clone(&sign_request))
+        .await
+        .is_none();
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
@@ -296,8 +303,8 @@ pub async fn process_execution_confirmed(
         .backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match entry.request.kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx,
+        .and_then(|entry| match &entry.request.kind {
+            SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
             _ => None,
         });
 
@@ -313,12 +320,13 @@ pub async fn process_execution_confirmed(
         }
     };
 
+    let sign_request = Arc::new(sign_request);
     let updated_tx = ctx
         .backlog
         .transition_to_bidirectional_response(
             pending_tx.source_chain,
             &unwatched_sign_id,
-            sign_request.clone(),
+            Arc::clone(&sign_request),
         )
         .await
         .with_context(|| {

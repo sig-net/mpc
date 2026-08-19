@@ -401,7 +401,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
                 req.id, sign_id,
                 "follow-up request should reuse the sign id"
             );
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(rb) => {
                     assert_eq!(rb.tx_id, tx_id, "tx_id should match the watched tx");
                     assert_eq!(

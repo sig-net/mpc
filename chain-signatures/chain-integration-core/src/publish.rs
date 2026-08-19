@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use cait_sith::protocol::Participant;
@@ -20,7 +21,7 @@ pub struct PublishAction {
     /// The public key associated with the signature.
     pub public_key: PublicKey,
     /// The indexed sign request that this signature corresponds to.
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     /// The actual signature to be published.
     pub signature: Signature,
     /// The participants involved in the signing process.
@@ -32,10 +33,11 @@ pub struct PublishAction {
 impl PublishAction {
     pub fn new(
         public_key: PublicKey,
-        request: IndexedSignRequest,
+        request: impl Into<Arc<IndexedSignRequest>>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) -> Option<Self> {
+        let request: Arc<IndexedSignRequest> = request.into();
         let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
         let signature = mpc_crypto::reconstruct_signature(
             &expected_public_key,

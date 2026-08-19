@@ -183,7 +183,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
+            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.kind {
                 assert_eq!(res.tx_id, tx.id);
             } else {
                 panic!("Expected RespondBidirectional request");
@@ -999,7 +999,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
+            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.kind {
                 assert_eq!(res.tx_id, tx.id);
                 // Expect the serialized output to begin with MAGIC_ERROR_PREFIX
                 assert!(res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
@@ -1156,7 +1156,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
             assert_eq!(req.chain, tx.source_chain);
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx.id);
                     assert_eq!(res.output, vec![1]);

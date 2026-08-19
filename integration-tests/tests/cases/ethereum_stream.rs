@@ -890,7 +890,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
             assert_eq!(req.chain, Chain::Solana);
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx_id);
                     assert!(

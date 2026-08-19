@@ -281,7 +281,11 @@ impl Backlog {
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
+    pub async fn insert(
+        &self,
+        request: impl Into<Arc<IndexedSignRequest>>,
+    ) -> Option<BacklogEntry> {
+        let request: Arc<IndexedSignRequest> = request.into();
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(request);
@@ -347,14 +351,14 @@ impl Backlog {
 
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
-    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
+    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
         let pending = self.pending(&chain).write().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| entry.request.clone())
+            .map(|entry| Arc::clone(&entry.request))
             .collect();
 
         requeueable.sort_by(|left, right| {
@@ -371,7 +375,7 @@ impl Backlog {
     pub async fn publishable_requests(
         &self,
         chain: Chain,
-    ) -> Vec<(IndexedSignRequest, PublishState)> {
+    ) -> Vec<(Arc<IndexedSignRequest>, PublishState)> {
         let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
@@ -380,7 +384,7 @@ impl Backlog {
             .filter_map(|entry| match entry.status() {
                 SignStatus::PendingPublish { publish }
                 | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((entry.request.clone(), publish))
+                    Some((Arc::clone(&entry.request), publish))
                 }
                 _ => None,
             })
@@ -455,7 +459,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: IndexedSignRequest,
+        request: impl Into<Arc<IndexedSignRequest>>,
     ) -> Result<(), BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -471,7 +475,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: IndexedSignRequest,
+        request: impl Into<Arc<IndexedSignRequest>>,
     ) -> Result<BacklogEntry, BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -479,7 +483,7 @@ impl Backlog {
             .requests
             .get_mut(id)
             .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.transition_to_bidirectional_response(request)?;
+        entry.transition_to_bidirectional_response(request.into())?;
         Ok(entry.clone())
     }
 
@@ -839,23 +843,29 @@ pub enum BacklogError {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
 }
 
 impl BacklogEntry {
-    pub fn new(request: IndexedSignRequest) -> Self {
+    pub fn new(request: impl Into<Arc<IndexedSignRequest>>) -> Self {
         Self {
-            request,
+            request: request.into(),
             status: SignStatus::PendingGeneration,
         }
     }
 
-    pub fn with_status(request: IndexedSignRequest, status: SignStatus) -> Self {
-        Self { request, status }
+    pub fn with_status(request: impl Into<Arc<IndexedSignRequest>>, status: SignStatus) -> Self {
+        Self {
+            request: request.into(),
+            status,
+        }
     }
 
-    pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
+    pub fn pending_execution(
+        request: impl Into<Arc<IndexedSignRequest>>,
+        tx: BidirectionalTx,
+    ) -> Self {
         Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
@@ -888,8 +898,8 @@ impl BacklogEntry {
 
     /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_request(&mut self, request: IndexedSignRequest) {
-        self.request = request;
+    pub fn set_request(&mut self, request: impl Into<Arc<IndexedSignRequest>>) {
+        self.request = request.into();
     }
 
     /// Rewrite this entry into the final-response request produced by a confirmed
@@ -902,8 +912,9 @@ impl BacklogEntry {
     /// identifiers diverge, which is the only way to reach this rejection.
     fn transition_to_bidirectional_response(
         &mut self,
-        request: IndexedSignRequest,
+        request: impl Into<Arc<IndexedSignRequest>>,
     ) -> Result<(), BacklogError> {
+        let request = request.into();
         if self.request.id != request.id
             || !matches!(&request.kind, SignKind::RespondBidirectional(_))
         {
@@ -1109,12 +1120,22 @@ mod tests {
         status: SignStatus,
         dest: &str,
     ) -> BacklogEntry {
+        create_execution_entry_with_timestamp(tx, chain, status, dest, 0)
+    }
+
+    fn create_execution_entry_with_timestamp(
+        tx: BidirectionalTx,
+        chain: Chain,
+        status: SignStatus,
+        dest: &str,
+        unix_timestamp_indexed: u64,
+    ) -> BacklogEntry {
         let sign_id = SignId::new(tx.request_id);
         let request = IndexedSignRequest::new(
             sign_id,
             create_test_args(tx.request_id[0]),
             chain,
-            0,
+            unix_timestamp_indexed,
             SignKind::SignBidirectional(create_test_event(dest)),
         );
 
@@ -1737,26 +1758,20 @@ mod tests {
     async fn test_checkpoint_digest_ignores_timestamp() {
         let tx = create_test_tx(8);
 
-        let entry1 = {
-            let mut e = create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            );
-            e.request.unix_timestamp_indexed = 1000;
-            e
-        };
-        let entry2 = {
-            let mut e = create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            );
-            e.request.unix_timestamp_indexed = 9999;
-            e
-        };
+        let entry1 = create_execution_entry_with_timestamp(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+            1000,
+        );
+        let entry2 = create_execution_entry_with_timestamp(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+            9999,
+        );
 
         let mut pending1 = PendingRequests::new();
         pending1.insert(SignId::new(tx.request_id), entry1);
