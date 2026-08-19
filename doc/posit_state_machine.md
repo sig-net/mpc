@@ -405,22 +405,30 @@ our cluster).
 - **Mainnet: no signing traffic at all** reached our node in the window, so its
   zeros mean no data, not health.
 
-Proposals against the churn, smallest first. Requests never expire by design,
-so parking is the only bound on rotation:
+Proposals against the churn, in order of expected impact. Requests never
+expire by design, so the churn has to be fixed at its supply side:
 
-1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
-   paused) says so; receivers end round `r` at once. Rounds that die silently
-   today (83% of reorganizes) end in milliseconds instead of a timeout.
-   Warning: alone it only makes futile rotation faster; ship with 2.
-2. **Park.** After K rounds without a PROPOSE, stop rotating; retry when the
-   presignature pool changes (in the data that is the scarce input; the active
-   set is healthy in steady state).
-3. **Shrink holder lists.** On a MissingArtifact reply, the owner removes the
-   rejector from that presignature's holder list in storage; below `t` holders
-   it is discarded. Not implemented today: the reply's reason is discarded
-   after the tally, and the only skip that exists is the proposer's transient
-   in-round `local_skip` on the active-set check.
-4. **Name the cause.** Storage deletes presignatures without a trace, so a
-   deliberator cannot say why one is missing. Keep a small tombstone of
-   recently deleted ids at each deletion site; a MissingArtifact then logs
-   "never received" vs "deleted (consumed / outdated / gc)".
+1. **Prune the pool.** Discard a presignature that cannot reach `t` live
+   holders: when MissingArtifact replies shrink its effective holder set (the
+   owner removes the rejector from the stored holder list), and when the
+   proposer's active-set skip keeps hitting it. Freeing the slot is the point:
+   stockpiling refuses to generate while `len_mine >= min_presignatures`, so
+   today an unusable presignature counts as stock and blocks its own
+   replacement — pruning lets the pipeline refill with live holders. The
+   reverse direction (owner lost it, holders clean up) is already handled by
+   sync's `remove_outdated`; this direction is handled by nothing.
+2. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+   paused) says so; receivers end round `r` at once, instead of 83% of
+   reorganizes being a timeout on silence. With 1 in place such rounds should
+   be rare; alone it only makes futile rotation faster.
+3. **Park.** Safety net if 1 does not end the rotation: after K rounds without
+   a PROPOSE, stop rotating and retry when the presignature pool changes (in
+   the data the pool is the scarce input; the active set is healthy in steady
+   state).
+4. **Name the cause.** With a healthy mesh, "never received" is a narrow
+   window (a completed generation leaves a share with every participant; only
+   a crash between computing and persisting loses one). The real split is
+   "deleted (consumed / outdated)" vs "storage lost since generation". A
+   tombstone of deleted ids answers the first and does not survive a storage
+   wipe, so pair it with a storage birth marker: a proposed id older than the
+   node's storage means "lost my storage".
