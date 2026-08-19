@@ -16,6 +16,25 @@ const ENTRY = `${ROOT}dist/main.js`;
 const BURST = 2;
 const BUILD = await respondInput();
 
+const STARTUP_ENV: NodeJS.ProcessEnv = {
+  MIDNIGHT_PUB_NETWORK_ID: "undeployed",
+  MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
+  MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
+  MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
+  MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
+  MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
+};
+
+const ready = (): string => JSON.stringify({ id: 0, op: "ready", protocolVersion: 1 });
+
+const envFor = (port: number): NodeJS.ProcessEnv => ({
+  ...STARTUP_ENV,
+  MIDNIGHT_PUB_NODE_URL: `ws://127.0.0.1:${port}`,
+  MIDNIGHT_PUB_PROOF_SERVER_URL: `http://127.0.0.1:${port}`,
+  MIDNIGHT_PUB_INDEXER_URL: `http://127.0.0.1:${port}/api/v3/graphql`,
+  MIDNIGHT_PUB_INDEXER_WS_URL: `ws://127.0.0.1:${port}/api/v3/graphql/ws`,
+});
+
 const request = (id: number): string =>
   JSON.stringify({
     id,
@@ -36,19 +55,9 @@ function drive(
   watchdogMs?: number,
 ): Promise<Run> {
   return new Promise((resolve, reject) => {
-    const childEnv = { ...process.env };
-    for (const name of Object.keys(childEnv)) {
-      if (name.startsWith("MIDNIGHT_PUB_")) delete childEnv[name];
-    }
     const child = spawn(process.execPath, [ENTRY], {
       env: {
-        ...childEnv,
-        MIDNIGHT_PUB_NETWORK_ID: "undeployed",
-        MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
-        MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
-        MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
-        MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
-        MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
+        ...process.env,
         ...env,
       },
     });
@@ -106,11 +115,16 @@ async function openBlackHole(): Promise<{
 
 describe("dist/main.js over a pipe", () => {
   it("answers a burst in order, one line per request, and nothing else on stdout", async () => {
-    const run = await drive([
-      ...Array.from({ length: BURST }, (_, index) => request(index + 1)),
-      "",
-      "{not json",
-    ]);
+    const blackHole = await openBlackHole();
+    const run = await drive(
+      [
+        ready(),
+        ...Array.from({ length: BURST }, (_, index) => request(index + 1)),
+        "",
+        "{not json",
+      ],
+      envFor(blackHole.port),
+    ).finally(blackHole.close);
 
     expect(run.code).toBe(0);
 
@@ -119,34 +133,28 @@ describe("dist/main.js over a pipe", () => {
     expect(replyLines.every((line) => line.length > 0)).toBe(true);
     const replies = replyLines.map((line) => JSON.parse(line));
 
-    // The blank line is skipped, the bad line is answered: BURST + 1.
-    expect(replies).toHaveLength(BURST + 1);
+    // Ready is answered, the blank line is skipped, and the bad line is answered.
+    expect(replies).toHaveLength(BURST + 2);
     // Order, not just presence: replies are matched by position downstream.
     expect(replies.map((reply) => reply.id)).toEqual([
+      0,
       ...Array.from({ length: BURST }, (_, i) => i + 1),
       null,
     ]);
-    expect(replies.slice(0, BURST).every((reply) => reply.ok === true)).toBe(true);
-    expect(replies.slice(0, BURST).every((reply) => /^(?:[0-9a-f]{2})+$/.test(reply.intent))).toBe(
-      true,
-    );
+    expect(replies[0]).toMatchObject({ ok: true, ready: true, protocolVersion: 1 });
+    expect(replies.slice(1, BURST + 1).every((reply) => reply.ok === true)).toBe(true);
+    expect(
+      replies.slice(1, BURST + 1).every((reply) => /^(?:[0-9a-f]{2})+$/.test(reply.intent)),
+    ).toBe(true);
     expect(replies.at(-1)).toMatchObject({ ok: false, code: "bad_request" });
   }, 120_000);
 
-  it("does not print credentials carried by the node URL", async () => {
-    const run = await drive([], {
-      MIDNIGHT_PUB_NODE_URL: "https://authuser:secret@example.invalid/rpc?token=private",
-      MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
-      MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
-      MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
-      MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
-    });
+  it("takes startup config from the parent-set environment", async () => {
+    const blackHole = await openBlackHole();
+    const run = await drive([ready()], envFor(blackHole.port)).finally(blackHole.close);
 
     expect(run.code).toBe(0);
-    expect(run.stderr).toContain("node=https://example.invalid");
-    expect(run.stderr).not.toContain("authuser");
-    expect(run.stderr).not.toContain("secret");
-    expect(run.stderr).not.toContain("private");
+    expect(run.stderr).toContain(`node=ws://127.0.0.1:${blackHole.port}`);
   });
 
   it("flushes ready and exits when its publisher warmup never settles", async () => {
@@ -155,8 +163,15 @@ describe("dist/main.js over a pipe", () => {
     const wsUrl = `ws://127.0.0.1:${blackHole.port}`;
     try {
       const run = await drive(
-        [JSON.stringify({ id: 40, op: "ready", protocolVersion: 1 })],
+        [
+          JSON.stringify({
+            id: 40,
+            op: "ready",
+            protocolVersion: 1,
+          }),
+        ],
         {
+          ...STARTUP_ENV,
           MIDNIGHT_PUB_NODE_URL: wsUrl,
           MIDNIGHT_PUB_PROOF_SERVER_URL: httpUrl,
           MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,

@@ -463,7 +463,11 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
         })?;
     for entry in entries.iter() {
         let (key, value) = &*entry;
-        match decode_response_entry(key, value) {
+        match decode_response_entry(key, value).and_then(|decoded| {
+            decoded
+                .signature
+                .map(|signature| (decoded.request_id, signature))
+        }) {
             Ok((stored_request_id, stored_signature))
                 if stored_request_id == request_id && stored_signature == call.stored_signature =>
             {
@@ -502,6 +506,7 @@ fn submit_backstop(config: &PublisherConfig) -> Duration {
 mod tests {
     use super::*;
 
+    use crate::config::MidnightConfig;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -809,7 +814,6 @@ mod tests {
         PublisherConfig {
             intent_gen_command,
             funding_seed: funding_seed(),
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
             proof_server_url: "http://127.0.0.1:6300".to_string(),
             indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
             indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
@@ -838,7 +842,14 @@ mod tests {
         submitter: Arc<dyn IntentSubmitter>,
         cancel: CancellationToken,
     ) -> MidnightPublisher {
-        let intent_gen = IntentGen::spawn(config, "undeployed")
+        let midnight = MidnightConfig {
+            node_ws_url: "ws://127.0.0.1:9944".to_string(),
+            central_address: CENTRAL.to_string(),
+            publisher: config.clone(),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let intent_gen = IntentGen::spawn(&midnight, "undeployed")
             .await
             .expect("the stub child spawns");
         MidnightPublisher::assemble(
@@ -962,6 +973,40 @@ mod tests {
         let mut encoded = Vec::new();
         midnight_serialize::tagged_serialize(&contract, &mut encoded)
             .expect("the malformed singleton state serializes");
+        encoded
+    }
+
+    fn state_with_invalid_signature_response(action: &PublishAction) -> Vec<u8> {
+        let call = respond_call(action).expect("the test action maps to a response");
+        let field = match call.circuit {
+            RESPOND => usize::from(RESPOND_MAP_FIELD),
+            RESPOND_BIDIRECTIONAL => usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
+            _ => unreachable!(),
+        };
+        let state = state_with_response(action);
+        let mut contract: ContractState<DefaultDB> =
+            midnight_serialize::tagged_deserialize(&mut &state[..])
+                .expect("the singleton response state decodes");
+        let StateValue::Array(fields) = contract.data.get_ref() else {
+            panic!("the singleton root is an array")
+        };
+        let mut fields: Vec<_> = fields.iter_deref().cloned().collect();
+        let StateValue::Map(entries) = &fields[field] else {
+            panic!("the response field is a map")
+        };
+        let (key, _) = &*entries.iter().next().expect("one response entry");
+        fields[field] = map_of(vec![(
+            (**key).clone(),
+            cell_from_atoms(
+                &[vec![0xff; 32], vec![0xff; 32], vec![1], vec![]],
+                &[32, 32, 32, 1],
+            ),
+        )]);
+        contract.data = ChargedState::new(array_of(fields));
+
+        let mut encoded = Vec::new();
+        midnight_serialize::tagged_serialize(&contract, &mut encoded)
+            .expect("the invalid-signature singleton state serializes");
         encoded
     }
 
@@ -1092,6 +1137,18 @@ mod tests {
             assert!(
                 !response_present(&state, &call).expect("a malformed individual entry is skipped"),
                 "the malformed entry is not an exact finalized response"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_signature_response_entry_does_not_poison_reconciliation() {
+        for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
+            let call = respond_call(&action).expect("the action maps to a response");
+            let state = state_with_invalid_signature_response(&action);
+            assert!(
+                !response_present(&state, &call).expect("an invalid signature entry is skipped"),
+                "the invalid signature is not an exact finalized response"
             );
         }
     }

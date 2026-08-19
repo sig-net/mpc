@@ -28,7 +28,6 @@ pub use args::{
     solana::SolArgs,
 };
 
-use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -548,12 +547,10 @@ impl ChainConfigs {
             }
         }
         if let Some(midnight) = &self.midnight {
-            if midnight.publisher.is_some() {
-                publishers.insert(
-                    Chain::Midnight,
-                    midnight_publisher(midnight, shutdown.clone()).await?,
-                );
-            }
+            publishers.insert(
+                Chain::Midnight,
+                midnight_publisher(midnight, shutdown.clone()).await?,
+            );
         }
 
         Ok(publishers)
@@ -564,15 +561,12 @@ async fn midnight_publisher(
     config: &MidnightConfig,
     shutdown: CancellationToken,
 ) -> anyhow::Result<Arc<MidnightPublisher>> {
-    let publisher_config = config
-        .publisher
-        .as_ref()
-        .context("midnight publisher requested without publisher configuration")?;
+    let publisher_config = &config.publisher;
     // A second connection to the node the indexer also dials (`MidnightIndexer` opens
     // its own inside `run()` and does not expose it); the builder is spawned only
     // here, so this stays the single child process.
     let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
-    let intent_gen = Arc::new(IntentGen::spawn(publisher_config, rpc.network_id()).await?);
+    let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
     Ok(Arc::new(MidnightPublisher::new(
         publisher_config,
         config.central_address.clone(),

@@ -4,8 +4,9 @@ use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::reader::{
     decode_notification, decode_response_entry, resolve_verified_record, signet_field_node_by_path,
-    signet_map_key_rid, unpack_notification_v1, Node, Resolved, CENTRAL_LEDGER_FIELDS,
-    NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
+    signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry, Node, Resolved,
+    CENTRAL_LEDGER_FIELDS, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD,
+    RESPOND_MAP_FIELD,
 };
 use crate::rpc::{BlockRef, ReadFailure};
 use crate::source::{ChainSource, ContractState, LiveSource};
@@ -30,6 +31,34 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 /// Marker context on a central state the ledger deserializer refused: this build can
 /// no longer read the chain, so the block-level retry must halt on it, not spin.
 const CENTRAL_STATE_UNDECODABLE: &str = "the central contract's own state did not decode";
+
+/// A typed permanent failure so the retry boundary can halt without parsing prose.
+#[derive(Debug)]
+struct ResponseSchemaDrift {
+    response_map: &'static str,
+    request_id: Option<[u8; 32]>,
+    cause: anyhow::Error,
+}
+
+impl std::fmt::Display for ResponseSchemaDrift {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "central {} entry violates the deployed contract schema",
+            self.response_map
+        )?;
+        if let Some(request_id) = self.request_id {
+            write!(formatter, " for request {}", hex::encode(request_id))?;
+        }
+        write!(formatter, ": {:#}", self.cause)
+    }
+}
+
+impl std::error::Error for ResponseSchemaDrift {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
 
 /// Midnight indexer: `run()` owns the whole read path.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
@@ -117,6 +146,47 @@ fn drop_entry_unattributed<T>(
         "midnight entry dropped: {detail}"
     );
     None
+}
+
+fn response_event(
+    entry: &MapEntry,
+    response_map: &'static str,
+    height: u64,
+    make_event: impl FnOnce([u8; 32], mpc_primitives::Signature) -> ChainEvent,
+) -> anyhow::Result<Option<ChainEvent>> {
+    let request_id = signet_map_key_rid(&entry.key);
+    let DecodedResponseEntry {
+        request_id: decoded_request_id,
+        signature,
+    } = match decode_response_entry(&entry.key, &entry.value) {
+        Ok(decoded) => decoded,
+        Err(cause) => {
+            let drift = ResponseSchemaDrift {
+                response_map,
+                request_id,
+                cause,
+            };
+            tracing::error!(
+                reason = "response-entry-structural-hold",
+                height,
+                response_map,
+                request_id = request_id.map(hex::encode),
+                error = %format_args!("{drift:#}"),
+                "midnight central response entry violates the deployed contract schema; holding block"
+            );
+            return Err(drift.into());
+        }
+    };
+
+    match signature {
+        Ok(signature) => Ok(Some(make_event(decoded_request_id, signature))),
+        Err(err) => Ok(drop_entry(
+            "response-signature-invalid",
+            height,
+            Some(decoded_request_id),
+            &format!("{response_map}: {err:#}"),
+        )),
+    }
 }
 
 /// Names the one failure a retry never clears. The supervised restart resumes from
@@ -312,12 +382,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             Some(tree) => Self::central_entries(&tree)?,
             None => CentralEntries::default(),
         };
-        let parent_entries = match cache.take() {
-            Some((hash, entries)) if hash == block.parent_hash => entries,
-            _ => match self.central_tree(source, &block.parent_hash).await? {
-                Some(tree) => Self::central_entries(&tree)?,
-                None => CentralEntries::default(),
-            },
+        let fetched_parent;
+        let parent_entries = match cache.as_ref() {
+            Some((hash, entries)) if hash == &block.parent_hash => entries,
+            _ => {
+                fetched_parent = match self.central_tree(source, &block.parent_hash).await? {
+                    Some(tree) => Self::central_entries(&tree)?,
+                    None => CentralEntries::default(),
+                };
+                &fetched_parent
+            }
         };
 
         let mut events = Vec::new();
@@ -339,20 +413,18 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
 
         for entry in new_entries(&entries.responses, &parent_entries.responses) {
-            let event: Option<ChainEvent> = match decode_response_entry(&entry.key, &entry.value) {
-                Ok((request_id, signature)) => Some(ChainEvent::Respond(SignatureRespondedEvent {
-                    request_id,
-                    signature,
-                    chain: Chain::Midnight,
-                })),
-                Err(err) => drop_entry(
-                    "response-entry-malformed",
-                    block.number,
-                    signet_map_key_rid(&entry.key),
-                    &format!("respondMap: {err:#}"),
-                ),
-            };
-            if let Some(event) = event {
+            if let Some(event) = response_event(
+                entry,
+                "respondMap",
+                block.number,
+                |request_id, signature| {
+                    ChainEvent::Respond(SignatureRespondedEvent {
+                        request_id,
+                        signature,
+                        chain: Chain::Midnight,
+                    })
+                },
+            )? {
                 events.push(event);
             }
         }
@@ -361,22 +433,18 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             &entries.bidirectional_responses,
             &parent_entries.bidirectional_responses,
         ) {
-            let event: Option<ChainEvent> = match decode_response_entry(&entry.key, &entry.value) {
-                Ok((request_id, signature)) => Some(ChainEvent::RespondBidirectional(
-                    RespondBidirectionalEvent {
+            if let Some(event) = response_event(
+                entry,
+                "respondBidirectionalMap",
+                block.number,
+                |request_id, signature| {
+                    ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
                         request_id,
                         signature,
                         chain: Chain::Midnight,
-                    },
-                )),
-                Err(err) => drop_entry(
-                    "response-entry-malformed",
-                    block.number,
-                    signet_map_key_rid(&entry.key),
-                    &format!("respondBidirectionalMap: {err:#}"),
-                ),
-            };
-            if let Some(event) = event {
+                    })
+                },
+            )? {
                 events.push(event);
             }
         }
@@ -562,6 +630,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Err(err) => match ReadFailure::of(&err) {
                     Some(ReadFailure::Unservable) => return Retried::Unservable(err),
                     Some(ReadFailure::ClientClosed) => return Retried::ClientClosed(err),
+                    None if err.downcast_ref::<ResponseSchemaDrift>().is_some() => {
+                        return Retried::Halted(err);
+                    }
                     None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
                         tracing::error!(
                             reason = "central-state-undecodable-hold",
@@ -781,6 +852,7 @@ mod tests {
         array_of, ascii_padded, cell_from_atoms, cell_from_record, key_of, map_of, sample_record,
         trim,
     };
+    use crate::PublisherConfig;
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_primitives::SignId;
     use mpc_utils::task::AbortOnDrop;
@@ -812,7 +884,13 @@ mod tests {
         MidnightConfig {
             node_ws_url: "ws://127.0.0.1:1".to_string(),
             central_address: central_address(),
-            publisher: None,
+            publisher: PublisherConfig {
+                funding_seed: "ab".repeat(32),
+                proof_server_url: "http://127.0.0.1:1".to_string(),
+                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                ..Default::default()
+            },
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -870,6 +948,23 @@ mod tests {
                     trim(signature.s.to_bytes().as_slice()),
                     trim(&[signature.recovery_id]),
                 ],
+                &[32, 32, 32, 1],
+            ),
+        )
+    }
+
+    fn raw_response_entry(
+        count: u8,
+        rid: &[u8; 32],
+        x: [u8; 32],
+        y: [u8; 32],
+        s: [u8; 32],
+        recovery_id: u8,
+    ) -> (AlignedValue, Node) {
+        (
+            signet_map_key(count, rid),
+            cell_from_atoms(
+                &[trim(&x), trim(&y), trim(&s), trim(&[recovery_id])],
                 &[32, 32, 32, 1],
             ),
         )
@@ -1238,7 +1333,6 @@ mod tests {
     async fn response_maps_emit_both_lifecycle_events_before_the_block() {
         let respond_rid = [0x31; 32];
         let bidirectional_rid = [0x32; 32];
-        let malformed_rid = [0x30; 32];
         let respond_signature = mpc_primitives::Signature::new(
             k256::AffinePoint::GENERATOR,
             k256::Scalar::from(9u64),
@@ -1258,34 +1352,54 @@ mod tests {
         let response_state = central_state_with_responses(
             vec![],
             vec![
-                (
-                    signet_map_key(1, &malformed_rid),
-                    cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+                raw_response_entry(
+                    1,
+                    &respond_rid,
+                    [0xff; 32],
+                    [0xff; 32],
+                    k256::Scalar::from(8u64).to_bytes().into(),
+                    0,
                 ),
                 response_entry(2, &respond_rid, &respond_signature),
             ],
-            vec![response_entry(
-                1,
-                &bidirectional_rid,
-                &bidirectional_signature,
-            )],
+            vec![
+                raw_response_entry(
+                    1,
+                    &bidirectional_rid,
+                    [0xff; 32],
+                    [0xff; 32],
+                    k256::Scalar::from(8u64).to_bytes().into(),
+                    0,
+                ),
+                response_entry(2, &bidirectional_rid, &bidirectional_signature),
+            ],
         );
         source.set_state(&central, 9, response_state);
         let repeated_response_state = central_state_with_responses(
             vec![],
             vec![
-                (
-                    signet_map_key(1, &malformed_rid),
-                    cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+                raw_response_entry(
+                    1,
+                    &respond_rid,
+                    [0xff; 32],
+                    [0xff; 32],
+                    k256::Scalar::from(8u64).to_bytes().into(),
+                    0,
                 ),
                 response_entry(2, &respond_rid, &respond_signature),
                 response_entry(3, &respond_rid, &respond_signature),
             ],
-            vec![response_entry(
-                1,
-                &bidirectional_rid,
-                &bidirectional_signature,
-            )],
+            vec![
+                raw_response_entry(
+                    1,
+                    &bidirectional_rid,
+                    [0xff; 32],
+                    [0xff; 32],
+                    k256::Scalar::from(8u64).to_bytes().into(),
+                    0,
+                ),
+                response_entry(2, &bidirectional_rid, &bidirectional_signature),
+            ],
         );
         source.set_state(&central, 10, repeated_response_state.clone());
         source.set_state(&central, 11, repeated_response_state);
@@ -1334,6 +1448,93 @@ mod tests {
             .expect("send unchanged block");
         assert_block(&harness.next_event().await, 11);
         harness.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn response_schema_drift_halts_without_events_or_cache_commit() {
+        let valid_rid = [0x40; 32];
+        let drift_rid = [0x41; 32];
+        let valid_signature = mpc_primitives::Signature::new(
+            k256::AffinePoint::GENERATOR,
+            k256::Scalar::from(9u64),
+            0,
+        );
+
+        for (map_name, drift_in_bidirectional_map) in
+            [("respondMap", false), ("respondBidirectionalMap", true)]
+        {
+            let central = central_address();
+            let mut source = FixtureSource::default();
+            source.set_state(&central, 7, central_state(vec![]));
+            source.set_state(&central, 8, central_state(vec![]));
+
+            // The invalid point must not hide the extra atom: contract structure is
+            // exhausted before caller-controlled cryptographic values are checked.
+            let structurally_invalid = (
+                signet_map_key(2, &drift_rid),
+                cell_from_atoms(
+                    &[vec![0xff; 32], vec![0xff; 32], vec![9], vec![], vec![1]],
+                    &[32, 32, 32, 1, 1],
+                ),
+            );
+            let entries = vec![
+                response_entry(1, &valid_rid, &valid_signature),
+                structurally_invalid,
+            ];
+            let (responses, bidirectional_responses) = if drift_in_bidirectional_map {
+                (vec![], entries)
+            } else {
+                (entries, vec![])
+            };
+            source.set_state(
+                &central,
+                9,
+                central_state_with_responses(vec![], responses, bidirectional_responses),
+            );
+
+            let indexer = direct_indexer().await;
+            let mut cache = None;
+            indexer
+                .process_block(&source, &mut cache, &block_ref(8))
+                .await
+                .expect("the parent primes the cache");
+            let parent_hash = hash_of(8);
+            assert_eq!(
+                cache.as_ref().map(|(hash, _)| hash.as_str()),
+                Some(parent_hash.as_str())
+            );
+
+            let (events_tx, mut events_rx) = chain_event_channel();
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                indexer.index_block(
+                    &source,
+                    &mut cache,
+                    &events_tx,
+                    &block_ref(9),
+                    &CancellationToken::new(),
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{map_name} schema drift must halt, not retry"));
+            let err = match result {
+                Err(err) => err,
+                Ok(_) => panic!("{map_name} schema drift must fail the block"),
+            };
+            assert!(
+                format!("{err:#}").contains(map_name),
+                "the error must name its response map: {err:#}"
+            );
+            assert!(
+                events_rx.try_recv().is_err(),
+                "no lifecycle or Block event may escape a failed block"
+            );
+            assert_eq!(
+                cache.as_ref().map(|(hash, _)| hash.as_str()),
+                Some(parent_hash.as_str()),
+                "a failed block must preserve the parent cache"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2319,13 +2520,8 @@ mod tests {
 
     #[tokio::test]
     async fn midnight_indexer_new_rejects_unusable_config() {
-        let config = MidnightConfig {
-            node_ws_url: String::new(),
-            central_address: "ab".repeat(32),
-            publisher: None,
-            rpc: Default::default(),
-            indexer: Default::default(),
-        };
+        let mut config = test_config();
+        config.node_ws_url = String::new();
         let Err(err) = TestIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await
         else {
             panic!("an empty node_ws_url must fail at construction, not forever at runtime")
