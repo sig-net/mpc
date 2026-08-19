@@ -733,7 +733,7 @@ mod tests {
         let mut config = crate::config::MidnightConfig {
             node_ws_url: format!("ws://{address}"),
             central_address: "ab".repeat(32),
-            publisher: None,
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -765,7 +765,7 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_ws_url: format!("ws://{address}"),
             central_address: "ab".repeat(32),
-            publisher: None,
+            publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
         };

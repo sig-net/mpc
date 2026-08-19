@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{MidnightConfig, MidnightRpc, PublisherConfig};
+use mpc_chain_midnight::{MidnightConfig, MidnightPublisherRpc, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,12 @@ impl MidnightContext {
             publisher_entrypoint.display(),
             publisher_package_dir()?.display()
         );
-        let config = responder_config(&stack.endpoints, &bootstrap, publisher_entrypoint);
+        let config = responder_config(
+            &stack.endpoints,
+            &bootstrap,
+            node_executable()?,
+            publisher_entrypoint,
+        );
         config.validate()?;
         Ok(Self {
             _stack: stack,
@@ -227,26 +232,45 @@ impl<'a> DriverConfig<'a> {
 fn responder_config(
     endpoints: &MidnightEndpoints,
     bootstrap: &BootstrapResult,
+    node_executable: String,
     publisher_entrypoint: PathBuf,
 ) -> MidnightConfig {
     MidnightConfig {
         node_ws_url: endpoints.node_ws_url.clone(),
         central_address: bootstrap.central_address.clone(),
-        publisher: Some(PublisherConfig {
+        publisher: PublisherConfig {
             intent_gen_command: vec![
-                "node".into(),
+                node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
             funding_seed: bootstrap.publisher_seed.clone(),
-            node_ws_url: endpoints.node_ws_url.clone(),
             proof_server_url: endpoints.proof_server_url.clone(),
             indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),
             ..Default::default()
-        }),
+        },
         rpc: Default::default(),
         indexer: Default::default(),
     }
+}
+
+fn node_executable() -> anyhow::Result<String> {
+    let output = std::process::Command::new("node")
+        .args(["--print", "process.execPath"])
+        .output()
+        .context("resolving the Node executable for the Midnight publisher")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "resolving the Node executable failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = String::from_utf8(output.stdout).context("Node's executable path is not UTF-8")?;
+    let path = path.trim();
+    anyhow::ensure!(
+        Path::new(path).is_absolute(),
+        "Node returned a non-absolute executable path: {path}"
+    );
+    Ok(path.to_string())
 }
 
 struct MidnightDriver {
@@ -443,17 +467,14 @@ async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
     let config = MidnightConfig {
         node_ws_url: node_ws_url.to_string(),
         central_address: "00".repeat(32),
-        publisher: None,
+        publisher: Default::default(),
         rpc: Default::default(),
         indexer: Default::default(),
     };
     let mut last_error = None;
     for _ in 0..120 {
-        match MidnightRpc::connect(&config).await {
-            Ok(rpc) => match rpc.network_id().await {
-                Ok(network_id) => return Ok(network_id),
-                Err(error) => last_error = Some(format!("network id: {error:#}")),
-            },
+        match MidnightPublisherRpc::connect(&config).await {
+            Ok(rpc) => return Ok(rpc.network_id().to_string()),
             Err(error) => last_error = Some(format!("connect: {error:#}")),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

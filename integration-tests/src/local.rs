@@ -263,15 +263,14 @@ mod tests {
         let config = MidnightConfig {
             node_ws_url: "ws://127.0.0.1:19944".into(),
             central_address: "ab".repeat(32),
-            publisher: Some(PublisherConfig {
+            publisher: PublisherConfig {
                 intent_gen_command: vec!["node".into(), "/fixture/midnight-publisher.js".into()],
                 funding_seed: "0f".repeat(32),
-                node_ws_url: "ws://127.0.0.1:19944".into(),
                 proof_server_url: "http://127.0.0.1:16300".into(),
                 indexer_url: "http://127.0.0.1:18088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:18088/api/v3/graphql/ws".into(),
                 ..Default::default()
-            }),
+            },
             rpc: Default::default(),
             indexer: Default::default(),
         };
