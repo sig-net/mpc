@@ -436,11 +436,4 @@ expire by design, so the rotation has to be ended by information, not time:
    entries toward `min_presignatures`) and speeds recovery after storage
    incidents like the Redis-master replacement. Sync's `remove_outdated`
    handles the owner-lost direction; this direction is handled by nothing.
-4. **Park.** Last resort if 1-3 leave residual rotation: after K rounds
-   without a PROPOSE, stop rotating. With the pool healthy its retry trigger
-   is unclear, which is itself a reason to prefer 1.
-5. **Name the cause.** With a healthy mesh, "never received" is a narrow
-   window (a completed generation leaves a share with every participant). The
-   real split is "deleted (consumed / outdated)" vs "storage lost": a
-   tombstone of deleted ids answers the first; a storage birth marker covers
-   the wipe case the tombstone cannot.
+
