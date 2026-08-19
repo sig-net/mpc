@@ -18,7 +18,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::PublisherConfig;
+use crate::config::{validate_publisher_network_id, MidnightConfig, PublisherConfig};
 
 #[derive(Debug)]
 pub(crate) struct AmbiguousSubmit;
@@ -74,41 +74,6 @@ struct SubmitRequest {
     intent: String,
 }
 
-/// A hex seed is at least 16 bytes. Kept in step with the child's own floor.
-const SHORTEST_SEED_HEX: usize = 32;
-
-/// Scrubs the funding seed out of anything the child says before this node repeats
-/// it: its stderr via `drain_stderr`, and a refusal's `message`, which renders a
-/// dependency cause chain the child does not control.
-#[derive(Clone)]
-struct SeedRedactor(Vec<String>);
-
-impl SeedRedactor {
-    fn new(seed: &str) -> Self {
-        let seed = seed.trim();
-        // Anything shorter is not a seed and would redact unrelated text, destroying
-        // the diagnostic; the child applies the same floor to its own redaction.
-        if seed.len() < SHORTEST_SEED_HEX {
-            return Self(Vec::new());
-        }
-        // Every spelling the seed parser accepts: substring matching only catches the rendered one.
-        let bare = seed.strip_prefix("0x").unwrap_or(seed);
-        Self(vec![
-            seed.to_string(),
-            bare.to_lowercase(),
-            bare.to_uppercase(),
-        ])
-    }
-
-    fn scrub(&self, text: &str) -> String {
-        let mut out = text.to_string();
-        for form in &self.0 {
-            out = out.replace(form.as_str(), "<redacted>");
-        }
-        out
-    }
-}
-
 /// What the child is being asked to do. A build's lost answer can simply be asked for
 /// again; a submit's may be on chain, and asking again races the single dust UTXO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,9 +119,8 @@ impl Operation {
 
 /// Builds intents and posts them, by driving one persistent child process.
 pub struct IntentGen {
-    config: PublisherConfig,
+    config: MidnightConfig,
     network_id: String,
-    redactor: SeedRedactor,
     /// Two interleaved requests on one pipe have no correct reading, so the lock is the
     /// concurrency story: callers queue.
     session: Mutex<Option<Session>>,
@@ -164,11 +128,12 @@ pub struct IntentGen {
 
 impl IntentGen {
     /// Starts the builder eagerly: a command that cannot run fails here, not on the first signature.
-    pub async fn spawn(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Self> {
+    pub async fn spawn(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Self> {
+        config.validate()?;
+        validate_publisher_network_id(network_id)?;
         Ok(Self {
             config: config.clone(),
             network_id: network_id.to_string(),
-            redactor: SeedRedactor::new(&config.funding_seed),
             session: Mutex::new(Some(spawn_session(config, network_id).await?)),
         })
     }
@@ -235,7 +200,7 @@ impl IntentGen {
     fn blame_the_command(&self, error: anyhow::Error) -> anyhow::Error {
         error.context(format!(
             "midnight intent builder command [{}]",
-            self.config.intent_gen_command.join(" ")
+            self.config.publisher.intent_gen_command.join(" ")
         ))
     }
 
@@ -259,15 +224,7 @@ impl IntentGen {
         let live = session
             .as_mut()
             .expect("the slot was just filled or was already full");
-        let outcome = exchange(
-            live,
-            request,
-            operation,
-            &self.config,
-            cancel,
-            &self.redactor,
-        )
-        .await;
+        let outcome = exchange(live, request, operation, &self.config.publisher, cancel).await;
         if matches!(
             &outcome,
             Exchange::Answered(Err(error))
@@ -322,7 +279,7 @@ const STDERR_TAIL_LINES: usize = 10;
 const STDERR_TAIL_GRACE: Duration = Duration::from_millis(200);
 
 /// The child's last words, bound for an error rather than a log: `tracing` reaches
-/// nobody in a process without a subscriber. `ScrubbedLines` is the only filler.
+/// nobody in a process without a subscriber. `drain_stderr` is the only filler.
 #[derive(Clone, Default)]
 struct StderrTail(Arc<std::sync::Mutex<VecDeque<String>>>);
 
@@ -362,7 +319,7 @@ impl Exchange {
     /// The pipe failed under us; only an operation that left nothing on chain may be asked again.
     fn lost(error: anyhow::Error, operation: Operation) -> Self {
         Self::Broken {
-            error: unanswered(error, operation),
+            error,
             retry: operation.is_repeatable(),
         }
     }
@@ -377,8 +334,8 @@ impl Exchange {
 }
 
 /// `error`, plus what an operation that cannot be asked again leaves behind. Applied
-/// wherever a pass breaks PAST THE WRITE and nowhere else: from there a lost answer
-/// and a landed transaction are indistinguishable, before it an alarm would be false.
+/// to every locally broken exchange after encoding: from there the transport may have
+/// been attempted, so a lost answer and a landed transaction are indistinguishable.
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     match operation {
         Operation::Submit => error.context(AmbiguousSubmit),
@@ -386,9 +343,9 @@ fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     }
 }
 
-/// The child's configuration namespace, exact up to the trailing underscore: a
-/// variable that merely shares the stem reaches the child untouched.
-const PUBLISHER_ENV_PREFIX: &str = "MIDNIGHT_PUB_";
+/// Resolves the packaged publisher and its `#!/usr/bin/env node` interpreter without
+/// making the parent's executable search path part of the child configuration.
+const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// The child parses numbers as JavaScript `number`, whose integer precision ends here.
 const MAX_SAFE_WIRE_ID: u64 = (1_u64 << 53) - 1;
@@ -401,26 +358,15 @@ fn take_wire_id(next_id: &mut u64) -> u64 {
     id
 }
 
-/// The names in `names` that fall in that namespace.
-fn publisher_vars<I>(names: I) -> Vec<std::ffi::OsString>
-where
-    I: IntoIterator<Item = std::ffi::OsString>,
-{
-    names
-        .into_iter()
-        .filter(|name| name.to_string_lossy().starts_with(PUBLISHER_ENV_PREFIX))
-        .collect()
-}
-
 /// Starts the builder under the restart budget.
-async fn spawn_session(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
+async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
     retry_rpc!(
-        config.request_timeout,
-        config.restart_backoff,
+        config.publisher.request_timeout,
+        config.publisher.restart_backoff,
         "midnight_intent_gen_spawn",
         {
             let session = spawn_child(config, network_id)?;
-            verify_ready(session, config).await
+            verify_ready(session, &config.publisher).await
         }
     )
 }
@@ -445,7 +391,7 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
     let reply = tokio::time::timeout(config.request_timeout, round_trip(&mut session, &line))
         .await
         .context("midnight intent builder did not become ready before its startup deadline")??;
-    let decoded = match decode_reply(&reply, id, &SeedRedactor::new(&config.funding_seed)) {
+    let decoded = match decode_reply(&reply, id) {
         Exchange::Answered(result) => result?,
         Exchange::Broken { error, .. } => return Err(error),
     };
@@ -481,13 +427,12 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
     Ok(session)
 }
 
-fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Session> {
-    let inherited = publisher_vars(std::env::vars_os().map(|(name, _)| name));
-    let mut command = intent_gen_command(config, network_id, &inherited)?;
+fn spawn_child(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
+    let mut command = intent_gen_command(config, network_id)?;
     let mut child = command.spawn().with_context(|| {
         format!(
             "spawning the midnight intent builder ({})",
-            config.intent_gen_command.join(" ")
+            config.publisher.intent_gen_command.join(" ")
         )
     })?;
 
@@ -510,44 +455,35 @@ fn spawn_child(config: &PublisherConfig, network_id: &str) -> anyhow::Result<Ses
         next_id: 0,
         stderr: tail.clone(),
         _child: child,
-        stderr_drain: AbortOnDrop(tokio::spawn(drain_stderr(
-            stderr,
-            SeedRedactor::new(&config.funding_seed),
-            tail,
-        ))),
+        stderr_drain: AbortOnDrop(tokio::spawn(drain_stderr(stderr, tail))),
     })
 }
 
 /// Configured but not spawned, so a test can read back the environment the child would get.
-fn intent_gen_command(
-    config: &PublisherConfig,
-    network_id: &str,
-    inherited: &[std::ffi::OsString],
-) -> anyhow::Result<Command> {
+fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Command> {
     let (program, args) = config
+        .publisher
         .intent_gen_command
         .split_first()
         .context("midnight publisher config: intent_gen_command is empty")?;
     let mut command = Command::new(program);
     command.args(args);
 
-    // Every `MIDNIGHT_PUB_*` name is set below or removed here, never inherited: an
-    // ambient value for a name added on the child's side would be quietly supplied by
-    // the host instead of rejected by the child's own required-value check. Narrower
-    // than `env_clear` deliberately: taking PATH or HOME away from Node breaks it.
-    for name in inherited {
-        command.env_remove(name);
-    }
-
     command
-        .env("MIDNIGHT_PUB_FUNDING_SEED", &config.funding_seed)
+        .env_clear()
+        .env("PATH", CHILD_PATH)
+        .env("MIDNIGHT_PUB_FUNDING_SEED", &config.publisher.funding_seed)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
-        // Written unconditionally: a name left unwritten is one the `env_remove`
-        // above took away.
         .env("MIDNIGHT_PUB_NODE_URL", &config.node_ws_url)
-        .env("MIDNIGHT_PUB_PROOF_SERVER_URL", &config.proof_server_url)
-        .env("MIDNIGHT_PUB_INDEXER_URL", &config.indexer_url)
-        .env("MIDNIGHT_PUB_INDEXER_WS_URL", &config.indexer_ws_url)
+        .env(
+            "MIDNIGHT_PUB_PROOF_SERVER_URL",
+            &config.publisher.proof_server_url,
+        )
+        .env("MIDNIGHT_PUB_INDEXER_URL", &config.publisher.indexer_url)
+        .env(
+            "MIDNIGHT_PUB_INDEXER_WS_URL",
+            &config.publisher.indexer_ws_url,
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Piped: an unread stderr pipe eventually blocks the child mid-proof.
@@ -557,46 +493,22 @@ fn intent_gen_command(
 }
 
 /// Forwards the child's stderr to the log and keeps the tail for errors.
-async fn drain_stderr(stderr: ChildStderr, redactor: SeedRedactor, tail: StderrTail) {
-    let mut lines = ScrubbedLines::new(stderr, redactor);
-    while let Some(line) = lines.next().await {
+async fn drain_stderr(stderr: ChildStderr, tail: StderrTail) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
         tracing::warn!(source = "midnight-intent-builder", "{line}");
         tail.push(line);
     }
 }
 
-/// A child's stderr, seed already out; there is deliberately no way to read an unscrubbed line.
-struct ScrubbedLines<R> {
-    lines: tokio::io::Lines<BufReader<R>>,
-    redactor: SeedRedactor,
-}
-
-impl<R: tokio::io::AsyncRead + Unpin> ScrubbedLines<R> {
-    fn new(reader: R, redactor: SeedRedactor) -> Self {
-        Self {
-            lines: BufReader::new(reader).lines(),
-            redactor,
-        }
-    }
-
-    /// The next line, or `None` at end of input and equally on a read error: there is
-    /// no second stderr to report a read failure on.
-    async fn next(&mut self) -> Option<String> {
-        let line = self.lines.next_line().await.ok()??;
-        Some(self.redactor.scrub(&line))
-    }
-}
-
-/// One line out, one line in; anything leaving the pipe in an unknown state reports `Broken`.
+/// Encodes one request and applies the post-encoding uncertainty policy once.
 async fn exchange<T: Serialize>(
     session: &mut Session,
     request: &T,
     operation: Operation,
     config: &PublisherConfig,
     cancel: &CancellationToken,
-    redactor: &SeedRedactor,
 ) -> Exchange {
-    let deadline = operation.deadline(config);
     let id = take_wire_id(&mut session.next_id);
     let line = match encode_request(request, id, operation) {
         Ok(line) => line,
@@ -604,18 +516,37 @@ async fn exchange<T: Serialize>(
         Err(error) => return Exchange::Answered(Err(error)),
     };
 
+    match exchange_inner(session, &line, id, operation, config, cancel).await {
+        Exchange::Broken { error, retry } => Exchange::Broken {
+            error: unanswered(error, operation),
+            retry,
+        },
+        answered => answered,
+    }
+}
+
+/// One line out, one line in; anything leaving the pipe in an unknown state reports `Broken`.
+async fn exchange_inner(
+    session: &mut Session,
+    line: &str,
+    id: u64,
+    operation: Operation,
+    config: &PublisherConfig,
+    cancel: &CancellationToken,
+) -> Exchange {
+    let deadline = operation.deadline(config);
     let reply = tokio::select! {
         // Nothing here can tell a cancel that raced the write from one that beat it,
         // so a cancelled submit reports what it may have left behind.
         _ = cancel.cancelled() => {
-            return Exchange::give_up(unanswered(
-                anyhow::anyhow!("midnight {} cancelled", operation.name()),
-                operation,
+            return Exchange::give_up(anyhow::anyhow!(
+                "midnight {} cancelled",
+                operation.name(),
             ))
         }
         // A timed-out child is a dead publisher if kept: a wedged circuit run wedges the
         // process while it still looks healthy. `Broken` kills it; a submit is still not reissued.
-        result = tokio::time::timeout(deadline, round_trip(session, &line)) => match result {
+        result = tokio::time::timeout(deadline, round_trip(session, line)) => match result {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => return Exchange::lost(error, operation),
             Err(_) => return Exchange::lost(
@@ -624,14 +555,7 @@ async fn exchange<T: Serialize>(
             ),
         },
     };
-    match decode_reply(&reply, id, redactor) {
-        // The child's verdict passes through; an unpairable reply leaves the doubt a dead pipe does.
-        answered @ Exchange::Answered(_) => answered,
-        Exchange::Broken { error, retry } => Exchange::Broken {
-            error: unanswered(error, operation),
-            retry,
-        },
-    }
+    decode_reply(&reply, id)
 }
 
 async fn round_trip(session: &mut Session, line: &str) -> anyhow::Result<String> {
@@ -656,7 +580,7 @@ async fn round_trip(session: &mut Session, line: &str) -> anyhow::Result<String>
 }
 
 /// Reads one reply line as the answer to request `id`.
-fn decode_reply(line: &str, id: u64, redactor: &SeedRedactor) -> Exchange {
+fn decode_reply(line: &str, id: u64) -> Exchange {
     let reply: WireReply = match serde_json::from_str(line.trim()) {
         Ok(reply) => reply,
         // Not this wire at all: the reader's idea of where a line starts is now wrong.
@@ -683,17 +607,16 @@ fn decode_reply(line: &str, id: u64, redactor: &SeedRedactor) -> Exchange {
         }
         _ => {}
     }
-    Exchange::Answered(granted(reply, redactor))
+    Exchange::Answered(granted(reply))
 }
 
-/// The refusal's `message` is the one field on this wire that can carry the key back out.
-fn granted(reply: WireReply, redactor: &SeedRedactor) -> anyhow::Result<WireReply> {
+fn granted(reply: WireReply) -> anyhow::Result<WireReply> {
     if !reply.ok {
         let code = reply.code.as_deref().unwrap_or("no code");
         let error = anyhow::anyhow!(
             "midnight intent builder refused the request [{}]: {}",
             code,
-            redactor.scrub(reply.message.as_deref().unwrap_or("no message"))
+            reply.message.as_deref().unwrap_or("no message")
         );
         return Err(if code == "ambiguous_submit" {
             error.context(AmbiguousSubmit)
@@ -749,42 +672,62 @@ struct WireReply {
 mod tests {
     use super::*;
 
-    use crate::config::PublisherConfig;
+    use crate::config::{MidnightConfig, PublisherConfig};
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     const NETWORK_ID: &str = "undeployed";
+    const NODE_WS_URL: &str = "ws://127.0.0.1:9944";
 
     /// A shell stub in place of the real Node child; a test reading an unpinned field
     /// must pin its own, or it silently tests the default.
-    fn stub_config(script: &str) -> PublisherConfig {
+    fn stub_config(script: &str) -> MidnightConfig {
         let script = format!(
             r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
-        PublisherConfig {
-            intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
-            request_timeout: Duration::from_secs(5),
-            restart_backoff: RetryConfig {
-                min_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(5),
-                max_times: 2,
-                jitter: false,
+        MidnightConfig {
+            node_ws_url: NODE_WS_URL.to_string(),
+            central_address: "ab".repeat(32),
+            publisher: PublisherConfig {
+                intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
+                funding_seed: "ab".repeat(32),
+                proof_server_url: "http://127.0.0.1:6300".to_string(),
+                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+                request_timeout: Duration::from_secs(5),
+                restart_backoff: RetryConfig {
+                    min_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(5),
+                    max_times: 2,
+                    jitter: false,
+                },
+                ..Default::default()
             },
-            ..Default::default()
+            rpc: Default::default(),
+            indexer: Default::default(),
         }
     }
 
-    async fn spawn_stub(config: &PublisherConfig) -> IntentGen {
+    async fn spawn_stub(config: &MidnightConfig) -> IntentGen {
         IntentGen::spawn(config, NETWORK_ID)
             .await
             .expect("the stub spawns")
     }
 
-    fn ready_reply_config(reply: &str) -> PublisherConfig {
+    #[tokio::test]
+    async fn spawn_rejects_a_network_the_child_sdk_does_not_support() {
+        let error = IntentGen::spawn(&stub_config("exit 0"), "unknown-network")
+            .await
+            .err()
+            .expect("the parent must reject an unsupported network");
+        assert!(error.to_string().contains("network_id"), "{error:#}");
+    }
+
+    fn ready_reply_config(reply: &str) -> MidnightConfig {
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec![
+        config.publisher.intent_gen_command = vec![
             "sh".to_string(),
             "-c".to_string(),
             format!("read -r ready; printf '%s\\n' '{reply}'; sleep 30"),
@@ -942,7 +885,7 @@ mod tests {
         // End-of-input read as a zero-length line would look like an unreadable reply minutes later.
         let mut config = stub_config(r#"read line; exec 1>&-; sleep 30"#);
         // Long enough that the timeout cannot be what saves this test.
-        config.request_timeout = Duration::from_secs(30);
+        config.publisher.request_timeout = Duration::from_secs(30);
         let builder = spawn_stub(&config).await;
         let started = Instant::now();
         let err = builder
@@ -978,6 +921,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_submit_reply_for_another_request_is_ambiguous() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":7,"ok":true,"txId":"ab","blockHash":"cd"}\n'"#,
+        ))
+        .await;
+        let err = builder
+            .submit(SAMPLE_INTENT, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+
+        assert!(rendered.contains("id 7"), "got: {rendered}");
+        assert!(
+            rendered.contains("check it for this request before posting again"),
+            "an unpairable submit reply must preserve the on-chain uncertainty: {rendered}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_submit_the_child_granted_without_naming_the_transaction_is_not_a_receipt() {
         // An empty receipt would log "published successfully" for a post nothing can be looked up by.
         let builder = spawn_stub(&stub_config(
@@ -1004,7 +966,7 @@ mod tests {
             counter.prologue()
         ));
         // Long enough that the closed pipe, not the deadline, is what ends this.
-        config.submit_timeout = Duration::from_secs(30);
+        config.publisher.submit_timeout = Duration::from_secs(30);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1033,7 +995,7 @@ mod tests {
         // The deadline-blown loss: the wedged child is killed, just not asked again.
         let counter = SpawnCounter::new("submit-timeout");
         let mut config = stub_config(&format!("{} sleep 30", counter.prologue()));
-        config.submit_timeout = Duration::from_millis(50);
+        config.publisher.submit_timeout = Duration::from_millis(50);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1122,8 +1084,8 @@ mod tests {
     async fn a_submit_is_bounded_by_the_submit_budget_and_not_the_build_one() {
         // Bounding a submit by the build's budget would kill the child mid-prove on every real post.
         let mut config = stub_config("sleep 30");
-        config.request_timeout = Duration::from_millis(50);
-        config.submit_timeout = Duration::from_millis(400);
+        config.publisher.request_timeout = Duration::from_millis(50);
+        config.publisher.submit_timeout = Duration::from_millis(400);
         let builder = spawn_stub(&config).await;
 
         let started = Instant::now();
@@ -1149,7 +1111,7 @@ mod tests {
             ECHO_ID_REPLY
         ));
         // Wide enough that a fresh `sh -c` spawn beats it even on a loaded machine.
-        config.request_timeout = Duration::from_millis(500);
+        config.publisher.request_timeout = Duration::from_millis(500);
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
@@ -1215,7 +1177,7 @@ mod tests {
             counter.prologue(),
             ECHO_ID_REPLY
         ));
-        config.request_timeout = Duration::from_millis(500);
+        config.publisher.request_timeout = Duration::from_millis(500);
         let builder = std::sync::Arc::new(spawn_stub(&config).await);
         counter.wait_for(1).await;
 
@@ -1273,7 +1235,8 @@ mod tests {
     #[tokio::test]
     async fn a_child_that_exits_before_readiness_fails_startup() {
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
+        config.publisher.intent_gen_command =
+            vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
 
         let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
             panic!("an exited process is not a ready publisher")
@@ -1288,7 +1251,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_deadline_that_reaches_the_rust_backstop_fails_startup() {
         let mut config = stub_config("unreachable");
-        config.submit_timeout = Duration::from_millis(2);
+        config.publisher.submit_timeout = Duration::from_millis(2);
 
         let Err(error) = IntentGen::spawn(&config, NETWORK_ID).await else {
             panic!("the Rust supervisor must outlive the child submit deadline")
@@ -1304,7 +1267,7 @@ mod tests {
     async fn a_command_that_does_not_exist_fails_at_startup_and_names_itself() {
         // The case the eager spawn does catch: a missing binary is learned at startup.
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["mpc-midnight-no-such-binary".to_string()];
+        config.publisher.intent_gen_command = vec!["mpc-midnight-no-such-binary".to_string()];
 
         let started = Instant::now();
         let Err(err) = IntentGen::spawn(&config, NETWORK_ID).await else {
@@ -1320,180 +1283,119 @@ mod tests {
         );
     }
 
-    /// A 32-byte hex seed, the shape `validate()` requires when one is present.
-    const SEED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
     #[tokio::test]
-    async fn the_child_s_publisher_namespace_is_exactly_what_this_process_put_there() {
-        // Exact, not "contains": an ambient survivor is an extra name, a forgotten set a missing one.
+    async fn the_child_s_environment_is_only_fixed_path_and_parent_config() {
+        // The stub reports every name it can see. Whatever the shell did not add must
+        // be the fixed launcher path or one of the six parent-set config entries.
         let builder = spawn_stub(&stub_config(
-        r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"%s"}\n' "$(env | sed -n "s/^\(MIDNIGHT_PUB_[A-Z_]*\)=.*/\1/p" | sort | tr "\n" ",")""#,
+        r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"%s"}\n' "$(env | awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' | sort | tr "\n" ",")""#,
     ))
     .await;
         let err = builder
             .build(&sample_request(), &CancellationToken::new())
             .await
             .unwrap_err();
+        let rendered = format!("{err:#}");
+        let (_, names) = rendered
+            .split_once("[bad_request]: ")
+            .expect("the stub answered with its environment");
+        let names: Vec<&str> = names.split(',').filter(|name| !name.is_empty()).collect();
+
+        let ours: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| name.starts_with("MIDNIGHT_PUB_"))
+            .collect();
         assert_eq!(
-            format!("{err:#}"),
-            "midnight intent builder refused the request [bad_request]: \
-         MIDNIGHT_PUB_FUNDING_SEED,MIDNIGHT_PUB_INDEXER_URL,MIDNIGHT_PUB_INDEXER_WS_URL,\
-         MIDNIGHT_PUB_NETWORK_ID,MIDNIGHT_PUB_NODE_URL,MIDNIGHT_PUB_PROOF_SERVER_URL,"
+            ours,
+            [
+                "MIDNIGHT_PUB_FUNDING_SEED",
+                "MIDNIGHT_PUB_INDEXER_URL",
+                "MIDNIGHT_PUB_INDEXER_WS_URL",
+                "MIDNIGHT_PUB_NETWORK_ID",
+                "MIDNIGHT_PUB_NODE_URL",
+                "MIDNIGHT_PUB_PROOF_SERVER_URL",
+            ],
+            "the child must receive exactly the parent-owned publisher config"
         );
-    }
-
-    #[tokio::test]
-    async fn the_child_is_handed_every_value_it_is_configured_with() {
-        // The VALUES have to arrive, each its own: four distinguishable endpoints, not one URL repeated.
-        let mut config = stub_config(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"net=%s node=%s prover=%s indexer=%s ws=%s"}\n' "$MIDNIGHT_PUB_NETWORK_ID" "$MIDNIGHT_PUB_NODE_URL" "$MIDNIGHT_PUB_PROOF_SERVER_URL" "$MIDNIGHT_PUB_INDEXER_URL" "$MIDNIGHT_PUB_INDEXER_WS_URL""#,
-        );
-        config.node_ws_url = "ws://127.0.0.1:9944".to_string();
-        config.proof_server_url = "http://127.0.0.1:6300".to_string();
-        config.indexer_url = "http://127.0.0.1:8088/api/v3/graphql".to_string();
-        config.indexer_ws_url = "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string();
-        let builder = spawn_stub(&config).await;
-
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains(
-                "net=undeployed node=ws://127.0.0.1:9944 \
-             prover=http://127.0.0.1:6300 \
-             indexer=http://127.0.0.1:8088/api/v3/graphql \
-             ws=ws://127.0.0.1:8088/api/v3/graphql/ws"
-            ),
-            "got: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_child_s_stderr_is_scrubbed_before_it_can_reach_a_log() {
-        // Whatever survives this reader is in the node's log.
-        let stderr = format!("midnight-publisher: opened wallet {SEED}\nsecond line\n");
-        let mut lines = ScrubbedLines::new(stderr.as_bytes(), SeedRedactor::new(SEED));
-        assert_eq!(
-            lines.next().await.unwrap(),
-            "midnight-publisher: opened wallet <redacted>"
-        );
-        assert_eq!(lines.next().await.unwrap(), "second line");
-        assert!(lines.next().await.is_none());
+        let shell_added = ["PWD", "OLDPWD", "SHLVL", "_"];
+        let strays: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| {
+                !name.starts_with("MIDNIGHT_PUB_") && *name != "PATH" && !shell_added.contains(name)
+            })
+            .collect();
+        assert!(strays.is_empty(), "the child inherited {strays:?}");
     }
 
     #[tokio::test]
     async fn a_child_that_dies_after_readiness_reports_what_it_said_on_its_way_out() {
-        // The stub quotes the seed rather than a literal, which would sit in the rendered argv.
-        let mut config = stub_config(
-            r#"printf 'invalid MIDNIGHT_PUB_* configuration: missing MIDNIGHT_PUB_INDEXER_URL (wallet %s)\n' "$MIDNIGHT_PUB_FUNDING_SEED" >&2; exit 1"#,
-        );
-        config.funding_seed = SEED.to_string();
-        let builder = spawn_stub(&config).await;
+        let builder = spawn_stub(&stub_config(
+            r#"printf 'publisher stopped after readiness\n' >&2; exit 1"#,
+        ))
+        .await;
 
         let err = builder
             .build(&sample_request(), &CancellationToken::new())
             .await
             .unwrap_err();
-        let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("missing MIDNIGHT_PUB_INDEXER_URL"),
-            "the child's own explanation has to reach whoever asked: {rendered}"
-        );
-        // The same scrubbing the drain applies, on the text's second route out.
-        assert!(
-            rendered.contains("wallet <redacted>"),
-            "the child was handed the seed and quoted it back: {rendered}"
-        );
-        assert!(
-            !rendered.contains(SEED),
-            "the seed reached an error this node reports: {rendered}"
+            format!("{err:#}").contains("publisher stopped after readiness"),
+            "the child's own explanation has to reach whoever asked: {err:#}"
         );
     }
 
     #[test]
-    fn every_publisher_variable_this_process_holds_is_taken_off_the_child() {
-        // Synthetic, so non-vacuous anywhere; `MIDNIGHT_PUBLIC` pins that a shared stem is not membership.
-        let stray = std::ffi::OsString::from("MIDNIGHT_PUB_SOMETHING_ADDED_LATER");
-        let seed = std::ffi::OsString::from("MIDNIGHT_PUB_FUNDING_SEED");
-        let inherited = publisher_vars(
-            ["PATH", "MIDNIGHT_PUBLIC", "HOME"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .chain([stray.clone(), seed.clone()]),
-        );
-        assert_eq!(inherited, vec![stray.clone(), seed.clone()]);
-
-        let command = intent_gen_command(&stub_config("true"), NETWORK_ID, &inherited)
-            .expect("the stub command is well formed");
-
-        let changes: Vec<_> = command.as_std().get_envs().collect();
-        assert!(
-        changes.iter().any(|(name, value)| *name == stray && value.is_none()),
-        "a publisher variable this process does not set must be removed, not inherited: {changes:?}"
-    );
-        // Ordering, not contradiction: the removal registers first and the set that
-        // follows replaces it.
-        assert!(
-            changes
-                .iter()
-                .any(|(name, value)| *name == seed && value.is_some()),
-            "a publisher variable this process does set must survive its own removal: {changes:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_funding_seed_reaches_the_child_but_not_anything_this_node_says() {
-        // The echo proves delivery; the assertion proves the key does not ride the cause chain out.
-        let mut config = stub_config(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"internal","message":"wallet rejected %s"}\n' "$MIDNIGHT_PUB_FUNDING_SEED""#,
-        );
-        config.funding_seed = SEED.to_string();
-        let builder = spawn_stub(&config).await;
-
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(
-            rendered.contains("wallet rejected <redacted>"),
-            "the child was handed the seed and quoted it back: {rendered}"
-        );
-        assert!(
-            !rendered.contains(SEED),
-            "the seed reached an error this node reports: {rendered}"
-        );
-    }
-
-    #[test]
-    fn the_seed_is_scrubbed_in_every_spelling_and_nothing_else_is() {
-        let redactor = SeedRedactor::new(SEED);
+    fn only_fixed_path_and_parent_config_reach_the_child() {
+        let config = stub_config("true");
+        let command =
+            intent_gen_command(&config, NETWORK_ID).expect("the stub command is well formed");
+        let mut values: Vec<(String, String)> = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                let value = value.unwrap_or_else(|| panic!("{name:?} is unset rather than absent"));
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        values.sort();
         assert_eq!(
-            redactor.scrub(&format!("loaded {SEED} from disk")),
-            "loaded <redacted> from disk"
-        );
-        assert_eq!(redactor.scrub(&SEED.to_uppercase()), "<redacted>");
-        assert_eq!(
-            redactor.scrub("nothing sensitive here"),
-            "nothing sensitive here"
-        );
-
-        // A seed configured `0x`-prefixed is scrubbed bare too: a library may strip it before quoting.
-        let redactor = SeedRedactor::new(&format!("0x{SEED}"));
-        assert_eq!(redactor.scrub(&format!("key {SEED}")), "key <redacted>");
-        assert_eq!(redactor.scrub(&format!("key 0x{SEED}")), "key <redacted>");
-
-        // Too short to be a seed: redacting it would blank unrelated text.
-        assert_eq!(
-            SeedRedactor::new("abcd").scrub("abcdef is not a secret"),
-            "abcdef is not a secret"
-        );
-
-        // An absent seed scrubs nothing: the empty string occurs between every pair of characters.
-        assert_eq!(
-            SeedRedactor::new("").scrub("midnight-publisher: started"),
-            "midnight-publisher: started"
+            values,
+            [
+                (
+                    "MIDNIGHT_PUB_FUNDING_SEED".to_string(),
+                    config.publisher.funding_seed.clone(),
+                ),
+                (
+                    "MIDNIGHT_PUB_INDEXER_URL".to_string(),
+                    config.publisher.indexer_url.clone(),
+                ),
+                (
+                    "MIDNIGHT_PUB_INDEXER_WS_URL".to_string(),
+                    config.publisher.indexer_ws_url.clone(),
+                ),
+                (
+                    "MIDNIGHT_PUB_NETWORK_ID".to_string(),
+                    NETWORK_ID.to_string(),
+                ),
+                (
+                    "MIDNIGHT_PUB_NODE_URL".to_string(),
+                    config.node_ws_url.clone(),
+                ),
+                (
+                    "MIDNIGHT_PUB_PROOF_SERVER_URL".to_string(),
+                    config.publisher.proof_server_url.clone(),
+                ),
+                (
+                    "PATH".to_string(),
+                    "/usr/local/bin:/usr/bin:/bin".to_string(),
+                ),
+            ],
+            "the child environment is exactly fixed PATH plus parent-owned config"
         );
     }
 
@@ -1522,7 +1424,7 @@ mod tests {
             }),
             "the unidirectional circuit carries no output fields, and the child's \
          discriminated union rejects the request outright if it does. Every protocol \
-         generation 1 request names its operation explicitly"
+         application request names its operation explicitly"
         );
     }
 
@@ -1530,7 +1432,8 @@ mod tests {
     async fn readiness_sends_and_requires_protocol_generation_one() {
         let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":1}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
         let mut config = stub_config("unreachable");
-        config.intent_gen_command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        config.publisher.intent_gen_command =
+            vec!["sh".to_string(), "-c".to_string(), script.to_string()];
 
         IntentGen::spawn(&config, NETWORK_ID)
             .await

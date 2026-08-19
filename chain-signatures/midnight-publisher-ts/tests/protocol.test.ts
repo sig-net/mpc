@@ -6,7 +6,6 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ContractState } from "@midnight-ntwrk/compact-runtime";
-
 const submitMocks = vi.hoisted(() => ({ warmupPublisher: vi.fn() }));
 
 vi.mock("../src/submit.js", async (importOriginal) => ({
@@ -25,8 +24,6 @@ import {
   toHex,
 } from "./support.js";
 
-const CONFIG = testConfig();
-
 const BUILD = await respondInput();
 
 const request = (overrides: Record<string, unknown> = {}): string =>
@@ -37,6 +34,7 @@ const request = (overrides: Record<string, unknown> = {}): string =>
     ...overrides,
   });
 
+const CONFIG = testConfig();
 const answer = async (line: string) => JSON.parse(await handleLine(CONFIG, line));
 
 beforeEach(() => submitMocks.warmupPublisher.mockClear());
@@ -124,7 +122,7 @@ describe("handleLine: the operation discriminator", () => {
   });
 
   it("requires the exact protocol version on ready", async () => {
-    for (const protocolVersion of [undefined, 0, 2, "1", null]) {
+    for (const protocolVersion of [undefined, 0, 2, 3, "1", null]) {
       const reply = await answer(JSON.stringify({ id: 6, op: "ready", protocolVersion }));
 
       expect(reply, String(protocolVersion)).toMatchObject({
