@@ -391,11 +391,10 @@ our cluster).
   duplicates, zero START-from-non-proposer, zero conflicting-proposer events
   anywhere, so reordering damage has not been observed.
 - **Round churn is currently a devnet phenomenon.** ~100k reorganizes in 48h on
-  devnet against exactly zero on testnet. Devnet steady state concentrates in
-  ~79 stuck requests each rotating 1.5-2x per minute (§8.1, the zombie
-  pattern). ~83% of reorganize reasons are "deliberator timeout waiting for
-  Propose": rounds ending because no PROPOSE ever arrived, which is the case a
-  round-outcome signal (§3) would address.
+  devnet against exactly zero on testnet; the midday baseline hour had 3815
+  reorganizes across only 79 distinct sign_ids. ~83% of reorganize reasons are
+  "deliberator timeout waiting for Propose": rounds ending because no PROPOSE
+  ever arrived.
 - **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
   in 48h.
 
@@ -411,24 +410,31 @@ our cluster).
   steady state. Both fire only in a burst coinciding with the shared devnet
   Redis master being replaced (each cluster runs one shared Redis, so a node
   cannot lose its storage alone). Steady-state churn is therefore not pool
-  starvation. Best fit for the silent rounds: participants that already
-  completed the request (signature produced, publish never confirmed, #1063)
-  drop late posits via `dead_ids` without replying, so the excluded few rotate
-  through mostly-silent proposers forever — which also explains the observed
-  1-3 accept counts against threshold 9. Per-request verification pending.
+  starvation.
+- **Per-request verification refuted the zombie reading.** The three worst
+  midday rotators each lived ~19 minutes and ended in one successful
+  signature: ~100-140 reorganizes and 9-11 generation attempts per request,
+  then "sign request completed successfully" on 6-7 pods within seconds, and
+  zero reorganizes afterwards — completion propagation works. The churn is
+  heavy but bounded per request; why rounds stay silent for those minutes is
+  not identified yet (4 of the 12 dev pods log no signing traffic at all).
+  Side findings: requests reach the nodes ~15 minutes after the contract
+  first sees them, making end-to-end latency ~34 minutes in that hour.
 
 Proposals against the churn, in order of expected impact. Requests never
 expire by design, so the rotation has to be ended by information, not time:
 
-1. **Answer posits for completed requests.** `dead_ids` silently drops them
-   today; replying REJECT Completed lets a rotating node end its task on the
-   next message it sends. One new reject reason, no new message type. Directly
-   targets the best-fit zombie mechanism, and is the minimal form of the
-   round-outcome signal (§3).
-2. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
    paused) says so; receivers end round `r` at once instead of timing out on
-   silence. Does not help when the proposer is silent because it finished the
-   request — that is case 1.
+   silence. Silent rounds dominate the churn and their cause is unidentified;
+   SKIP both shortens them and sharpens the diagnosis, since a round that
+   stays silent after SKIP has an absent proposer, not an unwilling one.
+2. **Answer posits for completed requests.** `dead_ids` silently drops them
+   today; replying REJECT Completed lets a straggler end its task on the next
+   message it sends. One new reject reason, no new message type. Verification
+   showed completion propagating well, so this is insurance for a node the
+   Completion event misses, and the minimal form of the round-outcome signal
+   (§3).
 3. **Prune the pool.** Discard a presignature that cannot reach `t` live
    holders (MissingArtifact replies shrink its effective holder set; repeated
    active-set skips finish it). Not the steady-state churn driver — the pool
