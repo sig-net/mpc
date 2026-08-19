@@ -27,4 +27,6 @@ ignore = [
 	# wasmtime stores can mix up type indices between engines; only reachable via near-sdk's `unit-testing`
 	# dev-only dependency (near-vm-runner 0.37.2 pins wasmtime ^45, which has no patched release; blocked upstream).
 	"RUSTSEC-2026-0222",
+	"RUSTSEC-2026-0258", # h2 0.3.26 queues unbounded empty DATA frames (low-severity DoS); 0.3 line has no patch,
+	# pinned via hyper 0.14 / reqwest 0.11; the h2 0.4 instance is bumped to the patched 0.4.16.
 ]
