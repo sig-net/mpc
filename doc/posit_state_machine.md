@@ -343,20 +343,17 @@ because the round timeout ran out.
 
 ## 8. Observations the model surfaces
 
-Stated as consequences of the machine, not as bug reports.
-
-1. **The new-round edge has no exit but another round.** No round cap, no
+1. **No way to leave the state machine except by generating.** No round cap, no
    cross-round deadline, and `round_timeout` saturates at 600s. The one failure
    terminal (`Complete(Err(Aborted))`) needs a closed proposer semaphore, which
-   nothing closes, so no request ever fails from inside the machine. A wedged
-   request rotates until something outside removes it; the delayed watcher only
-   bumps a metric.
+   nothing closes, so no request ever fails from inside the machine. This is 
+   the desired behavior. 
 2. **A late accepter burns a full round.** A node that catches up mid-round
    sends `ACCEPT` after the proposer already sent `START`. The proposer is
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
 3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
-4. **One slot per sender assumes an ordering HTTP does not provide.** Both
+4. **One slot per sender assumes an ordering which is not guaranteed.** Both
    buffers overwrite on arrival, including for an equal round, so if a sender's
    `PROPOSE` and `START` for one round arrive out of order the later arrival
    wins and the other is dropped silently, costing that node the round.
@@ -374,7 +371,7 @@ Stated as consequences of the machine, not as bug reports.
    a node declines proposership and takes the deliberator edge out of
    `Waiting for participants`. Since election is by round, nobody else proposes
    that round either, so the round is spent waiting for a `PROPOSE` that will
-   not come.
+   not come. Could be improved by more information being sent around.
 7. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
 
@@ -402,6 +399,24 @@ our cluster).
   round-outcome signal (§3) would address.
 - **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
   in 48h.
+
+Proposals against the churn, smallest first:
+
+1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+   paused) says so; receivers end round `r` at once. Rounds that die silently
+   today (83% of reorganizes) end in milliseconds instead of a timeout.
+   Warning: alone it only makes futile rotation faster; ship with 2 or 3.
+2. **Park.** After K rounds without a PROPOSE, stop rotating; retry when the
+   active set or the presignature pool changes.
+3. **Expire.** After N rounds or T minutes the request fails for good. Needs a
+   product decision: what "failed" means on chain.
+4. **Shrink holder lists.** A MissingArtifact reply removes the rejector from
+   that presignature's stored holder list (`set_holders` exists); below `t`
+   holders the presignature is discarded. The proposer stops proposing what
+   peers do not have.
+5. **Name the cause.** Extend the MissingArtifact log with whether the
+   presignature was never received or was deleted, so the devnet root cause
+   becomes visible.
 - **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
   on testnet (§8.1);** on testnet each node logs the same delayed request, so
   the per-node uniform count is one request counted nine times.
