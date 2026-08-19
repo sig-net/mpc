@@ -9,7 +9,9 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_utils::task::AbortOnDrop;
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
+use subxt::backend::rpc::reconnecting_rpc_client::RpcClient as ReconnectingRpcClient;
 use subxt::backend::rpc::RpcClient;
+use subxt::backend::BackendExt as _;
 use subxt::client::OnlineClient;
 use subxt::ext::jsonrpsee::client_transport::ws::{Url as WsUrl, WsTransportClientBuilder};
 use subxt::ext::jsonrpsee::core::client::async_client::PingConfig;
@@ -29,8 +31,6 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
-/// How the legacy backend renders a `state_call` at a hash the node cannot serve.
-const UNKNOWN_BLOCK_MSG: &str = "UnknownBlock";
 const TIMESTAMP_PALLET: &str = "Timestamp";
 const TIMESTAMP_NOW: &str = "Now";
 
@@ -118,6 +118,48 @@ fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
     Ok(H256(bytes))
 }
 
+async fn connect_bounded(
+    config: &MidnightConfig,
+) -> anyhow::Result<(OnlineClient<SubstrateConfig>, RpcClient, Liveness)> {
+    let connect_timeout = config.rpc.connect_timeout;
+    let url = config.node_ws_url.as_str();
+
+    // `RpcClient::from_url` with the one knob it does not expose, the response
+    // cap (`RpcConfig::max_response_size`): the same transport, client and
+    // subscription buffer, through subxt's own jsonrpsee re-export.
+    let ws_client = tokio::time::timeout(connect_timeout, async {
+        let target = WsUrl::parse(url).context("the midnight node ws url does not parse")?;
+        let (sender, receiver) = WsTransportClientBuilder::default()
+            .max_response_size(config.rpc.max_response_size)
+            .build(target)
+            .await
+            .context("failed to connect to the midnight node rpc")?;
+        anyhow::Ok(
+            RawWsClient::builder()
+                // Pings are off by default, leaving a blackholed connection
+                // (no FIN or RST) undetectable; the heartbeat surfaces it as
+                // RestartNeeded, i.e. the ClientClosed reconnect path.
+                .enable_ws_ping(PingConfig::default())
+                .max_buffer_capacity_per_subscription(4096)
+                .build_with_tokio(sender, receiver),
+        )
+    })
+    .await
+    .context("timed out connecting to the midnight node rpc")??;
+    let ws = Arc::new(ws_client);
+    let rpc = RpcClient::new(ws.clone());
+    let alive: Liveness = Arc::new(move || ws.is_connected());
+    let client = tokio::time::timeout(
+        connect_timeout,
+        OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone()),
+    )
+    .await
+    .context("timed out initialising the midnight subxt client")?
+    .context("failed to initialise the midnight subxt client")?;
+
+    Ok((client, rpc, alive))
+}
+
 pub struct MidnightRpc {
     client: OnlineClient<SubstrateConfig>,
     reads: Reads,
@@ -131,49 +173,13 @@ pub struct MidnightRpc {
 impl MidnightRpc {
     /// Dials the node named by `config.node_ws_url`.
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
-        let connect_timeout = config.rpc.connect_timeout;
-        let url = config.node_ws_url.as_str();
-
-        // `RpcClient::from_url` with the one knob it does not expose, the response
-        // cap (`RpcConfig::max_response_size`): the same transport, client and
-        // subscription buffer, through subxt's own jsonrpsee re-export.
-        let ws_client = tokio::time::timeout(connect_timeout, async {
-            let target = WsUrl::parse(url).context("the midnight node ws url does not parse")?;
-            let (sender, receiver) = WsTransportClientBuilder::default()
-                .max_response_size(config.rpc.max_response_size)
-                .build(target)
-                .await
-                .context("failed to connect to the midnight node rpc")?;
-            anyhow::Ok(
-                RawWsClient::builder()
-                    // Pings are off by default, leaving a blackholed connection
-                    // (no FIN or RST) undetectable; the heartbeat surfaces it as
-                    // RestartNeeded, i.e. the ClientClosed reconnect path.
-                    .enable_ws_ping(PingConfig::default())
-                    .max_buffer_capacity_per_subscription(4096)
-                    .build_with_tokio(sender, receiver),
-            )
-        })
-        .await
-        .context("timed out connecting to the midnight node rpc")??;
-        let ws = Arc::new(ws_client);
-        let rpc = RpcClient::new(ws.clone());
-        let client = tokio::time::timeout(
-            connect_timeout,
-            OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone()),
-        )
-        .await
-        .context("timed out initialising the midnight subxt client")?
-        .context("failed to initialise the midnight subxt client")?;
-        // `is_connected` is the liveness answer catching dead-client shapes
-        // the error types hide.
-        let alive: Liveness = Arc::new(move || ws.is_connected());
+        let (client, rpc, alive) = connect_bounded(config).await?;
 
         Ok(Self {
             _runtime_updater: spawn_runtime_updater(client.clone()),
             client,
             reads: Reads::new(rpc, config.rpc.request_timeout, config.rpc.retry, alive),
-            connect_timeout,
+            connect_timeout: config.rpc.connect_timeout,
             stall_timeout: config.indexer.stall_timeout,
         })
     }
@@ -237,68 +243,6 @@ impl MidnightRpc {
             .await
     }
 
-    /// The finalized head as the `0x`-prefixed hash string every pinned read takes.
-    pub async fn finalized_head_0x(&self) -> anyhow::Result<String> {
-        Ok(hex_0x(self.reads.finalized_head().await?))
-    }
-
-    /// The timestamp stored by `pallet_timestamp` at one explicit block. The Midnight
-    /// ledger floors milliseconds to seconds when it validates an intent's TTL.
-    pub(crate) async fn block_timestamp_seconds(
-        &self,
-        at_block_hash_0x: &str,
-    ) -> anyhow::Result<u64> {
-        let at = parse_block_hash(at_block_hash_0x)?;
-        let address = subxt::dynamic::storage(
-            TIMESTAMP_PALLET,
-            TIMESTAMP_NOW,
-            Vec::<subxt::dynamic::Value>::new(),
-        );
-        let key = self
-            .client
-            .storage()
-            .address_bytes(&address)
-            .context("midnight runtime metadata has no Timestamp.Now storage entry")?;
-        let encoded = self
-            .reads
-            .storage(&key, at)
-            .await?
-            .with_context(|| format!("midnight block {at_block_hash_0x} has no timestamp"))?;
-        decode_timestamp_seconds(&encoded)
-    }
-
-    /// The ledger parameters at `at_block_hash_0x`. Fees drift per block, so a
-    /// caller proving against a state must read these at that state's own hash.
-    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        let at = parse_block_hash(at_block_hash_0x)?;
-        self.reads
-            .runtime_api_bytes(LEDGER_PARAMETERS_ENTRY, Vec::new(), at)
-            .await?
-            .with_context(|| {
-                format!("midnight node has no ledger parameters at {at_block_hash_0x}")
-            })
-    }
-
-    /// The network id reported by the connected finalized runtime.
-    pub async fn network_id(&self) -> anyhow::Result<String> {
-        use subxt::ext::codec::Decode as _;
-
-        let at = self.reads.finalized_head().await?;
-        let answer = self
-            .reads
-            .runtime_api_answer(NETWORK_ID_ENTRY, Vec::new(), at)
-            .await?;
-        let mut payload = &answer[..];
-        let network_id = String::decode(&mut payload)
-            .context("midnight runtime returned a malformed network id")?;
-        anyhow::ensure!(
-            payload.is_empty(),
-            "midnight runtime network id has {} trailing bytes",
-            payload.len()
-        );
-        Ok(network_id)
-    }
-
     /// The finalized head as a [`BlockRef`]: the head hash, then its header for the
     /// number and parent, each read on the ordinary retry budget.
     pub async fn finalized_block_ref(&self) -> anyhow::Result<BlockRef> {
@@ -332,6 +276,192 @@ impl MidnightRpc {
             hash: hex_0x(hash),
             parent_hash: hex_0x(header.parent_hash),
         })
+    }
+}
+
+/// Finalized reads for the Midnight publisher. Subxt owns connection recovery;
+/// callers keep one instance instead of rebuilding or retrying a dead transport.
+pub struct MidnightPublisherRpc {
+    client: OnlineClient<SubstrateConfig>,
+    rpc: RpcClient,
+    network_id: String,
+    /// Keeps subxt metadata current across runtime upgrades; aborted when this client
+    /// drops.
+    _runtime_updater: AbortOnDrop,
+}
+
+impl MidnightPublisherRpc {
+    pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
+        // Fetch the immutable client state over the bounded transport before the
+        // persistent reconnect worker exists. The persistent client can then be
+        // initialized synchronously, without leaving cancelled calls in its queue.
+        let (bootstrap, _, _) = connect_bounded(config).await?;
+        let network_id = tokio::time::timeout(config.rpc.connect_timeout, network_id(&bootstrap))
+            .await
+            .context("timed out fetching the midnight network id")??;
+        let genesis_hash = bootstrap.genesis_hash();
+        let runtime_version = bootstrap.runtime_version();
+        let metadata = bootstrap.metadata();
+        drop(bootstrap);
+
+        let rpc = connect_publisher_transport(config).await?;
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            genesis_hash,
+            runtime_version,
+            metadata,
+            rpc.clone(),
+        )
+        .context("failed to initialise the midnight publisher subxt client")?;
+
+        Ok(Self {
+            _runtime_updater: spawn_runtime_updater(client.clone()),
+            client,
+            rpc,
+            network_id,
+        })
+    }
+
+    pub async fn finalized_head_0x(&self) -> anyhow::Result<String> {
+        let finalized = self
+            .client
+            .backend()
+            .latest_finalized_block_ref()
+            .await
+            .context("failed to fetch the midnight finalized head")?;
+        Ok(hex_0x(finalized.hash()))
+    }
+
+    pub(crate) async fn block_timestamp_seconds(
+        &self,
+        at_block_hash_0x: &str,
+    ) -> anyhow::Result<u64> {
+        let at = parse_block_hash(at_block_hash_0x)?;
+        let address = subxt::dynamic::storage(
+            TIMESTAMP_PALLET,
+            TIMESTAMP_NOW,
+            Vec::<subxt::dynamic::Value>::new(),
+        );
+        let key = self
+            .client
+            .storage()
+            .address_bytes(&address)
+            .context("midnight runtime metadata has no Timestamp.Now storage entry")?;
+        let encoded = self
+            .client
+            .backend()
+            .storage_fetch_value(key, at)
+            .await
+            .context("failed to fetch midnight runtime storage")?
+            .with_context(|| format!("midnight block {at_block_hash_0x} has no timestamp"))?;
+        decode_timestamp_seconds(&encoded)
+    }
+
+    pub async fn contract_state(
+        &self,
+        address_64hex: &str,
+        at_block_hash_0x: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        publisher_contract_state(&self.rpc, address_64hex, at_block_hash_0x).await
+    }
+
+    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
+        let at = parse_block_hash(at_block_hash_0x)?;
+        let answer = self
+            .client
+            .backend()
+            .call(LEDGER_PARAMETERS_ENTRY, Some(&[]), at)
+            .await
+            .context("failed to fetch midnight ledger parameters")?;
+        unwrap_runtime_api_result(&answer)?.with_context(|| {
+            format!("midnight node has no ledger parameters at {at_block_hash_0x}")
+        })
+    }
+
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+}
+
+async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<String> {
+    use subxt::ext::codec::Decode as _;
+
+    let finalized = client
+        .backend()
+        .latest_finalized_block_ref()
+        .await
+        .context("failed to fetch the midnight finalized head")?;
+    let answer = client
+        .backend()
+        .call(NETWORK_ID_ENTRY, Some(&[]), finalized.hash())
+        .await
+        .context("failed to fetch the midnight network id")?;
+    let mut payload = &answer[..];
+    let network_id =
+        String::decode(&mut payload).context("midnight runtime returned a malformed network id")?;
+    anyhow::ensure!(
+        payload.is_empty(),
+        "midnight runtime network id has {} trailing bytes",
+        payload.len()
+    );
+    Ok(network_id)
+}
+
+async fn connect_publisher_transport(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
+    let connect = ReconnectingRpcClient::builder()
+        .max_response_size(config.rpc.max_response_size)
+        .request_timeout(config.rpc.request_timeout)
+        .connection_timeout(config.rpc.connect_timeout)
+        .build(&config.node_ws_url);
+    let client = tokio::time::timeout(config.rpc.connect_timeout, connect)
+        .await
+        .context("timed out connecting to the midnight node rpc")?
+        .context("failed to connect to the midnight node rpc")?;
+    Ok(RpcClient::new(client))
+}
+
+async fn publisher_contract_state(
+    rpc: &RpcClient,
+    address_64hex: &str,
+    at_block_hash_0x: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let response = subxt::backend::utils::retry(|| async {
+        match rpc
+            .request::<String>(
+                "midnight_contractState",
+                rpc_params![address_64hex, at_block_hash_0x],
+            )
+            .await
+        {
+            Err(err @ RawRpcError::DisconnectedWillReconnect(_)) => Err(err.into()),
+            answer => Ok(answer),
+        }
+    })
+    .await
+    .context("midnight_contractState reconnect failed")?;
+
+    match response {
+        Ok(state_hex) => Ok(Some(
+            hex::decode(state_hex.trim_start_matches("0x"))
+                .context("midnight_contractState returned non-hex state")?,
+        )),
+        Err(RawRpcError::User(reply))
+            if reply.code == INVALID_PARAMS_CODE
+                && reply.message.contains("Contract not present") =>
+        {
+            Ok(None)
+        }
+        Err(RawRpcError::User(reply))
+            if reply.code == INVALID_PARAMS_CODE
+                && reply
+                    .message
+                    .contains("Unable to get requested contract state") =>
+        {
+            Err(ReadFailure::Unservable.err(RawRpcError::User(reply)))
+        }
+        Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
+            Err(ReadFailure::TooLarge.err(reply))
+        }
+        Err(err) => Err(anyhow::Error::new(err).context("midnight_contractState failed")),
     }
 }
 
@@ -484,16 +614,6 @@ impl Reads {
         Self::resolve(fetched)
     }
 
-    async fn storage(&self, key: &[u8], at: H256) -> anyhow::Result<Option<Vec<u8>>> {
-        let fetched = retry_rpc!(self.request_timeout, self.retry, "midnight_storage", {
-            self.classify(
-                self.legacy.state_get_storage(key, Some(at)).await,
-                "failed to fetch midnight runtime storage",
-            )
-        })?;
-        Self::resolve(fetched)
-    }
-
     async fn contract_state(
         &self,
         address_64hex: &str,
@@ -546,43 +666,6 @@ impl Reads {
         )?;
         Self::resolve(fetched)
     }
-
-    /// One `MidnightRuntimeApi` read: a `state_call` at `at`, unwrapped to the bare
-    /// payload. Whatever the runtime itself answers is definitive (Err envelope
-    /// included); only transport faults spend the retry budget.
-    async fn runtime_api_bytes(
-        &self,
-        entry_point: &'static str,
-        call_parameters: Vec<u8>,
-        at: H256,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        let answer = self
-            .runtime_api_answer(entry_point, call_parameters, at)
-            .await?;
-        unwrap_runtime_api_result(&answer)
-    }
-
-    async fn runtime_api_answer(
-        &self,
-        entry_point: &'static str,
-        call_parameters: Vec<u8>,
-        at: H256,
-    ) -> anyhow::Result<Vec<u8>> {
-        let fetched = retry_rpc!(self.request_timeout, self.retry, "midnight_state_call", {
-            match self
-                .legacy
-                .state_call(entry_point, Some(&call_parameters), Some(at))
-                .await
-            {
-                Ok(answer) => Ok(Fetched::Value(answer)),
-                Err(err) if err.to_string().contains(UNKNOWN_BLOCK_MSG) => {
-                    Err(ReadFailure::Unservable.err(err))
-                }
-                Err(err) => self.classify(Err(err), entry_point),
-            }
-        })?;
-        Self::resolve(fetched)
-    }
 }
 
 fn spawn_runtime_updater(client: OnlineClient<SubstrateConfig>) -> AbortOnDrop {
@@ -597,10 +680,153 @@ fn spawn_runtime_updater(client: OnlineClient<SubstrateConfig>) -> AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonrpsee::server::{ServerBuilder, ServerHandle};
+    use jsonrpsee::RpcModule;
     use std::collections::{HashMap, VecDeque};
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClientT};
     use subxt::ext::subxt_rpcs::UserError;
+
+    async fn contract_state_server(
+        address: impl tokio::net::ToSocketAddrs,
+        calls: Arc<AtomicUsize>,
+    ) -> (ServerHandle, SocketAddr) {
+        let server = ServerBuilder::default()
+            .build(address)
+            .await
+            .expect("bind contract-state server");
+        let address = server.local_addr().expect("contract-state server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", move |_, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "0xcafe"
+            })
+            .expect("register contract-state method");
+        (server.start(module), address)
+    }
+
+    #[tokio::test]
+    async fn publisher_startup_is_bounded_if_the_endpoint_dies_during_initialization() {
+        use futures_util::StreamExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bootstrap endpoint");
+        let address = listener.local_addr().expect("bootstrap endpoint address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept publisher connection");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete publisher websocket handshake");
+            websocket
+                .next()
+                .await
+                .expect("publisher sent no initialization request")
+                .expect("read publisher initialization request");
+        });
+        let mut config = crate::config::MidnightConfig {
+            node_ws_url: format!("ws://{address}"),
+            central_address: "ab".repeat(32),
+            publisher: None,
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        config.rpc.connect_timeout = Duration::from_millis(75);
+        config.rpc.request_timeout = Duration::from_secs(5);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(750),
+            MidnightPublisherRpc::connect(&config),
+        )
+        .await;
+        server.await.expect("bootstrap endpoint task failed");
+
+        let error = match result.expect("publisher startup outlived its connection budget") {
+            Ok(_) => panic!("publisher initialized after its endpoint vanished"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("midnight"),
+            "startup error has no RPC context: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publisher_contract_state_waits_for_reconnect_without_duplicate_calls() {
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let (first_server, address) =
+            contract_state_server("127.0.0.1:0", first_calls.clone()).await;
+        let config = crate::config::MidnightConfig {
+            node_ws_url: format!("ws://{address}"),
+            central_address: "ab".repeat(32),
+            publisher: None,
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let rpc = connect_publisher_transport(&config)
+            .await
+            .expect("connect publisher transport");
+
+        let state = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+            .await
+            .expect("read contract state before restart");
+        assert_eq!(state, Some(vec![0xca, 0xfe]));
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+
+        first_server.stop().expect("stop first server");
+        first_server.stopped().await;
+
+        // Make one reconnect attempt fail before the replacement server starts.
+        // This distinguishes a persistent reconnect loop from a single redial.
+        let reject_listener = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("bind one-shot rejecting listener");
+        let rejector = tokio::spawn(async move {
+            let (stream, _) = reject_listener
+                .accept()
+                .await
+                .expect("accept reconnect attempt");
+            drop(stream);
+        });
+        tokio::time::timeout(Duration::from_secs(1), rejector)
+            .await
+            .expect("publisher made no reconnect attempt")
+            .expect("rejecting listener task failed");
+
+        let pending_rpc = rpc.clone();
+        let mut pending =
+            tokio::spawn(
+                async move { publisher_contract_state(&pending_rpc, ADDRESS, AT_HASH).await },
+            );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut pending)
+                .await
+                .is_err(),
+            "a publisher read must wait while the endpoint is unavailable"
+        );
+
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let (_second_server, rebound) = contract_state_server(address, second_calls.clone()).await;
+        assert_eq!(rebound, address);
+
+        let state = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("publisher transport did not reconnect before the deadline")
+            .expect("publisher read task failed")
+            .expect("publisher contract-state read failed after reconnect");
+        assert_eq!(state, Some(vec![0xca, 0xfe]));
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            1,
+            "one logical read must produce one request after reconnect"
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires a local midnight node"]
@@ -630,11 +856,13 @@ mod tests {
 
     // Contract-state reads over an in-process JSON-RPC stub.
 
-    /// One canned reply for a stubbed JSON-RPC method: a JSON-RPC error response as
-    /// the node sends it, or the two client-side failure shapes subxt boxes.
+    /// One canned reply for a stubbed JSON-RPC method: a value, a JSON-RPC error
+    /// response, or one of the client-side failure shapes subxt exposes.
     #[derive(Clone)]
     enum Canned {
+        Value(&'static str),
         User(i32, &'static str),
+        Reconnecting,
         ClientDead,
         ClientErr,
     }
@@ -706,21 +934,28 @@ mod tests {
                         queue.front().expect("stub queues are never empty").clone()
                     }
                 };
-                Err(match canned {
-                    Canned::User(code, message) => RawRpcError::User(UserError {
+                match canned {
+                    Canned::Value(value) => Ok(RawValue::from_string(
+                        serde_json::to_string(value).expect("serialize canned value"),
+                    )
+                    .expect("canned value is valid JSON")),
+                    Canned::User(code, message) => Err(RawRpcError::User(UserError {
                         code,
                         message: message.to_string(),
                         data: None,
-                    }),
-                    Canned::ClientDead => RawRpcError::Client(Box::new(
+                    })),
+                    Canned::Reconnecting => Err(RawRpcError::DisconnectedWillReconnect(
+                        "stub reconnect".to_string(),
+                    )),
+                    Canned::ClientDead => Err(RawRpcError::Client(Box::new(
                         JsonrpseeClientError::RestartNeeded(std::sync::Arc::new(
                             JsonrpseeClientError::Transport("stub ws died".into()),
                         )),
-                    )),
-                    Canned::ClientErr => RawRpcError::Client(Box::new(
+                    ))),
+                    Canned::ClientErr => Err(RawRpcError::Client(Box::new(
                         JsonrpseeClientError::Transport("connection reset by peer".into()),
-                    )),
-                })
+                    ))),
+                }
             })
         }
 
@@ -759,6 +994,22 @@ mod tests {
             retry,
             Arc::new(move || alive),
         )
+    }
+
+    #[tokio::test]
+    async fn publisher_contract_state_retries_the_reconnect_signal() {
+        let node = StubNode::new(vec![(
+            "midnight_contractState",
+            vec![Canned::Reconnecting, Canned::Value("0xcafe")],
+        )]);
+        let rpc = RpcClient::new(node.clone());
+
+        let state = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+            .await
+            .expect("the interrupted call is retried");
+
+        assert_eq!(state, Some(vec![0xca, 0xfe]));
+        assert_eq!(node.calls_to("midnight_contractState").len(), 2);
     }
 
     #[tokio::test]

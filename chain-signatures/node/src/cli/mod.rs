@@ -39,7 +39,7 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_midnight::{
-    IntentGen, MidnightConfig, MidnightIndexer, MidnightPublisher, MidnightRpc,
+    IntentGen, MidnightConfig, MidnightIndexer, MidnightPublisher, MidnightPublisherRpc,
 };
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
@@ -571,9 +571,8 @@ async fn midnight_publisher(
     // A second connection to the node the indexer also dials (`MidnightIndexer` opens
     // its own inside `run()` and does not expose it); the builder is spawned only
     // here, so this stays the single child process.
-    let rpc = Arc::new(MidnightRpc::connect(config).await?);
-    let network_id = rpc.network_id().await?;
-    let intent_gen = Arc::new(IntentGen::spawn(publisher_config, &network_id).await?);
+    let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
+    let intent_gen = Arc::new(IntentGen::spawn(publisher_config, rpc.network_id()).await?);
     Ok(Arc::new(MidnightPublisher::new(
         publisher_config,
         config.central_address.clone(),
