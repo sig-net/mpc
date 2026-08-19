@@ -31,6 +31,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -475,20 +476,20 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let resolved_sign_id = SignId::new([0x11; 32]);
     let requeued_sign_id = SignId::new([0x22; 32]);
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             resolved_sign_id,
             test_sign_args(0x11),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             requeued_sign_id,
             test_sign_args(0x22),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, checkpoint_height)
@@ -502,12 +503,14 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     let execution_sign_id = SignId::new([0x33; 32]);
     backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
-            execution_sign_id,
-            test_sign_args(0x33),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
+        .insert(Arc::new(
+            mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
+                execution_sign_id,
+                test_sign_args(0x33),
+                Chain::Solana,
+                current_unix_timestamp(),
+                test_bidirectional_event(),
+            ),
         ))
         .await;
 
@@ -759,12 +762,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     let dummy_sign_id = SignId::new([0x66; 32]);
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             dummy_sign_id,
             test_sign_args(0x66),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
 
     let indexer =
@@ -855,13 +858,13 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         nonce: 0,
     };
     backlog
-        .insert(IndexedSignRequest::sign_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x88),
             Chain::Solana,
             current_unix_timestamp(),
             test_bidirectional_event(),
-        ))
+        )))
         .await;
     backlog
         .set_status(
@@ -980,7 +983,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                         continue;
                     }
-                    backlog.insert(request.clone()).await;
+                    backlog.insert(Arc::new(request.clone())).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -1025,7 +1028,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                     continue;
                 }
-                backlog.insert(request.clone()).await;
+                backlog.insert(Arc::new(request.clone())).await;
 
                 if saw_new_checkpoint {
                     break;

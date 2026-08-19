@@ -22,6 +22,7 @@ use mpc_primitives::{
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -409,7 +410,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             SignArgs {
                 entropy: [9u8; 32],
@@ -420,7 +421,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             },
             Chain::Solana,
             0,
-        ))
+        )))
         .await;
     seeded_backlog
         .set_status(

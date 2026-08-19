@@ -281,11 +281,7 @@ impl Backlog {
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(
-        &self,
-        request: impl Into<Arc<IndexedSignRequest>>,
-    ) -> Option<BacklogEntry> {
-        let request: Arc<IndexedSignRequest> = request.into();
+    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(request);
@@ -459,7 +455,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: impl Into<Arc<IndexedSignRequest>>,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -848,24 +844,18 @@ pub struct BacklogEntry {
 }
 
 impl BacklogEntry {
-    pub fn new(request: impl Into<Arc<IndexedSignRequest>>) -> Self {
+    pub fn new(request: Arc<IndexedSignRequest>) -> Self {
         Self {
-            request: request.into(),
+            request,
             status: SignStatus::PendingGeneration,
         }
     }
 
-    pub fn with_status(request: impl Into<Arc<IndexedSignRequest>>, status: SignStatus) -> Self {
-        Self {
-            request: request.into(),
-            status,
-        }
+    pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
+        Self { request, status }
     }
 
-    pub fn pending_execution(
-        request: impl Into<Arc<IndexedSignRequest>>,
-        tx: BidirectionalTx,
-    ) -> Self {
+    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: BidirectionalTx) -> Self {
         Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
@@ -898,8 +888,8 @@ impl BacklogEntry {
 
     /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_request(&mut self, request: impl Into<Arc<IndexedSignRequest>>) {
-        self.request = request.into();
+    pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
+        self.request = request;
     }
 
     /// Rewrite this entry into the final-response request produced by a confirmed
@@ -1094,8 +1084,14 @@ mod tests {
         args: SignArgs,
         kind: SignKind,
         unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    ) -> Arc<IndexedSignRequest> {
+        Arc::new(IndexedSignRequest::new(
+            sign_id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            kind,
+        ))
     }
 
     fn create_bidirectional_request(
@@ -1103,14 +1099,14 @@ mod tests {
         chain: Chain,
         dest: &str,
         unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::sign_bidirectional(
+    ) -> Arc<IndexedSignRequest> {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             chain,
             unix_timestamp_indexed,
             create_test_event(dest),
-        )
+        ))
     }
 
     fn create_execution_entry(
@@ -1130,13 +1126,13 @@ mod tests {
         unix_timestamp_indexed: u64,
     ) -> BacklogEntry {
         let sign_id = SignId::new(tx.request_id);
-        let request = IndexedSignRequest::new(
+        let request = Arc::new(IndexedSignRequest::new(
             sign_id,
             create_test_args(tx.request_id[0]),
             chain,
             unix_timestamp_indexed,
             SignKind::SignBidirectional(create_test_event(dest)),
-        );
+        ));
 
         match status {
             SignStatus::PendingExecution { .. } => BacklogEntry::pending_execution(request, tx),
@@ -1171,7 +1167,7 @@ mod tests {
                     },
                 );
                 backlog
-                    .set_request(chain, &sign_id, completion_request)
+                    .set_request(chain, &sign_id, Arc::new(completion_request))
                     .await
                     .unwrap();
                 backlog
@@ -1206,7 +1202,7 @@ mod tests {
                     },
                 );
                 backlog
-                    .set_request(chain, &sign_id, completion_request)
+                    .set_request(chain, &sign_id, Arc::new(completion_request))
                     .await
                     .unwrap();
                 backlog.set_status(chain, &sign_id, status).await;
@@ -1581,7 +1577,7 @@ mod tests {
         );
 
         let mut pending_generation = PendingRequests::new();
-        pending_generation.insert(sign_id, BacklogEntry::new(request.clone()));
+        pending_generation.insert(sign_id, BacklogEntry::new(Arc::clone(&request)));
         pending_generation.set_processed_block(100);
 
         let mut pending_publish = PendingRequests::new();
@@ -1633,8 +1629,10 @@ mod tests {
                 chain_ctx: None,
             },
         );
-        let mut final_response =
-            BacklogEntry::with_status(response_request, SignStatus::PendingGenerationBidirectional);
+        let mut final_response = BacklogEntry::with_status(
+            Arc::new(response_request),
+            SignStatus::PendingGenerationBidirectional,
+        );
         let final_consensus_tag = final_response.status().consensus_tag();
         final_response
             .mark_publishing(test_publish_state(true))
@@ -2027,7 +2025,7 @@ mod tests {
                 },
             );
             recovered
-                .set_request(Chain::Solana, &sign_id, completion_request)
+                .set_request(Chain::Solana, &sign_id, Arc::new(completion_request))
                 .await
                 .expect("failed to store completion request");
             recovered
@@ -2069,7 +2067,7 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog.insert(Arc::new(completion_request)).await;
         backlog
             .set_status(
                 Chain::Solana,
@@ -2131,7 +2129,7 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog.insert(Arc::new(completion_request)).await;
         backlog
             .set_status(
                 Chain::Solana,
@@ -2516,7 +2514,7 @@ mod tests {
         );
 
         // Insert first time
-        backlog.insert(request.clone()).await;
+        backlog.insert(Arc::clone(&request)).await;
         assert_eq!(backlog.len(), 1);
 
         // Insert exactly the same ID again (overwrites)

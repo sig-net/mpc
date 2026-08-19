@@ -16,6 +16,7 @@ use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
 use tokio::time::timeout;
@@ -252,7 +253,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
                     saw_sign_request = true;
-                    backlog.insert(request).await;
+                    backlog.insert(Arc::new(request)).await;
                 }
                 ChainEvent::Block(height) => {
                     if let Some(persisted_checkpoint) = backlog
@@ -305,7 +306,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         match timeout(Duration::from_secs(5), indexer2.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => {
                 sign_request_ids.push(request.id.request_id);
-                backlog.insert(request).await;
+                backlog.insert(Arc::new(request)).await;
                 if saw_new_checkpoint {
                     break;
                 }

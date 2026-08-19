@@ -19,6 +19,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 pub fn test_indexed_request(
@@ -27,8 +28,14 @@ pub fn test_indexed_request(
     args: SignArgs,
     unix_timestamp_indexed: u64,
     kind: SignKind,
-) -> IndexedSignRequest {
-    IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+) -> Arc<IndexedSignRequest> {
+    Arc::new(IndexedSignRequest::new(
+        sign_id,
+        args,
+        chain,
+        unix_timestamp_indexed,
+        kind,
+    ))
 }
 
 pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
@@ -67,13 +74,13 @@ pub fn test_sign_args(id: u8) -> SignArgs {
 pub fn test_canton_sign_bidirectional_request(
     sign_id: SignId,
     sign_event_contract_id: &str,
-) -> IndexedSignRequest {
+) -> Arc<IndexedSignRequest> {
     let ctx = CantonChainCtx {
         sign_event_contract_id: sign_event_contract_id.to_string(),
     };
     let chain_ctx =
         Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
-    IndexedSignRequest::sign_bidirectional(
+    Arc::new(IndexedSignRequest::sign_bidirectional(
         sign_id,
         test_sign_args(sign_id.request_id[0]),
         Chain::Canton,
@@ -93,7 +100,7 @@ pub fn test_canton_sign_bidirectional_request(
             chain: Chain::Canton,
             chain_ctx,
         },
-    )
+    ))
 }
 
 pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {

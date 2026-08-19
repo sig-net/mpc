@@ -22,6 +22,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -442,7 +443,7 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
     let unsigned_rlp = rlp_s.out().to_vec();
 
     backlog
-        .insert(IndexedSignRequest::sign_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             args.clone(),
             Chain::Ethereum,
@@ -462,7 +463,7 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
                 output_deserialization_schema: vec![],
                 respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             },
-        ))
+        )))
         .await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -557,7 +558,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request(request, &ctx)
+    let err = process_sign_request((*request).clone(), &ctx)
         .await
         .expect_err("empty serialized_transaction should be rejected at ingestion");
     assert!(err.to_string().contains("empty serialized_transaction"));
@@ -585,7 +586,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
 
     // First emission inserts a new entry.
-    let was_new = process_sign_request(request.clone(), &ctx)
+    let was_new = process_sign_request((*request).clone(), &ctx)
         .await
         .expect("first sign request should be accepted");
     assert!(was_new, "first insert must report a new entry");
@@ -593,7 +594,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 
     // Replay: the indexer re-emitted the same SignId
     // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
-    let is_new = process_sign_request(request.clone(), &ctx)
+    let is_new = process_sign_request((*request).clone(), &ctx)
         .await
         .expect("replayed sign request should be accepted");
     assert!(!is_new, "replayed insert must report an existing entry");
@@ -681,7 +682,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     let args = test_sign_args(13);
 
     backlog
-        .insert(IndexedSignRequest::respond_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             args.clone(),
             Chain::Solana,
@@ -691,7 +692,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
                 output: vec![1, 2, 3],
                 chain_ctx: None,
             },
-        ))
+        )))
         .await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -736,7 +737,7 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
     let args = test_sign_args(16);
 
     backlog
-        .insert(IndexedSignRequest::respond_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             args.clone(),
             Chain::Solana,
@@ -746,7 +747,7 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
                 output: vec![1, 2, 3],
                 chain_ctx: None,
             },
-        ))
+        )))
         .await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -851,7 +852,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let unsigned_rlp = rlp_s.out().to_vec();
 
     backlog
-        .insert(IndexedSignRequest::sign_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             args.clone(),
             Chain::Ethereum,
@@ -871,7 +872,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                 output_deserialization_schema: tx.output_deserialization_schema.clone(),
                 respond_serialization_schema: tx.respond_serialization_schema.clone(),
             },
-        ))
+        )))
         .await;
 
     backlog
