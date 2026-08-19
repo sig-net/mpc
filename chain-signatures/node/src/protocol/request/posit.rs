@@ -530,7 +530,7 @@ mod tests {
             SignKind::Sign,
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let state = SignState::new(request, mesh_rx, Arc::clone(&ctx.round));
+        let state = SignState::new(Arc::new(request), mesh_rx, Arc::clone(&ctx.round));
 
         TestSetup {
             ctx,

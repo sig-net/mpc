@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use cait_sith::protocol::Participant;
@@ -20,7 +21,7 @@ pub struct PublishAction {
     /// The public key associated with the signature.
     pub public_key: PublicKey,
     /// The indexed sign request that this signature corresponds to.
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     /// The actual signature to be published.
     pub signature: Signature,
     /// The participants involved in the signing process.
@@ -32,7 +33,7 @@ pub struct PublishAction {
 impl PublishAction {
     pub fn new(
         public_key: PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) -> Option<Self> {
@@ -77,7 +78,7 @@ mod tests {
             SignId::new([0u8; 32]),
         );
 
-        assert!(PublishAction::new(pk, request, output, vec![]).is_some());
+        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_some());
     }
 
     #[test]
@@ -97,6 +98,6 @@ mod tests {
             SignId::new([0u8; 32]),
         );
 
-        assert!(PublishAction::new(pk, request, output, vec![]).is_none());
+        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_none());
     }
 }

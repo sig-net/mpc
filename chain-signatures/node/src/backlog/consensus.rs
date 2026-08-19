@@ -200,6 +200,7 @@ mod tests {
 
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     struct AlignFixture {
         chain: Chain,
@@ -367,7 +368,7 @@ mod tests {
                         chain,
                         0,
                     );
-                    fixture.backlog.insert(tx).await;
+                    fixture.backlog.insert(Arc::new(tx)).await;
                 }
 
                 for &height in &case.local_checkpoints {

@@ -17,6 +17,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -91,7 +92,7 @@ async fn test_stream_handles_sign_and_respond() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: request.clone(),
+            request: Arc::new(request),
             block_timestamp: None,
         }),
         Some(ChainEvent::Respond(sig_responded)),
@@ -148,10 +149,10 @@ async fn test_stream_handles_sign_and_respond() {
 }
 
 /// Build a `SignKind::SignBidirectional` request from Solana to Ethereum.
-/// Returns `(IndexedSignRequest, SignArgs, SecretKey)`
+/// Returns `(Arc<IndexedSignRequest>, SignArgs, SecretKey)`
 fn build_solana_to_ethereum_bidirectional_request(
     seed: u8,
-) -> (IndexedSignRequest, SignArgs, k256::SecretKey) {
+) -> (Arc<IndexedSignRequest>, SignArgs, k256::SecretKey) {
     use mpc_primitives::SignBidirectionalEvent as SBE;
 
     let sign_id = SignId::new([seed; 32]);
@@ -195,7 +196,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     );
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    (request, args, root_sk)
+    (Arc::new(request), args, root_sk)
 }
 
 /// Receiving a `ChainEvent::SignRequest` with a bidirectional event should
@@ -209,7 +210,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: request.clone(),
+            request: Arc::clone(&request),
             block_timestamp: None,
         }),
         None,
@@ -401,7 +402,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
                 req.id, sign_id,
                 "follow-up request should reuse the sign id"
             );
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(rb) => {
                     assert_eq!(rb.tx_id, tx_id, "tx_id should match the watched tx");
                     assert_eq!(
@@ -433,12 +434,12 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let args = test_sign_args(9);
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             args.clone(),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
@@ -480,12 +481,12 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let replayed_timestamp = recovered_timestamp.saturating_add(1);
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             args.clone(),
             Chain::Ethereum,
             recovered_timestamp,
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
@@ -497,7 +498,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
     let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
-            request: replacement,
+            request: Arc::new(replacement),
             block_timestamp: None,
         }),
         Some(ChainEvent::CatchupCompleted),
@@ -543,12 +544,12 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
 
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             test_sign_args(9),
             Chain::Solana,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     backlog
         .set_status(
@@ -629,12 +630,12 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
 
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             test_sign_args(10),
             Chain::Solana,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     backlog
         .set_status(

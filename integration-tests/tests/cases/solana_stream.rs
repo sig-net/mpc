@@ -22,6 +22,7 @@ use mpc_primitives::{
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -57,7 +58,9 @@ async fn run_solana_indexer_with_backlog(
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(indexer: &mut ChainIndexerStream) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(
+    indexer: &mut ChainIndexerStream,
+) -> Result<Arc<IndexedSignRequest>> {
     loop {
         match timeout(Duration::from_secs(6), indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
@@ -409,7 +412,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             SignArgs {
                 entropy: [9u8; 32],
@@ -420,7 +423,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             },
             Chain::Solana,
             0,
-        ))
+        )))
         .await;
     seeded_backlog
         .set_status(

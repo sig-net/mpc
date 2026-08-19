@@ -13,6 +13,7 @@ use midnight_base_crypto::fab::AlignedValue;
 use midnight_onchain_state::state::StateValue;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -566,7 +567,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         for request in requests {
             events_tx
                 .send(ChainEvent::SignRequest {
-                    request,
+                    request: Arc::new(request),
                     block_timestamp: None,
                 })
                 .await
