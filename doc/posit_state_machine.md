@@ -389,8 +389,7 @@ our cluster).
   "posit ACCEPT duplicate ignored" in episodic bursts (half from one node), in
   the shared posit layer the presignature protocol uses. Zero REJECT
   duplicates, zero START-from-non-proposer, zero conflicting-proposer events
-  anywhere, so reordering damage has not been observed — but the retry/duplicate
-  precondition for §8.4 is met.
+  anywhere, so reordering damage has not been observed.
 - **Round churn is currently a devnet phenomenon.** ~100k reorganizes in 48h on
   devnet against exactly zero on testnet. Devnet steady state concentrates in
   ~79 stuck requests each rotating 1.5-2x per minute (§8.1, the zombie
@@ -400,25 +399,28 @@ our cluster).
 - **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
   in 48h.
 
-Proposals against the churn, smallest first:
-
-1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
-   paused) says so; receivers end round `r` at once. Rounds that die silently
-   today (83% of reorganizes) end in milliseconds instead of a timeout.
-   Warning: alone it only makes futile rotation faster; ship with 2 or 3.
-2. **Park.** After K rounds without a PROPOSE, stop rotating; retry when the
-   active set or the presignature pool changes.
-3. **Expire.** After N rounds or T minutes the request fails for good. Needs a
-   product decision: what "failed" means on chain.
-4. **Shrink holder lists.** A MissingArtifact reply removes the rejector from
-   that presignature's stored holder list (`set_holders` exists); below `t`
-   holders the presignature is discarded. The proposer stops proposing what
-   peers do not have.
-5. **Name the cause.** Extend the MissingArtifact log with whether the
-   presignature was never received or was deleted, so the devnet root cause
-   becomes visible.
 - **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
   on testnet (§8.1);** on testnet each node logs the same delayed request, so
   the per-node uniform count is one request counted nine times.
 - **Mainnet: no signing traffic at all** reached our node in the window, so its
   zeros mean no data, not health.
+
+Proposals against the churn, smallest first. Requests never expire by design,
+so parking is the only bound on rotation:
+
+1. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+   paused) says so; receivers end round `r` at once. Rounds that die silently
+   today (83% of reorganizes) end in milliseconds instead of a timeout.
+   Warning: alone it only makes futile rotation faster; ship with 2.
+2. **Park.** After K rounds without a PROPOSE, stop rotating; retry when the
+   presignature pool changes (in the data that is the scarce input; the active
+   set is healthy in steady state).
+3. **Shrink holder lists.** On a MissingArtifact reply, the owner removes the
+   rejector from that presignature's holder list in storage; below `t` holders
+   it is discarded. Not implemented today: the reply's reason is discarded
+   after the tally, and the only skip that exists is the proposer's transient
+   in-round `local_skip` on the active-set check.
+4. **Name the cause.** Storage deletes presignatures without a trace, so a
+   deliberator cannot say why one is missing. Keep a small tombstone of
+   recently deleted ids at each deletion site; a MissingArtifact then logs
+   "never received" vs "deleted (consumed / outdated / gc)".
