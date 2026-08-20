@@ -104,18 +104,10 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
-        participants: Vec<Participant>,
+        participants: Vec<mpc_primitives::Participant>,
     ) {
         let sign_id = request.id;
-        let Some(action) = PublishAction::new(
-            public_key,
-            request,
-            output,
-            participants
-                .into_iter()
-                .map(|p| mpc_primitives::Participant(u32::from(p)))
-                .collect(),
-        ) else {
+        let Some(action) = PublishAction::new(public_key, request, output, participants) else {
             tracing::error!(
                 ?sign_id,
                 "failed to validate signature; trashing publish request",

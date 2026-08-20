@@ -76,7 +76,7 @@ impl GeneratingPhase {
         } else {
             PendingPresignature::InStorage(
                 self.presignature_id,
-                self.proposer,
+                mpc_primitives::Participant(u32::from(self.proposer)),
                 ctx.presignatures.clone(),
             )
         };
@@ -85,10 +85,13 @@ impl GeneratingPhase {
         let gen_ctx = ctx.generate_ctx();
         let generator = match SignGenerator::new(
             &gen_ctx,
-            self.proposer,
+            mpc_primitives::Participant(u32::from(self.proposer)),
             Arc::clone(&state.request),
             presignature_pending,
-            self.accepted_participants.clone(),
+            self.accepted_participants
+                .iter()
+                .map(|p| mpc_primitives::Participant(u32::from(*p)))
+                .collect(),
         )
         .await
         {
