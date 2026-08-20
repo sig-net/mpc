@@ -13,9 +13,10 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  # Light-weight component tests using the MPC fixture, these can run in parallel.
-  component-test:
-    name: Component Test
+  # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
+  # Runs the `fixture` nextest profile (see .config/nextest.toml).
+  fixture-test:
+    name: Fixture Test
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
@@ -61,7 +62,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: component-test
+          shared-key: fixture-test
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -78,13 +79,11 @@ jobs:
 
       - name: Build integration test artifacts
         run: ./setup.sh
-        env:
-          MPC_ENABLE_HELIOS: 1
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests --features helios
+        run: cargo build -p integration-tests --tests
 
       - name: Test
         run: cargo nextest run -p integration-tests --profile fixture
@@ -94,7 +93,7 @@ jobs:
 
   # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
   # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
-  sequential-integration-test:
+  cluster-test:
     name: Integration Test
     strategy:
       matrix:
