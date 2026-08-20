@@ -18,3 +18,4 @@ retries = 2
 # Usage: cargo nextest run -p integration-tests --profile cluster
 [profile.cluster]
 default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint))'
+retries = 1
