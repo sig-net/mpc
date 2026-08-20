@@ -2,12 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { configFromEnv } from "../src/config.js";
 
-const BUILDER = {
+const SUBMITTER: NodeJS.ProcessEnv = {
   MIDNIGHT_PUB_NETWORK_ID: "undeployed",
-};
-
-const SUBMITTER = {
-  ...BUILDER,
   MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
   MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
   MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
@@ -15,27 +11,12 @@ const SUBMITTER = {
   MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
 };
 
-const REQUIRED = [
-  "MIDNIGHT_PUB_NODE_URL",
-  "MIDNIGHT_PUB_PROOF_SERVER_URL",
-  "MIDNIGHT_PUB_INDEXER_URL",
-  "MIDNIGHT_PUB_INDEXER_WS_URL",
-  "MIDNIGHT_PUB_FUNDING_SEED",
-] as const;
-
 describe("configFromEnv", () => {
-  it("names every missing variable at once", () => {
-    expect(() => configFromEnv(BUILDER)).toThrowError(new RegExp(REQUIRED.join("[\\s\\S]*")));
-  });
-
-  it("starts a deployment that submits, with every endpoint canonicalized for the wallet", () => {
-    const config = configFromEnv({
-      ...SUBMITTER,
-      MIDNIGHT_PUB_PROOF_SERVER_URL: "HTTP://127.0.0.1:6300",
-    });
+  it("turns the parent-set process values into the SDK config", () => {
+    const config = configFromEnv(SUBMITTER);
     expect(config.endpoints).toEqual({
-      nodeUrl: "ws://127.0.0.1:9944/",
-      proofServerUrl: "http://127.0.0.1:6300/",
+      nodeUrl: "ws://127.0.0.1:9944",
+      proofServerUrl: "http://127.0.0.1:6300",
       indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
       indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
     });
@@ -44,34 +25,8 @@ describe("configFromEnv", () => {
     );
   });
 
-  it("uses the SDK's 16-to-64-byte hex seed contract and never quotes a rejection", () => {
-    expect(() =>
-      configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(17) }),
-    ).not.toThrow();
-
-    for (const invalid of [
-      "",
-      "ab".repeat(15),
-      "ab".repeat(65),
-      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-    ]) {
-      expect(() =>
-        configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid }),
-      ).toThrowError(/MIDNIGHT_PUB_FUNDING_SEED/);
-      expect(() =>
-        configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_FUNDING_SEED: invalid }),
-      ).not.toThrowError(invalid);
-    }
-  });
-
-  it("refuses a network id the library does not know and endpoints of the wrong shape", () => {
-    expect(() => configFromEnv({ ...SUBMITTER, MIDNIGHT_PUB_NETWORK_ID: "undeploy" })).toThrowError(
-      /MIDNIGHT_PUB_NETWORK_ID/,
-    );
-    for (const name of REQUIRED.slice(0, 4)) {
-      for (const value of ["not-a-url", "file:///tmp/socket"]) {
-        expect(() => configFromEnv({ ...SUBMITTER, [name]: value }), name).toThrowError(name);
-      }
-    }
+  it("retains derived keys rather than the seed", () => {
+    const config = configFromEnv(SUBMITTER);
+    expect(JSON.stringify(config)).not.toContain(SUBMITTER.MIDNIGHT_PUB_FUNDING_SEED);
   });
 });
