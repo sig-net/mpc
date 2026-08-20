@@ -140,6 +140,35 @@ function deployEnv(config: MidnightNodeConfig, seed: string): Record<string, str
   };
 }
 
+// `assertRootFunded` returns as soon as root's spendable DUST is positive, but a
+// transfer's fee may exceed that first sliver until a few more blocks of DUST
+// generate. A transfer built too early fails to balance ("could not balance
+// dust"); the same transfer a few blocks later succeeds. Retry only that error,
+// so root's DUST can catch up without masking a genuine funding failure.
+function isDustBalancingShortfall(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
+  return /Wallet\.InsufficientFunds|Insufficient Funds|could not balance dust/i.test(text);
+}
+
+async function fundChildWaitingForRootDust(
+  config: MidnightNodeConfig,
+  childSeed: string,
+  amount: bigint,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fundChildFromRoot(config, GENESIS_MINT_WALLET_SEED, childSeed, amount);
+      return;
+    } catch (error) {
+      if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
+      diagnostics(
+        `root DUST is not yet enough to cover the transfer fee; retrying child funding (attempt ${attempt + 1})`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  }
+}
+
 async function fundRoles(config: MidnightNodeConfig): Promise<void> {
   const root = await assertRootFunded(config, GENESIS_MINT_WALLET_SEED, undefined);
   const amount = root.night / 5n;
@@ -147,7 +176,7 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
   for (const seed of [DEPLOYER_SEED, INVOKER_SEED, PUBLISHER_SEED]) {
     const current = await readAccountFunding(config, seed);
     if (!isFeeReady(current)) {
-      await fundChildFromRoot(config, GENESIS_MINT_WALLET_SEED, seed, amount);
+      await fundChildWaitingForRootDust(config, seed, amount);
     }
   }
 }
