@@ -430,7 +430,7 @@ mod tests {
             s: k256::Scalar::ONE,
             recovery_id: 0,
         };
-        let dummy_tx = BidirectionalTx {
+        let dummy_tx = Arc::new(BidirectionalTx {
             id: BidirectionalTxId([1u8; 32]),
             sender: [0u8; 32],
             serialized_transaction: vec![],
@@ -448,7 +448,7 @@ mod tests {
             request_id: [1u8; 32],
             from_address: [0u8; 20],
             nonce: 0,
-        };
+        });
         let publish = || PublishState {
             signature: dummy_sig,
             participants: vec![],
@@ -464,10 +464,7 @@ mod tests {
 
         // Post-initial phase: target-chain execution and the final response
         // generation/publish are indistinguishable at the source-chain height.
-        let execution_tag = SignStatus::PendingExecution {
-            tx: Arc::new(dummy_tx),
-        }
-        .consensus_tag();
+        let execution_tag = SignStatus::PendingExecution { tx: dummy_tx }.consensus_tag();
         let gen_bidi_tag = SignStatus::PendingGenerationBidirectional.consensus_tag();
         let pub_bidi_tag =
             SignStatus::PendingPublishBidirectional { publish: publish() }.consensus_tag();

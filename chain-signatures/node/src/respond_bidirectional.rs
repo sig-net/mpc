@@ -145,8 +145,8 @@ mod tests {
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
     /// Sample tx with a Solana source chain, required by `epsilon`/path derivation.
-    fn sample_bidirectional_tx() -> BidirectionalTx {
-        BidirectionalTx {
+    fn sample_bidirectional_tx() -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
             id: BidirectionalTxId(B256::repeat_byte(0xab).0),
             sender: [0x11; 32],
             serialized_transaction: Vec::new(),
@@ -164,12 +164,12 @@ mod tests {
             request_id: [0x22; 32],
             from_address: **Address::ZERO,
             nonce: 0,
-        }
+        })
     }
 
     #[tokio::test]
     async fn create_failed_sign_request_emits_error_prefix() {
-        let completed = CompletedTx::new(Arc::new(sample_bidirectional_tx()));
+        let completed = CompletedTx::new(sample_bidirectional_tx());
 
         // Solana (Borsh).
         let borsh = completed
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn create_sign_request_carries_output_and_context() {
         let tx = sample_bidirectional_tx();
-        let completed = CompletedTx::new(Arc::new(tx.clone()));
+        let completed = CompletedTx::new(tx.clone());
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
 

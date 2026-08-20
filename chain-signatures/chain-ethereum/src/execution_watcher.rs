@@ -822,24 +822,26 @@ mod tests {
         // Setup Indexer & Watchers
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256, nonce: u64| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce,
+        let create_tx = |hash: alloy::primitives::B256, nonce: u64| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce,
+            })
         };
 
         harness
@@ -847,7 +849,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0; 32]),
-                Arc::new(create_tx(tx_hash_0, 0)),
+                create_tx(tx_hash_0, 0),
             )
             .await;
         harness
@@ -855,7 +857,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
-                Arc::new(create_tx(tx_hash_1, 1)),
+                create_tx(tx_hash_1, 1),
             )
             .await;
         harness
@@ -863,7 +865,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                Arc::new(create_tx(tx_hash_2, 2)),
+                create_tx(tx_hash_2, 2),
             )
             .await;
 
@@ -1033,40 +1035,38 @@ mod tests {
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce: 0,
+        let create_tx = |hash: alloy::primitives::B256| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce: 0,
+            })
         };
 
         harness
             .state_manager
-            .watch_execution(
-                Chain::Ethereum,
-                SignId::new([1; 32]),
-                Arc::new(create_tx(tx_hash_ok)),
-            )
+            .watch_execution(Chain::Ethereum, SignId::new([1; 32]), create_tx(tx_hash_ok))
             .await;
         harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                Arc::new(create_tx(tx_hash_err)),
+                create_tx(tx_hash_err),
             )
             .await;
 
@@ -1597,8 +1597,8 @@ mod tests {
     fn empty_output_schema_tx(
         tx_hash: alloy::primitives::B256,
         from_address: alloy::primitives::Address,
-    ) -> BidirectionalTx {
-        BidirectionalTx {
+    ) -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
@@ -1616,7 +1616,7 @@ mod tests {
             request_id: tx_hash.0,
             from_address: **from_address,
             nonce: 0,
-        }
+        })
     }
 
     /// A deterministic extraction failure — trace return data that contradicts
@@ -1693,7 +1693,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([9; 32]),
-                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
+                empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
 
@@ -1788,7 +1788,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0xaa; 32]),
-                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
+                empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
 
@@ -1951,7 +1951,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0xbb; 32]),
-                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
+                empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
 
@@ -2046,41 +2046,35 @@ mod tests {
             .await;
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
-        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce: 0,
+        let create_tx = |hash: alloy::primitives::B256| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce: 0,
+            })
         };
 
         harness
             .state_manager
-            .watch_execution(
-                Chain::Ethereum,
-                SignId::new([7; 32]),
-                Arc::new(create_tx(tx_hash_a)),
-            )
+            .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
             .await;
         harness
             .state_manager
-            .watch_execution(
-                Chain::Ethereum,
-                SignId::new([8; 32]),
-                Arc::new(create_tx(tx_hash_b)),
-            )
+            .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
             .await;
 
         let mut block4: Block = Block::default();
