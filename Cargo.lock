@@ -8817,6 +8817,7 @@ dependencies = [
  "serde_bytes",
  "sha3 0.10.8",
  "signet-primitives",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

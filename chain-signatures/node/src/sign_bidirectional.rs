@@ -1,63 +1,30 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes};
-use cait_sith::protocol::Participant;
+use cait_sith::protocol::Participant as CaitSithParticipant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{
+    BidirectionalTx, ChainFromError, Participant, PublishState, SignBidirectionalEvent, SignStatus,
+    Signature,
+};
 use rlp::{Rlp, RlpStream};
 
 pub type RequestId = [u8; 32];
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PublishState {
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub is_proposer: bool,
+pub fn to_cait_sith_participants(participants: &[Participant]) -> Vec<CaitSithParticipant> {
+    participants
+        .iter()
+        .map(|p| CaitSithParticipant::from(p.0))
+        .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SignStatus {
-    PendingGeneration,
-    PendingPublish { publish: PublishState },
-    PendingExecution { tx: BidirectionalTx },
-    PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
-}
-
-impl SignStatus {
-    pub fn is_pending_generation(&self) -> bool {
-        matches!(
-            self,
-            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
-        )
-    }
-
-    pub fn is_pending_execution(&self) -> bool {
-        matches!(self, SignStatus::PendingExecution { .. })
-    }
-
-    /// Project this status onto what is observable at a checkpoint's own chain height.
-    ///
-    /// Generation and publication are local attempts to reach an on-chain event: only
-    /// a signature's participants advance to publishing, so nodes cannot be required
-    /// to agree on which of the two a request is in. They collapse to one value.
-    pub fn consensus_tag(&self) -> u8 {
-        match self {
-            SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => 0,
-            SignStatus::PendingExecution { .. } => 1,
-            SignStatus::PendingGenerationBidirectional
-            | SignStatus::PendingPublishBidirectional { .. } => 2,
-        }
-    }
-
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        match self {
-            SignStatus::PendingExecution { tx } => Some(tx),
-            _ => None,
-        }
-    }
+pub fn from_cait_sith_participants(participants: &[CaitSithParticipant]) -> Vec<Participant> {
+    participants
+        .iter()
+        .map(|p| Participant(u32::from(*p)))
+        .collect()
 }
 
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.

@@ -198,7 +198,7 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
+    use mpc_primitives::{BacklogEntry, CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -387,7 +387,7 @@ mod tests {
             let mut peer_digest = [0u8; 32];
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
-                    vec![Arc::new(IndexedSignRequest::sign(
+                    vec![BacklogEntry::new(Arc::new(IndexedSignRequest::sign(
                         SignId::new([1u8; 32]),
                         SignArgs {
                             entropy: [1u8; 32],
@@ -398,7 +398,7 @@ mod tests {
                         },
                         chain,
                         0,
-                    ))]
+                    )))]
                 } else {
                     vec![]
                 };

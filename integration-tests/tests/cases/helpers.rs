@@ -7,7 +7,9 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    BacklogEntry, Chain, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
+};
 use sha2::Digest;
 use std::sync::Arc;
 
@@ -24,6 +26,10 @@ pub(crate) fn dummy_indexed_sign_request(id: u8, chain: Chain) -> Arc<IndexedSig
         chain,
         0,
     ))
+}
+
+pub(crate) fn dummy_backlog_entry(id: u8, chain: Chain) -> BacklogEntry {
+    BacklogEntry::new(dummy_indexed_sign_request(id, chain))
 }
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {

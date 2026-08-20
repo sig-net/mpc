@@ -316,7 +316,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.id.request_id == expected_request_bytes);
+        .any(|entry| entry.request.id.request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,

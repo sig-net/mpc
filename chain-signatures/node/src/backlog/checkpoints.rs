@@ -102,22 +102,18 @@ impl Checkpoints {
 
     /// Captures the current request state as a deterministic checkpoint.
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
-        let mut pending_requests = requests
-            .requests
-            .values()
-            .map(|entry| (Arc::clone(&entry.request), entry.status().consensus_tag()))
-            .collect::<Vec<_>>();
-        pending_requests.sort_by_key(|(req, _)| req.id);
+        let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
+        pending_requests.sort_by_key(|entry| entry.request.id);
 
         let mut cumulative = sha3::Sha3_256::new();
-        for (_, consensus_tag) in &pending_requests {
-            cumulative.update([*consensus_tag]);
+        for entry in &pending_requests {
+            cumulative.update([entry.status().consensus_tag()]);
         }
 
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
-            pending_requests: pending_requests.into_iter().map(|(req, _)| req).collect(),
+            pending_requests,
             cumulative_digest: cumulative.finalize().into(),
         }
     }

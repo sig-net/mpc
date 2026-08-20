@@ -558,7 +558,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             SignStatus::PendingPublish {
                 publish: crate::sign_bidirectional::PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![mpc_primitives::Participant::from(0u32)],
                     is_proposer: true,
                 },
             },
@@ -644,7 +644,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             SignStatus::PendingPublish {
                 publish: crate::sign_bidirectional::PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![mpc_primitives::Participant::from(0u32)],
                     is_proposer: false,
                 },
             },

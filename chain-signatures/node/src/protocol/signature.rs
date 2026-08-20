@@ -355,7 +355,7 @@ fn build_publish_state(
     .ok()?;
     let publish = PublishState {
         signature,
-        participants,
+        participants: crate::sign_bidirectional::from_cait_sith_participants(&participants),
         is_proposer,
     };
 
