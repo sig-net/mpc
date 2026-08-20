@@ -82,12 +82,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = sign_request.id;
-        ctx.rpc.publish_signature(
-            public_key,
-            sign_request,
-            publish.signature,
-            publish.participants,
-        );
+        ctx.rpc
+            .publish_with_state(public_key, sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }

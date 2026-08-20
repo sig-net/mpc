@@ -4,7 +4,7 @@ use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::SignStatus;
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -882,8 +882,8 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .set_status(
             Chain::Ethereum,
             &sign_id,
-            crate::sign_bidirectional::SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
                     signature: Signature::new(
                         ProjectivePoint::GENERATOR.to_affine(),
                         Scalar::ONE,
@@ -891,7 +891,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                     ),
                     participants: vec![],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;

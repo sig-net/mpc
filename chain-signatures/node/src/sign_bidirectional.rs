@@ -21,10 +21,10 @@ pub struct PublishState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish { publish: PublishState },
+    PendingPublish { publish: Arc<PublishState> },
     PendingExecution { tx: Arc<BidirectionalTx> },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
+    PendingPublishBidirectional { publish: Arc<PublishState> },
 }
 
 impl SignStatus {
@@ -449,10 +449,12 @@ mod tests {
             from_address: [0u8; 20],
             nonce: 0,
         });
-        let publish = || PublishState {
-            signature: dummy_sig,
-            participants: vec![],
-            is_proposer: true,
+        let publish = || {
+            Arc::new(PublishState {
+                signature: dummy_sig,
+                participants: vec![],
+                is_proposer: true,
+            })
         };
 
         let generation_tag = SignStatus::PendingGeneration.consensus_tag();

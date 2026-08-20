@@ -288,16 +288,16 @@ impl Backlog {
     pub async fn publishable_requests(
         &self,
         chain: Chain,
-    ) -> Vec<(Arc<IndexedSignRequest>, PublishState)> {
+    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
         let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
             .requests
             .values()
-            .filter_map(|entry| match entry.status() {
+            .filter_map(|entry| match &entry.status {
                 SignStatus::PendingPublish { publish }
                 | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((Arc::clone(&entry.request), publish))
+                    Some((Arc::clone(&entry.request), Arc::clone(publish)))
                 }
                 _ => None,
             })
@@ -348,7 +348,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        publish: PublishState,
+        publish: Arc<PublishState>,
     ) -> Result<(), BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -813,8 +813,8 @@ impl BacklogEntry {
         Ok(())
     }
 
-    pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
-        match (&self.request.kind, self.status.clone()) {
+    pub fn mark_publishing(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+        match (&self.request.kind, &self.status) {
             (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
                 self.status = SignStatus::PendingPublish { publish };
                 Ok(())
@@ -910,12 +910,12 @@ mod tests {
         mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
     }
 
-    fn test_publish_state(is_proposer: bool) -> PublishState {
-        PublishState {
+    fn test_publish_state(is_proposer: bool) -> Arc<PublishState> {
+        Arc::new(PublishState {
             signature: test_signature(),
             participants: vec![Participant::from(0u32), Participant::from(1u32)],
             is_proposer,
-        }
+        })
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
