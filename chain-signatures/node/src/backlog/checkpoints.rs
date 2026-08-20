@@ -1,4 +1,4 @@
-use super::{Checkpoint, PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
@@ -7,6 +7,43 @@ use sha3::Digest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// A checkpoint represents the backlog state at a specific block height.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub chain: Chain,
+    pub block_height: u64,
+    pub pending_requests: Vec<BacklogEntry>,
+    /// Commitment to each pending request's checkpoint-consensus phase.
+    #[serde(default, with = "serde_bytes")]
+    pub cumulative_digest: [u8; 32],
+}
+
+impl Checkpoint {
+    pub fn empty(chain: Chain) -> Self {
+        Self {
+            chain,
+            block_height: 0,
+            pending_requests: Vec::new(),
+            cumulative_digest: Self::empty_cumulative_digest(),
+        }
+    }
+
+    pub fn empty_cumulative_digest() -> [u8; 32] {
+        sha3::Sha3_256::new().finalize().into()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.block_height.to_le_bytes());
+        for entry in &self.pending_requests {
+            hasher.update(entry.sign_id().request_id);
+        }
+        hasher.update(self.cumulative_digest);
+        hasher.finalize().into()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct Checkpoints {

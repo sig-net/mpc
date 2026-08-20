@@ -18,6 +18,7 @@ use crate::containers::DockerClient;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
+use cait_sith::protocol::Participant;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
@@ -442,7 +443,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
         for (i, account) in spawner.accounts.iter().enumerate() {
-            let participant = cait_sith::protocol::Participant::from(i as u32);
+            let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
                 let mut secret_storage = storage::secret_storage::init(
                     None, // No GCP service for tests

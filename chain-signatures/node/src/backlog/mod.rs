@@ -1,7 +1,7 @@
 mod checkpoints;
 pub mod consensus;
 
-use crate::sign_bidirectional::{PublishState, SignStatus};
+use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
@@ -12,65 +12,12 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
     SignKind,
 };
-use sha3::Digest as _;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// A checkpoint represents the backlog state at a specific block height.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Checkpoint {
-    pub chain: Chain,
-    pub block_height: u64,
-    pub pending_requests: Vec<BacklogEntry>,
-    /// Commitment to each pending request's checkpoint-consensus phase.
-    #[serde(default, with = "serde_bytes")]
-    pub cumulative_digest: [u8; 32],
-}
-
-impl Checkpoint {
-    pub fn empty(chain: Chain) -> Self {
-        Self {
-            chain,
-            block_height: 0,
-            pending_requests: Vec::new(),
-            cumulative_digest: Self::empty_cumulative_digest(),
-        }
-    }
-
-    pub fn empty_cumulative_digest() -> [u8; 32] {
-        sha3::Sha3_256::new().finalize().into()
-    }
-
-    pub fn digest(&self) -> [u8; 32] {
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(self.chain.caip2_chain_id().as_bytes());
-        hasher.update(self.block_height.to_le_bytes());
-        for entry in &self.pending_requests {
-            hasher.update(entry.sign_id().request_id);
-        }
-        hasher.update(self.cumulative_digest);
-        hasher.finalize().into()
-    }
-}
-
-/// Errors that can occur when working with Backlog
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum BacklogError {
-    #[error("request not found for chain {chain:?} with id {id:?}")]
-    NotFound { chain: Chain, id: SignId },
-    #[error("chain not initialized: {chain:?}")]
-    ChainNotInitialized { chain: Chain },
-    #[error("transaction not found")]
-    TransactionNotFound,
-    #[error("cannot advance sign request: status must be pending generation or publishing")]
-    InvalidAdvanceTransition,
-    #[error("cannot mark publishing: status must be pending generation")]
-    InvalidPublishingTransition,
-    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
-    InvalidBidirectionalResponseTransition,
-}
+pub use checkpoints::Checkpoint;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -771,6 +718,23 @@ impl StateManager for Backlog {
     }
 }
 
+/// Errors that can occur when working with Backlog
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BacklogError {
+    #[error("request not found for chain {chain:?} with id {id:?}")]
+    NotFound { chain: Chain, id: SignId },
+    #[error("chain not initialized: {chain:?}")]
+    ChainNotInitialized { chain: Chain },
+    #[error("transaction not found")]
+    TransactionNotFound,
+    #[error("cannot advance sign request: status must be pending generation or publishing")]
+    InvalidAdvanceTransition,
+    #[error("cannot mark publishing: status must be pending generation")]
+    InvalidPublishingTransition,
+    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
+    InvalidBidirectionalResponseTransition,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
@@ -797,33 +761,44 @@ impl BacklogEntry {
         self.request.id
     }
 
+    /// Get the request ID for this transaction
     pub fn request_id(&self) -> [u8; 32] {
         self.request.id.request_id
     }
 
+    /// Get the source chain for this transaction
     pub fn source_chain(&self) -> Chain {
         self.request.chain
     }
 
+    /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         self.status.clone()
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        self.status.execution_tx()
-    }
-
+    /// Set the status of this transaction
+    ///
+    /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
     pub fn set_status(&mut self, status: SignStatus) {
         self.status = status;
     }
 
+    /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
     pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
         self.request = request;
     }
 
-    pub fn transition_to_bidirectional_response(
+    /// Rewrite this entry into the final-response request produced by a confirmed
+    /// target-chain execution.
+    ///
+    /// Rejects a request whose id differs from this entry's. Callers look the entry
+    /// up by `SignId`, so accepting a mismatch would leave `request.id` disagreeing
+    /// with the key it is stored under, and `checkpoint` commits to the key while
+    /// diagnostics report the id. `Backlog::watch_execution` warns when the two
+    /// identifiers diverge, which is the only way to reach this rejection.
+    fn transition_to_bidirectional_response(
         &mut self,
         request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
@@ -870,8 +845,26 @@ impl BacklogEntry {
         }
     }
 
+    /// Get target chain if this is a bidirectional transaction
+    // TODO: looks a bit weird having two different ways to get target_chain in the match
+    pub fn target_chain(&self) -> Option<Chain> {
+        match &self.request.kind {
+            SignKind::Sign => None,
+            SignKind::SignBidirectional(event) => self
+                .execution_tx()
+                .map(|tx| tx.target_chain)
+                .or_else(|| event.target_chain().ok()),
+            SignKind::RespondBidirectional(_) => None,
+        }
+    }
+
+    /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
         matches!(self.request.kind, SignKind::SignBidirectional(_))
+    }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        self.status.execution_tx()
     }
 
     pub fn typename(&self) -> &'static str {

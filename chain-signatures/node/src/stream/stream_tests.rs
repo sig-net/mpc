@@ -9,6 +9,7 @@ use crate::stream::test_utils::{
     test_rpc_channel, test_sign_args,
 };
 use async_trait::async_trait;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
@@ -558,7 +559,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             SignStatus::PendingPublish {
                 publish: crate::sign_bidirectional::PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![Participant::from(0u32)],
                     is_proposer: true,
                 },
             },
@@ -644,7 +645,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             SignStatus::PendingPublish {
                 publish: crate::sign_bidirectional::PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![Participant::from(0u32)],
                     is_proposer: false,
                 },
             },

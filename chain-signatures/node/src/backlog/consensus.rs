@@ -564,12 +564,12 @@ mod tests {
             .await;
 
         let peers = [
-            (cait_sith::protocol::Participant::from(0u32), {
+            (Participant::from(0u32), {
                 let mut info = ParticipantInfo::new(0);
                 info.url = newer_server.url();
                 info
             }),
-            (cait_sith::protocol::Participant::from(1u32), {
+            (Participant::from(1u32), {
                 let mut info = ParticipantInfo::new(1);
                 info.url = current_server.url();
                 info
