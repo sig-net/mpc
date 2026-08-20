@@ -3,6 +3,7 @@
 mod config;
 mod convert;
 mod indexer;
+mod intent_gen;
 mod publisher;
 mod reader;
 pub mod records;
@@ -14,7 +15,8 @@ mod state;
 mod test_utils;
 mod tx;
 
-pub use config::{IndexerConfig, MidnightConfig, RpcConfig};
+pub use config::{IndexerConfig, MidnightConfig, PublisherConfig, RpcConfig};
 pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
+pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;

@@ -33,16 +33,16 @@ Four errors have especially important retry semantics:
 
 ## Configuration
 
-All six variables are required when the process starts, even if a caller initially uses only `build`:
+Rust is the single source of publisher configuration and performs all semantic validation. On every initial spawn and respawn, it clears the inherited child environment, installs the fixed launcher path `/usr/local/bin:/usr/bin:/bin`, and explicitly sets these six process values from its stored configuration:
 
-- `MIDNIGHT_PUB_NETWORK_ID`: one of `undeployed`, `stagenet`, `preview`, `preprod`, or `mainnet`.
-- `MIDNIGHT_PUB_NODE_URL`: absolute Midnight node HTTP(S) or WebSocket URL.
-- `MIDNIGHT_PUB_PROOF_SERVER_URL`: absolute proof-server HTTP(S) URL.
-- `MIDNIGHT_PUB_INDEXER_URL`: absolute indexer HTTP(S) URL.
-- `MIDNIGHT_PUB_INDEXER_WS_URL`: absolute indexer WebSocket URL.
-- `MIDNIGHT_PUB_FUNDING_SEED`: raw hexadecimal seed containing 16 to 64 bytes. A mnemonic is not accepted, and rejected seed input is not echoed in errors.
+- `MIDNIGHT_PUB_NETWORK_ID`
+- `MIDNIGHT_PUB_NODE_URL`
+- `MIDNIGHT_PUB_PROOF_SERVER_URL`
+- `MIDNIGHT_PUB_INDEXER_URL`
+- `MIDNIGHT_PUB_INDEXER_WS_URL`
+- `MIDNIGHT_PUB_FUNDING_SEED`
 
-The circuit executor's own configuration (the funding wallet's coin public key, derived from the seed) is bound in code. Ambient `NETWORK` and `KEYS_*` variables, which the platform SDK's default configuration provider would otherwise read ahead of that value, are ignored, so the environment the parent process inherits cannot change what `build` produces.
+These variables are a private parent-to-child transport, not ambient deployment configuration. No host environment values are inherited; custom publisher commands outside the fixed launcher path must name an absolute executable. The child reads the six values once at process startup, converts them into the SDK configuration, and derives wallet keys without retaining the seed in that configuration. It does not repeat Rust's URL, network, or seed validation and does not read the SDK's ambient `NETWORK` or `KEYS_*` configuration.
 
 ## Development
 
@@ -62,4 +62,4 @@ npm test
 
 The runtime image for this sidecar must include the built `dist/` tree, production Node.js dependencies, and the managed contract proving assets (`keys/` and `zkir/`) shipped by `@sig-net/midnight-contract`; proving resolves those assets through the installed package at runtime.
 
-The Rust node spawns this process from that image and must send and require protocol version 1 in the `ready` handshake before any build or submit traffic.
+The Rust node spawns this process from that image with the six publisher values above and must send and require protocol version 1 in the `ready` handshake before any build or submit traffic.

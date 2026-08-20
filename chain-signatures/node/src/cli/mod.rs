@@ -1130,7 +1130,15 @@ mod tests {
     /// fixtures use the values a developer running a local stack exports,
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
-        for var in ["MPC_MIDNIGHT_NODE_WS_URL", "MPC_MIDNIGHT_CENTRAL_ADDRESS"] {
+        for var in [
+            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_FUNDING_SEED",
+            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
+            "MPC_MIDNIGHT_PROOF_SERVER_URL",
+            "MPC_MIDNIGHT_INDEXER_URL",
+            "MPC_MIDNIGHT_INDEXER_WS_URL",
+        ] {
             assert!(
                 std::env::var_os(var).is_none(),
                 "{var} is set: these tests require an unpolluted environment"
@@ -1149,6 +1157,8 @@ mod tests {
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
         let central_address = "ab".repeat(32);
+        let funding_seed = "0f".repeat(32);
+        let intent_gen_command = r#"["midnight-publisher"]"#;
         let argv = [
             "mpc-node",
             "start",
@@ -1168,6 +1178,16 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
+            "--midnight-funding-seed",
+            &funding_seed,
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1176,6 +1196,16 @@ mod tests {
             "ws://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
+            "--midnight-funding-seed",
+            funding_seed.as_str(),
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
         ] {
             assert!(
                 out.contains(&expected.to_string()),
