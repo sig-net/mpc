@@ -15,10 +15,10 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use midnight_onchain_state::state::StateValue;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
+use mpc_utils::time::current_unix_timestamp;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::PublisherConfig;
-use crate::indexer::unix_now;
 use crate::intent_gen::{
     is_ambiguous_submit, AmbiguousSubmit, IntentGen, IntentRequest, WirePoint, WireSignature,
 };
@@ -231,7 +231,7 @@ impl MidnightPublisher {
             return Ok(());
         }
 
-        let expires_at = ttl_seconds(&self.config, unix_now()?);
+        let expires_at = ttl_seconds(&self.config, current_unix_timestamp());
         let request = IntentRequest {
             circuit: call.circuit,
             contract_address: self.central_address.clone(),
@@ -1456,7 +1456,7 @@ mod tests {
         );
 
         let ttl = request["ttlSeconds"].as_u64().expect("ttl is an integer");
-        let now = unix_now().unwrap();
+        let now = current_unix_timestamp();
         assert_eq!(
             ttl.saturating_sub(now),
             config.request_timeout.as_secs() + config.submit_timeout.as_secs(),
