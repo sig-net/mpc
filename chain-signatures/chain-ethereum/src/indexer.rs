@@ -222,7 +222,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         for request in indexed_requests {
             events_tx
                 .send(ChainEvent::SignRequest {
-                    request,
+                    request: Arc::new(request),
                     block_timestamp: Some(block_timestamp),
                 })
                 .await

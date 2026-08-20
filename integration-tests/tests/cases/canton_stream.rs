@@ -16,6 +16,7 @@ use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
 use tokio::time::timeout;
@@ -37,7 +38,7 @@ async fn run_canton_indexer(
 async fn wait_for_sign_request(
     indexer: &mut ChainIndexerStream,
     timeout_secs: u64,
-) -> Result<IndexedSignRequest> {
+) -> Result<Arc<IndexedSignRequest>> {
     timeout(Duration::from_secs(timeout_secs), async {
         loop {
             match indexer.next_event().await {

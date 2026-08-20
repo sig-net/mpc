@@ -117,7 +117,7 @@ const MAX_DEAD_IDS: usize = 4096;
 /// task incarnation and read by the deadline watcher; `round` carries the
 /// posit round across respawns.
 struct SignEntry {
-    request: IndexedSignRequest,
+    request: Arc<IndexedSignRequest>,
     is_proposer: Arc<AtomicBool>,
     round: Arc<AtomicUsize>,
 }
@@ -160,7 +160,7 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
         let sign_id = request.id;
@@ -171,7 +171,7 @@ impl SignatureSpawner {
         self.requests.insert(
             sign_id,
             SignEntry {
-                request: request.clone(),
+                request: Arc::clone(&request),
                 is_proposer: Arc::clone(&is_proposer),
                 round: Arc::new(AtomicUsize::new(0)),
             },
@@ -217,7 +217,7 @@ impl SignatureSpawner {
     fn spawn_task(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
         let sign_id = request.id;
@@ -260,10 +260,10 @@ impl SignatureSpawner {
     /// have aborted previous incarnations. Not a retirement: mailboxes,
     /// watchers, and dedup state survive.
     fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
-        let requests: Vec<IndexedSignRequest> = self
+        let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
             .values()
-            .map(|entry| entry.request.clone())
+            .map(|entry| Arc::clone(&entry.request))
             .collect();
         tracing::info!(
             count = requests.len(),
@@ -611,7 +611,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
+        let request = Arc::new(IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0));
 
         let probe_id = SignId::new([43u8; 32]);
         let probe_request = IndexedSignRequest::sign(
@@ -631,7 +631,7 @@ mod tests {
         spawner.requests.insert(
             probe_id,
             SignEntry {
-                request: probe_request,
+                request: Arc::new(probe_request),
                 is_proposer: Arc::new(AtomicBool::new(false)),
                 round: Arc::new(AtomicUsize::new(0)),
             },
@@ -642,7 +642,7 @@ mod tests {
         });
 
         // Step 1: Spawn → mailbox created, request retained, not dead
-        spawner.add_request(&governance, request.clone(), cfg.clone());
+        spawner.add_request(&governance, Arc::clone(&request), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));

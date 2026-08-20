@@ -5,7 +5,7 @@ use super::*;
 
 pub struct SignState {
     round: usize,
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
@@ -31,7 +31,7 @@ pub struct SignState {
 
 impl SignState {
     pub fn new(
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         mesh_state: watch::Receiver<MeshState>,
         carried_round: Arc<AtomicUsize>,
     ) -> Self {
@@ -153,7 +153,7 @@ mod tests {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
-        let mut state = SignState::new(request(), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(Arc::new(request()), mesh_rx.clone(), Arc::clone(&carried));
         state.reorganize("test");
         state.highest_seen_round = 9;
         state.reorganize("test");
@@ -161,7 +161,7 @@ mod tests {
 
         // The task is aborted and a new incarnation takes over.
         drop(state);
-        let respawned = SignState::new(request(), mesh_rx, carried);
+        let respawned = SignState::new(Arc::new(request()), mesh_rx, carried);
         assert_eq!(respawned.round(), 9);
     }
 }
