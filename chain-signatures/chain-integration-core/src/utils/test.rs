@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -89,7 +90,7 @@ pub fn make_publish_action_for(
     let pk: AffinePoint = sk.public_key().into();
     let output = make_signature(&sk, epsilon, payload);
     let request = make_indexed(chain, epsilon, payload, kind, sign_id);
-    PublishAction::new(pk, request, output, vec![])
+    PublishAction::new(pk, Arc::new(request), output, vec![])
         .expect("valid signature should produce a publish action")
 }
 

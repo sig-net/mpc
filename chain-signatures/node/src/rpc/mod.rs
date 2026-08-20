@@ -102,7 +102,7 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
@@ -125,7 +125,7 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
     ) {

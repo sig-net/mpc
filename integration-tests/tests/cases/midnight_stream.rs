@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::{keccak256, Address, Bytes, U256};
@@ -133,7 +134,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     midnight
         .submit_is_even(0, target.into_array(), argument)
         .await?;
-    let request: IndexedSignRequest = events
+    let request: Arc<IndexedSignRequest> = events
         .wait_for("the caller SignRequest", |event| match event {
             ChainEvent::SignRequest { request, .. }
                 if request.chain == Chain::Midnight
