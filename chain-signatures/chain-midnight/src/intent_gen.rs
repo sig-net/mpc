@@ -1,8 +1,5 @@
-//! Client for the out-of-process intent builder: one JSON object per line down the
-//! child's stdin, one back up its stdout, mirroring `protocol.ts` field for field. The
-//! hazard is a reply landing on the wrong request, which would put one post's signature
-//! into another post's intent; the pipe has no framing beyond the newline, so once the
-//! stream is in any doubt the child is replaced rather than resynchronized.
+//! JSON-lines client for the out-of-process intent builder. A desynchronized pipe is
+//! replaced because a stale reply could put one request's signature into another intent.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -16,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::{validate_publisher_network_id, MidnightConfig, PublisherConfig};
 
@@ -38,17 +34,14 @@ pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<AmbiguousSubmit>().is_some()
 }
 
-/// One respond call, in the shape the child validates. Every byte field is bare
-/// lowercase hex with no `0x`; the child converts nothing and rejects anything else.
+/// One respond call in the child's lowercase, unprefixed hex wire shape.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentRequest {
-    /// `respond` or `respondBidirectional`.
     pub circuit: &'static str,
     pub contract_address: String,
     pub request_id: String,
     pub signature: WireSignature,
-    /// The reads this caller pinned, so the child stays a pure function of them.
     pub contract_state: String,
     pub ledger_parameters: String,
     /// Absolute unix seconds, not a duration from now.
@@ -60,7 +53,6 @@ pub struct IntentRequest {
 pub struct WireSignature {
     pub big_r: WirePoint,
     pub s: String,
-    /// 0 or 1.
     pub recovery_id: u8,
 }
 
@@ -71,8 +63,7 @@ pub struct WirePoint {
     pub y: String,
 }
 
-/// One submit call: only the intent travels, the child balances against a wallet it
-/// syncs itself.
+/// One submit call; the child owns wallet state.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct SubmitRequest {
     intent: String,
@@ -82,31 +73,30 @@ struct SubmitRequest {
 /// again; a submit's may be on chain, and asking again races the single dust UTXO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
-    Ready,
     BuildIntent,
     Submit,
 }
 
+/// The wire `op` of the readiness handshake, which runs its own exchange in
+/// `verify_ready` rather than under [`Operation`]'s budget and reissue policy.
+const READY_OP: &str = "ready";
+
 impl Operation {
-    /// Build and readiness share the request budget. Submit uses Rust's process
-    /// backstop, whose strict ordering against the child's own deadlines is checked
-    /// during the readiness exchange.
+    /// Submit has its own proving budget; the build shares the request budget.
     fn deadline(self, config: &PublisherConfig) -> Duration {
         match self {
-            Self::Ready | Self::BuildIntent => config.request_timeout,
+            Self::BuildIntent => config.request_timeout,
             Self::Submit => config.submit_timeout,
         }
     }
 
     /// Whether an answer lost in transit may simply be asked for again.
     fn is_repeatable(self) -> bool {
-        matches!(self, Self::Ready | Self::BuildIntent)
+        matches!(self, Self::BuildIntent)
     }
 
-    /// The `op` the child discriminates on.
     fn wire_op(self) -> &'static str {
         match self {
-            Self::Ready => "ready",
             Self::BuildIntent => "build",
             Self::Submit => "submit",
         }
@@ -114,7 +104,6 @@ impl Operation {
 
     fn name(self) -> &'static str {
         match self {
-            Self::Ready => "readiness check",
             Self::BuildIntent => "intent build",
             Self::Submit => "submit",
         }
@@ -125,8 +114,7 @@ impl Operation {
 pub struct IntentGen {
     config: MidnightConfig,
     network_id: String,
-    /// Two interleaved requests on one pipe have no correct reading, so the lock is the
-    /// concurrency story: callers queue.
+    /// Serializes requests on the single child pipe.
     session: Mutex<Option<Session>>,
 }
 
@@ -143,46 +131,33 @@ impl IntentGen {
     }
 
     /// The serialized ledger `Intent` for `request`.
-    pub async fn build(
-        &self,
-        request: &IntentRequest,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<Vec<u8>> {
-        let reply = self
-            .dispatch(request, cancel, Operation::BuildIntent)
-            .await?;
+    pub async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+        let reply = self.dispatch(request, Operation::BuildIntent).await?;
         let intent = reply
             .intent
             .context("midnight intent builder granted a request without an intent")?;
         hex::decode(&intent).context("decoding the intent the builder granted")
     }
 
-    /// Balances, proves and posts `intent`, answering with what names it on chain.
-    /// Attempted exactly once.
-    pub async fn submit(
-        &self,
-        intent: &[u8],
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<String> {
+    /// Balances, proves and posts `intent` exactly once.
+    pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
         let request = SubmitRequest {
             intent: hex::encode(intent),
         };
-        let reply = self.dispatch(&request, cancel, Operation::Submit).await?;
+        let reply = self.dispatch(&request, Operation::Submit).await?;
         reply
             .tx_id
             .context("midnight intent builder posted a transaction without naming it")
     }
 
-    /// One operation, start to finish; budget and reissue policy come from
-    /// `operation`, never from the caller.
+    /// Runs one operation with its own budget and reissue policy.
     async fn dispatch<T: Serialize>(
         &self,
         request: &T,
-        cancel: &CancellationToken,
         operation: Operation,
     ) -> anyhow::Result<WireReply> {
         let mut session = self.session.lock().await;
-        let (error, retry) = match self.attempt(&mut session, request, cancel, operation).await {
+        let (error, retry) = match self.attempt(&mut session, request, operation).await {
             Exchange::Answered(result) => return result,
             Exchange::Broken { error, retry } => (error, retry),
         };
@@ -194,13 +169,12 @@ impl IntentGen {
             reason = "respawning",
             "midnight intent builder failed: {error:#}; retrying once on a fresh child"
         );
-        match self.attempt(&mut session, request, cancel, operation).await {
+        match self.attempt(&mut session, request, operation).await {
             Exchange::Answered(result) => result,
             Exchange::Broken { error, .. } => Err(self.blame_the_command(error)),
         }
     }
 
-    /// Named only on failures of the child itself: a refusal is an answer, not the command's fault.
     fn blame_the_command(&self, error: anyhow::Error) -> anyhow::Error {
         error.context(format!(
             "midnight intent builder command [{}]",
@@ -208,42 +182,37 @@ impl IntentGen {
         ))
     }
 
-    /// One pass. A broken exchange or ambiguous submit empties the slot, killing the
-    /// child: nothing later reads its pipe.
+    /// A broken exchange or ambiguous submit retires the child.
     async fn attempt<T: Serialize>(
         &self,
         session: &mut Option<Session>,
         request: &T,
-        cancel: &CancellationToken,
         operation: Operation,
     ) -> Exchange {
         if session.is_none() {
             match spawn_session(&self.config, &self.network_id).await {
                 Ok(fresh) => *session = Some(fresh),
-                // The restart budget was already spent inside the spawn; a second pass
-                // would only spend it again.
+                // The restart budget was already spent inside the spawn.
                 Err(error) => return Exchange::give_up(error),
             }
         }
         let live = session
             .as_mut()
             .expect("the slot was just filled or was already full");
-        let outcome = exchange(live, request, operation, &self.config.publisher, cancel).await;
+        let outcome = exchange(live, request, operation, &self.config.publisher).await;
         if matches!(
             &outcome,
             Exchange::Answered(Err(error))
                 if error.downcast_ref::<AmbiguousSubmit>().is_some()
         ) {
-            // The wallet work may still be running after its answer times out, so no
-            // later request may reuse this child.
+            // Timed-out wallet work makes this child unsafe to reuse.
             *session = None;
             return outcome;
         }
         let Exchange::Broken { error, retry } = outcome else {
             return outcome;
         };
-        // Attached before the slot empties: emptying kills the child and takes its
-        // stderr with it.
+        // Capture stderr before emptying the slot kills the child.
         let error = match live.last_words().await {
             Some(said) => error.context(format!("the midnight intent builder said: {said}")),
             None => error,
@@ -257,20 +226,16 @@ impl IntentGen {
 struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    /// Per session: a fresh pipe cannot deliver a previous child's reply.
     next_id: u64,
-    /// What the drain below has heard, for the error that reports this child's death.
     stderr: StderrTail,
-    /// Held for `kill_on_drop`; dropped after `stdin`, so a child that exits on
-    /// end-of-input gets to do that before the kill lands.
+    /// Dropping this kills the child at once (`kill_on_drop`); it does not get to act
+    /// on the stdin EOF first.
     _child: Child,
-    /// Awaited briefly by `last_words`; its end says the child finished saying why it died.
     stderr_drain: AbortOnDrop,
 }
 
 impl Session {
-    /// What the child said on its stderr, or `None`. Waits for the drain briefly: a dead
-    /// child's explanation may still be in flight, and a wedged one never closes stderr.
+    /// Waits briefly for a dead child's final stderr lines.
     async fn last_words(&mut self) -> Option<String> {
         let _ = tokio::time::timeout(STDERR_TAIL_GRACE, &mut self.stderr_drain.0).await;
         self.stderr.take()
@@ -279,17 +244,14 @@ impl Session {
 
 const STDERR_TAIL_LINES: usize = 10;
 
-/// How long a broken pass waits for the drain to finish before reporting what it has.
 const STDERR_TAIL_GRACE: Duration = Duration::from_millis(200);
 
-/// The child's last words, bound for an error rather than a log: `tracing` reaches
-/// nobody in a process without a subscriber. `drain_stderr` is the only filler.
+/// Bounded stderr retained for error context.
 #[derive(Clone, Default)]
 struct StderrTail(Arc<std::sync::Mutex<VecDeque<String>>>);
 
 impl StderrTail {
-    /// Never panics on a poisoned lock: a panic here takes a runtime worker with it
-    /// over a diagnostic, and nothing inside the lock can panic anyway.
+    /// A poisoned diagnostic lock must not take down a runtime worker.
     fn lines(&self) -> std::sync::MutexGuard<'_, VecDeque<String>> {
         self.0
             .lock()
@@ -304,19 +266,19 @@ impl StderrTail {
         lines.push_back(line);
     }
 
-    /// Oldest first, on one line: this becomes an `anyhow` context.
     fn take(&self) -> Option<String> {
         let lines = self.lines();
         (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join("; "))
     }
 }
 
-/// What a pass at the child produced.
 enum Exchange {
-    /// A reply that answers this request, whether it granted it or refused it.
     Answered(anyhow::Result<WireReply>),
     /// The child is replaced either way; only a transport fault is worth a second try.
-    Broken { error: anyhow::Error, retry: bool },
+    Broken {
+        error: anyhow::Error,
+        retry: bool,
+    },
 }
 
 impl Exchange {
@@ -328,7 +290,6 @@ impl Exchange {
         }
     }
 
-    /// The child is finished either way, and asking a new one would only reproduce this.
     fn give_up(error: anyhow::Error) -> Self {
         Self::Broken {
             error,
@@ -337,24 +298,20 @@ impl Exchange {
     }
 }
 
-/// `error`, plus what an operation that cannot be asked again leaves behind. Applied
-/// to every locally broken exchange after encoding: from there the transport may have
-/// been attempted, so a lost answer and a landed transaction are indistinguishable.
+/// Marks post-encoding submit failures as ambiguous because the transaction may have landed.
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     match operation {
         Operation::Submit => error.context(AmbiguousSubmit),
-        Operation::Ready | Operation::BuildIntent => error,
+        Operation::BuildIntent => error,
     }
 }
 
-/// Resolves the packaged publisher and its `#!/usr/bin/env node` interpreter without
-/// making the parent's executable search path part of the child configuration.
+/// Fixed executable path for the packaged publisher and its Node interpreter.
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// The child parses numbers as JavaScript `number`, whose integer precision ends here.
 const MAX_SAFE_WIRE_ID: u64 = (1_u64 << 53) - 1;
 
-/// Returns one lossless JSON id and advances the private session counter.
 fn take_wire_id(next_id: &mut u64) -> u64 {
     let id = *next_id;
     debug_assert!(id <= MAX_SAFE_WIRE_ID);
@@ -362,7 +319,6 @@ fn take_wire_id(next_id: &mut u64) -> u64 {
     id
 }
 
-/// Starts the builder under the restart budget.
 async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
     retry_rpc!(
         config.publisher.request_timeout,
@@ -390,7 +346,7 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
             protocol_version: PUBLISHER_PROTOCOL_VERSION,
         },
         id,
-        Operation::Ready,
+        READY_OP,
     )?;
     let reply = tokio::time::timeout(config.request_timeout, round_trip(&mut session, &line))
         .await
@@ -399,10 +355,6 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
         Exchange::Answered(result) => result?,
         Exchange::Broken { error, .. } => return Err(error),
     };
-    anyhow::ensure!(
-        decoded.ready == Some(true),
-        "midnight intent builder readiness reply did not identify itself"
-    );
     anyhow::ensure!(
         decoded.protocol_version == Some(PUBLISHER_PROTOCOL_VERSION),
         "midnight intent builder readiness reply has protocolVersion {:?}, expected {}",
@@ -425,8 +377,7 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
          timeout ({submit_timeout:?}) < Rust backstop ({:?})",
         config.submit_timeout
     );
-    // Readiness is a session bootstrap, not an application request. Reusing id zero
-    // keeps the application protocol independent of whether the bootstrap grows.
+    // Application ids start at zero independently of the readiness exchange.
     session.next_id = 0;
     Ok(session)
 }
@@ -463,7 +414,6 @@ fn spawn_child(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Sess
     })
 }
 
-/// Configured but not spawned, so a test can read back the environment the child would get.
 fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Command> {
     let (program, args) = config
         .publisher
@@ -496,7 +446,6 @@ fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Resu
     Ok(command)
 }
 
-/// Forwards the child's stderr to the log and keeps the tail for errors.
 async fn drain_stderr(stderr: ChildStderr, tail: StderrTail) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -511,16 +460,14 @@ async fn exchange<T: Serialize>(
     request: &T,
     operation: Operation,
     config: &PublisherConfig,
-    cancel: &CancellationToken,
 ) -> Exchange {
     let id = take_wire_id(&mut session.next_id);
-    let line = match encode_request(request, id, operation) {
+    let line = match encode_request(request, id, operation.wire_op()) {
         Ok(line) => line,
-        // Nothing reached the pipe, so the child is still in step.
         Err(error) => return Exchange::Answered(Err(error)),
     };
 
-    match exchange_inner(session, &line, id, operation, config, cancel).await {
+    match exchange_inner(session, &line, id, operation, config).await {
         Exchange::Broken { error, retry } => Exchange::Broken {
             error: unanswered(error, operation),
             retry,
@@ -536,28 +483,18 @@ async fn exchange_inner(
     id: u64,
     operation: Operation,
     config: &PublisherConfig,
-    cancel: &CancellationToken,
 ) -> Exchange {
     let deadline = operation.deadline(config);
-    let reply = tokio::select! {
-        // Nothing here can tell a cancel that raced the write from one that beat it,
-        // so a cancelled submit reports what it may have left behind.
-        _ = cancel.cancelled() => {
-            return Exchange::give_up(anyhow::anyhow!(
-                "midnight {} cancelled",
-                operation.name(),
-            ))
-        }
-        // A timed-out child is a dead publisher if kept: a wedged circuit run wedges the
-        // process while it still looks healthy. `Broken` kills it; a submit is still not reissued.
-        result = tokio::time::timeout(deadline, round_trip(session, line)) => match result {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(error)) => return Exchange::lost(error, operation),
-            Err(_) => return Exchange::lost(
+    // Retire timed-out children; submits are never reissued here.
+    let reply = match tokio::time::timeout(deadline, round_trip(session, line)).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => return Exchange::lost(error, operation),
+        Err(_) => {
+            return Exchange::lost(
                 anyhow::anyhow!("midnight {} timed out after {deadline:?}", operation.name()),
                 operation,
-            ),
-        },
+            )
+        }
     };
     decode_reply(&reply, id)
 }
@@ -583,7 +520,6 @@ async fn round_trip(session: &mut Session, line: &str) -> anyhow::Result<String>
     Ok(reply)
 }
 
-/// Reads one reply line as the answer to request `id`.
 fn decode_reply(line: &str, id: u64) -> Exchange {
     let reply: WireReply = match serde_json::from_str(line.trim()) {
         Ok(reply) => reply,
@@ -595,15 +531,13 @@ fn decode_reply(line: &str, id: u64) -> Exchange {
             )
         }
     };
-    // A rejection carrying no id is this request's own; a reply naming a different request
-    // means the stream has slipped, the one outcome worth killing a healthy child over.
+    // A different id proves the stream slipped; an id-less rejection still answers this request.
     match reply.id {
         Some(answered) if answered != id => {
             return Exchange::give_up(anyhow::anyhow!(
                 "midnight intent builder answered id {answered}, not the id {id} it was asked"
             ))
         }
-        // A grant with no id is not an answer to anything nameable.
         None if reply.ok => {
             return Exchange::give_up(anyhow::anyhow!(
                 "midnight intent builder granted a request with no id"
@@ -631,20 +565,11 @@ fn granted(reply: WireReply) -> anyhow::Result<WireReply> {
     Ok(reply)
 }
 
-fn encode_request<T: Serialize>(
-    request: &T,
-    id: u64,
-    operation: Operation,
-) -> anyhow::Result<String> {
-    serde_json::to_string(&WireRequest {
-        id,
-        op: operation.wire_op(),
-        request,
-    })
-    .context("encoding the request for the builder")
+fn encode_request<T: Serialize>(request: &T, id: u64, op: &'static str) -> anyhow::Result<String> {
+    serde_json::to_string(&WireRequest { id, op, request })
+        .context("encoding the request for the builder")
 }
 
-/// The wire shape: the caller's fields, the id that pairs the reply, the discriminating op.
 #[derive(Serialize)]
 struct WireRequest<'a, T> {
     id: u64,
@@ -653,20 +578,16 @@ struct WireRequest<'a, T> {
     request: &'a T,
 }
 
-/// Both arms of a reply in one shape. Unknown fields are ignored on purpose: growing
-/// the wire is meant to be additive on one side at a time.
+/// Additive reply shape; unknown fields are ignored.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireReply {
-    /// Null when the child could not read an id off the line it was rejecting.
     id: Option<u64>,
     ok: bool,
-    ready: Option<bool>,
     protocol_version: Option<u64>,
     submit_timeout_ms: Option<u64>,
     recipe_ttl_ms: Option<u64>,
     intent: Option<String>,
-    /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
     code: Option<String>,
     message: Option<String>,
@@ -680,7 +601,6 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
-    use tokio_util::sync::CancellationToken;
 
     const NETWORK_ID: &str = "undeployed";
     const NODE_WS_URL: &str = "ws://127.0.0.1:9944";
@@ -812,10 +732,7 @@ mod tests {
             r#"read line; printf '{"id":0,"ok":true,"intent":"deadbeef"}\n'"#,
         ))
         .await;
-        let bytes = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap();
+        let bytes = builder.build(&sample_request()).await.unwrap();
         assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
     }
 
@@ -825,10 +742,7 @@ mod tests {
         r#"read line; printf '{"id":0,"ok":false,"code":"contract_mismatch","message":"no operation"}\n'"#,
     ))
     .await;
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("contract_mismatch"),
             "got: {err:#}"
@@ -845,10 +759,7 @@ mod tests {
         r#"read line; printf '{"id":null,"ok":false,"code":"bad_request","message":"invalid JSON"}\n'"#,
     ))
     .await;
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(format!("{err:#}").contains("bad_request"), "got: {err:#}");
         assert!(format!("{err:#}").contains("invalid JSON"), "got: {err:#}");
     }
@@ -861,10 +772,7 @@ mod tests {
             r#"read line; printf '{"id":7,"ok":true,"intent":"deadbeef"}\n'"#,
         ))
         .await;
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(format!("{err:#}").contains("id 7"), "got: {err:#}");
     }
 
@@ -874,14 +782,8 @@ mod tests {
             r#"read line; printf '{"id":0,"ok":true,"intent":"01"}\n'"#,
         ))
         .await;
-        assert!(builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .is_ok());
-        assert!(builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .is_ok());
+        assert!(builder.build(&sample_request()).await.is_ok());
+        assert!(builder.build(&sample_request()).await.is_ok());
     }
 
     #[tokio::test]
@@ -892,10 +794,7 @@ mod tests {
         config.publisher.request_timeout = Duration::from_secs(30);
         let builder = spawn_stub(&config).await;
         let started = Instant::now();
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("closed its stdout"),
             "got: {err:#}"
@@ -917,10 +816,7 @@ mod tests {
         r#"read -r line; case "$line" in *'"op":"submit"'*) intent=$(printf "%s" "$line" | sed -n 's/.*"intent":"\([0-9a-f]*\)".*/\1/p'); printf '{"id":0,"ok":true,"txId":"%s","blockHash":"cd"}\n' "$intent" ;; *) printf '{"id":0,"ok":false,"code":"bad_request","message":"this line carries no submit op"}\n' ;; esac"#,
     ))
     .await;
-        let tx_id = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap();
+        let tx_id = builder.submit(SAMPLE_INTENT).await.unwrap();
         assert_eq!(tx_id, hex::encode(SAMPLE_INTENT));
     }
 
@@ -930,10 +826,7 @@ mod tests {
             r#"read -r line; printf '{"id":7,"ok":true,"txId":"ab","blockHash":"cd"}\n'"#,
         ))
         .await;
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         let rendered = format!("{err:#}");
 
         assert!(rendered.contains("id 7"), "got: {rendered}");
@@ -950,10 +843,7 @@ mod tests {
             r#"read -r line; printf '{"id":0,"ok":true,"blockHash":"cd"}\n'"#,
         ))
         .await;
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("without naming it"),
             "got: {err:#}"
@@ -975,10 +865,7 @@ mod tests {
         counter.wait_for(1).await;
 
         let started = Instant::now();
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         let rendered = format!("{err:#}");
         assert!(rendered.contains("closed its stdout"), "got: {rendered}");
         assert!(
@@ -1003,10 +890,7 @@ mod tests {
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("check it for this request before posting again"),
             "the error has to say what an operator must do before retrying by hand: {err:#}"
@@ -1020,32 +904,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_submit_says_what_may_be_on_chain_too() {
-        // Shutdown cannot tell a cancel that beat the write from one that raced it.
-        let cancel = CancellationToken::new();
-        let builder = spawn_stub(&stub_config("sleep 30")).await;
-        cancel.cancel();
-
-        let err = builder.submit(SAMPLE_INTENT, &cancel).await.unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("cancelled"), "got: {rendered}");
-        assert!(
-            rendered.contains("check it for this request before posting again"),
-            "got: {rendered}"
-        );
-    }
-
-    #[tokio::test]
     async fn a_submit_surfaces_the_child_s_error_code_and_message() {
         // A refusal like `wallet_unfunded` is the operator's to act on: an answer, not a pipe fault.
         let builder = spawn_stub(&stub_config(
         r#"read -r line; printf '{"id":0,"ok":false,"code":"wallet_unfunded","message":"no spendable dust"}\n'"#,
     ))
     .await;
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("wallet_unfunded"),
             "got: {err:#}"
@@ -1069,7 +934,7 @@ mod tests {
     .await;
 
         let error = builder
-            .submit(&[0xde, 0xad], &CancellationToken::new())
+            .submit(&[0xde, 0xad])
             .await
             .expect_err("an ambiguous child answer is not a receipt");
 
@@ -1090,10 +955,7 @@ mod tests {
         let builder = spawn_stub(&config).await;
 
         let started = Instant::now();
-        let err = builder
-            .submit(SAMPLE_INTENT, &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
         assert!(
             started.elapsed() >= Duration::from_millis(300),
@@ -1116,10 +978,7 @@ mod tests {
         let builder = spawn_stub(&config).await;
         counter.wait_for(1).await;
 
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
         // A build leaves nothing behind: sending its operator to the chain would be a false alarm.
         assert!(
@@ -1128,44 +987,10 @@ mod tests {
         );
 
         let bytes = builder
-            .build(&sample_request(), &CancellationToken::new())
+            .build(&sample_request())
             .await
             .expect("the hung child was killed, so this request gets a fresh one");
         assert_eq!(bytes, vec![0x0a]);
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_child_is_killed_so_a_later_request_does_not_wait_on_it() {
-        // Killing the cancelled child keeps its stale reply from becoming the NEXT caller's failure.
-        let counter = SpawnCounter::new("cancel-recovery");
-        let config = stub_config(&format!(
-            r#"{} if [ $n -eq 1 ]; then sleep 30; else read -r line; {} fi"#,
-            counter.prologue(),
-            ECHO_ID_REPLY
-        ));
-        let builder = spawn_stub(&config).await;
-        counter.wait_for(1).await;
-
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let cancelled_at = Instant::now();
-        let err = builder.build(&sample_request(), &cancel).await.unwrap_err();
-        assert!(format!("{err:#}").contains("cancelled"), "got: {err:#}");
-        assert!(
-            cancelled_at.elapsed() < Duration::from_secs(1),
-            "a cancelled build must return promptly, not wait on the child"
-        );
-
-        let started = Instant::now();
-        let bytes = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .expect("the cancelled child was killed, so this request gets a fresh one");
-        assert_eq!(bytes, vec![0x0a]);
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "answered only after waiting out the 5s timeout, so it was handed the cancelled child"
-        );
     }
 
     #[tokio::test]
@@ -1185,11 +1010,7 @@ mod tests {
         let callers: Vec<_> = (0..3)
             .map(|_| {
                 let builder = builder.clone();
-                tokio::spawn(async move {
-                    builder
-                        .build(&sample_request(), &CancellationToken::new())
-                        .await
-                })
+                tokio::spawn(async move { builder.build(&sample_request()).await })
             })
             .collect();
         for caller in callers {
@@ -1209,10 +1030,7 @@ mod tests {
         let builder = spawn_stub(&stub_config(&script)).await;
 
         let started = Instant::now();
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         // The raw failure is a broken pipe that names no command.
         assert!(
             format!("{err:#}").contains(&script),
@@ -1292,10 +1110,7 @@ mod tests {
         r#"read -r line; printf '{"id":0,"ok":false,"code":"bad_request","message":"%s"}\n' "$(env | awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' | sort | tr "\n" ",")""#,
     ))
     .await;
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         let rendered = format!("{err:#}");
         let (_, names) = rendered
             .split_once("[bad_request]: ")
@@ -1337,10 +1152,7 @@ mod tests {
         ))
         .await;
 
-        let err = builder
-            .build(&sample_request(), &CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("publisher stopped after readiness"),
             "the child's own explanation has to reach whoever asked: {err:#}"
@@ -1403,7 +1215,7 @@ mod tests {
     #[test]
     fn the_encoded_line_is_the_shape_the_child_validates() {
         let encoded: serde_json::Value = serde_json::from_str(
-            &encode_request(&sample_request(), 3, Operation::BuildIntent).unwrap(),
+            &encode_request(&sample_request(), 3, Operation::BuildIntent.wire_op()).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1484,11 +1296,11 @@ mod tests {
         builder.session.lock().await.as_mut().unwrap().next_id = 9_007_199_254_740_991;
 
         builder
-            .build(&sample_request(), &CancellationToken::new())
+            .build(&sample_request())
             .await
             .expect("the maximum safe id is valid");
         builder
-            .build(&sample_request(), &CancellationToken::new())
+            .build(&sample_request())
             .await
             .expect("the next id wraps to zero instead of crossing the JSON integer boundary");
     }
@@ -1501,7 +1313,7 @@ mod tests {
                     intent: "deadbeef".to_string(),
                 },
                 4,
-                Operation::Submit,
+                Operation::Submit.wire_op(),
             )
             .unwrap(),
         )

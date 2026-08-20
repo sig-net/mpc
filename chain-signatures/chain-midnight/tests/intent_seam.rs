@@ -12,7 +12,6 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_chain_midnight::{IntentGen, IntentRequest, WirePoint, WireSignature};
-use tokio_util::sync::CancellationToken;
 
 /// Any well-formed 32-byte hex address serves.
 const SINGLETON: &str = "5555555555555555555555555555555555555555555555555555555555555555";
@@ -130,7 +129,7 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_respond_intent() {
         .expect("spawn the builder");
 
     let bytes = builder
-        .build(&respond_request(), &CancellationToken::new())
+        .build(&respond_request())
         .await
         .expect("the builder answers");
 
@@ -151,13 +150,10 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
         .expect("spawn the builder");
 
     let bytes = builder
-        .build(
-            &IntentRequest {
-                circuit: "respondBidirectional",
-                ..respond_request()
-            },
-            &CancellationToken::new(),
-        )
+        .build(&IntentRequest {
+            circuit: "respondBidirectional",
+            ..respond_request()
+        })
         .await
         .expect("the builder answers");
 
@@ -181,13 +177,10 @@ async fn a_contract_missing_the_entry_point_arrives_as_the_child_s_own_refusal()
         .expect("an empty contract state serializes");
 
     let error = builder
-        .build(
-            &IntentRequest {
-                contract_state: hex::encode(&empty),
-                ..respond_request()
-            },
-            &CancellationToken::new(),
-        )
+        .build(&IntentRequest {
+            contract_state: hex::encode(&empty),
+            ..respond_request()
+        })
         .await
         .expect_err("a contract with no respond operation cannot be answered");
 

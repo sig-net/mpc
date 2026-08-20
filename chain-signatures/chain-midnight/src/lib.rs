@@ -20,5 +20,3 @@ pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;
-pub use rpc::{MidnightPublisherRpc, MidnightRpc};
-pub use state::decode_contract_state;

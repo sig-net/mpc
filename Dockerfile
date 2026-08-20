@@ -21,8 +21,8 @@ RUN chmod +x /opt/midnight-publisher/dist/main.js \
     && ln -s /opt/midnight-publisher/dist/main.js /usr/local/bin/midnight-publisher \
     && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/keys/respond.prover \
     && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/keys/respondBidirectional.prover \
-    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respond.zkir \
-    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respondBidirectional.zkir \
+    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respond.bzkir \
+    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respondBidirectional.bzkir \
     && test "$(printf '{"id":0,"op":"ready","protocolVersion":1}\n' | env -i \
       PATH=/usr/local/bin:/usr/bin:/bin \
       MIDNIGHT_PUB_NETWORK_ID=undeployed \
@@ -56,7 +56,6 @@ RUN update-ca-certificates
 COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
 COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
-RUN mpc-node --help > /dev/null
 
 # Create a script to start both Redis and the Rust app
 RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec env RUST_LOG=${RUST_LOG:-mpc=debug,helios=info} mpc-node start" > /start.sh \
