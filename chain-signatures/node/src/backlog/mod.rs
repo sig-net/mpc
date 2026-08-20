@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub use mpc_primitives::{BacklogEntry, Checkpoint};
+pub use mpc_primitives::{BacklogEntry, BacklogError, Checkpoint};
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -114,7 +114,7 @@ impl PendingRequests {
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
         let mut requests = HashMap::new();
         for entry in &checkpoint.pending_requests {
-            requests.insert(entry.request.id, entry.clone());
+            requests.insert(entry.sign_id(), entry.clone());
         }
         Ok(Self {
             requests,
@@ -355,7 +355,7 @@ impl Backlog {
             return Err(BacklogError::NotFound { chain, id: *id });
         };
 
-        Ok(entry.mark_publishing(publish)?)
+        entry.mark_publishing(publish)
     }
 
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
@@ -714,39 +714,6 @@ impl StateManager for Backlog {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
         self.watchers(&chain).read().await.all()
-    }
-}
-
-/// Errors that can occur when working with Backlog
-#[derive(Debug, thiserror::Error)]
-pub enum BacklogError {
-    #[error("request not found for chain {chain:?} with id {id:?}")]
-    NotFound { chain: Chain, id: SignId },
-    #[error("chain not initialized: {chain:?}")]
-    ChainNotInitialized { chain: Chain },
-    #[error("transaction not found")]
-    TransactionNotFound,
-    #[error("cannot mark publishing for current backlog state")]
-    InvalidPublishingTransition,
-    #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
-    InvalidAdvanceTransition,
-    #[error("cannot transition backlog entry to a bidirectional response request")]
-    InvalidBidirectionalResponseTransition,
-}
-
-impl From<mpc_primitives::BacklogError> for BacklogError {
-    fn from(err: mpc_primitives::BacklogError) -> Self {
-        match err {
-            mpc_primitives::BacklogError::InvalidAdvanceTransition => {
-                BacklogError::InvalidAdvanceTransition
-            }
-            mpc_primitives::BacklogError::InvalidPublishingTransition => {
-                BacklogError::InvalidPublishingTransition
-            }
-            mpc_primitives::BacklogError::InvalidBidirectionalResponseTransition => {
-                BacklogError::InvalidBidirectionalResponseTransition
-            }
-        }
     }
 }
 
@@ -1472,7 +1439,7 @@ mod tests {
             err,
             mpc_primitives::BacklogError::InvalidBidirectionalResponseTransition
         ));
-        assert_eq!(entry.request.id, original_sign_id);
+        assert_eq!(entry.sign_id(), original_sign_id);
         assert!(matches!(
             entry.status(),
             SignStatus::PendingExecution { .. }
@@ -1619,7 +1586,7 @@ mod tests {
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
         let restored_entry = &deserialized.pending_requests[0];
-        assert_eq!(restored_entry.request.id, SignId::new(tx1.request_id));
+        assert_eq!(restored_entry.sign_id(), SignId::new(tx1.request_id));
         let SignKind::SignBidirectional(ref event) = restored_entry.request.kind else {
             panic!("Expected SignBidirectional kind");
         };

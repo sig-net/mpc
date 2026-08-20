@@ -279,7 +279,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         "expected one pending request in checkpoint"
     );
     let checkpoint_height = checkpoint.block_height;
-    let phase1_request_id = checkpoint.pending_requests[0].request.id.request_id;
+    let phase1_request_id = checkpoint.pending_requests[0].sign_id().request_id;
     drop(indexer);
 
     // Verify the backlog actually persisted the block height

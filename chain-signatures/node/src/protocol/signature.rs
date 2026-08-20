@@ -286,7 +286,7 @@ impl SignGenerator {
                         ctx.governance.public_key,
                         &self.request,
                         &output,
-                        self.participants.clone(),
+                        &self.participants,
                         is_proposer,
                     ) {
                         if let Err(err) = ctx
@@ -342,7 +342,7 @@ fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
     request: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
-    participants: Vec<Participant>,
+    participants: &[Participant],
     is_proposer: bool,
 ) -> Option<PublishState> {
     let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
@@ -355,7 +355,10 @@ fn build_publish_state(
     .ok()?;
     let publish = PublishState {
         signature,
-        participants: crate::sign_bidirectional::from_cait_sith_participants(&participants),
+        participants: participants
+            .iter()
+            .map(|p| mpc_primitives::Participant(u32::from(*p)))
+            .collect(),
         is_proposer,
     };
 

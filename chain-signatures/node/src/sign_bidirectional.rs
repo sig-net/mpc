@@ -1,6 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes};
-use cait_sith::protocol::Participant as CaitSithParticipant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
@@ -12,20 +11,6 @@ pub use mpc_primitives::{
 use rlp::{Rlp, RlpStream};
 
 pub type RequestId = [u8; 32];
-
-pub fn to_cait_sith_participants(participants: &[Participant]) -> Vec<CaitSithParticipant> {
-    participants
-        .iter()
-        .map(|p| CaitSithParticipant::from(p.0))
-        .collect()
-}
-
-pub fn from_cait_sith_participants(participants: &[CaitSithParticipant]) -> Vec<Participant> {
-    participants
-        .iter()
-        .map(|p| Participant(u32::from(*p)))
-        .collect()
-}
 
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {

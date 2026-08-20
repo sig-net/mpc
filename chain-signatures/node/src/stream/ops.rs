@@ -86,7 +86,7 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
             public_key,
             sign_request,
             publish.signature,
-            crate::sign_bidirectional::to_cait_sith_participants(&publish.participants),
+            publish.participants,
         );
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }

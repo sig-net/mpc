@@ -341,10 +341,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(
-        latest.pending_requests[0].request.id,
-        SignId::new([1u8; 32])
-    );
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([1u8; 32]));
 
     // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
     let tx2 = dummy_backlog_entry(2, Chain::Solana);
@@ -360,10 +357,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(
-        latest.pending_requests[0].request.id,
-        SignId::new([2u8; 32])
-    );
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([2u8; 32]));
 
     Ok(())
 }

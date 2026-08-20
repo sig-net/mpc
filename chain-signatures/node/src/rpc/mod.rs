@@ -107,7 +107,15 @@ impl RpcChannel {
         participants: Vec<Participant>,
     ) {
         let sign_id = request.id;
-        let Some(action) = PublishAction::new(public_key, request, output, participants) else {
+        let Some(action) = PublishAction::new(
+            public_key,
+            request,
+            output,
+            participants
+                .into_iter()
+                .map(|p| mpc_primitives::Participant(u32::from(p)))
+                .collect(),
+        ) else {
             tracing::error!(
                 ?sign_id,
                 "failed to validate signature; trashing publish request",
@@ -127,7 +135,7 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: Arc<IndexedSignRequest>,
         signature: Signature,
-        participants: Vec<Participant>,
+        participants: Vec<mpc_primitives::Participant>,
     ) {
         let rpc = self.clone();
         tokio::spawn(async move {
@@ -720,7 +728,6 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{

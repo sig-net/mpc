@@ -103,7 +103,7 @@ impl Checkpoints {
     /// Captures the current request state as a deterministic checkpoint.
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
         let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
-        pending_requests.sort_by_key(|entry| entry.request.id);
+        pending_requests.sort_by_key(|entry| entry.sign_id());
 
         let mut cumulative = sha3::Sha3_256::new();
         for entry in &pending_requests {

@@ -82,6 +82,12 @@ impl SignStatus {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BacklogError {
+    #[error("request not found for chain {chain:?} with id {id:?}")]
+    NotFound { chain: Chain, id: SignId },
+    #[error("chain not initialized: {chain:?}")]
+    ChainNotInitialized { chain: Chain },
+    #[error("transaction not found")]
+    TransactionNotFound,
     #[error("cannot advance sign request: status must be pending generation or publishing")]
     InvalidAdvanceTransition,
     #[error("cannot mark publishing: status must be pending generation")]
@@ -261,7 +267,7 @@ impl Checkpoint {
         hasher.update(self.chain.caip2_chain_id().as_bytes());
         hasher.update(self.block_height.to_le_bytes());
         for entry in &self.pending_requests {
-            hasher.update(entry.request.id.request_id);
+            hasher.update(entry.sign_id().request_id);
         }
         hasher.update(self.cumulative_digest);
         hasher.finalize().into()
