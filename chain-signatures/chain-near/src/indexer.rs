@@ -4,6 +4,7 @@ use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignCommand, SignId};
 use mpc_utils::time::current_unix_timestamp;
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -187,7 +188,11 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(request)).await {
+        if let Err(err) = ctx
+            .sign_tx
+            .send(SignCommand::Request(Arc::new(request)))
+            .await
+        {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
     }

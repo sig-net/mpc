@@ -1,16 +1,19 @@
+mod checkpoints;
 pub mod consensus;
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+pub(crate) use checkpoints::CheckpointError;
+use checkpoints::Checkpoints;
 
 use anyhow::Context;
+use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PendingTx,
-    SignId, SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
+    SignKind,
 };
-use sha3::Digest;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -105,43 +108,9 @@ impl PendingRequests {
         self.processed_block_height = Some(height);
     }
 
+    #[cfg(test)]
     fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        let mut encoded = self
-            .requests
-            .iter()
-            .map(|(&sign_id, entry)| {
-                let mut transaction = Vec::new();
-                ciborium::ser::into_writer(entry, &mut transaction)
-                    .expect("serialize backlog entry for checkpoint");
-                let consensus_tag = entry.status().consensus_tag();
-                (
-                    PendingTx {
-                        sign_id,
-                        transaction,
-                    },
-                    consensus_tag,
-                )
-            })
-            .collect::<Vec<_>>();
-        encoded.sort_by_key(|(pending, _)| pending.sign_id);
-
-        let mut cumulative = sha3::Sha3_256::new();
-        for (_, consensus_tag) in &encoded {
-            cumulative.update([*consensus_tag]);
-        }
-        let cumulative_digest = cumulative.finalize().into();
-
-        let pending_requests = encoded
-            .into_iter()
-            .map(|(pending, _)| pending)
-            .collect::<Vec<_>>();
-
-        Checkpoint {
-            chain,
-            block_height: self.processed_block_height.unwrap_or(0),
-            pending_requests,
-            cumulative_digest,
-        }
+        Checkpoints::snapshot(self, chain)
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
@@ -205,17 +174,11 @@ impl ExecutionWatchers {
 /// publish queues.
 #[derive(Debug, Clone)]
 pub struct Backlog {
-    /// Storage for checkpoints, which can be in-memory or persisted to disk
-    pub(crate) storage: CheckpointStorage,
+    checkpoints: Checkpoints,
     /// Pending requests indexed by chain
-    requests: Arc<HashMap<Chain, RwLock<PendingRequests>>>,
+    requests: Arc<EnumMap<Chain, RwLock<PendingRequests>>>,
     /// Execution watchers indexed by chain
-    execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
-    /// Unconfirmed checkpoints pending MPC signing consensus.
-    /// Size is capped by MAX_PENDING_CHECKPOINTS to provide backpressure.
-    /// When full, new checkpoint creation is stalled until a slot opens.
-    /// This is the single in-memory checkpoint store (no separate historical).
-    pending_checkpoints: Arc<HashMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
+    execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
 }
@@ -231,57 +194,30 @@ impl Backlog {
         Self::persisted(CheckpointStorage::in_memory())
     }
 
-    /// Initialize the backlog with storage and pre-allocate maps for all chains
+    /// Initialize the backlog with storage for all chains
     pub fn persisted(storage: CheckpointStorage) -> Self {
-        let mut requests = HashMap::new();
-        let mut execution_watchers = HashMap::new();
-        let mut pending_checkpoints = HashMap::new();
-
-        // Pre-allocate the maps for all chains
-        for chain in Chain::iter() {
-            requests.insert(chain, RwLock::new(PendingRequests::new()));
-            execution_watchers.insert(chain, RwLock::new(ExecutionWatchers::default()));
-            pending_checkpoints.insert(chain, RwLock::new(BTreeMap::new()));
-        }
-
         Self {
-            storage,
-            requests: Arc::new(requests),
-            execution_watchers: Arc::new(execution_watchers),
-            pending_checkpoints: Arc::new(pending_checkpoints),
+            checkpoints: Checkpoints::new(storage),
+            requests: Arc::default(),
+            execution_watchers: Arc::default(),
             total_pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// Get the pending requests for a specific chain.
-    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
     fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
-        self.requests
-            .get(chain)
-            .expect("chain should be initialized within `persisted` method")
+        &self.requests[*chain]
     }
 
     /// Get the execution watchers for a specific chain.
-    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
     fn watchers(&self, chain: &Chain) -> &RwLock<ExecutionWatchers> {
-        self.execution_watchers
-            .get(chain)
-            .expect("chain should be initialized within `persisted` method")
-    }
-
-    /// Get the pending (unconfirmed) checkpoints for a specific chain.
-    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
-    #[inline]
-    fn pending_checkpoints(&self, chain: &Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
-        self.pending_checkpoints
-            .get(chain)
-            .expect("chain should be initialized within `persisted` method")
+        &self.execution_watchers[*chain]
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
+    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(request);
@@ -339,22 +275,16 @@ impl Backlog {
             .set(len as i64);
     }
 
-    fn observe_pending_checkpoints(&self, chain: Chain, len: usize) {
-        crate::metrics::requests::PENDING_CHECKPOINTS
-            .with_label_values(&[chain.as_str()])
-            .set(len as i64);
-    }
-
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
-    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
+    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
         let pending = self.pending(&chain).write().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| entry.request.clone())
+            .map(|entry| Arc::clone(&entry.request))
             .collect();
 
         requeueable.sort_by(|left, right| {
@@ -371,7 +301,7 @@ impl Backlog {
     pub async fn publishable_requests(
         &self,
         chain: Chain,
-    ) -> Vec<(IndexedSignRequest, PublishState)> {
+    ) -> Vec<(Arc<IndexedSignRequest>, PublishState)> {
         let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
@@ -380,7 +310,7 @@ impl Backlog {
             .filter_map(|entry| match entry.status() {
                 SignStatus::PendingPublish { publish }
                 | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((entry.request.clone(), publish))
+                    Some((Arc::clone(&entry.request), publish))
                 }
                 _ => None,
             })
@@ -455,7 +385,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -471,7 +401,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<BacklogEntry, BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -625,17 +555,24 @@ impl Backlog {
         if height / interval > prev / interval {
             let tx_count = pending.len();
             drop(pending);
-            if let Some(checkpoint) = self.checkpoint(chain).await {
-                tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
-                Some(checkpoint)
-            } else {
-                tracing::warn!(
-                    ?chain,
-                    height,
-                    tx_count,
-                    "checkpoint creation stalled (pending cap reached)"
-                );
-                None
+            match self.checkpoint(chain).await {
+                Ok(checkpoint) => {
+                    tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
+                    Some(checkpoint)
+                }
+                Err(CheckpointError::PendingCap { .. }) => {
+                    tracing::warn!(
+                        ?chain,
+                        height,
+                        tx_count,
+                        "checkpoint creation stalled (pending cap reached)"
+                    );
+                    None
+                }
+                Err(err @ CheckpointError::Storage { .. }) => {
+                    tracing::error!(?chain, %err, "failed to create checkpoint");
+                    None
+                }
             }
         } else {
             None
@@ -644,75 +581,61 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain.
     ///
-    /// Returns `None` if the pending checkpoint cap has been reached (stalling).
-    /// Persists only when a consensus confirmation arrives via `on_consensus_confirmed`.
-    pub async fn checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        let pending = self.pending_checkpoints(&chain).read().await;
-        if pending.len() >= MAX_PENDING_CHECKPOINTS {
-            tracing::warn!(
-                ?chain,
-                count = pending.len(),
-                "pending checkpoint cap reached; stalling checkpoint creation"
-            );
-            return None;
-        }
-        drop(pending);
-
-        let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
-
-        let len = {
-            let mut pending = self.pending_checkpoints(&chain).write().await;
-            pending.insert(checkpoint.block_height, checkpoint.clone());
-            pending.len()
+    pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
+        let checkpoint = {
+            let requests = self.pending(&chain).read().await;
+            Checkpoints::snapshot(&requests, chain)
         };
-        self.observe_pending_checkpoints(chain, len);
-
-        Some(checkpoint)
+        self.checkpoints.persist_pending(&checkpoint).await?;
+        Ok(checkpoint)
     }
 
-    /// Called when consensus confirms a checkpoint (via the watcher).
-    /// Removes it from pending and persists to storage as the latest consensus checkpoint.
-    pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
-        // Remove from pending checkpoints (frees a slot for future checkpoints)
-        let len = {
-            let mut pending = self.pending_checkpoints(&chain).write().await;
-            pending.retain(|&height, _| height > checkpoint.block_height);
-            pending.len()
-        };
-        self.observe_pending_checkpoints(chain, len);
+    /// Confirm a locally available checkpoint against an on-chain consensus digest.
+    ///
+    /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
+    /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
+    /// storage was unavailable.
+    pub async fn confirm_consensus(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Result<bool, CheckpointError> {
+        self.checkpoints.confirm(chain, digest).await
+    }
 
-        // Persist as the latest consensus checkpoint
-        if let Err(err) = self.storage.persist(checkpoint).await {
-            tracing::warn!(?chain, %err, "failed to persist consensus checkpoint");
-        }
+    /// Load the durable checkpoint state and return the newest checkpoint.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        self.checkpoints.load_local(chain).await
+    }
 
-        tracing::info!(
-            ?chain,
-            height = checkpoint.block_height,
-            "consensus checkpoint confirmed and persisted"
-        );
+    /// Replace the local backlog with a consensus checkpoint after divergence.
+    async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        // Decode the checkpoint before the durable write so a malformed peer
+        // checkpoint cannot leave storage regressed while memory stays put.
+        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+        self.checkpoints.regress(&checkpoint).await?;
+        self.apply_checkpoint(checkpoint, restored).await;
+        Ok(())
     }
 
     /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        {
-            let pending = self.pending_checkpoints(&chain).read().await;
-            if let Some(cp) = pending.values().next_back().cloned() {
-                return Some(cp);
-            }
-        }
-        self.storage.load_latest(chain).await.ok().flatten()
+        self.checkpoints.latest(chain).await
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
     pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
-        let pending = self.pending_checkpoints(&chain).read().await;
-        pending.len() < MAX_PENDING_CHECKPOINTS
+        self.checkpoints.has_slot(chain).await
     }
 
     /// Number of pending checkpoints for a chain.
     pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
-        self.pending_checkpoints(&chain).read().await.len()
+        self.checkpoints.count(chain).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_storage(&self) -> &CheckpointStorage {
+        self.checkpoints.storage()
     }
 
     /// Find a checkpoint by its consensus digest.
@@ -721,25 +644,19 @@ impl Backlog {
         chain: Chain,
         digest: [u8; 32],
     ) -> Option<Checkpoint> {
-        {
-            let pending = self.pending_checkpoints(&chain).read().await;
-            for cp in pending.values() {
-                if cp.digest() == digest {
-                    return Some(cp.clone());
-                }
-            }
-        }
-        if let Ok(Some(latest)) = self.storage.load_latest(chain).await {
-            if latest.digest() == digest {
-                return Some(latest);
-            }
-        }
-        None
+        self.checkpoints.find(chain, digest).await
     }
 
     /// Recover backlog state from a checkpoint.
     /// This is called when a node restarts or when it needs to align/regress to consensus.
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+        self.apply_checkpoint(checkpoint, restored).await;
+        Ok(())
+    }
+
+    /// Apply an already-decoded checkpoint to the backlog.
+    async fn apply_checkpoint(&self, checkpoint: Checkpoint, restored: PendingRequests) {
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
@@ -749,30 +666,26 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // Clear all pending (unconfirmed) checkpoints for this chain.
-        // Any checkpoint that was waiting for consensus is now obsolete.
-        self.pending_checkpoints(&chain).write().await.clear();
-        self.observe_pending_checkpoints(chain, 0);
-
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
             let previous_height = pending.processed_block_height().unwrap_or(0);
 
             // Execution watchers are ephemeral, we need to get all the execution watchers here
             let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(&checkpoint)?;
-            let restored = pending.len();
+            let restored_len = restored.len();
+            *pending = restored;
 
             // Update total pending count based on the difference between cleared and restored requests
             self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending.fetch_add(restored, Ordering::Relaxed);
+            self.total_pending
+                .fetch_add(restored_len, Ordering::Relaxed);
 
             tracing::info!(
                 ?chain,
                 old_block = previous_height,
                 new_block = checkpoint_height,
                 cleared_requests = cleared,
-                restored_requests = restored,
+                restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
             pending.pending_executions()
@@ -793,8 +706,6 @@ impl Backlog {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
-
-        Ok(())
     }
 }
 
@@ -839,23 +750,23 @@ pub enum BacklogError {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
 }
 
 impl BacklogEntry {
-    pub fn new(request: IndexedSignRequest) -> Self {
+    pub fn new(request: Arc<IndexedSignRequest>) -> Self {
         Self {
             request,
             status: SignStatus::PendingGeneration,
         }
     }
 
-    pub fn with_status(request: IndexedSignRequest, status: SignStatus) -> Self {
+    pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
         Self { request, status }
     }
 
-    pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
+    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: BidirectionalTx) -> Self {
         Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
@@ -888,7 +799,7 @@ impl BacklogEntry {
 
     /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_request(&mut self, request: IndexedSignRequest) {
+    pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
         self.request = request;
     }
 
@@ -902,7 +813,7 @@ impl BacklogEntry {
     /// identifiers diverge, which is the only way to reach this rejection.
     fn transition_to_bidirectional_response(
         &mut self,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
         if self.request.id != request.id
             || !matches!(&request.kind, SignKind::RespondBidirectional(_))
@@ -1084,8 +995,14 @@ mod tests {
         args: SignArgs,
         kind: SignKind,
         unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    ) -> Arc<IndexedSignRequest> {
+        Arc::new(IndexedSignRequest::new(
+            sign_id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            kind,
+        ))
     }
 
     fn create_bidirectional_request(
@@ -1093,14 +1010,14 @@ mod tests {
         chain: Chain,
         dest: &str,
         unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::sign_bidirectional(
+    ) -> Arc<IndexedSignRequest> {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             chain,
             unix_timestamp_indexed,
             create_test_event(dest),
-        )
+        ))
     }
 
     fn create_execution_entry(
@@ -1109,19 +1026,37 @@ mod tests {
         status: SignStatus,
         dest: &str,
     ) -> BacklogEntry {
+        create_execution_entry_with_timestamp(tx, chain, status, dest, 0)
+    }
+
+    fn create_execution_entry_with_timestamp(
+        tx: BidirectionalTx,
+        chain: Chain,
+        status: SignStatus,
+        dest: &str,
+        unix_timestamp_indexed: u64,
+    ) -> BacklogEntry {
         let sign_id = SignId::new(tx.request_id);
-        let request = IndexedSignRequest::new(
+        let request = Arc::new(IndexedSignRequest::new(
             sign_id,
             create_test_args(tx.request_id[0]),
             chain,
-            0,
+            unix_timestamp_indexed,
             SignKind::SignBidirectional(create_test_event(dest)),
-        );
+        ));
 
         match status {
             SignStatus::PendingExecution { .. } => BacklogEntry::pending_execution(request, tx),
             status => BacklogEntry::with_status(request, status),
         }
+    }
+
+    /// Builds a checkpoint for a chain with exactly one backlog entry at height 100.
+    fn single_entry_checkpoint(entry: BacklogEntry) -> Checkpoint {
+        let mut pending = PendingRequests::new();
+        pending.insert(entry.sign_id(), entry);
+        pending.set_processed_block(100);
+        pending.checkpoint(Chain::Ethereum)
     }
 
     async fn insert_bidirectional_with_status(
@@ -1151,7 +1086,7 @@ mod tests {
                     },
                 );
                 backlog
-                    .set_request(chain, &sign_id, completion_request)
+                    .set_request(chain, &sign_id, Arc::new(completion_request))
                     .await
                     .unwrap();
                 backlog
@@ -1186,7 +1121,7 @@ mod tests {
                     },
                 );
                 backlog
-                    .set_request(chain, &sign_id, completion_request)
+                    .set_request(chain, &sign_id, Arc::new(completion_request))
                     .await
                     .unwrap();
                 backlog.set_status(chain, &sign_id, status).await;
@@ -1389,7 +1324,6 @@ mod tests {
         // Add some transactions
         let tx1 = create_test_tx(1);
         let tx2 = create_test_tx(2);
-        backlog.set_processed_block(Chain::Ethereum, 100).await;
 
         insert_bidirectional_with_status(
             &backlog,
@@ -1408,6 +1342,11 @@ mod tests {
         )
         .await;
 
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
         assert_eq!(checkpoint.block_height, 100);
         assert_eq!(checkpoint.chain, Chain::Ethereum);
@@ -1415,7 +1354,7 @@ mod tests {
         // Guard the checkpoint digest wire format; update only for intentional changes.
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("6512dd0dcc0adf84fdad988c04a24f320c8116ee4c194d8e4165f6bccb694017")
+            digest_hex("884b11ef5550724b788b7e29e9a07e7a6fd46f94d604e6d38bae71a36816b65e")
         );
     }
 
@@ -1477,152 +1416,106 @@ mod tests {
         assert_ne!(checkpoint1, checkpoint3);
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_digest_changes_after_initial_bidirectional_response() {
-        let tx = create_test_tx(7);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                pending_execution_status(&tx),
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        // The initial source-chain response is observable at this checkpoint's
-        // height, so nodes must agree whether it has happened.
-        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_digest_ignores_generation_vs_publish() {
-        let tx = create_test_tx(12);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
-    }
-
     #[test]
-    fn test_plain_request_digest_ignores_generation_vs_publish() {
-        let sign_id = SignId::new([20; 32]);
-        let request = create_indexed_request(
+    fn test_checkpoint_consensus_projection() {
+        let tx = create_test_tx(60);
+        let sign_id = SignId::new(tx.request_id);
+
+        // The digest commits only to the consensus projection of each entry's
+        // status (sorted by sign_id), not to the request or publish content.
+
+        // Initial source-chain phase: generation, and publishing by any proposer,
+        // all collapse to a single digest.
+        let generation = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+        ));
+        let publish = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(true),
+            },
+            "ethereum",
+        ));
+        let publish_other = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(false),
+            },
+            "ethereum",
+        ));
+        assert_eq!(generation.digest(), publish.digest());
+        assert_eq!(generation.digest(), publish_other.digest());
+
+        // Plain `Sign` requests follow the same initial-phase projection.
+        let plain = create_indexed_request(
             sign_id,
             Chain::Ethereum,
-            create_test_args(20),
+            create_test_args(60),
             SignKind::Sign,
             0,
         );
-
-        let mut pending_generation = PendingRequests::new();
-        pending_generation.insert(sign_id, BacklogEntry::new(request.clone()));
-        pending_generation.set_processed_block(100);
-
-        let mut pending_publish = PendingRequests::new();
-        pending_publish.insert(
-            sign_id,
-            BacklogEntry::with_status(
-                request,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-            ),
-        );
-        pending_publish.set_processed_block(100);
-
-        let generation_checkpoint = pending_generation.checkpoint(Chain::Ethereum);
-        let publish_checkpoint = pending_publish.checkpoint(Chain::Ethereum);
-        assert_eq!(generation_checkpoint.digest(), publish_checkpoint.digest());
-    }
-
-    #[test]
-    fn test_consensus_byte_ignores_publish_state() {
-        let sign_id = SignId::new([21; 32]);
-
-        // Only a signature's participants advance to publishing, so the two statuses
-        // must be indistinguishable in both the initial and the final response phase.
-        let mut initial_bidirectional = BacklogEntry::new(create_bidirectional_request(
-            sign_id,
-            Chain::Ethereum,
-            "ethereum",
-            0,
+        let plain_generation = single_entry_checkpoint(BacklogEntry::new(Arc::clone(&plain)));
+        let plain_publish = single_entry_checkpoint(BacklogEntry::with_status(
+            plain,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(true),
+            },
         ));
-        let initial_consensus_tag = initial_bidirectional.status().consensus_tag();
-        initial_bidirectional
-            .mark_publishing(test_publish_state(true))
-            .unwrap();
-        assert_eq!(
-            initial_bidirectional.status().consensus_tag(),
-            initial_consensus_tag
-        );
+        assert_eq!(plain_generation.digest(), plain_publish.digest());
 
+        // Post-initial phase: awaiting target-chain execution and the final
+        // response generation/publish states are not observable at the
+        // source-chain checkpoint height, so they share the checkpoint digest.
+        let execution = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+        ));
         let response_request = IndexedSignRequest::respond_bidirectional(
             sign_id,
-            create_test_args(21),
+            create_test_args(sign_id.request_id[0]),
             Chain::Ethereum,
             0,
             RespondBidirectionalTx {
-                tx_id: create_test_tx(21).id,
+                tx_id: tx.id,
                 output: vec![],
                 chain_ctx: None,
             },
         );
-        let mut final_response =
-            BacklogEntry::with_status(response_request, SignStatus::PendingGenerationBidirectional);
-        let final_consensus_tag = final_response.status().consensus_tag();
-        final_response
-            .mark_publishing(test_publish_state(true))
-            .unwrap();
-        assert_eq!(final_response.status().consensus_tag(), final_consensus_tag);
+        let gen_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
+            Arc::new(response_request.clone()),
+            SignStatus::PendingGenerationBidirectional,
+        ));
+        let pub_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
+            Arc::new(response_request),
+            SignStatus::PendingPublishBidirectional {
+                publish: test_publish_state(true),
+            },
+        ));
+        assert_eq!(
+            execution.digest(),
+            gen_bidirectional.digest(),
+            "PendingExecution must yield the same checkpoint digest as the final response generation state"
+        );
+        assert_eq!(
+            execution.digest(),
+            pub_bidirectional.digest(),
+            "PendingExecution must yield the same checkpoint digest as the final response publish state"
+        );
 
-        // The initial response is observable at this height; the two phases differ.
-        assert_ne!(initial_consensus_tag, final_consensus_tag);
+        // The initial source-chain phase is observable at this height and must
+        // still differ from the post-initial phase.
+        assert_ne!(
+            generation.digest(),
+            execution.digest(),
+            "the initial source-chain phase must remain distinct in the checkpoint"
+        );
     }
 
     #[test]
@@ -1648,7 +1541,7 @@ mod tests {
         );
 
         entry
-            .transition_to_bidirectional_response(response_request)
+            .transition_to_bidirectional_response(Arc::new(response_request))
             .unwrap();
 
         assert!(matches!(
@@ -1681,7 +1574,7 @@ mod tests {
         );
 
         let err = entry
-            .transition_to_bidirectional_response(response_request)
+            .transition_to_bidirectional_response(Arc::new(response_request))
             .unwrap_err();
 
         assert!(matches!(
@@ -1696,67 +1589,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_digest_ignores_publish_local_state() {
-        let tx = create_test_tx(9);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(false),
-                },
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
-    }
-
-    #[tokio::test]
     async fn test_checkpoint_digest_ignores_timestamp() {
         let tx = create_test_tx(8);
 
-        let entry1 = {
-            let mut e = create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            );
-            e.request.unix_timestamp_indexed = 1000;
-            e
-        };
-        let entry2 = {
-            let mut e = create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            );
-            e.request.unix_timestamp_indexed = 9999;
-            e
-        };
+        let entry1 = create_execution_entry_with_timestamp(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+            1000,
+        );
+        let entry2 = create_execution_entry_with_timestamp(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+            9999,
+        );
 
         let mut pending1 = PendingRequests::new();
         pending1.insert(SignId::new(tx.request_id), entry1);
@@ -1903,7 +1752,11 @@ mod tests {
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let recovered = Backlog::new();
-        recovered.storage.persist(&checkpoint).await.unwrap();
+        recovered
+            .checkpoint_storage()
+            .persist(&checkpoint)
+            .await
+            .unwrap();
         recovered
             .recover_by_checkpoint(checkpoint.clone())
             .await
@@ -2013,7 +1866,7 @@ mod tests {
                 },
             );
             recovered
-                .set_request(Chain::Solana, &sign_id, completion_request)
+                .set_request(Chain::Solana, &sign_id, Arc::new(completion_request))
                 .await
                 .expect("failed to store completion request");
             recovered
@@ -2055,7 +1908,7 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog.insert(Arc::new(completion_request)).await;
         backlog
             .set_status(
                 Chain::Solana,
@@ -2117,7 +1970,7 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
+        backlog.insert(Arc::new(completion_request)).await;
         backlog
             .set_status(
                 Chain::Solana,
@@ -2364,9 +2217,8 @@ mod tests {
         // 500 / 120 = 4 > 0, so a boundary was crossed.
         let cp = backlog
             .set_processed_block_interval(Chain::Solana, 500, 120)
-            .await;
-        assert!(cp.is_some());
-        let cp = cp.unwrap();
+            .await
+            .unwrap();
         assert_eq!(cp.block_height, 500);
         assert_eq!(cp.pending_requests.len(), 1);
     }
@@ -2502,7 +2354,7 @@ mod tests {
         );
 
         // Insert first time
-        backlog.insert(request.clone()).await;
+        backlog.insert(Arc::clone(&request)).await;
         assert_eq!(backlog.len(), 1);
 
         // Insert exactly the same ID again (overwrites)
@@ -2664,90 +2516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_stalls_at_cap() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let interval = chain.checkpoint_interval().unwrap();
-
-        // Fill pending to MAX_PENDING_CHECKPOINTS using set_processed_block
-        // which auto-creates checkpoints at interval boundaries.
-        for i in 1..=MAX_PENDING_CHECKPOINTS {
-            let h = i as u64 * interval;
-            assert!(
-                backlog.set_processed_block(chain, h).await.is_some(),
-                "auto-checkpoint at height {} should succeed",
-                h
-            );
-        }
-
-        // Next checkpoint should be None (stalled)
-        let h = (MAX_PENDING_CHECKPOINTS as u64 + 1) * interval;
-        assert!(
-            backlog.set_processed_block(chain, h).await.is_none(),
-            "checkpoint should stall at cap"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_unblocks_after_confirmation() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let interval = chain.checkpoint_interval().unwrap();
-
-        // Fill pending to cap using set_processed_block
-        for i in 1..=MAX_PENDING_CHECKPOINTS {
-            let h = i as u64 * interval;
-            backlog.set_processed_block(chain, h).await.unwrap();
-        }
-
-        // Confirm one checkpoint → frees a slot
-        let cp = backlog.latest_checkpoint(chain).await.unwrap();
-        backlog.on_consensus_confirmed(chain, &cp).await;
-
-        // Should be able to create a new checkpoint now
-        let h = (MAX_PENDING_CHECKPOINTS as u64 + 1) * interval;
-        assert!(
-            backlog.set_processed_block(chain, h).await.is_some(),
-            "checkpoint should unblock after confirmation"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_on_consensus_confirmed_removes_from_pending() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let interval = chain.checkpoint_interval().unwrap();
-
-        // Use set_processed_block at interval boundaries which auto-creates
-        // checkpoints. Each call creates one checkpoint.
-        let cp1 = backlog.set_processed_block(chain, interval).await.unwrap();
-        let cp2 = backlog
-            .set_processed_block(chain, 2 * interval)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            2,
-            "two checkpoints should be pending"
-        );
-
-        // Confirm first → pending has 1
-        backlog.on_consensus_confirmed(chain, &cp1).await;
-        assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 1);
-        assert_eq!(
-            backlog.latest_checkpoint(chain).await.unwrap().block_height,
-            2 * interval,
-            "latest pending is the confirmed checkpoint"
-        );
-
-        // Confirm second → pending has 0
-        backlog.on_consensus_confirmed(chain, &cp2).await;
-        assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_recovery_clears_pending_checkpoints() {
+    async fn test_recovery_keeps_pending_checkpoints() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
         let interval = chain.checkpoint_interval().unwrap();
@@ -2759,12 +2528,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
+            backlog.pending_checkpoint_count(chain).await,
             2,
             "two checkpoints should be pending"
         );
 
-        // Recover to a new checkpoint (simulating regression)
+        // Recover the request backlog without discarding checkpoints that may
+        // still be needed to match an on-chain consensus digest.
         let fresh = Backlog::new();
         let recovery_cp = fresh.set_processed_block(chain, interval / 2).await;
         // interval/2 is not a multiple of interval → no auto-checkpoint
@@ -2773,102 +2543,11 @@ mod tests {
         let fresh_cp = fresh.checkpoint(chain).await.unwrap();
         assert_eq!(fresh_cp.block_height, interval / 2);
 
-        backlog.storage.persist(&fresh_cp).await.unwrap();
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
         assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            0,
-            "pending checkpoints should be completely cleared"
+            backlog.pending_checkpoint_count(chain).await,
+            2,
+            "pending checkpoints should remain available for consensus matching"
         );
-        assert_eq!(
-            backlog.latest_checkpoint(chain).await.unwrap().block_height,
-            interval / 2,
-            "latest should be the recovered checkpoint"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_on_consensus_confirmed_evicts_older_pending_checkpoints() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let interval = chain.checkpoint_interval().unwrap();
-
-        // Generate 3 checkpoints. Each call creates one checkpoint.
-        let _cp1 = backlog.set_processed_block(chain, interval).await.unwrap();
-        let cp2 = backlog
-            .set_processed_block(chain, 2 * interval)
-            .await
-            .unwrap();
-        let cp3 = backlog
-            .set_processed_block(chain, 3 * interval)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            3,
-            "three checkpoints should be pending"
-        );
-
-        // Confirming the second checkpoint should evict the first and second
-        backlog.on_consensus_confirmed(chain, &cp2).await;
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            1,
-            "only checkpoints newer than cp2 should remain"
-        );
-
-        // Verify remaining is cp3
-        assert!(backlog
-            .pending_checkpoints(&chain)
-            .read()
-            .await
-            .contains_key(&(3 * interval)));
-
-        // Verify latest_checkpoint returns cp3 (highest pending)
-        assert_eq!(
-            backlog.latest_checkpoint(chain).await.unwrap().block_height,
-            3 * interval,
-        );
-
-        // Confirming the third checkpoint should evict cp3 (0 pending)
-        backlog.on_consensus_confirmed(chain, &cp3).await;
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            0,
-            "all checkpoints confirmed, pending should be empty"
-        );
-
-        // Verify latest_checkpoint fallback to storage returns cp3
-        assert_eq!(
-            backlog.latest_checkpoint(chain).await.unwrap().block_height,
-            3 * interval,
-        );
-    }
-
-    #[tokio::test]
-    async fn test_find_checkpoint_by_digest_falls_back_to_storage() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let interval = chain.checkpoint_interval().unwrap();
-
-        let cp = backlog.set_processed_block(chain, interval).await.unwrap();
-        let digest = cp.digest();
-
-        // Confirm it (removes from pending, persists to storage)
-        backlog.on_consensus_confirmed(chain, &cp).await;
-
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            0,
-            "should not be in pending"
-        );
-
-        // Should still be findable by digest
-        let found = backlog
-            .find_checkpoint_by_digest(chain, digest)
-            .await
-            .unwrap();
-        assert_eq!(found.block_height, interval);
     }
 }
