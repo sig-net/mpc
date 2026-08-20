@@ -198,7 +198,7 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
+    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -347,9 +347,8 @@ mod tests {
             },
         ];
 
-        let chain = Chain::Ethereum;
-
         for case in cases {
+            let chain = Chain::Ethereum;
             let mut fixture = AlignFixture::new(None);
 
             // 1. Setup local checkpoints
@@ -388,10 +387,18 @@ mod tests {
             let mut peer_digest = [0u8; 32];
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
-                    vec![PendingTx {
-                        sign_id: SignId::new([1u8; 32]),
-                        transaction: vec![1, 2, 3],
-                    }]
+                    vec![Arc::new(IndexedSignRequest::sign(
+                        SignId::new([1u8; 32]),
+                        SignArgs {
+                            entropy: [1u8; 32],
+                            epsilon: k256::Scalar::ONE,
+                            payload: k256::Scalar::ONE,
+                            path: "test".to_string(),
+                            key_version: 0,
+                        },
+                        chain,
+                        0,
+                    ))]
                 } else {
                     vec![]
                 };

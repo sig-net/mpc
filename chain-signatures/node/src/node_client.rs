@@ -94,6 +94,7 @@ impl NodeClient {
     pub fn new(options: &Options) -> Self {
         Self {
             http: reqwest::Client::builder()
+                .no_proxy()
                 .timeout(Duration::from_millis(options.timeout))
                 .build()
                 .unwrap(),

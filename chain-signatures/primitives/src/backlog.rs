@@ -2,62 +2,22 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use k256::{Scalar, Secp256k1};
 use serde::{Deserialize, Serialize};
 use sha3::Digest;
-use std::fmt;
+use std::sync::Arc;
 
-use crate::{Chain, SignId};
-
-/// Transaction information tracked across checkpoints.
-#[derive(
-    BorshDeserialize,
-    BorshSerialize,
-    Serialize,
-    Deserialize,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
-pub struct PendingTx {
-    pub sign_id: SignId,
-    #[serde(with = "serde_bytes")]
-    pub transaction: Vec<u8>,
-}
-
-impl fmt::Debug for PendingTx {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PendingTx")
-            .field("sign_id", &self.sign_id)
-            .finish()
-    }
-}
+use crate::{Chain, IndexedSignRequest, SignId};
 
 /// A checkpoint represents the backlog state at a specific block height.
-#[derive(
-    BorshDeserialize,
-    BorshSerialize,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
-    pub pending_requests: Vec<PendingTx>,
+    pub pending_requests: Vec<Arc<IndexedSignRequest>>,
     /// Commitment to each pending request's checkpoint-consensus phase.
     ///
     /// This is computed by hashing each request's checkpoint-consensus phase
     /// in the same sorted order as `pending_requests`. It lets the checkpoint
     /// digest commit to cross-node request progress without hashing
-    /// `transaction`, which is the full recovery payload and may include
-    /// node-local fields.
+    /// the full recovery payload, which may include node-local fields.
     ///
     /// The phase distinguishes only "awaiting the initial response on this chain"
     /// from "past it". Generation versus publication is local progress that only a
@@ -90,8 +50,8 @@ impl Checkpoint {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(self.chain.caip2_chain_id().as_bytes());
         hasher.update(self.block_height.to_le_bytes());
-        for pending in &self.pending_requests {
-            hasher.update(pending.sign_id.request_id);
+        for req in &self.pending_requests {
+            hasher.update(req.id.request_id);
         }
         hasher.update(self.cumulative_digest);
         hasher.finalize().into()

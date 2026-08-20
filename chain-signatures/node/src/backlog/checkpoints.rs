@@ -2,7 +2,7 @@ use super::{PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
-use mpc_primitives::{Chain, Checkpoint, PendingTx};
+use mpc_primitives::{Chain, Checkpoint};
 use sha3::Digest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -102,34 +102,22 @@ impl Checkpoints {
 
     /// Captures the current request state as a deterministic checkpoint.
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
-        let mut encoded = requests
+        let mut pending_requests = requests
             .requests
-            .iter()
-            .map(|(&sign_id, entry)| {
-                let mut transaction = Vec::new();
-                ciborium::ser::into_writer(entry, &mut transaction)
-                    .expect("serialize backlog entry for checkpoint");
-                let consensus_tag = entry.status().consensus_tag();
-                (
-                    PendingTx {
-                        sign_id,
-                        transaction,
-                    },
-                    consensus_tag,
-                )
-            })
+            .values()
+            .map(|entry| (Arc::clone(&entry.request), entry.status().consensus_tag()))
             .collect::<Vec<_>>();
-        encoded.sort_by_key(|(pending, _)| pending.sign_id);
+        pending_requests.sort_by_key(|(req, _)| req.id);
 
         let mut cumulative = sha3::Sha3_256::new();
-        for (_, consensus_tag) in &encoded {
+        for (_, consensus_tag) in &pending_requests {
             cumulative.update([*consensus_tag]);
         }
 
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
-            pending_requests: encoded.into_iter().map(|(pending, _)| pending).collect(),
+            pending_requests: pending_requests.into_iter().map(|(req, _)| req).collect(),
             cumulative_digest: cumulative.finalize().into(),
         }
     }

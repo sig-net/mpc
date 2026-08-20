@@ -6,7 +6,6 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
-use anyhow::Context;
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
@@ -114,21 +113,14 @@ impl PendingRequests {
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
-        fn decode(pending: &mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
-            let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
-                .with_context(|| {
-                    format!(
-                        "failed to deserialize pending backlog entry for sign_id {:?}",
-                        pending.sign_id
-                    )
-                })?;
-            Ok((pending.sign_id, entry))
-        }
-
         let mut requests = HashMap::new();
-        for pending_tx in &checkpoint.pending_requests {
-            let (sign_id, tx) = decode(pending_tx)?;
-            requests.insert(sign_id, tx);
+        for req in &checkpoint.pending_requests {
+            let status = match &req.kind {
+                SignKind::Sign | SignKind::SignBidirectional(_) => SignStatus::PendingGeneration,
+                SignKind::RespondBidirectional(_) => SignStatus::PendingGenerationBidirectional,
+            };
+            let entry = BacklogEntry::with_status(Arc::clone(req), status);
+            requests.insert(req.id, entry);
         }
         Ok(Self {
             requests,
@@ -1767,27 +1759,19 @@ mod tests {
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
-        let (sign_id, restored_tx) = {
-            let pending = &deserialized.pending_requests[0];
-            let backlog_entry: BacklogEntry =
-                ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
-            let tx = backlog_entry
-                .execution_tx()
-                .cloned()
-                .expect("Expected pending execution entry");
-            (pending.sign_id, tx)
+        let restored_req = &deserialized.pending_requests[0];
+        assert_eq!(restored_req.id, SignId::new(tx1.request_id));
+        let SignKind::SignBidirectional(ref event) = restored_req.kind else {
+            panic!("Expected SignBidirectional kind");
         };
-        assert_eq!(sign_id, SignId::new(tx1.request_id));
-        assert_eq!(
-            restored_tx.serialized_transaction,
-            tx1.serialized_transaction
-        );
+        assert_eq!(event.dest, "ethereum");
     }
 
     #[tokio::test]
-    async fn test_recover_restores_execution_watchers() {
+    async fn test_recover_restores_pending_requests() {
         let backlog = Backlog::new();
         let tx = create_test_tx(6);
+        let sign_id = SignId::new(tx.request_id);
 
         insert_bidirectional_with_status(
             &backlog,
@@ -1807,9 +1791,11 @@ mod tests {
             .await
             .expect("failed to recover");
 
-        let watchers = recovered.get_execution_watchers(Chain::Ethereum).await;
-        assert_eq!(watchers.len(), 1);
-        assert!(watchers.contains_key(&tx.id));
+        let entry = recovered
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("entry should exist");
+        assert_eq!(entry.sign_id(), sign_id);
     }
 
     #[tokio::test]
