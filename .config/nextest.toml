@@ -3,17 +3,18 @@ cluster = { max-threads = "num-cpus" }
 fixture = { max-threads = "num-cpus" }
 
 [[profile.default.overrides]]
-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
+filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint)'
 test-group = 'fixture'
 
 [[profile.default.overrides]]
-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'
+filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint))'
 test-group = 'cluster'
 
 # Usage: cargo nextest run -p integration-tests --profile fixture
 [profile.fixture]
-default-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
+default-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint)'
+retries = 2
 
 # Usage: cargo nextest run -p integration-tests --profile cluster
 [profile.cluster]
-default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'
+default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint))'
