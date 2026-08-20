@@ -10,13 +10,13 @@ use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
 
-use cait_sith::protocol::{Action, InitializationError, Participant as ProtocolParticipant};
+use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{IndexedSignRequest, Participant};
+use mpc_primitives::IndexedSignRequest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -99,12 +99,8 @@ impl SignGenerator {
             k: k * delta.invert().unwrap(),
             sigma: (sigma + request.args.epsilon * k) * delta.invert().unwrap(),
         };
-        let protocol_participants: Vec<ProtocolParticipant> = participants
-            .iter()
-            .map(|p| ProtocolParticipant::from(p.0))
-            .collect();
         let protocol = Box::new(cait_sith::sign(
-            &protocol_participants,
+            &participants,
             ctx.governance.me,
             derive_key(ctx.governance.public_key, request.args.epsilon),
             output,
@@ -171,7 +167,7 @@ impl SignGenerator {
     /// Poke-drive the protocol to completion: relay messages, and on `Return`
     /// publish the signature (proposer) and mark the request publishing.
     pub(crate) async fn run(mut self, ctx: &GenerateCtx) -> Result<(), SignError> {
-        let me = Participant(u32::from(ctx.governance.me));
+        let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
         let sign_id = self.request.id;
@@ -221,9 +217,8 @@ impl SignGenerator {
                             crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                         }
                     })?;
-                    let from = Participant(u32::from(msg.from));
-                    if !seen.contains(&from) {
-                        seen.push(from);
+                    if !seen.contains(&msg.from) {
+                        seen.push(msg.from);
                     }
                     self.protocol.message(msg.from, msg.data);
                 }
@@ -234,14 +229,14 @@ impl SignGenerator {
                         }
                         ctx.msg
                             .send(
-                                ctx.governance.me,
-                                ProtocolParticipant::from(to.0),
+                                me,
+                                to,
                                 SignatureMessage {
                                     id: sign_id,
-                                    proposer: ProtocolParticipant::from(self.proposer.0),
+                                    proposer: self.proposer,
                                     presignature_id: self.dropper.id,
                                     epoch,
-                                    from: ctx.governance.me,
+                                    from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
                                 },
@@ -252,14 +247,14 @@ impl SignGenerator {
                 Action::SendPrivate(to, data) => {
                     ctx.msg
                         .send(
-                            ctx.governance.me,
+                            me,
                             to,
                             SignatureMessage {
                                 id: sign_id,
-                                proposer: ProtocolParticipant::from(self.proposer.0),
+                                proposer: self.proposer,
                                 presignature_id,
                                 epoch,
-                                from: ctx.governance.me,
+                                from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
                             },
@@ -406,9 +401,7 @@ impl PendingPresignature {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
-                if let Some(presignature) =
-                    storage.take(id, ProtocolParticipant::from(owner.0)).await
-                {
+                if let Some(presignature) = storage.take(id, owner).await {
                     break presignature;
                 };
             }
@@ -433,35 +426,27 @@ impl PendingPresignature {
 mod tests {
     use super::*;
 
+    fn p(i: u32) -> Participant {
+        Participant::from(i)
+    }
+
     #[test]
     fn awaited_peers_returns_participants_not_yet_seen() {
-        let participants = vec![
-            Participant::from(1),
-            Participant::from(2),
-            Participant::from(3),
-            Participant::from(4),
-        ];
-        let seen = vec![Participant::from(1), Participant::from(3)];
-        assert_eq!(
-            awaited_peers(&participants, &seen),
-            vec![Participant::from(2), Participant::from(4)]
-        );
+        let participants = vec![p(1), p(2), p(3), p(4)];
+        let seen = vec![p(1), p(3)];
+        assert_eq!(awaited_peers(&participants, &seen), vec![p(2), p(4)]);
     }
 
     #[test]
     fn awaited_peers_empty_when_all_seen() {
-        let participants = vec![Participant::from(1), Participant::from(2)];
-        let seen = vec![
-            Participant::from(2),
-            Participant::from(1),
-            Participant::from(9),
-        ];
+        let participants = vec![p(1), p(2)];
+        let seen = vec![p(2), p(1), p(9)];
         assert!(awaited_peers(&participants, &seen).is_empty());
     }
 
     #[test]
     fn awaited_peers_is_all_when_nothing_seen() {
-        let participants = vec![Participant::from(1), Participant::from(2)];
+        let participants = vec![p(1), p(2)];
         assert_eq!(awaited_peers(&participants, &[]), participants);
     }
 }

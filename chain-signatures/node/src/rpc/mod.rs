@@ -104,7 +104,7 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
-        participants: Vec<mpc_primitives::Participant>,
+        participants: Vec<Participant>,
     ) {
         let sign_id = request.id;
         let Some(action) = PublishAction::new(public_key, request, output, participants) else {
@@ -127,7 +127,7 @@ impl RpcChannel {
         public_key: mpc_crypto::PublicKey,
         request: Arc<IndexedSignRequest>,
         signature: Signature,
-        participants: Vec<mpc_primitives::Participant>,
+        participants: Vec<Participant>,
     ) {
         let rpc = self.clone();
         tokio::spawn(async move {

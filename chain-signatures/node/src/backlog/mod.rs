@@ -10,13 +10,67 @@ use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
+    SignKind,
 };
+use sha3::Digest as _;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub use mpc_primitives::{BacklogEntry, BacklogError, Checkpoint};
+/// A checkpoint represents the backlog state at a specific block height.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub chain: Chain,
+    pub block_height: u64,
+    pub pending_requests: Vec<BacklogEntry>,
+    /// Commitment to each pending request's checkpoint-consensus phase.
+    #[serde(default, with = "serde_bytes")]
+    pub cumulative_digest: [u8; 32],
+}
+
+impl Checkpoint {
+    pub fn empty(chain: Chain) -> Self {
+        Self {
+            chain,
+            block_height: 0,
+            pending_requests: Vec::new(),
+            cumulative_digest: Self::empty_cumulative_digest(),
+        }
+    }
+
+    pub fn empty_cumulative_digest() -> [u8; 32] {
+        sha3::Sha3_256::new().finalize().into()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.block_height.to_le_bytes());
+        for entry in &self.pending_requests {
+            hasher.update(entry.sign_id().request_id);
+        }
+        hasher.update(self.cumulative_digest);
+        hasher.finalize().into()
+    }
+}
+
+/// Errors that can occur when working with Backlog
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BacklogError {
+    #[error("request not found for chain {chain:?} with id {id:?}")]
+    NotFound { chain: Chain, id: SignId },
+    #[error("chain not initialized: {chain:?}")]
+    ChainNotInitialized { chain: Chain },
+    #[error("transaction not found")]
+    TransactionNotFound,
+    #[error("cannot advance sign request: status must be pending generation or publishing")]
+    InvalidAdvanceTransition,
+    #[error("cannot mark publishing: status must be pending generation")]
+    InvalidPublishingTransition,
+    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
+    InvalidBidirectionalResponseTransition,
+}
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -717,15 +771,137 @@ impl StateManager for Backlog {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BacklogEntry {
+    pub request: Arc<IndexedSignRequest>,
+    pub status: SignStatus,
+}
+
+impl BacklogEntry {
+    pub fn new(request: Arc<IndexedSignRequest>) -> Self {
+        Self {
+            request,
+            status: SignStatus::PendingGeneration,
+        }
+    }
+
+    pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
+        Self { request, status }
+    }
+
+    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: BidirectionalTx) -> Self {
+        Self::with_status(request, SignStatus::PendingExecution { tx })
+    }
+
+    pub fn sign_id(&self) -> SignId {
+        self.request.id
+    }
+
+    pub fn request_id(&self) -> [u8; 32] {
+        self.request.id.request_id
+    }
+
+    pub fn source_chain(&self) -> Chain {
+        self.request.chain
+    }
+
+    pub fn status(&self) -> SignStatus {
+        self.status.clone()
+    }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        self.status.execution_tx()
+    }
+
+    #[cfg(any(test, feature = "test-feature"))]
+    pub fn set_status(&mut self, status: SignStatus) {
+        self.status = status;
+    }
+
+    #[cfg(any(test, feature = "test-feature"))]
+    pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
+        self.request = request;
+    }
+
+    pub fn transition_to_bidirectional_response(
+        &mut self,
+        request: Arc<IndexedSignRequest>,
+    ) -> Result<(), BacklogError> {
+        if self.request.id != request.id
+            || !matches!(&request.kind, SignKind::RespondBidirectional(_))
+        {
+            return Err(BacklogError::InvalidBidirectionalResponseTransition);
+        }
+
+        self.request = request;
+        self.status = SignStatus::PendingGenerationBidirectional;
+        Ok(())
+    }
+
+    pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
+        match (&self.request.kind, self.status.clone()) {
+            (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
+                self.status = SignStatus::PendingPublish { publish };
+                Ok(())
+            }
+            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
+                self.status = SignStatus::PendingPublishBidirectional { publish };
+                Ok(())
+            }
+            _ => Err(BacklogError::InvalidPublishingTransition),
+        }
+    }
+
+    pub fn advance_to_execution(
+        &mut self,
+        bidirectional_tx: BidirectionalTx,
+    ) -> Result<(), BacklogError> {
+        match (&self.request.kind, self.status.clone()) {
+            (
+                SignKind::SignBidirectional(_),
+                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
+            ) => {
+                self.status = SignStatus::PendingExecution {
+                    tx: bidirectional_tx,
+                };
+                Ok(())
+            }
+            _ => Err(BacklogError::InvalidAdvanceTransition),
+        }
+    }
+
+    pub fn is_bidirectional(&self) -> bool {
+        matches!(self.request.kind, SignKind::SignBidirectional(_))
+    }
+
+    pub fn typename(&self) -> &'static str {
+        match (&self.request.kind, &self.status) {
+            (SignKind::Sign, _) => "Sign",
+            (SignKind::SignBidirectional(_), SignStatus::PendingExecution { .. }) => {
+                "BidirectionalExecution"
+            }
+            (SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
+                "BidirectionalPending"
+            }
+            (SignKind::SignBidirectional(_), _) => "BidirectionalPending",
+            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
+                "BidirectionalRespondPending"
+            }
+            (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sign_bidirectional::{PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
+    use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
     use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, Participant, RespondBidirectionalTx, SignArgs,
+        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
         SignBidirectionalEvent, SignId, SignKind,
     };
     use std::convert::TryInto;
@@ -1437,7 +1613,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            mpc_primitives::BacklogError::InvalidBidirectionalResponseTransition
+            BacklogError::InvalidBidirectionalResponseTransition
         ));
         assert_eq!(entry.sign_id(), original_sign_id);
         assert!(matches!(

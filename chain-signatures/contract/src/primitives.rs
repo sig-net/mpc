@@ -1,4 +1,4 @@
-pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest};
+pub use mpc_primitives::ConsensusCheckpointDigest;
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;

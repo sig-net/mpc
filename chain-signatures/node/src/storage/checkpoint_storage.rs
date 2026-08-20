@@ -1,8 +1,8 @@
 use crate::protocol::Chain;
 
+use crate::backlog::Checkpoint;
 use anyhow::Context;
 use deadpool_redis::Pool;
-use mpc_primitives::Checkpoint;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;

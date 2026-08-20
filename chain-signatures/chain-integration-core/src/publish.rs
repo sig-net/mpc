@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::PublicKey;
-use mpc_primitives::{IndexedSignRequest, Participant, Signature};
+use mpc_primitives::{IndexedSignRequest, Signature};
 
 /// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
 #[async_trait::async_trait]

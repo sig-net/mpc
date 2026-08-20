@@ -550,10 +550,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                         Scalar::ONE,
                         0,
                     ),
-                    participants: vec![
-                        mpc_primitives::Participant::from(0u32),
-                        mpc_primitives::Participant::from(1u32),
-                    ],
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
                 },
             },
@@ -886,10 +883,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                         Scalar::ONE,
                         0,
                     ),
-                    participants: vec![
-                        mpc_primitives::Participant::from(0u32),
-                        mpc_primitives::Participant::from(1u32),
-                    ],
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
                 },
             },

@@ -4,8 +4,9 @@ use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
+use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -198,7 +199,8 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{BacklogEntry, CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
+    use crate::backlog::BacklogEntry;
+    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 

@@ -303,8 +303,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::{Chain, Checkpoint};
+    use mpc_primitives::Chain;
     use near_account_id::AccountId;
 
     let spawner = ClusterSpawner::default()
@@ -315,6 +316,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let pool = redis.pool();
     let account_id: AccountId = "party0.near".parse().unwrap();
+
     let storage = CheckpointStorage::Redis(pool.clone(), account_id);
 
     // 1. Clean storage returns None
@@ -364,8 +366,9 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::{Chain, Checkpoint};
+    use mpc_primitives::Chain;
 
     let spawner = ClusterSpawner::default()
         .network("test-pending-checkpoint-persistence")

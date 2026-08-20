@@ -1,8 +1,8 @@
-use super::{PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{Checkpoint, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use sha3::Digest;
 use std::collections::BTreeMap;
 use std::sync::Arc;

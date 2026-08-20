@@ -432,7 +432,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             SignStatus::PendingPublish {
                 publish: PublishState {
                     signature,
-                    participants: vec![mpc_primitives::Participant::from(0u32)],
+                    participants: vec![Participant::from(0u32)],
                     is_proposer: true,
                 },
             },
@@ -524,10 +524,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             assert_eq!(action.request.id, sign_id);
             assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, signature);
-            assert_eq!(
-                action.participants,
-                vec![mpc_primitives::Participant::from(0u32)]
-            );
+            assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }
         RpcAction::VoteCheckpoint { checkpoint, .. } => {
             panic!("unexpected checkpoint vote: {checkpoint:?}");
