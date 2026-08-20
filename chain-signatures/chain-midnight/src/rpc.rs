@@ -425,30 +425,8 @@ async fn publisher_contract_state(
     .await
     .context("midnight_contractState reconnect failed")?;
 
-    match classify_contract_state_reply(response)? {
-        ContractStateReply::State(state) => Ok(Some(state)),
-        ContractStateReply::Missing => Ok(None),
-        ContractStateReply::Unservable(error) => Err(ReadFailure::Unservable.err(error)),
-        ContractStateReply::TooLarge(detail) => Err(ReadFailure::TooLarge.err(detail)),
-        ContractStateReply::Other(error) => {
-            Err(anyhow::Error::new(error).context("midnight_contractState failed"))
-        }
-    }
-}
-
-enum ContractStateReply {
-    State(Vec<u8>),
-    Missing,
-    Unservable(RawRpcError),
-    TooLarge(String),
-    Other(RawRpcError),
-}
-
-fn classify_contract_state_reply(
-    response: Result<String, RawRpcError>,
-) -> anyhow::Result<ContractStateReply> {
     match response {
-        Ok(state_hex) => Ok(ContractStateReply::State(
+        Ok(state_hex) => Ok(Some(
             hex::decode(state_hex.trim_start_matches("0x"))
                 .context("midnight_contractState returned non-hex state")?,
         )),
@@ -456,7 +434,7 @@ fn classify_contract_state_reply(
             if reply.code == INVALID_PARAMS_CODE
                 && reply.message.contains("Contract not present") =>
         {
-            Ok(ContractStateReply::Missing)
+            Ok(None)
         }
         Err(RawRpcError::User(reply))
             if reply.code == INVALID_PARAMS_CODE
@@ -464,12 +442,12 @@ fn classify_contract_state_reply(
                     .message
                     .contains("Unable to get requested contract state") =>
         {
-            Ok(ContractStateReply::Unservable(RawRpcError::User(reply)))
+            Err(ReadFailure::Unservable.err(RawRpcError::User(reply)))
         }
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            Ok(ContractStateReply::TooLarge(reply.to_string()))
+            Err(ReadFailure::TooLarge.err(reply))
         }
-        Err(error) => Ok(ContractStateReply::Other(error)),
+        Err(err) => Err(anyhow::Error::new(err).context("midnight_contractState failed")),
     }
 }
 
@@ -640,16 +618,35 @@ impl Reads {
                     )
                     .await;
 
-                match classify_contract_state_reply(response)? {
-                    ContractStateReply::State(state) => Ok(Fetched::Value(Some(state))),
-                    ContractStateReply::Missing => Ok(Fetched::Value(None)),
-                    ContractStateReply::Unservable(error) => {
-                        Err(ReadFailure::Unservable.err(error))
+                match response {
+                    Ok(state_hex) => {
+                        let state = hex::decode(state_hex.trim_start_matches("0x"))
+                            .context("midnight_contractState returned non-hex state")?;
+                        Ok(Fetched::Value(Some(state)))
                     }
-                    ContractStateReply::TooLarge(detail) => Ok(Fetched::TooLarge(detail)),
-                    ContractStateReply::Other(error) => {
-                        self.classify(Err(error), "midnight_contractState failed")
+                    // The node builds every rpc error as invalid-params with the reason
+                    // only in the text, so its two answers stay text matches under the
+                    // code gate.
+                    Err(RawRpcError::User(reply))
+                        if reply.code == INVALID_PARAMS_CODE
+                            && reply.message.contains("Contract not present") =>
+                    {
+                        Ok(Fetched::Value(None))
                     }
+                    Err(RawRpcError::User(reply))
+                        if reply.code == INVALID_PARAMS_CODE
+                            && reply
+                                .message
+                                .contains("Unable to get requested contract state") =>
+                    {
+                        Err(anyhow::Error::new(RawRpcError::User(reply))
+                            .context(ReadFailure::Unservable.marker()))
+                    }
+                    // Reachable because our response cap sits above the server's.
+                    Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
+                        Ok(Fetched::TooLarge(reply.to_string()))
+                    }
+                    Err(err) => self.classify(Err(err), "midnight_contractState failed"),
                 }
             }
         )?;
@@ -995,14 +992,6 @@ mod tests {
             retry,
             Arc::new(move || alive),
         )
-    }
-
-    #[test]
-    fn contract_state_reply_rejects_malformed_success_payloads() {
-        assert!(
-            classify_contract_state_reply(Ok("0xnot-hex".to_string())).is_err(),
-            "malformed success payloads are decode failures"
-        );
     }
 
     #[tokio::test]

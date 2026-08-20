@@ -38,10 +38,10 @@ pub(crate) trait ChainSource: Send + Sync {
 
 /// Bytes that do not deserialize are charged to the contract that owns them, never to
 /// the read: the decode is in-process, so there is no transport that could have failed.
-fn classify_decode(decoded: anyhow::Result<Node>) -> anyhow::Result<ContractState> {
+fn classify_decode(decoded: anyhow::Result<Node>) -> ContractState {
     match decoded {
-        Ok(tree) => Ok(ContractState::Tree(tree)),
-        Err(err) => Ok(ContractState::Undecodable(err)),
+        Ok(tree) => ContractState::Tree(tree),
+        Err(err) => ContractState::Undecodable(err),
     }
 }
 
@@ -76,7 +76,7 @@ impl ChainSource for LiveSource {
             None => Ok(ContractState::Absent),
             // Decoded in-process by the ledger's own deserializer: the state path makes
             // no network call beyond the node read above.
-            Some(state) => classify_decode(decode_contract_state(&state)),
+            Some(state) => Ok(classify_decode(decode_contract_state(&state))),
         }
     }
 

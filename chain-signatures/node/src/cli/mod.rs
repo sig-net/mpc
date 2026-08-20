@@ -46,7 +46,6 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -300,10 +299,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // The process-wide shutdown token: publishers hold proving runs and child
-            // processes open, and those must stop when the node stops.
-            let shutdown = CancellationToken::new();
-
             let RpcHandles {
                 near_client,
                 near_governance_client,
@@ -316,7 +311,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 signer,
                 &chains,
-                shutdown.clone(),
             )
             .await;
 
@@ -402,7 +396,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
-            shutdown.cancel();
             system_handle.abort();
             tracing::info!("spinning down");
         }
@@ -508,11 +501,7 @@ impl ChainConfigs {
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured.
-    async fn publishers(
-        &self,
-        near: NearClient,
-        shutdown: CancellationToken,
-    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -546,7 +535,7 @@ impl ChainConfigs {
         }
         if let Some(midnight) = &self.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match MidnightPublisher::connect(midnight, telemetry, shutdown.clone()).await {
+            match MidnightPublisher::connect(midnight, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Midnight, Arc::new(client));
                 }
@@ -659,7 +648,6 @@ impl RpcHandles {
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         chains: &ChainConfigs,
-        shutdown: CancellationToken,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
@@ -679,7 +667,7 @@ impl RpcHandles {
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone(), shutdown).await;
+        let publishers = chains.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -1268,9 +1256,7 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let publishers = chains
-            .publishers(test_near_client(), CancellationToken::new())
-            .await;
+        let publishers = chains.publishers(test_near_client()).await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1307,9 +1293,7 @@ mod tests {
             midnight: Some(midnight),
         };
 
-        let publishers = chains
-            .publishers(test_near_client(), CancellationToken::new())
-            .await;
+        let publishers = chains.publishers(test_near_client()).await;
 
         assert!(publishers.contains_key(&Chain::NEAR));
         assert!(!publishers.contains_key(&Chain::Midnight));

@@ -11,7 +11,6 @@ use midnight_onchain_state::state::StateValue;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::{MidnightConfig, PublisherConfig};
 use crate::intent_gen::{
@@ -101,13 +100,13 @@ pub(crate) struct PinnedState {
 /// on a round trip nothing checks. The returned string names the transaction, opaque here.
 #[async_trait]
 pub(crate) trait IntentSubmitter: Send + Sync {
-    async fn submit(&self, intent: &[u8], cancel: &CancellationToken) -> anyhow::Result<String>;
+    async fn submit(&self, intent: &[u8]) -> anyhow::Result<String>;
 }
 
 #[async_trait]
 impl IntentSubmitter for IntentGen {
-    async fn submit(&self, intent: &[u8], cancel: &CancellationToken) -> anyhow::Result<String> {
-        IntentGen::submit(self, intent, cancel).await
+    async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
+        IntentGen::submit(self, intent).await
     }
 }
 
@@ -149,7 +148,6 @@ pub struct MidnightPublisher {
     submitter: Arc<dyn IntentSubmitter>,
     central_address: String,
     telemetry: Arc<dyn PublisherTelemetry>,
-    cancel: CancellationToken,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
     flow: tokio::sync::Mutex<()>,
 }
@@ -160,7 +158,6 @@ impl MidnightPublisher {
     pub async fn connect(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
-        cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
@@ -170,7 +167,6 @@ impl MidnightPublisher {
             rpc,
             intent_gen,
             telemetry,
-            cancel,
         ))
     }
 
@@ -180,7 +176,6 @@ impl MidnightPublisher {
         rpc: Arc<MidnightPublisherRpc>,
         intent_gen: Arc<IntentGen>,
         telemetry: Arc<dyn PublisherTelemetry>,
-        cancel: CancellationToken,
     ) -> Self {
         Self::assemble(
             config,
@@ -189,7 +184,6 @@ impl MidnightPublisher {
             intent_gen.clone(),
             intent_gen,
             telemetry,
-            cancel,
         )
     }
 
@@ -200,7 +194,6 @@ impl MidnightPublisher {
         intent_gen: Arc<IntentGen>,
         submitter: Arc<dyn IntentSubmitter>,
         telemetry: Arc<dyn PublisherTelemetry>,
-        cancel: CancellationToken,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -209,7 +202,6 @@ impl MidnightPublisher {
             intent_gen,
             submitter,
             telemetry,
-            cancel,
             flow: tokio::sync::Mutex::new(()),
         }
     }
@@ -233,10 +225,7 @@ impl MidnightPublisher {
 
     async fn publish_inner(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
-        let _flow = tokio::select! {
-            guard = self.flow.lock() => guard,
-            _ = self.cancel.cancelled() => anyhow::bail!("midnight publish cancelled while queued"),
-        };
+        let _flow = self.flow.lock().await;
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
@@ -271,19 +260,16 @@ impl MidnightPublisher {
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: expires_at,
         };
-        let bytes = self.intent_gen.build(&request, &self.cancel).await?;
+        let bytes = self.intent_gen.build(&request).await?;
 
         let backstop = submit_backstop(&self.config);
         let submitted = tokio::time::timeout(backstop, async {
-            self.submitter
-                .submit(&bytes, &self.cancel)
-                .await
-                .with_context(|| {
-                    format!(
-                        "submitting the midnight respond intent built over the chain at {}",
-                        chain.at_hash
-                    )
-                })
+            self.submitter.submit(&bytes).await.with_context(|| {
+                format!(
+                    "submitting the midnight respond intent built over the chain at {}",
+                    chain.at_hash
+                )
+            })
         })
         .await
         .unwrap_or_else(|_| {
@@ -351,12 +337,7 @@ impl MidnightPublisher {
                 ),
             }
 
-            tokio::select! {
-                _ = self.cancel.cancelled() => {
-                    return Err(original.context("midnight reconciliation cancelled"));
-                }
-                _ = tokio::time::sleep(RECONCILE_POLL) => {}
-            }
+            tokio::time::sleep(RECONCILE_POLL).await;
         }
     }
 
@@ -703,11 +684,7 @@ mod tests {
 
     #[async_trait]
     impl IntentSubmitter for StubSubmitter {
-        async fn submit(
-            &self,
-            intent: &[u8],
-            _cancel: &CancellationToken,
-        ) -> anyhow::Result<String> {
+        async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
             tokio::time::sleep(self.delay).await;
             // The bytes have to be the builder's own: whatever is proved and paid for is this.
             assert_eq!(
@@ -733,11 +710,7 @@ mod tests {
 
     #[async_trait]
     impl IntentSubmitter for LandingWithoutReply {
-        async fn submit(
-            &self,
-            _intent: &[u8],
-            _cancel: &CancellationToken,
-        ) -> anyhow::Result<String> {
+        async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             self.attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.reads.set_state(self.landed_state.clone());
@@ -754,11 +727,7 @@ mod tests {
 
     #[async_trait]
     impl IntentSubmitter for BlockingSubmitter {
-        async fn submit(
-            &self,
-            _intent: &[u8],
-            _cancel: &CancellationToken,
-        ) -> anyhow::Result<String> {
+        async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             let attempt = self
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -865,7 +834,6 @@ mod tests {
             Arc::new(intent_gen),
             submitter,
             Arc::new(NoopPublisherTelemetry),
-            CancellationToken::new(),
         )
     }
 
@@ -1372,7 +1340,6 @@ mod tests {
             intent_gen,
             StubSubmitter::slow(),
             Arc::new(NoopPublisherTelemetry),
-            CancellationToken::new(),
         );
 
         let started = std::time::Instant::now();

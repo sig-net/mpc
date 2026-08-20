@@ -217,9 +217,6 @@ enum Retried<T> {
     /// The client's connection is gone and every further call fails until `run()`
     /// is rebuilt: ends the run so the supervisor's restart reconnects.
     ClientClosed(anyhow::Error),
-    /// Permanent at this height and never the caller's; the ERROR is logged where
-    /// it is classified, so consumers just end the run and the restart holds.
-    Halted(anyhow::Error),
 }
 
 /// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
@@ -575,8 +572,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let record = match resolve_verified_record(field, rid) {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
-                // Not a fault: the caller notified an id its own index does not hold,
-                // having notified before its write landed or computed the id wrong.
+                // Not a fault: the caller's own index does not hold the id. The reference
+                // caller files its record and notifies in one circuit, so this is a caller
+                // that computed the id wrong or notified without filing.
                 tracing::debug!(
                     reason = "request-absent",
                     height,
@@ -607,26 +605,28 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
     /// Spelled out because holding `&mut cache` across attempts needs an `async ||`,
     /// whose lending future defeats `Send` inference at the node's spawn boundary on
-    /// stable Rust.
+    /// stable Rust. A halt (schema drift, undecodable central state) is the `Err`:
+    /// permanent at this height and never the caller's, logged where it is classified,
+    /// so the caller ends the run and the restart holds.
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,
         cache: &mut CentralCache,
         block: &BlockRef,
         cancel: &CancellationToken,
-    ) -> Retried<Vec<ChainEvent>> {
+    ) -> anyhow::Result<Retried<Vec<ChainEvent>>> {
         loop {
             let result = tokio::select! {
-                _ = cancel.cancelled() => return Retried::Cancelled,
+                _ = cancel.cancelled() => return Ok(Retried::Cancelled),
                 result = self.process_block(source, cache, block) => result,
             };
             match result {
-                Ok(requests) => return Retried::Done(requests),
+                Ok(requests) => return Ok(Retried::Done(requests)),
                 Err(err) => match ReadFailure::of(&err) {
-                    Some(ReadFailure::Unservable) => return Retried::Unservable(err),
-                    Some(ReadFailure::ClientClosed) => return Retried::ClientClosed(err),
+                    Some(ReadFailure::Unservable) => return Ok(Retried::Unservable(err)),
+                    Some(ReadFailure::ClientClosed) => return Ok(Retried::ClientClosed(err)),
                     None if err.downcast_ref::<ResponseSchemaDrift>().is_some() => {
-                        return Retried::Halted(err);
+                        return Err(err);
                     }
                     None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
                         tracing::error!(
@@ -636,7 +636,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                              build's ledger crates; holding. If the chain upgraded, \
                              upgrade mpc-node"
                         );
-                        return Retried::Halted(err);
+                        return Err(err);
                     }
                     _ => tracing::warn!(
                         reason = "retrying",
@@ -646,7 +646,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 },
             }
             tokio::select! {
-                _ = cancel.cancelled() => return Retried::Cancelled,
+                _ = cancel.cancelled() => return Ok(Retried::Cancelled),
                 _ = tokio::time::sleep(RETRY_DELAY) => {}
             }
         }
@@ -669,14 +669,14 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Retried::Done(block) => block,
                 Retried::Cancelled => return Ok(Indexed::Cancelled),
                 Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                Retried::ClientClosed(err) | Retried::Halted(err) => return Err(err),
+                Retried::ClientClosed(err) => return Err(err),
             };
         self.index_block(source, cache, events_tx, &block, cancel)
             .await
     }
 
     /// Processes and emits one block under the retry policy, surfacing the pruning
-    /// signature as the error that restarts the run.
+    /// signature or a halt as the error that restarts the run.
     async fn index_block<C: ChainSource>(
         &self,
         source: &C,
@@ -687,7 +687,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     ) -> anyhow::Result<Indexed> {
         match self
             .process_block_retrying(source, cache, block, cancel)
-            .await
+            .await?
         {
             Retried::Done(events) => {
                 self.emit_block(events_tx, block, events).await?;
@@ -695,7 +695,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
             Retried::Cancelled => Ok(Indexed::Cancelled),
             Retried::Unservable(err) => Err(note_unservable(err, block.number)),
-            Retried::ClientClosed(err) | Retried::Halted(err) => Err(err),
+            Retried::ClientClosed(err) => Err(err),
         }
     }
 
