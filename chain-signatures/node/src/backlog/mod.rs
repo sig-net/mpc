@@ -1051,6 +1051,14 @@ mod tests {
         }
     }
 
+    /// Builds a checkpoint for a chain with exactly one backlog entry at height 100.
+    fn single_entry_checkpoint(entry: BacklogEntry) -> Checkpoint {
+        let mut pending = PendingRequests::new();
+        pending.insert(entry.sign_id(), entry);
+        pending.set_processed_block(100);
+        pending.checkpoint(Chain::Ethereum)
+    }
+
     async fn insert_bidirectional_with_status(
         backlog: &Backlog,
         chain: Chain,
@@ -1346,7 +1354,7 @@ mod tests {
         // Guard the checkpoint digest wire format; update only for intentional changes.
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("6512dd0dcc0adf84fdad988c04a24f320c8116ee4c194d8e4165f6bccb694017")
+            digest_hex("884b11ef5550724b788b7e29e9a07e7a6fd46f94d604e6d38bae71a36816b65e")
         );
     }
 
@@ -1408,154 +1416,106 @@ mod tests {
         assert_ne!(checkpoint1, checkpoint3);
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_digest_changes_after_initial_bidirectional_response() {
-        let tx = create_test_tx(7);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                pending_execution_status(&tx),
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        // The initial source-chain response is observable at this checkpoint's
-        // height, so nodes must agree whether it has happened.
-        assert_ne!(checkpoint1.digest(), checkpoint2.digest());
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_digest_ignores_generation_vs_publish() {
-        let tx = create_test_tx(12);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingGeneration,
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
-    }
-
     #[test]
-    fn test_plain_request_digest_ignores_generation_vs_publish() {
-        let sign_id = SignId::new([20; 32]);
-        let request = create_indexed_request(
+    fn test_checkpoint_consensus_projection() {
+        let tx = create_test_tx(60);
+        let sign_id = SignId::new(tx.request_id);
+
+        // The digest commits only to the consensus projection of each entry's
+        // status (sorted by sign_id), not to the request or publish content.
+
+        // Initial source-chain phase: generation, and publishing by any proposer,
+        // all collapse to a single digest.
+        let generation = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+        ));
+        let publish = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(true),
+            },
+            "ethereum",
+        ));
+        let publish_other = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(false),
+            },
+            "ethereum",
+        ));
+        assert_eq!(generation.digest(), publish.digest());
+        assert_eq!(generation.digest(), publish_other.digest());
+
+        // Plain `Sign` requests follow the same initial-phase projection.
+        let plain = create_indexed_request(
             sign_id,
             Chain::Ethereum,
-            create_test_args(20),
+            create_test_args(60),
             SignKind::Sign,
             0,
         );
-
-        let mut pending_generation = PendingRequests::new();
-        pending_generation.insert(sign_id, BacklogEntry::new(Arc::clone(&request)));
-        pending_generation.set_processed_block(100);
-
-        let mut pending_publish = PendingRequests::new();
-        pending_publish.insert(
-            sign_id,
-            BacklogEntry::with_status(
-                request,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-            ),
-        );
-        pending_publish.set_processed_block(100);
-
-        let generation_checkpoint = pending_generation.checkpoint(Chain::Ethereum);
-        let publish_checkpoint = pending_publish.checkpoint(Chain::Ethereum);
-        assert_eq!(generation_checkpoint.digest(), publish_checkpoint.digest());
-    }
-
-    #[test]
-    fn test_consensus_byte_ignores_publish_state() {
-        let sign_id = SignId::new([21; 32]);
-
-        // Only a signature's participants advance to publishing, so the two statuses
-        // must be indistinguishable in both the initial and the final response phase.
-        let mut initial_bidirectional = BacklogEntry::new(create_bidirectional_request(
-            sign_id,
-            Chain::Ethereum,
-            "ethereum",
-            0,
+        let plain_generation = single_entry_checkpoint(BacklogEntry::new(Arc::clone(&plain)));
+        let plain_publish = single_entry_checkpoint(BacklogEntry::with_status(
+            plain,
+            SignStatus::PendingPublish {
+                publish: test_publish_state(true),
+            },
         ));
-        let initial_consensus_tag = initial_bidirectional.status().consensus_tag();
-        initial_bidirectional
-            .mark_publishing(test_publish_state(true))
-            .unwrap();
-        assert_eq!(
-            initial_bidirectional.status().consensus_tag(),
-            initial_consensus_tag
-        );
+        assert_eq!(plain_generation.digest(), plain_publish.digest());
 
+        // Post-initial phase: awaiting target-chain execution and the final
+        // response generation/publish states are not observable at the
+        // source-chain checkpoint height, so they share the checkpoint digest.
+        let execution = single_entry_checkpoint(create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+        ));
         let response_request = IndexedSignRequest::respond_bidirectional(
             sign_id,
-            create_test_args(21),
+            create_test_args(sign_id.request_id[0]),
             Chain::Ethereum,
             0,
             RespondBidirectionalTx {
-                tx_id: create_test_tx(21).id,
+                tx_id: tx.id,
                 output: vec![],
                 chain_ctx: None,
             },
         );
-        let mut final_response = BacklogEntry::with_status(
-            Arc::new(response_request),
+        let gen_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
+            Arc::new(response_request.clone()),
             SignStatus::PendingGenerationBidirectional,
+        ));
+        let pub_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
+            Arc::new(response_request),
+            SignStatus::PendingPublishBidirectional {
+                publish: test_publish_state(true),
+            },
+        ));
+        assert_eq!(
+            execution.digest(),
+            gen_bidirectional.digest(),
+            "PendingExecution must yield the same checkpoint digest as the final response generation state"
         );
-        let final_consensus_tag = final_response.status().consensus_tag();
-        final_response
-            .mark_publishing(test_publish_state(true))
-            .unwrap();
-        assert_eq!(final_response.status().consensus_tag(), final_consensus_tag);
+        assert_eq!(
+            execution.digest(),
+            pub_bidirectional.digest(),
+            "PendingExecution must yield the same checkpoint digest as the final response publish state"
+        );
 
-        // The initial response is observable at this height; the two phases differ.
-        assert_ne!(initial_consensus_tag, final_consensus_tag);
+        // The initial source-chain phase is observable at this height and must
+        // still differ from the post-initial phase.
+        assert_ne!(
+            generation.digest(),
+            execution.digest(),
+            "the initial source-chain phase must remain distinct in the checkpoint"
+        );
     }
 
     #[test]
@@ -1626,44 +1586,6 @@ mod tests {
             entry.status(),
             SignStatus::PendingExecution { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_digest_ignores_publish_local_state() {
-        let tx = create_test_tx(9);
-
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-                "ethereum",
-            ),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            SignId::new(tx.request_id),
-            create_execution_entry(
-                tx.clone(),
-                Chain::Ethereum,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(false),
-                },
-                "ethereum",
-            ),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = pending1.checkpoint(Chain::Ethereum);
-        let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
-
-        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
     }
 
     #[tokio::test]
