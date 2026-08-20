@@ -627,11 +627,13 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     };
 
     let mut attempt = 0usize;
+    // Try to publish the signature
     let publish = || publisher.publish_signature(&action);
     use mpc_chain_integration_core::backon::Retryable as _;
     let publish_res = publish
         .retry(&retry_config.build())
         .when(|error| publisher.should_retry(error))
+        // Log the error and retry attempt
         .notify(|err, sleep| {
             attempt += 1;
             tracing::warn!(
@@ -644,14 +646,13 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         })
         .await;
 
-    // Log an error when the publisher classifies a failure as terminal.
-    if let Err(error) = publish_res {
+    // TODO: Consider adding a metric update for failed publish attempts here, if needed.
+    // Log error if the publish failed after all retries
+    if publish_res.is_err() {
         tracing::error!(
             ?sign_id,
-            ?chain,
             elapsed = ?action.timestamp.elapsed(),
-            error = ?error,
-            "publisher declined to retry, trashing publish request"
+            "exceeded max retries, trashing publish request"
         );
     }
 }
@@ -839,20 +840,13 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FailingPublisher {
-        calls: AtomicUsize,
-    }
+    /// A publisher that always fails to publish a signature.
+    struct FailingPublisher;
 
     #[async_trait::async_trait]
     impl ChainPublisher for FailingPublisher {
         async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("publisher failed")
-        }
-
-        fn should_retry(&self, _error: &anyhow::Error) -> bool {
-            false
         }
     }
 
@@ -994,7 +988,7 @@ mod tests {
 
         // Create a publisher for NEAR that always fails, and a publisher for Solana that counts calls.
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
-        publishers.insert(Chain::NEAR, Arc::new(FailingPublisher::default()));
+        publishers.insert(Chain::NEAR, Arc::new(FailingPublisher));
         publishers.insert(
             Chain::Solana,
             Arc::new(CountingPublisher {
@@ -1033,9 +1027,27 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
+    /// A publisher that fails and, like Midnight on an unresolved submit, refuses the retry.
+    #[derive(Default)]
+    struct TerminalPublisher {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for TerminalPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("publisher failed")
+        }
+
+        fn should_retry(&self, _error: &anyhow::Error) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
     async fn publisher_retry_policy_can_make_a_failure_terminal() {
-        let publisher = Arc::new(FailingPublisher::default());
+        let publisher = Arc::new(TerminalPublisher::default());
         let action = make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([8u8; 32]));
 
         execute_publish(publisher.clone(), action).await;
