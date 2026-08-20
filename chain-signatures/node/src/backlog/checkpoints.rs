@@ -5,11 +5,12 @@ use enum_map::EnumMap;
 use mpc_primitives::Chain;
 use sha3::Digest;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// A checkpoint represents the backlog state at a specific block height.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
@@ -17,6 +18,31 @@ pub struct Checkpoint {
     /// Commitment to each pending request's checkpoint-consensus phase.
     #[serde(default, with = "serde_bytes")]
     pub cumulative_digest: [u8; 32],
+}
+
+impl fmt::Debug for Checkpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct DebugPendingRequests<'a>(&'a [BacklogEntry]);
+        impl<'a> fmt::Debug for DebugPendingRequests<'a> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let mut list = f.debug_list();
+                for entry in self.0 {
+                    list.entry(&entry.sign_id());
+                }
+                list.finish()
+            }
+        }
+
+        f.debug_struct("Checkpoint")
+            .field("chain", &self.chain)
+            .field("block_height", &self.block_height)
+            .field(
+                "pending_requests",
+                &DebugPendingRequests(&self.pending_requests),
+            )
+            .field("cumulative_digest", &self.cumulative_digest)
+            .finish()
+    }
 }
 
 impl Checkpoint {
@@ -652,5 +678,20 @@ mod tests {
                 .unwrap(),
             Some(checkpoint)
         );
+    }
+
+    #[test]
+    fn test_checkpoint_debug_formatting() {
+        let cp = checkpoint(3);
+        let debug_str = format!("{cp:?}");
+        assert!(debug_str.starts_with("Checkpoint {"));
+        assert!(debug_str.contains("pending_requests: ["));
+        assert!(!debug_str.contains("PendingRequest"));
+        assert!(!debug_str.contains("PendingTx"));
+        assert!(!debug_str.contains("IndexedSignRequest"));
+        assert!(!debug_str.contains("payload"));
+        for entry in &cp.pending_requests {
+            assert!(debug_str.contains(&hex::encode(entry.sign_id().request_id)));
+        }
     }
 }
