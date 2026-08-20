@@ -16,7 +16,7 @@ use midnight_onchain_state::state::StateValue;
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -24,6 +24,7 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
+use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -84,13 +85,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             telemetry,
         })
     }
-}
-
-pub(crate) fn unix_now() -> anyhow::Result<u64> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("the system clock is before the unix epoch")?
-        .as_secs())
 }
 
 /// One entry of a central map, keyed by the composite `SignetMapKey`.
@@ -399,7 +393,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let notification_entries =
             new_entries(&entries.notifications, &parent_entries.notifications);
         if !notification_entries.is_empty() {
-            let indexed_ts = unix_now().unwrap_or(0);
+            let indexed_ts = current_unix_timestamp();
             for entry in notification_entries {
                 if let Some(request) = self
                     .process_entry(source, entry, &block.hash, block.number, indexed_ts)
