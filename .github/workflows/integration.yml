@@ -87,13 +87,13 @@ jobs:
         run: cargo build -p integration-tests --tests --features helios
 
       - name: Test
-        run: cargo nextest run -p integration-tests --features helios --profile fixture
+        run: cargo nextest run -p integration-tests --profile fixture
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
 
-  # Integration tests that share the mpc_it_network Docker network and thus must run sequentially.
-  # This also requires additional Solana/Anchor setup.
+  # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
+  # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
   sequential-integration-test:
     name: Integration Test
     strategy:
