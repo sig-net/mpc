@@ -267,7 +267,7 @@ impl MidnightRpc {
 
 /// Finalized reads for the Midnight publisher. Subxt owns connection recovery;
 /// callers keep one instance instead of rebuilding or retrying a dead transport.
-pub(crate) struct MidnightPublisherRpc {
+pub struct MidnightPublisherRpc {
     client: OnlineClient<SubstrateConfig>,
     rpc: RpcClient,
     network_id: String,
