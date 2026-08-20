@@ -37,9 +37,7 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::ChainPublisher;
-use mpc_chain_midnight::{
-    IntentGen, MidnightConfig, MidnightIndexer, MidnightPublisher, MidnightPublisherRpc,
-};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
@@ -320,7 +318,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &chains,
                 shutdown.clone(),
             )
-            .await?;
+            .await;
 
             let (sync_channel, sync_task) = SyncTask::new(
                 &node_client,
@@ -514,7 +512,7 @@ impl ChainConfigs {
         &self,
         near: NearClient,
         shutdown: CancellationToken,
-    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
+    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -547,34 +545,17 @@ impl ChainConfigs {
             }
         }
         if let Some(midnight) = &self.midnight {
-            publishers.insert(
-                Chain::Midnight,
-                midnight_publisher(midnight, shutdown.clone()).await?,
-            );
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
+            match MidnightPublisher::connect(midnight, telemetry, shutdown.clone()).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Midnight, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
+            }
         }
 
-        Ok(publishers)
+        publishers
     }
-}
-
-async fn midnight_publisher(
-    config: &MidnightConfig,
-    shutdown: CancellationToken,
-) -> anyhow::Result<Arc<MidnightPublisher>> {
-    let publisher_config = &config.publisher;
-    // A second connection to the node the indexer also dials (`MidnightIndexer` opens
-    // its own inside `run()` and does not expose it); the builder is spawned only
-    // here, so this stays the single child process.
-    let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
-    let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
-    Ok(Arc::new(MidnightPublisher::new(
-        publisher_config,
-        config.central_address.clone(),
-        rpc,
-        intent_gen,
-        Arc::new(NodeTelemetry::new(Chain::Midnight)),
-        shutdown,
-    )))
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -679,7 +660,7 @@ impl RpcHandles {
         signer: InMemorySigner,
         chains: &ChainConfigs,
         shutdown: CancellationToken,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
         // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
@@ -698,15 +679,15 @@ impl RpcHandles {
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone(), shutdown).await?;
+        let publishers = chains.publishers(near_client.clone(), shutdown).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Ok(Self {
+        Self {
             near_client,
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        })
+        }
     }
 }
 
@@ -969,10 +950,28 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::time::Duration;
 
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+
+    fn test_near_client() -> NearClient {
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        NearClient::new(
+            "http://127.0.0.1:1",
+            &account_id,
+            signer,
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        )
+    }
 
     #[test]
     fn test_digest_staking() {
@@ -1269,25 +1268,9 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        ) {
-            near_crypto::Signer::InMemory(signer) => signer,
-            _ => unreachable!(),
-        };
-        // Never dialed: publishers() only stores the client in the registry.
-        let near = NearClient::new(
-            "http://127.0.0.1:1",
-            &account_id,
-            signer,
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        );
         let publishers = chains
-            .publishers(near, CancellationToken::new())
-            .await
-            .expect("an unconfigured Midnight publisher cannot fail startup");
+            .publishers(test_near_client(), CancellationToken::new())
+            .await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1299,5 +1282,36 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    #[tokio::test]
+    async fn a_midnight_startup_failure_does_not_abort_other_publishers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve an unresponsive endpoint");
+        let address = listener.local_addr().expect("read the endpoint address");
+
+        let mut midnight = MidnightConfig {
+            node_ws_url: format!("ws://{address}"),
+            central_address: "ab".repeat(32),
+            publisher: Default::default(),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        midnight.rpc.connect_timeout = Duration::from_millis(100);
+        let chains = ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: None,
+            canton: None,
+            midnight: Some(midnight),
+        };
+
+        let publishers = chains
+            .publishers(test_near_client(), CancellationToken::new())
+            .await;
+
+        assert!(publishers.contains_key(&Chain::NEAR));
+        assert!(!publishers.contains_key(&Chain::Midnight));
     }
 }

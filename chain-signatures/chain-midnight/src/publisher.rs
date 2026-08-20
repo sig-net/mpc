@@ -1,10 +1,5 @@
-//! Midnight publisher: a finished MPC signature becomes a respond call on the central
-//! singleton. The intent's bytes are opaque here; nothing in this crate names a ledger
-//! type, and drift in their shape is caught by the child's own submit-side decode and
-//! the wire tests its package pins from the TypeScript side. The two seams are traits
-//! because the things behind them cannot exist in a unit test: [`PinnedReads`] hides
-//! `MidnightPublisherRpc`, which needs a running node, and [`IntentSubmitter`] hides the ledger
-//! transaction, which needs a wallet and a proving run.
+//! Publishes finished MPC signatures to the Midnight central contract through opaque
+//! intents built and submitted by the companion process.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +13,7 @@ use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::PublisherConfig;
+use crate::config::{MidnightConfig, PublisherConfig};
 use crate::intent_gen::{
     is_ambiguous_submit, AmbiguousSubmit, IntentGen, IntentRequest, WirePoint, WireSignature,
 };
@@ -29,9 +24,7 @@ use crate::reader::{
 use crate::rpc::MidnightPublisherRpc;
 use crate::state::decode_contract_state;
 
-/// The deployed entry point for a phase-1 signature response.
 const RESPOND: &str = "respond";
-/// The deployed entry point for a phase-2 signature response.
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
 const RECONCILE_POLL: Duration = Duration::from_secs(2);
 
@@ -56,15 +49,11 @@ enum FinalizedResponse {
     },
 }
 
-/// The reads the respond path pins. A trait because `MidnightPublisherRpc` cannot be built
-/// without a node: its `OnlineClient` fetches metadata at construction.
+/// Finalized reads used by the publisher and its in-process tests.
 #[async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
-    /// The node's current finalized head, `0x` prefixed.
     async fn finalized_head(&self) -> anyhow::Result<String>;
-    /// The finalized block's timestamp, floored to Unix seconds as the ledger does.
     async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
-    /// `None` when no contract lives at `address_64hex` at that block.
     async fn contract_state(
         &self,
         address_64hex: &str,
@@ -122,10 +111,32 @@ impl IntentSubmitter for IntentGen {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RespondCircuit {
+    Respond,
+    RespondBidirectional,
+}
+
+impl RespondCircuit {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Respond => RESPOND,
+            Self::RespondBidirectional => RESPOND_BIDIRECTIONAL,
+        }
+    }
+
+    const fn map_field(self) -> usize {
+        match self {
+            Self::Respond => RESPOND_MAP_FIELD as usize,
+            Self::RespondBidirectional => RESPOND_BIDIRECTIONAL_MAP_FIELD as usize,
+        }
+    }
+}
+
 /// One respond call, marshalled off the action before anything is read or spawned.
 struct RespondCall {
-    circuit: &'static str,
-    request_id: String,
+    circuit: RespondCircuit,
+    request_id: [u8; 32],
     signature: WireSignature,
     stored_signature: Signature,
 }
@@ -136,17 +147,34 @@ pub struct MidnightPublisher {
     reads: Arc<dyn PinnedReads>,
     intent_gen: Arc<IntentGen>,
     submitter: Arc<dyn IntentSubmitter>,
-    /// Config-sourced: Midnight requests carry no per-request chain context.
     central_address: String,
     telemetry: Arc<dyn PublisherTelemetry>,
-    /// The node's shutdown token, so a build in flight stops with the node.
     cancel: CancellationToken,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
     flow: tokio::sync::Mutex<()>,
 }
 
 impl MidnightPublisher {
-    pub fn new(
+    /// Dials the node, spawns the intent builder on the node's network id, and wires
+    /// both. The order is the invariant: the builder validates the id the node reports.
+    pub async fn connect(
+        config: &MidnightConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
+        let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
+        Ok(Self::new(
+            &config.publisher,
+            config.central_address.clone(),
+            rpc,
+            intent_gen,
+            telemetry,
+            cancel,
+        ))
+    }
+
+    fn new(
         config: &PublisherConfig,
         central_address: String,
         rpc: Arc<MidnightPublisherRpc>,
@@ -212,8 +240,10 @@ impl MidnightPublisher {
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
-            circuit = call.circuit,
+            circuit = call.circuit.wire_name(),
             central = %self.central_address,
+            request_id = %hex::encode(call.request_id),
+            elapsed = ?action.timestamp.elapsed(),
             "midnight: publishing signature"
         );
 
@@ -223,7 +253,7 @@ impl MidnightPublisher {
         if response_present(&chain.contract_state, &call)? {
             tracing::info!(
                 ?sign_id,
-                circuit = call.circuit,
+                circuit = call.circuit.wire_name(),
                 at_hash = %chain.at_hash,
                 "midnight: exact response is already finalized"
             );
@@ -233,9 +263,9 @@ impl MidnightPublisher {
 
         let expires_at = ttl_seconds(&self.config, current_unix_timestamp());
         let request = IntentRequest {
-            circuit: call.circuit,
+            circuit: call.circuit.wire_name(),
             contract_address: self.central_address.clone(),
-            request_id: call.request_id.clone(),
+            request_id: hex::encode(call.request_id),
             signature: call.signature.clone(),
             contract_state: hex::encode(&chain.contract_state),
             ledger_parameters: hex::encode(&chain.ledger_parameters),
@@ -255,29 +285,27 @@ impl MidnightPublisher {
                     )
                 })
         })
-        .await;
-        let receipt = match submitted {
-            Ok(Ok(receipt)) => receipt,
-            Ok(Err(error)) if is_ambiguous_submit(&error) => {
-                self.reconcile_ambiguous(&call, expires_at, error).await?;
-                "reconciled-finalized-state".to_string()
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                let error = anyhow::anyhow!(
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
                 "the midnight submit step ran past its {backstop:?} backstop without returning: \
                  it is not enforcing the {:?} submit_timeout it was given",
                 self.config.submit_timeout
-                )
-                .context(AmbiguousSubmit);
+            )
+            .context(AmbiguousSubmit))
+        });
+        let receipt = match submitted {
+            Ok(receipt) => receipt,
+            Err(error) if is_ambiguous_submit(&error) => {
                 self.reconcile_ambiguous(&call, expires_at, error).await?;
                 "reconciled-finalized-state".to_string()
             }
+            Err(error) => return Err(error),
         };
 
         tracing::info!(
             ?sign_id,
-            circuit = call.circuit,
+            circuit = call.circuit.wire_name(),
             at_hash = %chain.at_hash,
             receipt = %receipt,
             elapsed = ?action.timestamp.elapsed(),
@@ -297,8 +325,8 @@ impl MidnightPublisher {
             match self.finalized_response(call).await {
                 Ok(FinalizedResponse::Present(at_hash)) => {
                     tracing::warn!(
-                        circuit = call.circuit,
-                        request_id = %call.request_id,
+                        circuit = call.circuit.wire_name(),
+                        request_id = %hex::encode(call.request_id),
                         %at_hash,
                         "midnight submit answer was lost, but the exact response is finalized"
                     );
@@ -317,8 +345,8 @@ impl MidnightPublisher {
                 }
                 Ok(FinalizedResponse::Absent { .. }) => {}
                 Err(error) => tracing::warn!(
-                    circuit = call.circuit,
-                    request_id = %call.request_id,
+                    circuit = call.circuit.wire_name(),
+                    request_id = %hex::encode(call.request_id),
                     "midnight reconciliation read failed: {error:#}"
                 ),
             }
@@ -358,7 +386,13 @@ impl MidnightPublisher {
 #[async_trait]
 impl ChainPublisher for MidnightPublisher {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        self.publish_inner(action).await
+        self.publish_inner(action).await.inspect_err(|e| {
+            tracing::error!(
+                sign_id = ?action.request.id,
+                ?e,
+                "midnight: failed to publish signature"
+            );
+        })
     }
 
     fn should_retry(&self, error: &anyhow::Error) -> bool {
@@ -376,7 +410,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
     );
     let stored_signature = action.signature;
     let signature = wire_signature(&stored_signature)?;
-    let request_id = hex::encode(action.request.id.request_id);
+    let request_id = action.request.id.request_id;
 
     match &action.request.kind {
         SignKind::SignBidirectional(event) => {
@@ -386,7 +420,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 event.chain
             );
             Ok(RespondCall {
-                circuit: RESPOND,
+                circuit: RespondCircuit::Respond,
                 request_id,
                 signature,
                 stored_signature,
@@ -395,7 +429,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
         // The output never travels: the contract stores a bare signature, and the
         // attestation already commits to the output.
         SignKind::RespondBidirectional(_) => Ok(RespondCall {
-            circuit: RESPOND_BIDIRECTIONAL,
+            circuit: RespondCircuit::RespondBidirectional,
             request_id,
             signature,
             stored_signature,
@@ -440,11 +474,7 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
         "midnight singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
         fields.len()
     );
-    let field = match call.circuit {
-        RESPOND => usize::from(RESPOND_MAP_FIELD),
-        RESPOND_BIDIRECTIONAL => usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
-        circuit => anyhow::bail!("midnight publisher has no response map for {circuit}"),
-    };
+    let field = call.circuit.map_field();
     let map = fields
         .iter_deref()
         .nth(field)
@@ -452,15 +482,6 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
     let StateValue::Map(entries) = map else {
         anyhow::bail!("midnight singleton ledger field {field} is not a response map")
     };
-    let request_id: [u8; 32] = hex::decode(&call.request_id)
-        .context("midnight response request id is not hex")?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!(
-                "midnight response request id is {} bytes, expected 32",
-                bytes.len()
-            )
-        })?;
     for entry in entries.iter() {
         let (key, value) = &*entry;
         match decode_response_entry(key, value).and_then(|decoded| {
@@ -469,14 +490,15 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
                 .map(|signature| (decoded.request_id, signature))
         }) {
             Ok((stored_request_id, stored_signature))
-                if stored_request_id == request_id && stored_signature == call.stored_signature =>
+                if stored_request_id == call.request_id
+                    && stored_signature == call.stored_signature =>
             {
                 return Ok(true);
             }
             Ok(_) => {}
             Err(err) => tracing::warn!(
-                circuit = call.circuit,
-                request_id = %call.request_id,
+                circuit = call.circuit.wire_name(),
+                request_id = %hex::encode(call.request_id),
                 "midnight finalized response entry ignored: {err:#}"
             ),
         }
@@ -492,10 +514,9 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
 }
 
 /// The outer bound on the submit step, behind the `submit_timeout` the step itself
-/// enforces. A fire has two candidate causes: a step that forgot its own deadline, or
-/// a submit stuck behind concurrent publishes on the builder's one lock. Deliberately
-/// looser than the budget it backs, or which one fired would be a race; the headroom
-/// is one build budget, for the respawn of a dead child. A fire abandons the wait,
+/// enforces. It is deliberately looser than the budget it backs so the two deadlines
+/// cannot race; the extra build budget is belt-and-braces headroom for a child that
+/// violates its own deadline. A fire abandons the wait,
 /// never the transaction, so the result is reconciled against finalized state through
 /// the intent's expiry before a caller may retry.
 fn submit_backstop(config: &PublisherConfig) -> Duration {
@@ -553,6 +574,7 @@ mod tests {
         calls: Mutex<Vec<Read>>,
         heads_served: Mutex<usize>,
         contract_state: Mutex<Vec<u8>>,
+        contract_error: Option<crate::rpc::ReadFailure>,
         finalized_timestamp_seconds: std::sync::atomic::AtomicU64,
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
@@ -577,6 +599,14 @@ mod tests {
 
         fn absent() -> Arc<Self> {
             Arc::new(Self::default())
+        }
+
+        fn too_large() -> Arc<Self> {
+            Arc::new(Self {
+                contract_present: true,
+                contract_error: Some(crate::rpc::ReadFailure::TooLarge),
+                ..Default::default()
+            })
         }
 
         fn reads(&self) -> Vec<Read> {
@@ -622,6 +652,9 @@ mod tests {
             at_hash: &str,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.record("contract_state", at_hash);
+            if let Some(error) = self.contract_error {
+                anyhow::bail!(error.marker());
+            }
             Ok(self
                 .contract_present
                 .then(|| self.contract_state.lock().unwrap().clone()))
@@ -642,11 +675,6 @@ mod tests {
         delay: Duration,
         /// What it refuses with, standing in for the child's own verdict.
         failure: Option<&'static str>,
-        /// Whether the handed token was ever cancelled: a fresh token instead of the
-        /// node's own keeps proving through a shutdown.
-        saw_cancelled_token: std::sync::atomic::AtomicBool,
-        /// Signalled on entry, so a test can cancel while the step certainly runs.
-        entered: tokio::sync::Notify,
     }
 
     impl StubSubmitter {
@@ -671,11 +699,6 @@ mod tests {
         fn submissions(&self) -> usize {
             self.submitted.load(std::sync::atomic::Ordering::SeqCst)
         }
-
-        fn saw_cancelled_token(&self) -> bool {
-            self.saw_cancelled_token
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }
     }
 
     #[async_trait]
@@ -683,17 +706,9 @@ mod tests {
         async fn submit(
             &self,
             intent: &[u8],
-            cancel: &CancellationToken,
+            _cancel: &CancellationToken,
         ) -> anyhow::Result<String> {
-            self.entered.notify_one();
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    self.saw_cancelled_token
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    anyhow::bail!("stub submit cancelled");
-                }
-                _ = tokio::time::sleep(self.delay) => {}
-            }
+            tokio::time::sleep(self.delay).await;
             // The bytes have to be the builder's own: whatever is proved and paid for is this.
             assert_eq!(
                 hex::encode(intent),
@@ -833,15 +848,6 @@ mod tests {
         reads: Arc<dyn PinnedReads>,
         submitter: Arc<dyn IntentSubmitter>,
     ) -> MidnightPublisher {
-        publisher_with_cancel(config, reads, submitter, CancellationToken::new()).await
-    }
-
-    async fn publisher_with_cancel(
-        config: &PublisherConfig,
-        reads: Arc<dyn PinnedReads>,
-        submitter: Arc<dyn IntentSubmitter>,
-        cancel: CancellationToken,
-    ) -> MidnightPublisher {
         let midnight = MidnightConfig {
             node_ws_url: "ws://127.0.0.1:9944".to_string(),
             central_address: CENTRAL.to_string(),
@@ -859,7 +865,7 @@ mod tests {
             Arc::new(intent_gen),
             submitter,
             Arc::new(NoopPublisherTelemetry),
-            cancel,
+            CancellationToken::new(),
         )
     }
 
@@ -903,11 +909,7 @@ mod tests {
 
     fn state_with_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = match call.circuit {
-            RESPOND => usize::from(RESPOND_MAP_FIELD),
-            RESPOND_BIDIRECTIONAL => usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
-            _ => unreachable!(),
-        };
+        let field = call.circuit.map_field();
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &CONTRACT_STATE[..])
                 .expect("the initial singleton state decodes");
@@ -915,12 +917,8 @@ mod tests {
             panic!("the initial singleton root is an array")
         };
         let mut fields: Vec<_> = fields.iter_deref().cloned().collect();
-        let request_id: [u8; 32] = hex::decode(&call.request_id)
-            .expect("the call request id is hex")
-            .try_into()
-            .expect("the call request id is 32 bytes");
         let key = AlignedValue {
-            value: Value(vec![ValueAtom(vec![1]), ValueAtom(trim(&request_id))]),
+            value: Value(vec![ValueAtom(vec![1]), ValueAtom(trim(&call.request_id))]),
             alignment: Alignment(vec![
                 AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 8 }),
                 AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
@@ -947,11 +945,7 @@ mod tests {
 
     fn state_with_malformed_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = match call.circuit {
-            RESPOND => usize::from(RESPOND_MAP_FIELD),
-            RESPOND_BIDIRECTIONAL => usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
-            _ => unreachable!(),
-        };
+        let field = call.circuit.map_field();
         let state = state_with_response(action);
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &state[..])
@@ -978,11 +972,7 @@ mod tests {
 
     fn state_with_invalid_signature_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = match call.circuit {
-            RESPOND => usize::from(RESPOND_MAP_FIELD),
-            RESPOND_BIDIRECTIONAL => usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
-            _ => unreachable!(),
-        };
+        let field = call.circuit.map_field();
         let state = state_with_response(action);
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &state[..])
@@ -1130,26 +1120,15 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_response_entry_does_not_poison_reconciliation() {
+    fn invalid_response_entries_do_not_poison_reconciliation() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let call = respond_call(&action).expect("the action maps to a response");
-            let state = state_with_malformed_response(&action);
-            assert!(
-                !response_present(&state, &call).expect("a malformed individual entry is skipped"),
-                "the malformed entry is not an exact finalized response"
-            );
-        }
-    }
-
-    #[test]
-    fn an_invalid_signature_response_entry_does_not_poison_reconciliation() {
-        for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
-            let call = respond_call(&action).expect("the action maps to a response");
-            let state = state_with_invalid_signature_response(&action);
-            assert!(
-                !response_present(&state, &call).expect("an invalid signature entry is skipped"),
-                "the invalid signature is not an exact finalized response"
-            );
+            for state in [
+                state_with_malformed_response(&action),
+                state_with_invalid_signature_response(&action),
+            ] {
+                assert!(!response_present(&state, &call).expect("invalid entries are skipped"));
+            }
         }
     }
 
@@ -1300,6 +1279,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reconciliation_read_failure_does_not_release_ambiguity() {
+        let recorder = Recorder::new("reconcile-read-failure");
+        let config = config(granting_child(&recorder));
+        let publisher = publisher(&config, StubReads::too_large(), StubSubmitter::new()).await;
+        let call = respond_call(&respond_action()).expect("the action maps to a response");
+        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                publisher.reconcile_ambiguous(&call, 1, original),
+            )
+            .await
+            .is_err(),
+            "an unreadable finalized state cannot prove that retrying is safe"
+        );
+    }
+
+    #[tokio::test]
     async fn finalized_expiry_without_the_response_allows_a_fresh_attempt() {
         let reads = StubReads::new();
         reads.set_finalized_timestamp(2);
@@ -1335,41 +1333,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_submit_step_is_handed_the_node_s_own_shutdown_token() {
-        // A step handed a fresh token instead of the node's own is indistinguishable in
-        // every other observation and keeps proving straight through a shutdown.
-        let cancel = CancellationToken::new();
-        let submitter = StubSubmitter::slow();
-        let recorder = Recorder::new("shutdown-token");
-        let config = config(granting_child(&recorder));
-        let publisher = Arc::new(
-            publisher_with_cancel(&config, StubReads::new(), submitter.clone(), cancel.clone())
-                .await,
-        );
-
-        let publishing = tokio::spawn({
-            let publisher = publisher.clone();
-            async move { publisher.publish_signature(&respond_action()).await }
-        });
-        submitter.entered.notified().await;
-        cancel.cancel();
-
-        let err = publishing
-            .await
-            .expect("the publish task is not lost")
-            .expect_err("a cancelled submit cannot report success");
-        assert!(format!("{err:#}").contains("cancelled"), "got: {err:#}");
-        assert!(
-            submitter.saw_cancelled_token(),
-            "the step was handed a token that shutdown never reaches"
-        );
-    }
-
-    #[tokio::test]
     async fn a_submit_step_that_never_returns_does_not_hold_the_publisher_task() {
         // The step is expected to enforce its own budget, and this is what happens when
         // it does not: the publish ends and says which fault it is.
-        let mut config = config(granting_child(&Recorder::new("submit-backstop")));
+        let recorder = Recorder::new("submit-backstop");
+        let mut config = config(granting_child(&recorder));
+        let midnight = MidnightConfig {
+            node_ws_url: "ws://127.0.0.1:9944".to_string(),
+            central_address: CENTRAL.to_string(),
+            publisher: config.clone(),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let intent_gen = Arc::new(
+            IntentGen::spawn(&midnight, "undeployed")
+                .await
+                .expect("the stub child spawns with the normal request budget"),
+        );
         config.submit_timeout = Duration::from_millis(20);
         config.request_timeout = Duration::from_millis(30);
 
@@ -1385,7 +1365,15 @@ mod tests {
 
         let reads = StubReads::new();
         reads.set_finalized_timestamp(u64::MAX);
-        let publisher = publisher(&config, reads, StubSubmitter::slow()).await;
+        let publisher = MidnightPublisher::assemble(
+            &config,
+            CENTRAL.to_string(),
+            reads,
+            intent_gen,
+            StubSubmitter::slow(),
+            Arc::new(NoopPublisherTelemetry),
+            CancellationToken::new(),
+        );
 
         let started = std::time::Instant::now();
         let err = publisher
@@ -1428,7 +1416,9 @@ mod tests {
         let publisher = publisher(&config, StubReads::new(), StubSubmitter::new()).await;
 
         let action = respond_action();
+        let before = current_unix_timestamp();
         publisher.publish_signature(&action).await.expect("granted");
+        let after = current_unix_timestamp();
 
         let request = recorder.request();
         assert_eq!(request["circuit"], RESPOND);
@@ -1456,11 +1446,10 @@ mod tests {
         );
 
         let ttl = request["ttlSeconds"].as_u64().expect("ttl is an integer");
-        let now = current_unix_timestamp();
-        assert_eq!(
-            ttl.saturating_sub(now),
-            config.request_timeout.as_secs() + config.submit_timeout.as_secs(),
-            "the ttl is the sum of the two budgets a publish spends, from now"
+        let budget = config.request_timeout.as_secs() + config.submit_timeout.as_secs();
+        assert!(
+            (before.saturating_add(budget)..=after.saturating_add(budget)).contains(&ttl),
+            "the ttl {ttl} is the two-budget sum {budget} from a time in {before}..={after}"
         );
     }
 

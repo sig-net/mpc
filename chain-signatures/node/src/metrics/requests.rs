@@ -143,15 +143,3 @@ pub(crate) static PENDING_CHECKPOINTS: LazyLock<prometheus::IntGaugeVec> = LazyL
     )
     .unwrap()
 });
-
-/// Failed publish attempts that will be retried, by chain: the publish loop retries
-/// forever, so a wedged publisher is visible here; alert on the rate. Non-retryable
-/// terminal failures are not counted; they surface via the publisher-declined-retry log.
-pub(crate) static SIGN_PUBLISH_FAILED_ATTEMPTS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec_with_node_and_version(
-        "multichain_sign_publish_failed_attempts_total",
-        "Number of failed signature publish attempts, by chain",
-        &["chain"],
-    )
-    .unwrap()
-});
