@@ -9,6 +9,8 @@ pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent
 use rlp::{Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
+use std::sync::Arc;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishState {
     pub signature: Signature,
@@ -20,7 +22,7 @@ pub struct PublishState {
 pub enum SignStatus {
     PendingGeneration,
     PendingPublish { publish: PublishState },
-    PendingExecution { tx: BidirectionalTx },
+    PendingExecution { tx: Arc<BidirectionalTx> },
     PendingGenerationBidirectional,
     PendingPublishBidirectional { publish: PublishState },
 }
@@ -47,7 +49,7 @@ impl SignStatus {
         }
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),
             _ => None,

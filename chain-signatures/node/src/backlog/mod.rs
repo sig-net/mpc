@@ -127,7 +127,7 @@ impl PendingRequests {
 #[derive(Debug, Clone)]
 struct ExecutionWatcher {
     sign_id: SignId,
-    tx: BidirectionalTx,
+    tx: Arc<BidirectionalTx>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -148,10 +148,10 @@ impl ExecutionWatchers {
         self.watchers.remove(tx_id)
     }
 
-    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, watcher)| (*id, (watcher.sign_id, watcher.tx.clone())))
+            .map(|(id, watcher)| (*id, (watcher.sign_id, Arc::clone(&watcher.tx))))
             .collect()
     }
 }
@@ -412,8 +412,8 @@ impl Backlog {
         &self,
         chain: Chain,
         sign_id: SignId,
-        tx: BidirectionalTx,
-    ) -> Option<(SignId, BidirectionalTx)> {
+        tx: Arc<BidirectionalTx>,
+    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
         if sign_id != SignId::new(tx.request_id) {
             tracing::warn!(
                 ?chain,
@@ -437,7 +437,7 @@ impl Backlog {
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<(SignId, BidirectionalTx)> {
+    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
         let mut entry = self.watchers(&chain).write().await;
 
         entry
@@ -477,7 +477,7 @@ impl Backlog {
         &self,
         chain: Chain,
         sign_id: SignId,
-        bidirectional_tx: BidirectionalTx,
+        bidirectional_tx: Arc<BidirectionalTx>,
     ) -> Result<(), BacklogError> {
         // Update the transaction in the backlog from Sign to Bidirectional
         let mut pending = self.pending(&chain).write().await;
@@ -487,7 +487,7 @@ impl Backlog {
             .get_mut(&sign_id)
             .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
 
-        entry.advance_to_execution(bidirectional_tx.clone())?;
+        entry.advance_to_execution(Arc::clone(&bidirectional_tx))?;
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
@@ -687,9 +687,9 @@ impl Backlog {
         }
 
         // now repopulate our execution watchers
-        for (sign_id, tx) in execution_to_watch {
+        for (sign_id, entry) in execution_to_watch {
             // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = tx.execution_tx().cloned() {
+            if let Some(tx) = entry.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
@@ -713,7 +713,7 @@ impl StateManager for Backlog {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
     }
 }
@@ -753,7 +753,7 @@ impl BacklogEntry {
         Self { request, status }
     }
 
-    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: BidirectionalTx) -> Self {
+    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
         Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
@@ -829,7 +829,7 @@ impl BacklogEntry {
 
     pub fn advance_to_execution(
         &mut self,
-        bidirectional_tx: BidirectionalTx,
+        bidirectional_tx: Arc<BidirectionalTx>,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
             (
@@ -863,7 +863,7 @@ impl BacklogEntry {
         matches!(self.request.kind, SignKind::SignBidirectional(_))
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         self.status.execution_tx()
     }
 
@@ -919,7 +919,9 @@ mod tests {
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-        SignStatus::PendingExecution { tx: tx.clone() }
+        SignStatus::PendingExecution {
+            tx: Arc::new(tx.clone()),
+        }
     }
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
@@ -1033,7 +1035,9 @@ mod tests {
         ));
 
         match status {
-            SignStatus::PendingExecution { .. } => BacklogEntry::pending_execution(request, tx),
+            SignStatus::PendingExecution { .. } => {
+                BacklogEntry::pending_execution(request, Arc::new(tx))
+            }
             status => BacklogEntry::with_status(request, status),
         }
     }
@@ -1085,7 +1089,7 @@ mod tests {
                         },
                     )
                     .await;
-                backlog.advance(chain, sign_id, tx).await.unwrap();
+                backlog.advance(chain, sign_id, Arc::new(tx)).await.unwrap();
             }
             SignStatus::PendingPublishBidirectional { .. } => {
                 let completion_request = IndexedSignRequest::respond_bidirectional(
@@ -2087,7 +2091,7 @@ mod tests {
 
         // Watch execution on the target chain
         backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
             .await;
 
         // Unwatch should return the watcher
@@ -2313,7 +2317,7 @@ mod tests {
             .await;
 
         let err = backlog
-            .advance(tx.source_chain, sign_id, tx)
+            .advance(tx.source_chain, sign_id, Arc::new(tx))
             .await
             .expect_err("advance should fail for plain Sign requests");
 
@@ -2336,7 +2340,7 @@ mod tests {
             .await;
 
         backlog
-            .advance(tx.source_chain, sign_id, tx.clone())
+            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
             .await
             .expect("advance should accept catchup advancement from PendingGeneration");
 
@@ -2372,7 +2376,7 @@ mod tests {
             .await;
 
         backlog
-            .advance(tx.source_chain, sign_id, tx.clone())
+            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
             .await
             .expect("advance should succeed once respond() is confirmed from PendingPublish");
 

@@ -372,7 +372,9 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     // Register an execution watcher for the derived bidirectional tx on the target chain (Ethereum)
     let tx = test_bidirectional_tx(seed, Chain::Solana, Chain::Ethereum);
     let tx_id = tx.id;
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+    backlog
+        .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+        .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
     let ctx = crate::stream::test_utils::make_test_stream_context_with_generator_pk(

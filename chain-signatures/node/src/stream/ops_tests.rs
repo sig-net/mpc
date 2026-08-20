@@ -133,7 +133,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -216,7 +216,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -290,7 +290,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -356,7 +356,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
@@ -961,7 +961,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1060,7 +1060,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1109,7 +1109,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);

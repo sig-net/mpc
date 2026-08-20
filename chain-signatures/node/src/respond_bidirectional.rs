@@ -7,6 +7,7 @@ use mpc_primitives::{
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
 use mpc_utils::time::current_unix_timestamp;
+use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -25,11 +26,11 @@ fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
 }
 
 pub struct CompletedTx {
-    tx: BidirectionalTx,
+    tx: Arc<BidirectionalTx>,
 }
 
 impl CompletedTx {
-    pub fn new(tx: BidirectionalTx) -> Self {
+    pub fn new(tx: Arc<BidirectionalTx>) -> Self {
         Self { tx }
     }
 
@@ -168,7 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_failed_sign_request_emits_error_prefix() {
-        let completed = CompletedTx::new(sample_bidirectional_tx());
+        let completed = CompletedTx::new(Arc::new(sample_bidirectional_tx()));
 
         // Solana (Borsh).
         let borsh = completed
@@ -197,7 +198,7 @@ mod tests {
     #[test]
     fn create_sign_request_carries_output_and_context() {
         let tx = sample_bidirectional_tx();
-        let completed = CompletedTx::new(tx.clone());
+        let completed = CompletedTx::new(Arc::new(tx.clone()));
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
 

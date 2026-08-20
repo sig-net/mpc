@@ -23,7 +23,7 @@ use mpc_primitives::{
     SignId,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Scheduling state for the watcher nonce gate. Persisted across blocks by the
 /// indexer (it borrows this) so first-appearance detection and retry tracking
@@ -37,13 +37,13 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, BidirectionalTx));
+type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
     BidirectionalTxId,
     SignId,
-    BidirectionalTx,
+    Arc<BidirectionalTx>,
     anyhow::Result<BackfillOutcome>,
 );
 
@@ -197,7 +197,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>,
+        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
@@ -653,6 +653,7 @@ mod tests {
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn late_watcher_backfill_uses_tx_hash_and_mined_block() {
@@ -737,7 +738,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -846,7 +847,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0; 32]),
-                create_tx(tx_hash_0, 0),
+                Arc::new(create_tx(tx_hash_0, 0)),
             )
             .await;
         harness
@@ -854,7 +855,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
-                create_tx(tx_hash_1, 1),
+                Arc::new(create_tx(tx_hash_1, 1)),
             )
             .await;
         harness
@@ -862,7 +863,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                create_tx(tx_hash_2, 2),
+                Arc::new(create_tx(tx_hash_2, 2)),
             )
             .await;
 
@@ -960,7 +961,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
@@ -1054,14 +1055,18 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([1; 32]), create_tx(tx_hash_ok))
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([1; 32]),
+                Arc::new(create_tx(tx_hash_ok)),
+            )
             .await;
         harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                create_tx(tx_hash_err),
+                Arc::new(create_tx(tx_hash_err)),
             )
             .await;
 
@@ -1151,7 +1156,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), Arc::new(tx))
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1235,7 +1240,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([4; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1253,7 +1258,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1328,7 +1333,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([5; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1346,7 +1351,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1442,7 +1447,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([6; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1460,7 +1465,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1688,7 +1693,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([9; 32]),
-                empty_output_schema_tx(tx_hash, from_address),
+                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
             )
             .await;
 
@@ -1783,7 +1788,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0xaa; 32]),
-                empty_output_schema_tx(tx_hash, from_address),
+                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
             )
             .await;
 
@@ -1946,7 +1951,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0xbb; 32]),
-                empty_output_schema_tx(tx_hash, from_address),
+                Arc::new(empty_output_schema_tx(tx_hash, from_address)),
             )
             .await;
 
@@ -2063,11 +2068,19 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([7; 32]),
+                Arc::new(create_tx(tx_hash_a)),
+            )
             .await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([8; 32]),
+                Arc::new(create_tx(tx_hash_b)),
+            )
             .await;
 
         let mut block4: Block = Block::default();
