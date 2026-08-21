@@ -386,7 +386,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         };
 
         for tx in transactions {
-            process_transaction(events_tx, &self.program_id, tx).await?;
+            process_transaction(events_tx, &self.program_id, None, tx).await?;
         }
 
         events_tx.send(ChainEvent::Block(height)).await?;
@@ -850,6 +850,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                         if let Err(err) = process_transaction(
                             &events_tx,
                             &program_id,
+                            Some(signature),
                             &tx_res.transaction,
                         ).await {
                             tracing::warn!(?err, sig = %signature, "failed to parse solana tx events");
@@ -1048,6 +1049,7 @@ impl SolanaEvents {
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &Pubkey,
+    known_signature: Option<Signature>,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -1060,7 +1062,10 @@ async fn process_transaction(
         return Ok(());
     };
 
-    let signature = extract_tx_signature(&tx.transaction)?;
+    let signature = match known_signature {
+        Some(signature) => signature,
+        None => extract_tx_signature(&tx.transaction)?,
+    };
     emit_events(events_tx, program_id, signature, tx, logs).await
 }
 
