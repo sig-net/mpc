@@ -57,8 +57,9 @@ pub(crate) async fn wait_detected_regression(
 }
 
 /// Returns `true` if a regression is detected. When the consensus digest matches
-/// a local checkpoint (latest or historical), the checkpoint is confirmed and
-/// persisted via `on_consensus_confirmed`. Returns `false` when the backlog is
+/// a local checkpoint (latest or historical), the checkpoint is confirmed via
+/// `confirm_consensus`. A transient storage error is treated as aligned so it is
+/// retried on the next checkpoint change. Returns `false` when the backlog is
 /// aligned (no regression).
 async fn detect_regression(
     chain: Chain,
@@ -69,34 +70,30 @@ async fn detect_regression(
         return false;
     };
 
-    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
-    // creating a new checkpoint as a side-effect during regression detection.
-    let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await else {
+    if backlog.latest_checkpoint(chain).await.is_none() {
         tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
-    };
-
-    // Consensus matches our latest local checkpoint → confirm and persist.
-    if current_checkpoint.digest() == checkpoint_digest.digest {
-        backlog
-            .on_consensus_confirmed(chain, &current_checkpoint)
-            .await;
         return false;
     }
 
-    // Consensus matches an older checkpoint in our history → confirm and persist.
-    if let Some(matched) = backlog
-        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+    // A consensus digest can match either the latest checkpoint or a retained
+    // pending checkpoint while this node is ahead of consensus.
+    match backlog
+        .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        tracing::info!(
-            ?chain,
-            local_height = current_checkpoint.block_height,
-            consensus_height = checkpoint_digest.height,
-            "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
-        );
-        backlog.on_consensus_confirmed(chain, &matched).await;
-        return false;
+        Ok(found) => {
+            if found {
+                return false;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error confirming checkpoint; retrying on next change"
+            );
+            return false;
+        }
     }
 
     // No match → regression detected.
@@ -128,7 +125,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
 
-    let threshold = ctx.contract_watcher.wait_threshold().await;
     let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
@@ -147,7 +143,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &mut ctx.checkpoints_rx,
             &mut ctx.mesh_state,
             &ctx.node_client,
-            threshold,
             &my_account_id,
         )
         .await;
@@ -263,7 +258,7 @@ mod tests {
         watch::Sender<MeshState>,
         mpsc::Receiver<RpcAction>,
     ) {
-        // threshold 0 so `recover_backlog` doesn't block on the empty mesh.
+        // Threshold 0 for the test contract watcher.
         make_test_stream_context(
             backlog,
             sign_tx,
@@ -298,7 +293,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let digest = cp.digest();
 
@@ -307,7 +302,11 @@ mod tests {
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "matching digest should not trigger regression");
 
-        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(chain)
+            .await
+            .unwrap();
         assert!(
             persisted.is_some(),
             "matching checkpoint should be persisted"
@@ -320,9 +319,9 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp1 = backlog.checkpoint(chain).await.unwrap();
-        backlog.set_processed_block(chain, 200).await;
+        backlog.set_processed_block(chain, 200).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let digest1 = cp1.digest();
@@ -331,7 +330,11 @@ mod tests {
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "ahead with match should not trigger regression");
 
-        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(chain)
+            .await
+            .unwrap();
         assert!(persisted.is_some());
         assert_eq!(persisted.unwrap().block_height, 100);
     }
@@ -341,7 +344,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let different_digest = [0xabu8; 32];
@@ -368,7 +371,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
@@ -392,7 +395,7 @@ mod tests {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
         let matching_digest = cp.digest();
 
@@ -515,7 +518,7 @@ mod tests {
     async fn regression_cancels_and_restarts_run() {
         let chain = Chain::Ethereum;
         let backlog = Backlog::new();
-        backlog.set_processed_block(chain, 100).await;
+        backlog.set_processed_block(chain, 100).await.unwrap();
         backlog.checkpoint(chain).await.unwrap();
 
         let attempts = Arc::new(AtomicUsize::new(0));

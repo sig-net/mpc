@@ -366,3 +366,70 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test(tokio::test)]
+async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::{Chain, Checkpoint};
+
+    let spawner = ClusterSpawner::default()
+        .network("test-pending-checkpoint-persistence")
+        .init_network()
+        .await?;
+    let redis = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis.pool(), account_id);
+    let checkpoint = |height| Checkpoint {
+        chain: Chain::Solana,
+        block_height: height,
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+    };
+
+    let first = checkpoint(10);
+    let second = checkpoint(20);
+    storage.persist_pending(&first).await?;
+    storage.persist_pending(&second).await?;
+
+    let restarted = storage.clone();
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![first.clone(), second.clone()]
+    );
+
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, first.block_height)
+            .await?
+    );
+    assert_eq!(
+        restarted.load_latest(Chain::Solana).await?,
+        Some(first.clone())
+    );
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+
+    let mut conflicting = second.clone();
+    conflicting.cumulative_digest[0] = 1;
+    assert!(restarted.persist_pending(&conflicting).await.is_err());
+    assert!(
+        !restarted
+            .promote_pending(Chain::Solana, second.block_height + 1)
+            .await?
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, second.block_height)
+            .await?
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
+    assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
+    Ok(())
+}
