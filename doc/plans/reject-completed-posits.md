@@ -77,11 +77,18 @@ machinery for a case that does not need it.)
 ### 1. `chain-signatures/node/src/protocol/request/mod.rs`
 
 - `dead_ids: LruCache<SignId, Retirement>` with
-  `enum Retirement { CompletedOnChain, Other }`. `retire_task` takes the
-  retirement: `handle_completion` records `CompletedOnChain`; task exits (`Ok`,
-  `Err(Aborted)`, interrupted), `AbortChain` and the quorum path record `Other`.
-  The regression case is the one that matters: a rolled-back chain must never
-  make peers claim the request is answered.
+  `enum Retirement { CompletedOnChain(Chain), Other }`. `retire_task` takes the
+  retirement: `handle_completion` records `CompletedOnChain(chain)`; task exits
+  (`Ok`, `Err(Aborted)`, interrupted), `AbortChain` and the quorum path record
+  `Other`. The regression case is the one that matters: a rolled-back chain must
+  never make peers claim the request is answered.
+- `AbortChain(chain)` also walks `dead_ids` (`iter_mut`, at most 4096 entries on
+  a rare event) and downgrades every `CompletedOnChain(chain)` to `Other`. A
+  regression rolls back the respond event that licensed the answer, and nodes
+  re-index at different times: without this, the nodes that have not re-indexed
+  yet answer `request_completed` to the first node that re-drives the request
+  and talk it out of the retry. The entries stay in the cache, they just lose
+  the licence to answer.
 - `mark_dead` is monotonic: `CompletedOnChain` is never downgraded to `Other`.
   Without this the feature silently disables itself, because a task that exits
   on its own just after `handle_completion` retired the id runs `retire_task`
@@ -100,14 +107,27 @@ machinery for a case that does not need it.)
     content" convention as the `StaleRound` reply. `Accept`, `Reject` and
     `Start` are never answered: replying to a reject ping-pongs between nodes.
     A `Other` id keeps today's silent drop. The reply must not block the
-    spawner select loop, so clone the `MessageChannel` and `tokio::spawn` the
-    send rather than making `handle_posit` async.
+    spawner select loop and must not spawn a task per inbound message, so add a
+    non-blocking `MessageChannel::try_send` (the outgoing channel is a bounded
+    tokio mpsc) and drop the reply when the outbox is full. Best effort is the
+    right semantics here: the straggler asks again next time it proposes, and
+    the rest of the codebase already drops posit traffic under load
+    (`try_send_lossy`).
   - **Counting.** If the message carries `request_completed` and we track the
     sign id, insert the sender into `completed_reports`, intersect it with the
     current participant set, and compare against
-    `participants.len().saturating_sub(threshold) + 1`. On quorum, log the
-    reporters, count a metric, and run the same teardown as
-    `handle_completion` with `Retirement::Other`.
+    `participants.len().saturating_sub(threshold) + 1`. On quorum, run the
+    same teardown as `handle_completion` with `Retirement::Other`.
+- Observability, because a straggler that never reaches quorum is otherwise
+  invisible: log each new distinct report at info with the running count
+  (`2/4`), warn on quorum with the reporter set, and add two counters,
+  `SIGN_COMPLETED_REJECTS_SENT` and `SIGN_ENDED_BY_COMPLETED_QUORUM` (labelled
+  by chain, read off `SignEntry` before the request is dropped).
+- The flag is counted whatever action carries it. Coupling it to
+  `RejectWithReason` would buy no safety, since the same node can send a reject,
+  and it would be one more branch to keep in step. The sender always pairs it
+  with a reject so that a node which does not know the field still reads
+  something sane.
 
 ### 2. `chain-signatures/node/src/protocol/message/types.rs`, `.../inbox.rs`
 
@@ -143,6 +163,10 @@ upgraded, together with `stale_round`.
   `try_send_lossy` and drops under load. Every report is regenerated the next
   time the straggler proposes, and duplicates are idempotent (the inbox dedups
   by signature, the report set dedups by sender).
+- **Answering costs at most one message per message received.** A participant
+  that floods `Propose` for a completed id gets one reply each, so there is no
+  amplification, and the replies are dropped rather than queued when the outbox
+  is full.
 - **A report is not tied to a round or an attempt.** It is a statement about the
   request. Counting in the spawner keeps it that way by construction, which is
   why no ordering against the stale-round filter has to be maintained.
@@ -160,11 +184,13 @@ upgraded, together with `stale_round`.
 
 Three, each pinning something that would otherwise break silently.
 
-1. **Quorum and wiring** (`request/mod.rs`): feed `handle_posit` reports for a
-   tracked sign id. `f` distinct senders plus a repeat of one of them leave the
-   task alive; the `f + 1`th distinct sender retires the request and aborts the
-   task. Covers the Byzantine parameter, sender dedup, and the teardown wiring
-   in one test.
+1. **Quorum and wiring** (`request/mod.rs`): with four participants and
+   threshold three (quorum two, so the test can tell `f + 1` from both `f` and
+   `n`), feed `handle_posit` reports for a tracked sign id whose task is the
+   `DropProbe` future the existing test already uses. One sender repeated twice
+   leaves the task alive; a second distinct sender retires the request and
+   aborts the task. Covers the Byzantine parameter, sender dedup, and the
+   teardown wiring in one test.
 2. **Retirement gating** (`request/mod.rs`): after `handle_completion`, a
    `Propose` for the dead id draws a reply carrying the flag and creates no
    mailbox; after `AbortChain`, the same `Propose` draws nothing. This is the
@@ -185,12 +211,15 @@ asserting a metric increments.
 
 ## Limits
 
-- **Termination takes up to `n` rounds.** A straggler only draws replies in
-  rounds where it proposes, and the proposer rotates as
-  `(entropy[0] + round) % n`, so it proposes once every `n` rounds. Once it
-  does, every peer answers at once and quorum is reached inside that round. With
-  eight nodes and round timeouts at the 600s ceiling, that is up to about 80
-  minutes, averaging 40. Much better than never, but not immediate. The fix, if
+- **Termination takes up to `n` proposing rounds.** A straggler only draws
+  replies in rounds where it proposes, and the proposer rotates as
+  `(entropy[0] + round) % n`, so it proposes once every `n` rounds. It also has
+  to get that far: `OrganizingPhase` gives up before proposing when no
+  presignature can be reserved or no proposer slot is free
+  (`MAX_CONCURRENT_PROPOSERS`), and a starved node stays silent and therefore
+  unanswerable. Once it does propose, every peer answers at once and quorum is
+  reached inside that round. With eight nodes and round timeouts at the 600s
+  ceiling, that is up to about 80 minutes, averaging 40. Much better than never, but not immediate. The fix, if
   that is too slow, is a one-shot broadcast when an id is retired as
   `CompletedOnChain`: `n - 1` extra messages per completed request, paid on
   every request whether or not anyone is behind. Out of scope here.
@@ -214,6 +243,10 @@ presignature posits, no new message type.
 - **Also treating local generation success as evidence**: reaches quorum in more
   cases, but a finished generation is not a landed publish, and it would end the
   task of the one node that could still have driven the request to a signature.
+- **Clearing all of `dead_ids` on a chain regression** instead of downgrading
+  the affected entries: simpler, but late posits for unaffected chains would
+  start recreating orphan mailboxes, which is the leak `dead_ids` exists to
+  prevent.
 - **Removing the backlog entry on quorum**: makes the termination survive a
   restart, at the price of deleting a locally pending request on peer testimony
   alone.
