@@ -13,13 +13,6 @@ pub trait ChainPublisher: Send + Sync + 'static {
     /// Accepts a publish action. The publisher encapsulates how this is executed
     /// (e.g., immediate spawn, or pushing to an internal batching queue).
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
-
-    /// Whether the node should retry a failed attempt. Existing publishers retain
-    /// the shared HTTP-status policy; integrations with different recovery semantics
-    /// can state that policy without rewriting diagnostics.
-    fn should_retry(&self, error: &anyhow::Error) -> bool {
-        crate::utils::retry::is_retryable(error)
-    }
 }
 
 /// Represents a signature that is ready to be published to a blockchain.

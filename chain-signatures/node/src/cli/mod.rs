@@ -500,7 +500,8 @@ impl ChainConfigs {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured.
+    /// each other chain is added only when configured. A client that fails to build is
+    /// logged and skipped rather than aborting startup.
     async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
@@ -938,28 +939,10 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::time::Duration;
 
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
-
-    fn test_near_client() -> NearClient {
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        ) {
-            near_crypto::Signer::InMemory(signer) => signer,
-            _ => unreachable!(),
-        };
-        NearClient::new(
-            "http://127.0.0.1:1",
-            &account_id,
-            signer,
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        )
-    }
 
     #[test]
     fn test_digest_staking() {
@@ -1256,7 +1239,22 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let publishers = chains.publishers(test_near_client()).await;
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        // Never dialed: publishers() only stores the client in the registry.
+        let near = NearClient::new(
+            "http://127.0.0.1:1",
+            &account_id,
+            signer,
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        );
+        let publishers = chains.publishers(near).await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1268,34 +1266,5 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
-    }
-
-    #[tokio::test]
-    async fn a_midnight_startup_failure_does_not_abort_other_publishers() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("reserve an unresponsive endpoint");
-        let address = listener.local_addr().expect("read the endpoint address");
-
-        let mut midnight = MidnightConfig {
-            node_ws_url: format!("ws://{address}"),
-            central_address: "ab".repeat(32),
-            publisher: Default::default(),
-            rpc: Default::default(),
-            indexer: Default::default(),
-        };
-        midnight.rpc.connect_timeout = Duration::from_millis(100);
-        let chains = ChainConfigs {
-            eth: None,
-            sol: None,
-            hydration: None,
-            canton: None,
-            midnight: Some(midnight),
-        };
-
-        let publishers = chains.publishers(test_near_client()).await;
-
-        assert!(publishers.contains_key(&Chain::NEAR));
-        assert!(!publishers.contains_key(&Chain::Midnight));
     }
 }

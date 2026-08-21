@@ -27,19 +27,6 @@ const RESPOND: &str = "respond";
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
 const RECONCILE_POLL: Duration = Duration::from_secs(2);
 
-#[derive(Debug)]
-struct RetryableExpiredSubmit;
-
-impl std::fmt::Display for RetryableExpiredSubmit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(
-            "finalized chain time is past the ambiguous transaction's expiry; it may be retried",
-        )
-    }
-}
-
-impl std::error::Error for RetryableExpiredSubmit {}
-
 enum FinalizedResponse {
     Present(String),
     Absent {
@@ -327,7 +314,10 @@ impl MidnightPublisher {
                             "the exact response was absent at finalized block {at_hash}, whose \
                              unix timestamp {timestamp_seconds} is past intent expiry {expires_at}"
                         ))
-                        .context(RetryableExpiredSubmit));
+                        .context(
+                            "finalized chain time is past the ambiguous transaction's expiry; \
+                             it may be retried",
+                        ));
                 }
                 Ok(FinalizedResponse::Absent { .. }) => {}
                 Err(error) => tracing::warn!(
@@ -374,10 +364,6 @@ impl ChainPublisher for MidnightPublisher {
                 "midnight: failed to publish signature"
             );
         })
-    }
-
-    fn should_retry(&self, error: &anyhow::Error) -> bool {
-        error.downcast_ref::<RetryableExpiredSubmit>().is_some() || !is_ambiguous_submit(error)
     }
 }
 
@@ -1209,23 +1195,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unresolved_ambiguous_submit_is_not_automatically_retried() {
-        let recorder = Recorder::new("ambiguous-retry-policy");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::new(), StubSubmitter::new()).await;
-        let error = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
-
-        assert!(
-            !publisher.should_retry(&error),
-            "an unresolved transaction may still land"
-        );
-        assert!(
-            publisher.should_retry(&anyhow::anyhow!("temporary node failure")),
-            "ordinary publisher failures keep the existing retry policy"
-        );
-    }
-
-    #[tokio::test]
     async fn a_finalized_head_at_the_intent_ttl_does_not_release_ambiguity() {
         let reads = StubReads::new();
         reads.set_finalized_timestamp(1);
@@ -1284,7 +1253,7 @@ mod tests {
             "the original submit diagnosis must survive expiry: {error:#}"
         );
         assert!(
-            publisher.should_retry(&error),
+            mpc_chain_integration_core::utils::retry::is_retryable(&error),
             "a finalized head past the TTL makes a fresh transaction safe: {error:#}"
         );
         let pinned_hashes: Vec<_> = reads

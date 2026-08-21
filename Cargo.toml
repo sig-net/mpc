@@ -37,7 +37,6 @@ deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hkdf = "0.12.4"
 hyper = { version = "0.14", features = ["full"] }
-jsonrpsee = { version = "0.24.10", features = ["server"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
