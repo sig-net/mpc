@@ -28,7 +28,8 @@ is therefore correct at 5-of-8 and, for any threshold below a majority,
 overestimates `f` and so asks for more reports than strictly needed. It is never
 the weaker of the two.
 
-The same notice is sent on two triggers, one push and one pull. Push: node A's
+A *notice* is one posit message: a reject carrying the `request_completed`
+flag. The same notice is sent on two triggers, one push and one pull. Push: node A's
 indexer sees the respond event, A retires the id as completed-on-chain and
 sends every participant one notice. Pull: whenever a node holding the
 completed tag receives a `Propose` for that id, it answers the sender with the
@@ -96,6 +97,10 @@ machinery for a case that does not need it.)
 
 ## Changes
 
+Footprint: one added wire field, one enum, one set per in-flight request, one
+message constructor with two call sites, across four files. Nothing in the sign
+state machine changes.
+
 ### 1. `chain-signatures/node/src/protocol/request/mod.rs`
 
 - `dead_ids: LruCache<SignId, Retirement>` with
@@ -111,6 +116,8 @@ machinery for a case that does not need it.)
   yet answer `request_completed` to the first node that re-drives the request
   and talk it out of the retry. The entries stay in the cache, they just lose
   the licence to answer.
+- `mark_dead` returns whether the id transitioned into `CompletedOnChain`,
+  which is what gates the push; no separate "already broadcast" set is needed.
 - `mark_dead` is monotonic: `CompletedOnChain` is never downgraded to `Other`.
   Without this the feature silently disables itself, because a task that exits
   on its own just after `handle_completion` retired the id runs `retire_task`
@@ -243,7 +250,17 @@ upgraded, together with `stale_round`.
   for that id and starts a fresh count.
 - **The evidence is no weaker than what each reporter acted on itself.** An
   honest reporter ends its own task on exactly one respond event; the straggler
-  ends its task on `f + 1` independent copies of that same observation.
+  ends its task on `f + 1` independent copies of that same observation. `f + 1`
+  guarantees one honest reporter, not a majority of honest reporters, so a
+  single honest node with a broken indexer can still end a live task with `f`
+  liars behind it. Demanding a majority means `2f + 1` reports, which is 7 of 8
+  at the deployed parameters and would be blocked by any two nodes being down.
+  One honest remote observation for what a node already accepts from one local
+  observation is the consistent choice.
+- **A wrongly ended task is recoverable.** Termination only drops in-memory
+  state, so the requeue path (`take_requeueable_requests` after a catchup, or a
+  re-index after a regression) delivers the request again, and `add_request`
+  clears the dead tag as it re-admits it.
 
 ## Tests
 
@@ -305,9 +322,11 @@ asserting a metric increments.
   misses that event during catchup. The push went out while it was down, so the
   notice is gone and only the pull path can end that task. Do not expect the
   push to shorten that particular scenario.
-- **The evidence expires.** `MAX_DEAD_IDS = 4096` LRU eviction and peer restarts
-  both wipe the dead-id tag, after which peers go back to dropping silently and
-  an old straggler never reaches `f + 1`.
+- **The pull evidence expires.** `MAX_DEAD_IDS = 4096` LRU eviction and peer
+  restarts both wipe the dead-id tag, after which peers go back to dropping
+  silently and an old straggler never reaches `f + 1` by asking. The push does
+  not depend on the cache at all, it fires at completion time, so only the
+  fallback path degrades.
 - **Fewer than `f + 1` observers, no effect.** If a catchup gap made most
   indexers miss the respond event, the request rotates as it does today.
 
