@@ -98,35 +98,30 @@ machinery for a case that does not need it.)
 
 ## Changes
 
-Footprint: one added wire field, one enum, one set per in-flight request, one
-message constructor with two call sites, across four files. Nothing in the sign
-state machine changes.
+Footprint: one added wire field, one small cache, one set per in-flight
+request, one message constructor with two call sites, across three files.
+Nothing in the sign state machine changes and `dead_ids` keeps its current
+meaning and type.
 
 ### 1. `chain-signatures/node/src/protocol/request/mod.rs`
 
-- `dead_ids: LruCache<SignId, Retirement>` with
-  `enum Retirement { CompletedOnChain(Chain), Other }`. `retire_task` takes the
-  retirement: `handle_completion` records `CompletedOnChain(chain)`; task exits
-  (`Ok`, `Err(Aborted)`, interrupted), `AbortChain` and the quorum path record
-  `Other`. The regression case is the one that matters: a rolled-back chain must
-  never make peers claim the request is answered.
-- `AbortChain(chain)` also walks `dead_ids` (`iter_mut`, at most 4096 entries on
-  a rare event) and downgrades every `CompletedOnChain(chain)` to `Other`. A
-  regression rolls back the respond event that licensed the answer, and nodes
-  re-index at different times: without this, the nodes that have not re-indexed
-  yet answer `request_completed` to the first node that re-drives the request
-  and talk it out of the retry. The entries stay in the cache, they just lose
-  the licence to answer.
-- `mark_dead` returns whether the id transitioned into `CompletedOnChain`,
-  which is what gates the push; no separate "already broadcast" set is needed.
-- `mark_dead` is monotonic: `CompletedOnChain` is never downgraded to `Other`.
-  Without this the feature silently disables itself, because a task that exits
-  on its own just after `handle_completion` retired the id runs `retire_task`
-  a second time through `handle_task_exit`. The regression downgrade above is
-  the one deliberate exception and goes through its own path, not `mark_dead`.
-- `handle_completion` and the quorum path share one
-  `fn end_request(&mut self, sign_id, retirement, reason)` that retires and
-  aborts, so the two callers cannot drift apart.
+- A new `completed_ids: LruCache<SignId, ()>` holds the ids our own indexer has
+  seen answered. It is the licence to send a notice, and it has exactly one
+  writer: `handle_completion` inserts, `add_request` removes as it re-admits a
+  request, `AbortChain` clears the whole cache. `dead_ids` and `retire_task`
+  are not touched.
+  - A single writer is the point. Tagging `dead_ids` with a reason instead
+    means the four `retire_task` call sites all have to pass one, and a task
+    that exits on its own just after `handle_completion` retires the same id a
+    second time and silently downgrades the tag. That bug does not exist here.
+  - `AbortChain` clears everything rather than the aborted chain's entries: a
+    regression rolls back the respond event that licensed the notice, and nodes
+    re-index at different times, so a node that has not re-indexed yet would
+    otherwise talk the first node that re-drives the request out of retrying.
+    Clearing across chains only costs a few pull licences, and unlike clearing
+    `dead_ids` it cannot resurrect orphan mailboxes.
+  - The insert returning "not present before" is what gates the push, so there
+    is no separate "already broadcast" set.
 - `SignEntry` gains `completed_reports: HashSet<Participant>`. Per-request state
   with a lifecycle that already exists: it is created in `add_request` and
   dropped in `retire_task`, so there is no second map to keep in step and no
@@ -134,27 +129,27 @@ state machine changes.
   also what stops a peer from growing our memory with reports for made-up ids.
 - `handle_posit` takes `&GovernanceInfo` (already in scope in the select loop)
   and gains two branches:
-  - **Answering.** If the id is dead as `CompletedOnChain` and the action is
+  - **Answering.** If the id is in `completed_ids` and the action is
     `Propose`, reply to the sender with `RejectWithReason(Unknown)` and
     `request_completed: true`, with the id echoing the sender's
     `(sign_id, presignature_id, round)`, the same "the id is an address, not
     content" convention as the `StaleRound` reply. `Accept`, `Reject` and
     `Start` are never answered: replying to a reject ping-pongs between nodes.
-    An `Other` id keeps today's silent drop. The reply must not block the
-    spawner select loop and must not spawn a task per inbound message, so add a
-    non-blocking `MessageChannel::try_send` (the outgoing channel is a bounded
-    tokio mpsc) and drop the reply when the outbox is full. Best effort is the
-    right semantics here: the straggler asks again next time it proposes, and
-    the rest of the codebase already drops posit traffic under load
-    (`try_send_lossy`).
-  - **Counting.** If the message carries `request_completed` and we track the
-    sign id, insert the sender into `completed_reports`, intersect it with the
-    current participant set, and compare against
-    `participants.len().saturating_sub(threshold) + 1`. On quorum, run the
-    same teardown as `handle_completion` with `Retirement::Other`.
+    Ids that are not in `completed_ids` keep today's silent drop. `handle_posit`
+    becomes async and awaits the send like every other sender in the codebase:
+    the outgoing channel holds `MAX_MESSAGE_OUTGOING` (about a million)
+    messages, so there is no realistic backpressure to design around and no
+    reason to add a `try_send` API or spawn a task per reply.
+  - **Counting.** If the message carries `request_completed`, the sender is a
+    current participant and we track the sign id, insert the sender into
+    `completed_reports` and compare its size against
+    `participants.len().saturating_sub(threshold) + 1`. Checking membership on
+    insert rather than filtering on every count keeps the quorum test to one
+    comparison. On quorum, retire the request and abort its task, exactly as
+    `handle_completion` does, but without touching `completed_ids`.
 - **Broadcasting.** `handle_completion` sends the same notice to every other
-  participant, once, when the id transitions to `CompletedOnChain` and we were
-  tracking the request. Both triggers build the message through one
+  participant, once, when the id is new to `completed_ids` and we were tracking
+  the request. Both triggers build the message through one
   `fn completed_notice(sign_id, presignature_id, round) -> PositMessage`, so
   there is a single definition of what a notice is.
   - Only on the transition, so a duplicate respond event or a checkpoint replay
@@ -167,16 +162,14 @@ state machine changes.
     `highest_seen_round` from it, and round 0 can never raise that, nor
     displace a live mailbox slot (the mailbox only overwrites on a round `>=`
     the one it holds).
-  - Sent with the same `try_send`, to all participants without consulting the
-    mesh: the outbox already retries unreachable peers for `message_timeout`
-    and then gives up.
+  - Sent to all participants without consulting the mesh: the outbox already
+    retries unreachable peers for `message_timeout` and then gives up.
 - Observability, because a straggler that never reaches quorum is otherwise
   invisible: log each new distinct report at info with the running count
-  (`2/4`), warn on quorum with the reporter set, and add two counters:
-  `SIGN_COMPLETED_NOTICES_SENT` labelled `kind={broadcast,reply}` (the two
-  triggers answer different questions and must be readable apart) and
-  `SIGN_ENDED_BY_COMPLETED_QUORUM` labelled by chain, read off `SignEntry`
-  before the request is dropped.
+  (`2/4`), warn on quorum with the reporter set, and add one counter,
+  `SIGN_ENDED_BY_COMPLETED_QUORUM`, labelled by chain and read off `SignEntry`
+  before the request is dropped. The sending side is visible in the logs; a
+  counter for it can wait until it is actually wanted.
 - The flag is counted whatever action carries it. Coupling it to
   `RejectWithReason` would buy no safety, since the same node can send a reject,
   and it would be one more branch to keep in step. The sender always pairs it
@@ -223,10 +216,10 @@ upgraded, together with `stale_round`.
   `try_send_lossy` and drops under load. Every report is regenerated the next
   time the straggler proposes, and duplicates are idempotent (the inbox dedups
   by signature, the report set dedups by sender).
-- **A sign id is either tracked or dead, never both.** `add_request` clears the
-  dead tag and `retire_task` drops the request as it sets one, so the answering
-  branch and the counting branch of `handle_posit` are mutually exclusive
-  without an explicit check.
+- **A sign id is either tracked or completed, never both.** `add_request`
+  removes it from `completed_ids` as it admits it and `retire_task` drops the
+  request, so the answering branch and the counting branch of `handle_posit`
+  are mutually exclusive without an explicit check.
 - **Ending a task releases what it held.** An uncommitted presignature
   reservation returns to the pool on drop and the limiter permit is released
   with it, so aborting during organizing or posit costs nothing. A presignature
@@ -333,10 +326,8 @@ asserting a metric increments.
 ## How we will know it works
 
 `SIGN_ENDED_BY_COMPLETED_QUORUM` going above zero on devnet is the signal that a
-straggler was ended by peers rather than by its own indexer, and
-`SIGN_COMPLETED_NOTICES_SENT` split by `kind` shows which of the two paths is
-carrying it: `broadcast` should be steady with request volume, `reply` should be
-near zero and spike only when a node is genuinely behind. The check that
+straggler was ended by peers rather than by its own indexer, and the reporter
+set in the log says whether the push or the pull carried it. The check that
 matters is the one from #891 and #829: sign ids that used to rotate for hours
 after the response landed should stop doing so.
 
@@ -367,10 +358,10 @@ presignature posits, no new message type.
 - **Pushing from one node instead of all `n`**: a straggler needs `f + 1`
   distinct reporters, so a single broadcaster cannot end anything on its own,
   and picking which node broadcasts would add coordination to save 3KB.
-- **Clearing all of `dead_ids` on a chain regression** instead of downgrading
-  the affected entries: simpler, but late posits for unaffected chains would
-  start recreating orphan mailboxes, which is the leak `dead_ids` exists to
-  prevent.
+- **Tagging `dead_ids` with a retirement reason** instead of a separate
+  `completed_ids`: one map instead of two, but four call sites have to pass a
+  reason and two paths write the same id, which makes an ordering bug possible
+  where a separate single-writer cache makes it impossible.
 - **Removing the backlog entry on quorum**: makes the termination survive a
   restart, at the price of deleting a locally pending request on peer testimony
   alone.
