@@ -86,7 +86,7 @@ impl GeneratingPhase {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            state.request().clone(),
+            Arc::clone(&state.request),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -175,7 +175,7 @@ impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         mesh_state: watch::Receiver<MeshState>,
         mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {

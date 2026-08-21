@@ -26,6 +26,11 @@ const TX_PARAM_TYPE_ATOM: usize = 7;
 
 pub type Node = StateValue<DefaultDB>;
 
+pub(crate) const CENTRAL_LEDGER_FIELDS: usize = 6;
+pub(crate) const NOTIFICATION_MAP_FIELD: u8 = 1;
+pub(crate) const RESPOND_MAP_FIELD: u8 = 3;
+pub(crate) const RESPOND_BIDIRECTIONAL_MAP_FIELD: u8 = 5;
+
 /// Follow a resolved ledger-tree path to its node, exactly as the generated `ledger()`
 /// accessor does. The path is what compactc records for the field in the caller's own
 /// `contract-info.json` (`"index"`): `[4]` for a flat contract, `[1, 14]` once the
@@ -232,6 +237,74 @@ pub(crate) fn signet_map_key_rid(key: &AlignedValue) -> Option<[u8; 32]> {
     };
     u64::try_from(count).ok()?;
     <[u8; 32]>::try_from(rid.clone()).ok()
+}
+
+pub(crate) struct DecodedResponseEntry {
+    pub request_id: [u8; 32],
+    pub signature: anyhow::Result<mpc_primitives::Signature>,
+}
+
+/// Decode the deployed singleton's complete response shape before interpreting its
+/// caller-controlled signature values. An outer error is contract-schema drift; an
+/// inner signature error is one invalid candidate that a later counted entry may replace.
+pub(crate) fn decode_response_entry(
+    key: &AlignedValue,
+    value: &Node,
+) -> anyhow::Result<DecodedResponseEntry> {
+    use k256::elliptic_curve::sec1::FromEncodedPoint as _;
+    use mpc_primitives::ScalarExt as _;
+
+    let key_widths = declared_widths(key, "response map key")?;
+    let key_cursor = &mut AtomCursor {
+        atoms: &key.value.0,
+        widths: &key_widths,
+        pos: 0,
+    };
+    let _count = uint::<u64>(key_cursor, 8, "response count")?;
+    let request_id = bytes_n::<32>(key_cursor, "response request id")?;
+    anyhow::ensure!(
+        key_cursor.pos == key.value.0.len(),
+        "response map key decoded {} of {} atoms",
+        key_cursor.pos,
+        key.value.0.len()
+    );
+
+    let cell = cell_of(value, "response signature")?;
+    let widths = declared_widths(cell, "response signature")?;
+    let cursor = &mut AtomCursor {
+        atoms: &cell.value.0,
+        widths: &widths,
+        pos: 0,
+    };
+    let x = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.x")?);
+    let y = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.y")?);
+    let s = bytes_n::<32>(cursor, "response s")?;
+    let recovery_id = uint::<u8>(cursor, 1, "response recovery_id")?;
+    anyhow::ensure!(
+        cursor.pos == cell.value.0.len(),
+        "response signature decoded {} of {} atoms",
+        cursor.pos,
+        cell.value.0.len()
+    );
+
+    let signature = (|| {
+        let encoded = k256::EncodedPoint::from_affine_coordinates(&x, &y, false);
+        let big_r =
+            Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(&encoded))
+                .ok_or_else(|| anyhow::anyhow!("response bigR is not a secp256k1 point"))?;
+        let s = k256::Scalar::from_bytes(s)
+            .ok_or_else(|| anyhow::anyhow!("response s is not a secp256k1 scalar"))?;
+        anyhow::ensure!(
+            recovery_id <= 1,
+            "response recovery_id: {recovery_id} exceeds the maximum 1"
+        );
+        Ok(mpc_primitives::Signature::new(big_r, s, recovery_id))
+    })();
+
+    Ok(DecodedResponseEntry {
+        request_id,
+        signature,
+    })
 }
 
 /// Decode the two-atom notification cell: version, then the 128-byte payload. Every
@@ -490,9 +563,26 @@ mod tests {
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
         key_of, map_of, minimal_record, sample_record, sample_record_with_partial_access_list,
-        sample_record_with_unused_access_list, widths_from_record,
+        sample_record_with_unused_access_list, trim, widths_from_record,
     };
-    use midnight_base_crypto::fab::Alignment;
+    use midnight_base_crypto::fab::{Alignment, Value};
+
+    fn response_key(count: u64, rid: [u8; 32]) -> AlignedValue {
+        AlignedValue {
+            value: Value(vec![
+                ValueAtom(trim(&count.to_le_bytes())),
+                ValueAtom(trim(&rid)),
+            ]),
+            alignment: alignment_of(&[8, 32]),
+        }
+    }
+
+    fn response_value(x: [u8; 32], y: [u8; 32], s: [u8; 32], recovery_id: u8) -> Node {
+        cell_from_atoms(
+            &[trim(&x), trim(&y), trim(&s), trim(&[recovery_id])],
+            &[32, 32, 32, 1],
+        )
+    }
 
     fn leaf(marker: u8) -> Node {
         cell_from_atoms(&[vec![marker]], &[1])
@@ -546,6 +636,61 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("non-array"));
+    }
+
+    #[test]
+    fn response_entry_decodes_only_supported_signature_values() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let rid = [0xa7; 32];
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("generator x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("generator y"));
+        let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let decoded = decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 1))
+            .expect("the contract's response shape decodes");
+        assert_eq!(decoded.request_id, rid);
+        let signature = decoded.signature.expect("the signature values are valid");
+        assert_eq!(signature.big_r, k256::AffinePoint::GENERATOR);
+        assert_eq!(signature.s, k256::Scalar::from(9u64));
+        assert_eq!(signature.recovery_id, 1);
+
+        let bad_widths = cell_from_atoms(&[trim(&x), trim(&y), trim(&s), vec![]], &[32, 32, 31, 1]);
+        assert!(decode_response_entry(&response_key(3, rid), &bad_widths).is_err());
+        assert!(
+            decode_response_entry(&AlignedValue::from(rid), &response_value(x, y, s, 1)).is_err(),
+            "a key that is not a counted SignetMapKey is structural drift"
+        );
+        assert!(decode_response_entry(
+            &response_key(3, rid),
+            &response_value([0xff; 32], [0xff; 32], s, 1),
+        )
+        .expect("the invalid point still has the contract's shape")
+        .signature
+        .is_err());
+        assert!(
+            decode_response_entry(&response_key(3, rid), &response_value(x, y, [0xff; 32], 1),)
+                .expect("the invalid scalar still has the contract's shape")
+                .signature
+                .is_err()
+        );
+        assert!(
+            decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 2),)
+                .expect("recovery id 2 still fits the contract's Uint<8>")
+                .signature
+                .is_err()
+        );
+
+        let invalid_point_with_extra_atom = cell_from_atoms(
+            &[vec![0xff; 32], vec![0xff; 32], trim(&s), vec![], vec![1]],
+            &[32, 32, 32, 1, 1],
+        );
+        assert!(
+            decode_response_entry(&response_key(3, rid), &invalid_point_with_extra_atom).is_err(),
+            "the complete contract shape is checked before cryptographic values"
+        );
     }
 
     #[test]

@@ -287,12 +287,12 @@ async fn test_sign_request_during_resharing() {
 }
 
 fn sign_request(seed: u8) -> SignCommand {
-    SignCommand::Request(IndexedSignRequest::sign(
+    SignCommand::Request(Arc::new(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
         super::helpers::test_sign_arg(seed),
         Chain::NEAR,
         0,
-    ))
+    )))
 }
 
 /// Drive the network through a threshold-change resharing via the real

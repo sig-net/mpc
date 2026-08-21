@@ -10,6 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
     utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
@@ -30,6 +31,7 @@ use mpc_primitives::{
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -140,8 +142,7 @@ impl EthereumTestEnvironment {
         });
 
         let contract_address =
-            eth::deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit())
-                .await?;
+            deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit()).await?;
 
         Ok(Self {
             _spawner: spawner,
@@ -370,9 +371,12 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         .set_processed_block(Chain::Ethereum, processed_height)
         .await;
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
-    seeded_backlog
-        .on_consensus_confirmed(Chain::Ethereum, &checkpoint)
-        .await;
+    assert!(matches!(
+        seeded_backlog
+            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let mut expected_payload = [0x32; 32];
     loop {
@@ -475,39 +479,44 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let resolved_sign_id = SignId::new([0x11; 32]);
     let requeued_sign_id = SignId::new([0x22; 32]);
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             resolved_sign_id,
             test_sign_args(0x11),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             requeued_sign_id,
             test_sign_args(0x22),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, checkpoint_height)
         .await;
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
-    seeded_backlog
-        .on_consensus_confirmed(Chain::Ethereum, &checkpoint)
-        .await;
+    assert!(matches!(
+        seeded_backlog
+            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let backlog = Backlog::persisted(storage.clone());
 
     let execution_sign_id = SignId::new([0x33; 32]);
     backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
-            execution_sign_id,
-            test_sign_args(0x33),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
+        .insert(Arc::new(
+            mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
+                execution_sign_id,
+                test_sign_args(0x33),
+                Chain::Solana,
+                current_unix_timestamp(),
+                test_bidirectional_event(),
+            ),
         ))
         .await;
 
@@ -759,12 +768,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     let dummy_sign_id = SignId::new([0x66; 32]);
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             dummy_sign_id,
             test_sign_args(0x66),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
 
     let indexer =
@@ -855,13 +864,13 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         nonce: 0,
     };
     backlog
-        .insert(IndexedSignRequest::sign_bidirectional(
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x88),
             Chain::Solana,
             current_unix_timestamp(),
             test_bidirectional_event(),
-        ))
+        )))
         .await;
     backlog
         .set_status(
@@ -890,7 +899,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
             assert_eq!(req.chain, Chain::Solana);
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx_id);
                     assert!(
@@ -980,7 +989,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                         continue;
                     }
-                    backlog.insert(request.clone()).await;
+                    backlog.insert(request).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -1025,7 +1034,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                     continue;
                 }
-                backlog.insert(request.clone()).await;
+                backlog.insert(request).await;
 
                 if saw_new_checkpoint {
                     break;

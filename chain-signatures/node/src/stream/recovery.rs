@@ -1,5 +1,5 @@
 use crate::backlog::{consensus, Backlog};
-use crate::mesh::{self, MeshState};
+use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::types::CheckpointWatcher;
 
@@ -8,8 +8,10 @@ use near_account_id::AccountId;
 use tokio::sync::watch;
 
 /// Node-side checkpoint recovery:
-/// waits for an active mesh, optionally loads the latest local checkpoint into the
-/// backlog, then aligns the backlog with the consensus checkpoint feed.
+/// loads the local checkpoint into the backlog (it only touches local storage),
+/// then aligns the backlog with the consensus checkpoint feed. Mesh availability
+/// is handled inside `align_backlog_with_consensus` when it needs to fetch a
+/// checkpoint from peers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     chain: Chain,
@@ -18,14 +20,15 @@ pub(crate) async fn recover_backlog(
     checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
-    threshold: usize,
     my_account_id: &AccountId,
 ) {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
-    mesh::wait_threshold_active(mesh_state, threshold).await;
 
+    // Hydrate the local checkpoint before aligning: the web server (spawned
+    // independently) can then serve durable pending bodies to peers during
+    // startup. `load_local` only reads local storage and does not need the mesh.
     if load_local {
-        match backlog.storage.load_latest(chain).await {
+        match backlog.load_local(chain).await {
             Ok(Some(checkpoint)) => {
                 tracing::info!(
                     ?chain,

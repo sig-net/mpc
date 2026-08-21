@@ -1,0 +1,12 @@
+# Generated output and installed runtime dependencies.
+dist/
+node_modules/
+
+# Generated/binary fixtures and dependency locks are not formatting inputs.
+*.mn
+package-lock.json
+
+# Prose and workflows are laid out by hand.
+*.md
+*.yml
+*.yaml
