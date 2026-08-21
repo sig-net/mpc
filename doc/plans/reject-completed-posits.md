@@ -13,9 +13,11 @@ during catchup after a restart).
 
 ## Design
 
-A node that has seen a request answered on chain replies to a straggler's
-`Propose` with a reject carrying a `request_completed` flag. The straggler ends
-its task once `f + 1` distinct participants have told it so, where
+A node that has seen a request answered on chain tells the other nodes so, both
+unprompted when it learns of the completion and in answer to a straggler's
+`Propose`. The message is a posit reject carrying a `request_completed` flag.
+The straggler ends its task once `f + 1` distinct participants have told it so,
+where
 `f = n - threshold` (8 nodes, threshold 5 => f = 3, so 4 reports). `f + 1`
 guarantees at least one honest reporter, so `f` colluding nodes cannot end an
 honest task. The same arithmetic already appears in
@@ -28,14 +30,13 @@ is therefore correct at 5-of-8 and, for any threshold below a majority,
 overestimates `f` and so asks for more reports than strictly needed. It is never
 the weaker of the two.
 
-A *notice* is one posit message: a reject carrying the `request_completed`
-flag. The same notice is sent on two triggers, one push and one pull. Push: node A's
-indexer sees the respond event, A retires the id as completed-on-chain and
-sends every participant one notice. Pull: whenever a node holding the
-completed tag receives a `Propose` for that id, it answers the sender with the
-same notice. Straggler S counts distinct senders in its spawner, across rounds
-and phases; at `f + 1` it retires the request and aborts the task, without
-itself gaining the right to answer for that id.
+Call that message a *notice*. It has two triggers. Push: node A's indexer sees
+the respond event, A retires the id as completed-on-chain and sends one notice
+to every participant. Pull: a node holding the completed tag receives a
+`Propose` for that id and answers the sender with the same notice. Straggler S
+counts distinct senders in its spawner, across rounds and phases; at `f + 1` it
+retires the request and aborts the task, without itself gaining the right to
+answer for that id.
 
 Push is the fast path and covers the straggler that cannot propose at all.
 Pull is the reliable path and covers everything the one-shot missed: S was
@@ -245,9 +246,6 @@ upgraded, together with `stale_round`.
 - **Governance changes do not inflate a stale count.** Quorum is computed from
   the current participant set and the report set is intersected with it, so
   reports from participants that left do not count towards a smaller quorum.
-- **A re-indexed request resets everything.** `add_request` clears the dead tag,
-  so after a regression recovery the node stops answering `request_completed`
-  for that id and starts a fresh count.
 - **The evidence is no weaker than what each reporter acted on itself.** An
   honest reporter ends its own task on exactly one respond event; the straggler
   ends its task on `f + 1` independent copies of that same observation. `f + 1`
@@ -257,10 +255,12 @@ upgraded, together with `stale_round`.
   at the deployed parameters and would be blocked by any two nodes being down.
   One honest remote observation for what a node already accepts from one local
   observation is the consistent choice.
-- **A wrongly ended task is recoverable.** Termination only drops in-memory
-  state, so the requeue path (`take_requeueable_requests` after a catchup, or a
-  re-index after a regression) delivers the request again, and `add_request`
-  clears the dead tag as it re-admits it.
+- **A wrongly ended task is recoverable, and re-admission is clean.**
+  Termination only drops in-memory state, so the requeue path
+  (`take_requeueable_requests` after a catchup, or a re-index after a
+  regression) delivers the request again; `add_request` clears the dead tag as
+  it re-admits it, which also stops the node answering for that id and starts a
+  fresh count.
 
 ## Tests
 
