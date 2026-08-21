@@ -30,24 +30,22 @@ report was wrong the usual requeue after a catchup brings the request back.
 
 ### Why `f + 1`
 
-`f = n - threshold`, so 3 at the deployed 5-of-8 and 4 reports to end a task.
-This is what `SinglePositCounter::enough_rejects` already uses. A
+`f = n - threshold`, so 3 at the deployed 5-of-8 and 4 reports to end a task,
+the same count `SinglePositCounter::enough_rejects` already uses. A
 `threshold`-of-`n` network tolerates `min(threshold - 1, n - threshold)` faults,
 so `n - threshold` is exact at 5-of-8 and conservative below a majority.
 
-`f + 1` guarantees one honest reporter among the senders, not a majority of
-them, so one honest node with a broken indexer plus `f` liars can still end a
-live task. A majority would need `2f + 1`, which is 7 of 8 here and unreachable
-whenever two nodes are down. One honest remote observation, where a node already
-acts on one local observation, is the consistent bar.
+`f + 1` guarantees one honest sender, not a majority of them, so one honest node
+with a broken indexer plus `f` liars can still end a live task. A majority would
+need `2f + 1`, unreachable at 8 nodes whenever two are down. One honest remote
+observation, where a node already acts on one local observation, is the bar.
 
 ### Why not just a timeout
 
 Capping how long a sign task may live is far simpler and would clear the
-zombies. It would also end live requests, which endless rotation never does: a
-task cannot tell "answered elsewhere" from "slow" from "waiting out a
-partition", and a timer treats all three alike. A generous deadline is still
-worth having as a backstop, as a separate mechanism rather than a substitute.
+zombies, but a timer cannot tell "answered elsewhere" from "slow" from "waiting
+out a partition" and ends all three, which endless rotation never does. Worth
+having as a backstop, not as a substitute.
 
 ### Two phases
 
@@ -80,11 +78,10 @@ unknown fields, so a field is compatible both ways. This is the same trick as
 
 `completed_ids: LruCache<SignId, ()>` is the licence to send a notice.
 `handle_completion` inserts, `add_request` removes as it re-admits a request,
-`AbortChain` clears the whole cache. One writer, and `dead_ids` keeps its
-current type and meaning. `AbortChain` clears across chains on purpose: a
-regression rolls back the respond event, nodes re-index at different times, and
-a node that has not re-indexed yet would otherwise talk the first node that
-retries out of retrying.
+`AbortChain` clears the whole cache; `dead_ids` is untouched. Clearing across
+chains is deliberate: a regression rolls back the respond event, nodes re-index
+at different times, and one that has not re-indexed yet would otherwise talk the
+first node that retries out of retrying.
 
 `SignEntry` gains `completed_reports: HashSet<Participant>`, created and dropped
 with the request, so there is no new lifecycle and nothing to bound.
@@ -108,14 +105,12 @@ either tracked or completed, never both:
   pair it with a reject so that a node not knowing the field still reads
   something sane.
 
-Counting belongs here rather than in the posit phases: `handle_posit` sees every
-posit for every id, so the count is phase-independent and survives a task
-respawn. Inside `PositPhase` it would be discarded during generation, unread
-during organizing, reset on respawn, and would need hoisting above the
-stale-round filter in two loops. The cost is that the spawner cannot see the
-phase, so a task already generating is aborted too. That is intended: the
-request is answered, so that generation is producing a signature nobody will
-publish.
+Counting belongs here rather than in the posit phases, which would discard
+reports during generation, never read them during organizing, reset them on
+respawn, and need hoisting above the stale-round filter in two loops. The cost
+is that the spawner cannot see the phase, so a task already generating is
+aborted too. That is intended: the request is answered, so that generation is
+producing a signature nobody will publish.
 
 ### What we watch
 
@@ -189,7 +184,6 @@ the request. Both call sites build it through one `completed_notice(...)`.
   neither raise that nor displace a live mailbox slot.
 - Sent with the same `try_send` to all participants, `n - 1` at a time from the
   spawner loop, which is what makes the non-blocking send worth its few lines.
-  The outbox already retries unreachable peers and gives up.
 - Costs `n(n - 1)` messages per completed request whether or not anyone is
   behind: 56 of roughly 60 bytes at 8 nodes, batched into partitions the outbox
   already sends.
@@ -215,19 +209,17 @@ presignature posits, and any new message type.
 ## Alternatives considered
 
 - Tagging `dead_ids` with a retirement reason instead of a second cache: one map
-  instead of two, but four `retire_task` call sites must pass a reason and two
-  paths write the same id, so a task exiting just after `handle_completion`
-  silently downgrades the tag and disables the feature. A single-writer cache
-  makes that impossible rather than merely documented.
+  instead of two, but two paths then write the same id, so a task exiting just
+  after `handle_completion` silently downgrades the tag and disables the
+  feature. A single-writer cache makes that impossible.
 - A new `PositRejectReason` variant, or a dedicated `Message` variant: drops
   whole partitions on nodes running old code.
 - Treating local generation success as evidence: reaches quorum more often, but
   a finished generation is not a landed publish.
 - Removing the backlog entry on quorum: survives a restart, at the price of
   deleting a locally pending request on peer testimony alone.
-- Buffering notices for ids we do not track, so a late indexer still counts
-  them: a cache keyed by an id a peer chooses, for nothing. A merely lagging
-  indexer sees request then respond in order, while a stuck node indexed the
-  request first by definition, so its task exists when a notice arrives.
+- Buffering notices for ids we do not track: a cache keyed by an id a peer
+  chooses, for nothing. A stuck node indexed the request before it could get
+  stuck, so its task already exists when a notice arrives.
 - Announcing from one node instead of all: a stuck node needs `f + 1` distinct
   senders, so a single announcer ends nothing on its own.
