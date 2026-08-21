@@ -643,8 +643,10 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
                 ?chain,
                 "failed to publish ({err}), retrying in {sleep:?}"
             );
-        })
-        .await;
+        },
+        // Try to publish the signature
+        { publisher.publish_signature(&action).await }
+    );
 
     // TODO: Consider adding a metric update for failed publish attempts here, if needed.
     // Log error if the publish failed after all retries

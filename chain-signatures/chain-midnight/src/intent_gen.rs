@@ -1,5 +1,8 @@
-//! JSON-lines client for the out-of-process intent builder. A desynchronized pipe is
-//! replaced because a stale reply could put one request's signature into another intent.
+//! Client for the out-of-process intent builder: one JSON object per line down the
+//! child's stdin, one back up its stdout, mirroring `protocol.ts` field for field. The
+//! hazard is a reply landing on the wrong request, which would put one post's signature
+//! into another post's intent; the pipe has no framing beyond the newline, so once the
+//! stream is in any doubt the child is replaced rather than resynchronized.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -22,8 +25,8 @@ pub(crate) struct AmbiguousSubmit;
 impl std::fmt::Display for AmbiguousSubmit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "the answer was lost; the transaction may still reach the chain, so check it for \
-             this request before posting again by reconciling finalized state",
+            "the answer was lost; the transaction may still reach the chain, so the next \
+             attempt checks finalized state for this request before posting again",
         )
     }
 }
@@ -34,14 +37,17 @@ pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<AmbiguousSubmit>().is_some()
 }
 
-/// One respond call in the child's lowercase, unprefixed hex wire shape.
+/// One respond call, in the shape the child validates. Every byte field is bare
+/// lowercase hex with no `0x`; the child converts nothing and rejects anything else.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentRequest {
+    /// `respond` or `respondBidirectional`.
     pub circuit: &'static str,
     pub contract_address: String,
     pub request_id: String,
     pub signature: WireSignature,
+    /// The reads this caller pinned, so the child stays a pure function of them.
     pub contract_state: String,
     pub ledger_parameters: String,
     /// Absolute unix seconds, not a duration from now.
@@ -53,6 +59,7 @@ pub struct IntentRequest {
 pub struct WireSignature {
     pub big_r: WirePoint,
     pub s: String,
+    /// 0 or 1.
     pub recovery_id: u8,
 }
 
@@ -63,7 +70,8 @@ pub struct WirePoint {
     pub y: String,
 }
 
-/// One submit call; the child owns wallet state.
+/// One submit call: only the intent travels, the child balances against a wallet it
+/// syncs itself.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct SubmitRequest {
     intent: String,
@@ -82,7 +90,9 @@ pub enum Operation {
 const READY_OP: &str = "ready";
 
 impl Operation {
-    /// Submit has its own proving budget; the build shares the request budget.
+    /// Build and readiness share the request budget. Submit uses Rust's process
+    /// backstop, whose strict ordering against the child's own deadlines is checked
+    /// during the readiness exchange.
     fn deadline(self, config: &PublisherConfig) -> Duration {
         match self {
             Self::BuildIntent => config.request_timeout,
@@ -95,6 +105,7 @@ impl Operation {
         matches!(self, Self::BuildIntent)
     }
 
+    /// The `op` the child discriminates on.
     fn wire_op(self) -> &'static str {
         match self {
             Self::BuildIntent => "build",
@@ -114,7 +125,8 @@ impl Operation {
 pub struct IntentGen {
     config: MidnightConfig,
     network_id: String,
-    /// Serializes requests on the single child pipe.
+    /// Two interleaved requests on one pipe have no correct reading, so the lock is the
+    /// concurrency story: callers queue.
     session: Mutex<Option<Session>>,
 }
 
@@ -139,7 +151,8 @@ impl IntentGen {
         hex::decode(&intent).context("decoding the intent the builder granted")
     }
 
-    /// Balances, proves and posts `intent` exactly once.
+    /// Balances, proves and posts `intent`, answering with what names it on chain.
+    /// Attempted exactly once.
     pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
         let request = SubmitRequest {
             intent: hex::encode(intent),
@@ -150,7 +163,8 @@ impl IntentGen {
             .context("midnight intent builder posted a transaction without naming it")
     }
 
-    /// Runs one operation with its own budget and reissue policy.
+    /// One operation, start to finish; budget and reissue policy come from
+    /// `operation`, never from the caller.
     async fn dispatch<T: Serialize>(
         &self,
         request: &T,
@@ -175,6 +189,7 @@ impl IntentGen {
         }
     }
 
+    /// Named only on failures of the child itself: a refusal is an answer, not the command's fault.
     fn blame_the_command(&self, error: anyhow::Error) -> anyhow::Error {
         error.context(format!(
             "midnight intent builder command [{}]",
@@ -182,7 +197,8 @@ impl IntentGen {
         ))
     }
 
-    /// A broken exchange or ambiguous submit retires the child.
+    /// One pass. A broken exchange or ambiguous submit empties the slot, killing the
+    /// child: nothing later reads its pipe.
     async fn attempt<T: Serialize>(
         &self,
         session: &mut Option<Session>,
@@ -192,7 +208,8 @@ impl IntentGen {
         if session.is_none() {
             match spawn_session(&self.config, &self.network_id).await {
                 Ok(fresh) => *session = Some(fresh),
-                // The restart budget was already spent inside the spawn.
+                // The restart budget was already spent inside the spawn; a second pass
+                // would only spend it again.
                 Err(error) => return Exchange::give_up(error),
             }
         }
@@ -202,17 +219,18 @@ impl IntentGen {
         let outcome = exchange(live, request, operation, &self.config.publisher).await;
         if matches!(
             &outcome,
-            Exchange::Answered(Err(error))
-                if error.downcast_ref::<AmbiguousSubmit>().is_some()
+            Exchange::Answered(Err(error)) if is_ambiguous_submit(error)
         ) {
-            // Timed-out wallet work makes this child unsafe to reuse.
+            // The wallet work may still be running after its answer times out, so no
+            // later request may reuse this child.
             *session = None;
             return outcome;
         }
         let Exchange::Broken { error, retry } = outcome else {
             return outcome;
         };
-        // Capture stderr before emptying the slot kills the child.
+        // Attached before the slot empties: emptying kills the child and takes its
+        // stderr with it.
         let error = match live.last_words().await {
             Some(said) => error.context(format!("the midnight intent builder said: {said}")),
             None => error,
@@ -226,16 +244,20 @@ impl IntentGen {
 struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Per session: a fresh pipe cannot deliver a previous child's reply.
     next_id: u64,
+    /// What the drain below has heard, for the error that reports this child's death.
     stderr: StderrTail,
-    /// Dropping this kills the child at once (`kill_on_drop`); it does not get to act
-    /// on the stdin EOF first.
+    /// Held for `kill_on_drop`; dropped after `stdin`, so a child that exits on
+    /// end-of-input gets to do that before the kill lands.
     _child: Child,
+    /// Awaited briefly by `last_words`; its end says the child finished saying why it died.
     stderr_drain: AbortOnDrop,
 }
 
 impl Session {
-    /// Waits briefly for a dead child's final stderr lines.
+    /// What the child said on its stderr, or `None`. Waits for the drain briefly: a dead
+    /// child's explanation may still be in flight, and a wedged one never closes stderr.
     async fn last_words(&mut self) -> Option<String> {
         let _ = tokio::time::timeout(STDERR_TAIL_GRACE, &mut self.stderr_drain.0).await;
         self.stderr.take()
@@ -244,14 +266,17 @@ impl Session {
 
 const STDERR_TAIL_LINES: usize = 10;
 
+/// How long a broken pass waits for the drain to finish before reporting what it has.
 const STDERR_TAIL_GRACE: Duration = Duration::from_millis(200);
 
-/// Bounded stderr retained for error context.
+/// The child's last words, bound for an error rather than a log: `tracing` reaches
+/// nobody in a process without a subscriber. `drain_stderr` is the only filler.
 #[derive(Clone, Default)]
 struct StderrTail(Arc<std::sync::Mutex<VecDeque<String>>>);
 
 impl StderrTail {
-    /// A poisoned diagnostic lock must not take down a runtime worker.
+    /// Never panics on a poisoned lock: a panic here takes a runtime worker with it
+    /// over a diagnostic, and nothing inside the lock can panic anyway.
     fn lines(&self) -> std::sync::MutexGuard<'_, VecDeque<String>> {
         self.0
             .lock()
@@ -266,19 +291,19 @@ impl StderrTail {
         lines.push_back(line);
     }
 
+    /// Oldest first, on one line: this becomes an `anyhow` context.
     fn take(&self) -> Option<String> {
         let lines = self.lines();
         (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join("; "))
     }
 }
 
+/// What a pass at the child produced.
 enum Exchange {
+    /// A reply that answers this request, whether it granted it or refused it.
     Answered(anyhow::Result<WireReply>),
     /// The child is replaced either way; only a transport fault is worth a second try.
-    Broken {
-        error: anyhow::Error,
-        retry: bool,
-    },
+    Broken { error: anyhow::Error, retry: bool },
 }
 
 impl Exchange {
@@ -290,6 +315,7 @@ impl Exchange {
         }
     }
 
+    /// The child is finished either way, and asking a new one would only reproduce this.
     fn give_up(error: anyhow::Error) -> Self {
         Self::Broken {
             error,
@@ -298,7 +324,9 @@ impl Exchange {
     }
 }
 
-/// Marks post-encoding submit failures as ambiguous because the transaction may have landed.
+/// `error`, plus what an operation that cannot be asked again leaves behind. Applied
+/// to every locally broken exchange after encoding: from there the transport may have
+/// been attempted, so a lost answer and a landed transaction are indistinguishable.
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     match operation {
         Operation::Submit => error.context(AmbiguousSubmit),
@@ -306,12 +334,14 @@ fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     }
 }
 
-/// Fixed executable path for the packaged publisher and its Node interpreter.
+/// Resolves the packaged publisher and its `#!/usr/bin/env node` interpreter without
+/// making the parent's executable search path part of the child configuration.
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// The child parses numbers as JavaScript `number`, whose integer precision ends here.
 const MAX_SAFE_WIRE_ID: u64 = (1_u64 << 53) - 1;
 
+/// Returns one lossless JSON id and advances the private session counter.
 fn take_wire_id(next_id: &mut u64) -> u64 {
     let id = *next_id;
     debug_assert!(id <= MAX_SAFE_WIRE_ID);
@@ -319,6 +349,7 @@ fn take_wire_id(next_id: &mut u64) -> u64 {
     id
 }
 
+/// Starts the builder under the restart budget.
 async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
     retry_rpc!(
         config.publisher.request_timeout,
@@ -356,6 +387,10 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
         Exchange::Broken { error, .. } => return Err(error),
     };
     anyhow::ensure!(
+        decoded.ready == Some(true),
+        "midnight intent builder readiness reply did not identify itself"
+    );
+    anyhow::ensure!(
         decoded.protocol_version == Some(PUBLISHER_PROTOCOL_VERSION),
         "midnight intent builder readiness reply has protocolVersion {:?}, expected {}",
         decoded.protocol_version,
@@ -377,7 +412,8 @@ async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow:
          timeout ({submit_timeout:?}) < Rust backstop ({:?})",
         config.submit_timeout
     );
-    // Application ids start at zero independently of the readiness exchange.
+    // Readiness is a session bootstrap, not an application request. Reusing id zero
+    // keeps the application protocol independent of whether the bootstrap grows.
     session.next_id = 0;
     Ok(session)
 }
@@ -414,6 +450,7 @@ fn spawn_child(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Sess
     })
 }
 
+/// Configured but not spawned, so a test can read back the environment the child would get.
 fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Command> {
     let (program, args) = config
         .publisher
@@ -446,6 +483,7 @@ fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Resu
     Ok(command)
 }
 
+/// Forwards the child's stderr to the log and keeps the tail for errors.
 async fn drain_stderr(stderr: ChildStderr, tail: StderrTail) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -464,6 +502,7 @@ async fn exchange<T: Serialize>(
     let id = take_wire_id(&mut session.next_id);
     let line = match encode_request(request, id, operation.wire_op()) {
         Ok(line) => line,
+        // Nothing reached the pipe, so the child is still in step.
         Err(error) => return Exchange::Answered(Err(error)),
     };
 
@@ -485,7 +524,8 @@ async fn exchange_inner(
     config: &PublisherConfig,
 ) -> Exchange {
     let deadline = operation.deadline(config);
-    // Retire timed-out children; submits are never reissued here.
+    // A timed-out child is a dead publisher if kept: a wedged circuit run wedges the
+    // process while it still looks healthy. `Broken` kills it; a submit is still not reissued.
     let reply = match tokio::time::timeout(deadline, round_trip(session, line)).await {
         Ok(Ok(reply)) => reply,
         Ok(Err(error)) => return Exchange::lost(error, operation),
@@ -520,6 +560,7 @@ async fn round_trip(session: &mut Session, line: &str) -> anyhow::Result<String>
     Ok(reply)
 }
 
+/// Reads one reply line as the answer to request `id`.
 fn decode_reply(line: &str, id: u64) -> Exchange {
     let reply: WireReply = match serde_json::from_str(line.trim()) {
         Ok(reply) => reply,
@@ -531,7 +572,8 @@ fn decode_reply(line: &str, id: u64) -> Exchange {
             )
         }
     };
-    // A different id proves the stream slipped; an id-less rejection still answers this request.
+    // A rejection carrying no id is this request's own; a reply naming a different request
+    // means the stream has slipped, the one outcome worth killing a healthy child over.
     match reply.id {
         Some(answered) if answered != id => {
             return Exchange::give_up(anyhow::anyhow!(
@@ -539,9 +581,10 @@ fn decode_reply(line: &str, id: u64) -> Exchange {
             ))
         }
         None if reply.ok => {
+            // A grant with no id is not an answer to anything nameable.
             return Exchange::give_up(anyhow::anyhow!(
                 "midnight intent builder granted a request with no id"
-            ))
+            ));
         }
         _ => {}
     }
@@ -570,6 +613,7 @@ fn encode_request<T: Serialize>(request: &T, id: u64, op: &'static str) -> anyho
         .context("encoding the request for the builder")
 }
 
+/// The wire shape: the caller's fields, the id that pairs the reply, the discriminating op.
 #[derive(Serialize)]
 struct WireRequest<'a, T> {
     id: u64,
@@ -578,16 +622,20 @@ struct WireRequest<'a, T> {
     request: &'a T,
 }
 
-/// Additive reply shape; unknown fields are ignored.
+/// Both arms of a reply in one shape. Unknown fields are ignored on purpose: growing
+/// the wire is meant to be additive on one side at a time.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireReply {
+    /// Null when the child could not read an id off the line it was rejecting.
     id: Option<u64>,
     ok: bool,
+    ready: Option<bool>,
     protocol_version: Option<u64>,
     submit_timeout_ms: Option<u64>,
     recipe_ttl_ms: Option<u64>,
     intent: Option<String>,
+    /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
     code: Option<String>,
     message: Option<String>,
@@ -831,7 +879,7 @@ mod tests {
 
         assert!(rendered.contains("id 7"), "got: {rendered}");
         assert!(
-            rendered.contains("check it for this request before posting again"),
+            is_ambiguous_submit(&err),
             "an unpairable submit reply must preserve the on-chain uncertainty: {rendered}"
         );
     }
@@ -869,7 +917,7 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("closed its stdout"), "got: {rendered}");
         assert!(
-            rendered.contains("check it for this request before posting again"),
+            is_ambiguous_submit(&err),
             "a lost answer must not be reported as a bare transport fault: {rendered}"
         );
         assert!(
@@ -892,8 +940,8 @@ mod tests {
 
         let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("check it for this request before posting again"),
-            "the error has to say what an operator must do before retrying by hand: {err:#}"
+            is_ambiguous_submit(&err),
+            "a blown submit deadline must keep the on-chain uncertainty: {err:#}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
@@ -919,9 +967,9 @@ mod tests {
             format!("{err:#}").contains("no spendable dust"),
             "got: {err:#}"
         );
-        // A refusal is an answer: nothing here should send an operator to the chain.
+        // A refusal is an answer: nothing was posted, so nothing is ambiguous.
         assert!(
-            !format!("{err:#}").contains("may still reach the chain"),
+            !is_ambiguous_submit(&err),
             "a refusal spent nothing: {err:#}"
         );
     }
@@ -980,9 +1028,9 @@ mod tests {
 
         let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
-        // A build leaves nothing behind: sending its operator to the chain would be a false alarm.
+        // A build leaves nothing behind, so its timeout is never ambiguous.
         assert!(
-            !format!("{err:#}").contains("may still reach the chain"),
+            !is_ambiguous_submit(&err),
             "a build that timed out spent nothing: {err:#}"
         );
 
@@ -1251,6 +1299,26 @@ mod tests {
         IntentGen::spawn(&config, NETWORK_ID)
             .await
             .expect("generation 1 readiness succeeds");
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_the_ready_discriminator() {
+        for (case, reply) in [
+            (
+                "missing",
+                r#"{"id":0,"ok":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+            ),
+            (
+                "false",
+                r#"{"id":0,"ok":true,"ready":false,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+            ),
+        ] {
+            let result = IntentGen::spawn(&ready_reply_config(reply), NETWORK_ID).await;
+            assert!(
+                result.is_err(),
+                "a {case} ready field must not start a session"
+            );
+        }
     }
 
     #[tokio::test]

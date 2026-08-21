@@ -31,7 +31,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-jsonrpsee.workspace = true
+jsonrpsee = { version = "0.24.10", features = ["server"] }
 midnight-ledger-v9 = { version = "1.0.0", default-features = false }
 midnight-transient-crypto = "3.0.0"
 tokio-tungstenite = "0.29"

@@ -939,7 +939,6 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::time::Duration;
 
     use super::*;
 

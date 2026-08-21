@@ -11,8 +11,8 @@ use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::reconnecting_rpc_client::RpcClient as ReconnectingRpcClient;
 use subxt::backend::rpc::RpcClient;
-use subxt::backend::BackendExt as _;
 use subxt::client::OnlineClient;
+use subxt::ext::codec::DecodeAll as _;
 use subxt::ext::jsonrpsee::client_transport::ws::{Url as WsUrl, WsTransportClientBuilder};
 use subxt::ext::jsonrpsee::core::client::async_client::PingConfig;
 use subxt::ext::jsonrpsee::core::client::{Client as RawWsClient, Error as JsonrpseeClientError};
@@ -30,21 +30,25 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
-const TIMESTAMP_PALLET: &str = "Timestamp";
-const TIMESTAMP_NOW: &str = "Now";
 
-/// Read failures carried as marker text because `retry_rpc!` flattens error chains.
+/// The classified read failures, travelling as marker text because `retry_rpc!`
+/// flattens error chains to their message; when the retry layer preserves sources,
+/// [`of`](Self::of) becomes a downcast and call sites stay put.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadFailure {
     /// Pruned or unknown hash: no number of retries makes the node serve it.
     Unservable,
-    /// State beyond the RPC response cap.
+    /// State beyond the rpc response cap: definitive (retrying cannot shrink a
+    /// contract's state) and the contract's own property, so reads of it charge
+    /// the caller.
     TooLarge,
-    /// The client's background task is gone and requires reconnecting.
+    /// The client's background task is gone: every call fails until reconnect, so
+    /// this ends `run()` and is never charged to the entry that observed it.
     ClientClosed,
 }
 
 impl ReadFailure {
+    /// The marker text errors of this class carry.
     pub(crate) const fn marker(self) -> &'static str {
         match self {
             Self::Unservable => {
@@ -55,10 +59,12 @@ impl ReadFailure {
         }
     }
 
+    /// An error of this class: the marker, then the detail.
     fn err(self, detail: impl std::fmt::Display) -> anyhow::Error {
         anyhow::anyhow!("{}: {detail}", self.marker())
     }
 
+    /// The class `err` carries, if any.
     pub(crate) fn of(err: &anyhow::Error) -> Option<Self> {
         let text = err.to_string();
         [Self::Unservable, Self::TooLarge, Self::ClientClosed]
@@ -67,10 +73,13 @@ impl ReadFailure {
     }
 }
 
-/// Websocket liveness when an error's type is inconclusive.
+/// Whether the websocket is still up, consulted when an error's shape alone
+/// cannot say; wraps the raw client's own `is_connected` in live code.
 type Liveness = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Finalized block data detached from its Subxt handle.
+/// One finalized block as plain data: the number plus the `0x`-prefixed hashes
+/// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRef {
     pub number: u64,
@@ -112,7 +121,9 @@ async fn connect_bounded(
     let connect_timeout = config.rpc.connect_timeout;
     let url = config.node_ws_url.as_str();
 
-    // Equivalent to `RpcClient::from_url`, with a configurable response cap.
+    // `RpcClient::from_url` with the one knob it does not expose, the response
+    // cap (`RpcConfig::max_response_size`): the same transport, client and
+    // subscription buffer, through subxt's own jsonrpsee re-export.
     let ws_client = tokio::time::timeout(connect_timeout, async {
         let target = WsUrl::parse(url).context("the midnight node ws url does not parse")?;
         let (sender, receiver) = WsTransportClientBuilder::default()
@@ -134,6 +145,8 @@ async fn connect_bounded(
     .context("timed out connecting to the midnight node rpc")??;
     let ws = Arc::new(ws_client);
     let rpc = RpcClient::new(ws.clone());
+    // `is_connected` is the liveness answer catching dead-client shapes
+    // the error types hide.
     let alive: Liveness = Arc::new(move || ws.is_connected());
     let client = tokio::time::timeout(
         connect_timeout,
@@ -307,7 +320,29 @@ impl MidnightPublisherRpc {
         })
     }
 
-    pub async fn finalized_head_0x(&self) -> anyhow::Result<String> {
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+}
+
+/// Finalized reads used by the publisher and its in-process tests. Every read is
+/// addressed by the `0x`-prefixed hash `finalized_head` answers with.
+#[async_trait::async_trait]
+pub(crate) trait PinnedReads: Send + Sync {
+    async fn finalized_head(&self) -> anyhow::Result<String>;
+    /// The two node surfaces disagree about `0x`; both are decoded to bytes here, so
+    /// nothing above this trait may reintroduce the distinction.
+    async fn contract_state(
+        &self,
+        address_64hex: &str,
+        at_hash_0x: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>>;
+}
+
+#[async_trait::async_trait]
+impl PinnedReads for MidnightPublisherRpc {
+    async fn finalized_head(&self) -> anyhow::Result<String> {
         let finalized = self
             .client
             .backend()
@@ -317,60 +352,28 @@ impl MidnightPublisherRpc {
         Ok(hex_0x(finalized.hash()))
     }
 
-    pub(crate) async fn block_timestamp_seconds(
-        &self,
-        at_block_hash_0x: &str,
-    ) -> anyhow::Result<u64> {
-        let at = parse_block_hash(at_block_hash_0x)?;
-        let address = subxt::dynamic::storage(
-            TIMESTAMP_PALLET,
-            TIMESTAMP_NOW,
-            Vec::<subxt::dynamic::Value>::new(),
-        );
-        let key = self
-            .client
-            .storage()
-            .address_bytes(&address)
-            .context("midnight runtime metadata has no Timestamp.Now storage entry")?;
-        let encoded = self
-            .client
-            .backend()
-            .storage_fetch_value(key, at)
-            .await
-            .context("failed to fetch midnight runtime storage")?
-            .with_context(|| format!("midnight block {at_block_hash_0x} has no timestamp"))?;
-        decode_timestamp_seconds(&encoded)
-    }
-
-    pub async fn contract_state(
+    async fn contract_state(
         &self,
         address_64hex: &str,
-        at_block_hash_0x: &str,
+        at_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address_64hex, at_block_hash_0x).await
+        publisher_contract_state(&self.rpc, address_64hex, at_hash_0x).await
     }
 
-    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        let at = parse_block_hash(at_block_hash_0x)?;
+    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
+        let at = parse_block_hash(at_hash_0x)?;
         let answer = self
             .client
             .backend()
             .call(LEDGER_PARAMETERS_ENTRY, Some(&[]), at)
             .await
             .context("failed to fetch midnight ledger parameters")?;
-        unwrap_runtime_api_result(&answer)?.with_context(|| {
-            format!("midnight node has no ledger parameters at {at_block_hash_0x}")
-        })
-    }
-
-    pub fn network_id(&self) -> &str {
-        &self.network_id
+        unwrap_runtime_api_result(&answer)?
+            .with_context(|| format!("midnight node has no ledger parameters at {at_hash_0x}"))
     }
 }
 
 async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<String> {
-    use subxt::ext::codec::Decode as _;
-
     let finalized = client
         .backend()
         .latest_finalized_block_ref()
@@ -381,15 +384,12 @@ async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<St
         .call(NETWORK_ID_ENTRY, Some(&[]), finalized.hash())
         .await
         .context("failed to fetch the midnight network id")?;
-    let mut payload = &answer[..];
-    let network_id =
-        String::decode(&mut payload).context("midnight runtime returned a malformed network id")?;
-    anyhow::ensure!(
-        payload.is_empty(),
-        "midnight runtime network id has {} trailing bytes",
-        payload.len()
-    );
-    Ok(network_id)
+    decode_network_id(&answer)
+}
+
+fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
+    let mut payload = answer;
+    String::decode_all(&mut payload).context("midnight runtime returned a malformed network id")
 }
 
 async fn connect_publisher_transport(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
@@ -425,8 +425,36 @@ async fn publisher_contract_state(
     .await
     .context("midnight_contractState reconnect failed")?;
 
-    match response {
-        Ok(state_hex) => Ok(Some(
+    match classify_contract_state_reply(response)? {
+        ContractStateReply::State(state) => Ok(state),
+        ContractStateReply::Unservable(err)
+        | ContractStateReply::TooLarge(err)
+        | ContractStateReply::Other(err) => {
+            Err(anyhow::Error::new(err).context("midnight_contractState failed"))
+        }
+    }
+}
+
+/// One `midnight_contractState` answer, classified once for both transports. The node
+/// builds every rpc error as invalid-params with the reason only in the text, so its
+/// two definitive answers stay text matches under the code gate.
+enum ContractStateReply {
+    /// The state bytes, or `None` when the contract is not present at that block.
+    State(Option<Vec<u8>>),
+    /// Pruned or unknown hash: no number of retries makes the node serve it.
+    Unservable(RawRpcError),
+    /// State beyond the rpc response cap, reachable because our cap sits above the
+    /// server's: definitive, since retrying cannot shrink a contract's state.
+    TooLarge(RawRpcError),
+    /// Anything else; the transport's own policy decides.
+    Other(RawRpcError),
+}
+
+fn classify_contract_state_reply(
+    response: Result<String, RawRpcError>,
+) -> anyhow::Result<ContractStateReply> {
+    Ok(match response {
+        Ok(state_hex) => ContractStateReply::State(Some(
             hex::decode(state_hex.trim_start_matches("0x"))
                 .context("midnight_contractState returned non-hex state")?,
         )),
@@ -434,7 +462,7 @@ async fn publisher_contract_state(
             if reply.code == INVALID_PARAMS_CODE
                 && reply.message.contains("Contract not present") =>
         {
-            Ok(None)
+            ContractStateReply::State(None)
         }
         Err(RawRpcError::User(reply))
             if reply.code == INVALID_PARAMS_CODE
@@ -442,51 +470,30 @@ async fn publisher_contract_state(
                     .message
                     .contains("Unable to get requested contract state") =>
         {
-            Err(ReadFailure::Unservable.err(RawRpcError::User(reply)))
+            ContractStateReply::Unservable(RawRpcError::User(reply))
         }
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            Err(ReadFailure::TooLarge.err(reply))
+            ContractStateReply::TooLarge(RawRpcError::User(reply))
         }
-        Err(err) => Err(anyhow::Error::new(err).context("midnight_contractState failed")),
-    }
+        Err(err) => ContractStateReply::Other(err),
+    })
 }
 
 /// The bare payload of the ledger-parameters `Result<Vec<u8>, _>` runtime-API answer
 /// at `MidnightRuntimeApi` version 2 (node 2.0.0-rc.4). `None` is the `Err` variant:
 /// only its discriminant is decoded, so an unseen ledger error stays `Err`.
 fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-    use subxt::ext::codec::Decode as _;
     let (variant, mut payload) = answer
         .split_first()
         .context("runtime api returned an empty Result envelope")?;
     match *variant {
-        0 => {
-            let value = Vec::<u8>::decode(&mut payload)
-                .context("runtime api Ok payload is not a SCALE Vec<u8>")?;
-            anyhow::ensure!(
-                payload.is_empty(),
-                "runtime api Ok payload has {} trailing bytes",
-                payload.len()
-            );
-            Ok(Some(value))
-        }
+        0 => Ok(Some(
+            Vec::<u8>::decode_all(&mut payload)
+                .context("runtime api Ok payload is not a SCALE Vec<u8>")?,
+        )),
         1 => Ok(None),
         other => anyhow::bail!("runtime api returned Result variant {other}"),
     }
-}
-
-fn decode_timestamp_seconds(encoded: &[u8]) -> anyhow::Result<u64> {
-    use subxt::ext::codec::Decode as _;
-
-    let mut payload = encoded;
-    let timestamp_millis =
-        u64::decode(&mut payload).context("midnight block timestamp is not a SCALE-encoded u64")?;
-    anyhow::ensure!(
-        payload.is_empty(),
-        "midnight block timestamp has {} trailing bytes",
-        payload.len()
-    );
-    Ok(timestamp_millis / 1_000)
 }
 
 /// The one-shot reads over explicit transports, so the offline tests can drive
@@ -618,35 +625,14 @@ impl Reads {
                     )
                     .await;
 
-                match response {
-                    Ok(state_hex) => {
-                        let state = hex::decode(state_hex.trim_start_matches("0x"))
-                            .context("midnight_contractState returned non-hex state")?;
-                        Ok(Fetched::Value(Some(state)))
+                match classify_contract_state_reply(response)? {
+                    ContractStateReply::State(state) => Ok(Fetched::Value(state)),
+                    // Spends the retry budget like any other `Err`; only the class escapes.
+                    ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
+                    ContractStateReply::TooLarge(err) => Ok(Fetched::TooLarge(err.to_string())),
+                    ContractStateReply::Other(err) => {
+                        self.classify(Err(err), "midnight_contractState failed")
                     }
-                    // The node builds every rpc error as invalid-params with the reason
-                    // only in the text, so its two answers stay text matches under the
-                    // code gate.
-                    Err(RawRpcError::User(reply))
-                        if reply.code == INVALID_PARAMS_CODE
-                            && reply.message.contains("Contract not present") =>
-                    {
-                        Ok(Fetched::Value(None))
-                    }
-                    Err(RawRpcError::User(reply))
-                        if reply.code == INVALID_PARAMS_CODE
-                            && reply
-                                .message
-                                .contains("Unable to get requested contract state") =>
-                    {
-                        Err(anyhow::Error::new(RawRpcError::User(reply))
-                            .context(ReadFailure::Unservable.marker()))
-                    }
-                    // Reachable because our response cap sits above the server's.
-                    Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-                        Ok(Fetched::TooLarge(reply.to_string()))
-                    }
-                    Err(err) => self.classify(Err(err), "midnight_contractState failed"),
                 }
             }
         )?;
@@ -1011,6 +997,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publisher_contract_state_preserves_raw_failures_without_indexer_markers() {
+        for (code, message) in [
+            (INVALID_PARAMS_CODE, UNSERVABLE_MSG),
+            (OVERSIZED_RESPONSE_CODE, "state exceeds the response limit"),
+        ] {
+            let node = StubNode::new(vec![(
+                "midnight_contractState",
+                vec![Canned::User(code, message)],
+            )]);
+            let rpc = RpcClient::new(node);
+
+            let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+                .await
+                .expect_err("the node reply is a publisher read failure");
+
+            assert_eq!(
+                ReadFailure::of(&err),
+                None,
+                "publisher errors must not acquire indexer policy markers: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains(message),
+                "the original node diagnostic must remain in the error chain: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn contract_state_definitive_answers_spend_no_retries() {
         // The oversized refusal classifies by its code, whatever the server words it as.
         let node = StubNode::new(vec![(
@@ -1202,6 +1216,24 @@ mod tests {
     }
 
     #[test]
+    fn network_id_decoder_consumes_the_whole_scale_value() {
+        use subxt::ext::codec::Encode as _;
+
+        let encoded = "preview".to_string().encode();
+        assert_eq!(decode_network_id(&encoded).unwrap(), "preview");
+
+        let mut trailing = encoded;
+        trailing.push(0xff);
+        let err = decode_network_id(&trailing)
+            .expect_err("a trailing byte must make the network id malformed");
+        assert!(
+            err.to_string()
+                .contains("midnight runtime returned a malformed network id"),
+            "the decoder boundary must identify the malformed network id: {err:#}"
+        );
+    }
+
+    #[test]
     fn runtime_api_result_envelope_unwraps_ok_err_and_garbage() {
         use subxt::ext::codec::Encode as _;
         // Ok(vec![0xaa, 0xbb]): discriminant 0, then a SCALE Vec<u8>.
@@ -1221,18 +1253,12 @@ mod tests {
         let mut trailing = vec![0u8];
         trailing.extend(vec![0xaau8].encode());
         trailing.push(0x99);
-        assert!(unwrap_runtime_api_result(&trailing).is_err());
-    }
-
-    #[test]
-    fn block_timestamp_matches_the_ledger_s_second_floor() {
-        use subxt::ext::codec::Encode as _;
-
-        assert_eq!(decode_timestamp_seconds(&1_000u64.encode()).unwrap(), 1);
-        assert_eq!(decode_timestamp_seconds(&1_999u64.encode()).unwrap(), 1);
-
-        let mut trailing = 1_000u64.encode();
-        trailing.push(0xff);
-        assert!(decode_timestamp_seconds(&trailing).is_err());
+        let err = unwrap_runtime_api_result(&trailing)
+            .expect_err("a trailing byte must make the runtime API payload malformed");
+        assert!(
+            err.to_string()
+                .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
+            "the decoder boundary must identify the malformed payload: {err:#}"
+        );
     }
 }

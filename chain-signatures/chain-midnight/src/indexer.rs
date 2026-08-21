@@ -3,16 +3,14 @@
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::reader::{
-    decode_notification, decode_response_entry, resolve_verified_record, signet_field_node_by_path,
-    signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry, Node, Resolved,
-    CENTRAL_LEDGER_FIELDS, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD,
-    RESPOND_MAP_FIELD,
+    central_map, decode_notification, decode_response_entry, resolve_verified_record,
+    signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
+    Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
 use crate::rpc::{BlockRef, ReadFailure};
 use crate::source::{ChainSource, ContractState, LiveSource};
 
 use midnight_base_crypto::fab::AlignedValue;
-use midnight_onchain_state::state::StateValue;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -204,49 +202,34 @@ enum Indexed {
     Cancelled,
 }
 
-/// The outcome of an operation run under [`retry_until_cancelled`].
-enum Retried<T> {
-    /// Succeeded, after however many retries.
-    Done(T),
-    /// `cancel` fired mid-flight; every caller answers this by returning `Ok(())`.
-    Cancelled,
-    /// The node cannot serve state at this height: the one failure a retry never
-    /// clears. Each caller applies its own policy, which is why it is handed back
-    /// rather than resolved here.
-    Unservable(anyhow::Error),
-    /// The client's connection is gone and every further call fails until `run()`
-    /// is rebuilt: ends the run so the supervisor's restart reconnects.
-    ClientClosed(anyhow::Error),
-}
-
 /// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
 ///
 /// The per-item retry the other chains' indexers apply around their own block
 /// processing: a node hiccup costs one retry here, not a supervised
 /// restart that re-runs backlog recovery, re-anchors and
-/// re-queues the pending backlog. Only the pruning signature escapes, as
-/// [`Retried::Unservable`]: no number of retries makes a pruned node serve state,
-/// so retrying it would spin until the watchdog fires.
+/// re-queues the pending backlog. The pruning signature escapes as `Err`: no number
+/// of retries makes a pruned node serve state, so retrying it would spin until the
+/// watchdog fires. Cancellation is `Ok(None)`.
 async fn retry_until_cancelled<T, F, Fut>(
     what: &'static str,
     height: u64,
     cancel: &CancellationToken,
     mut attempt: F,
-) -> Retried<T>
+) -> anyhow::Result<Option<T>>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     loop {
         let result = tokio::select! {
-            _ = cancel.cancelled() => return Retried::Cancelled,
+            _ = cancel.cancelled() => return Ok(None),
             result = attempt() => result,
         };
         match result {
-            Ok(value) => return Retried::Done(value),
+            Ok(value) => return Ok(Some(value)),
             Err(err) => match ReadFailure::of(&err) {
-                Some(ReadFailure::Unservable) => return Retried::Unservable(err),
-                Some(ReadFailure::ClientClosed) => return Retried::ClientClosed(err),
+                Some(ReadFailure::Unservable) => return Err(note_unservable(err, height)),
+                Some(ReadFailure::ClientClosed) => return Err(err),
                 _ => tracing::warn!(
                     reason = "retrying",
                     height,
@@ -255,7 +238,7 @@ where
             },
         }
         tokio::select! {
-            _ = cancel.cancelled() => return Retried::Cancelled,
+            _ = cancel.cancelled() => return Ok(None),
             _ = tokio::time::sleep(RETRY_DELAY) => {}
         }
     }
@@ -317,12 +300,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         field: u8,
         field_name: &'static str,
     ) -> anyhow::Result<Vec<MapEntry>> {
-        let node = signet_field_node_by_path(tree, &[field])
-            .with_context(|| format!("central {field_name} field"))?;
-        let StateValue::Map(entries) = node else {
-            anyhow::bail!("central field {field} ({field_name}) is not a map");
-        };
-        Ok(entries
+        Ok(central_map(tree, field, field_name)?
             .iter()
             .map(|entry| {
                 let (key, value) = &*entry;
@@ -338,14 +316,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// Their positions and map shapes are fixed by the deployed singleton, so drift
     /// halts before the block checkpoint can advance.
     fn central_entries(tree: &Node) -> anyhow::Result<CentralEntries> {
-        let StateValue::Array(fields) = tree else {
-            anyhow::bail!("central singleton state root is not an array");
-        };
-        anyhow::ensure!(
-            fields.len() == CENTRAL_LEDGER_FIELDS,
-            "central singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
-            fields.len()
-        );
         Ok(CentralEntries {
             notifications: Self::map_entries(
                 tree,
@@ -614,17 +584,19 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         cache: &mut CentralCache,
         block: &BlockRef,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Retried<Vec<ChainEvent>>> {
+    ) -> anyhow::Result<Option<Vec<ChainEvent>>> {
         loop {
             let result = tokio::select! {
-                _ = cancel.cancelled() => return Ok(Retried::Cancelled),
+                _ = cancel.cancelled() => return Ok(None),
                 result = self.process_block(source, cache, block) => result,
             };
             match result {
-                Ok(requests) => return Ok(Retried::Done(requests)),
+                Ok(requests) => return Ok(Some(requests)),
                 Err(err) => match ReadFailure::of(&err) {
-                    Some(ReadFailure::Unservable) => return Ok(Retried::Unservable(err)),
-                    Some(ReadFailure::ClientClosed) => return Ok(Retried::ClientClosed(err)),
+                    Some(ReadFailure::Unservable) => {
+                        return Err(note_unservable(err, block.number));
+                    }
+                    Some(ReadFailure::ClientClosed) => return Err(err),
                     None if err.downcast_ref::<ResponseSchemaDrift>().is_some() => {
                         return Err(err);
                     }
@@ -646,7 +618,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 },
             }
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(Retried::Cancelled),
+                _ = cancel.cancelled() => return Ok(None),
                 _ = tokio::time::sleep(RETRY_DELAY) => {}
             }
         }
@@ -662,15 +634,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         number: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
-        let block =
-            match retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
-                .await
-            {
-                Retried::Done(block) => block,
-                Retried::Cancelled => return Ok(Indexed::Cancelled),
-                Retried::Unservable(err) => return Err(note_unservable(err, number)),
-                Retried::ClientClosed(err) => return Err(err),
-            };
+        let Some(block) =
+            retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
+                .await?
+        else {
+            return Ok(Indexed::Cancelled);
+        };
         self.index_block(source, cache, events_tx, &block, cancel)
             .await
     }
@@ -685,18 +654,14 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         block: &BlockRef,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
-        match self
+        let Some(events) = self
             .process_block_retrying(source, cache, block, cancel)
             .await?
-        {
-            Retried::Done(events) => {
-                self.emit_block(events_tx, block, events).await?;
-                Ok(Indexed::Done)
-            }
-            Retried::Cancelled => Ok(Indexed::Cancelled),
-            Retried::Unservable(err) => Err(note_unservable(err, block.number)),
-            Retried::ClientClosed(err) => Err(err),
-        }
+        else {
+            return Ok(Indexed::Cancelled);
+        };
+        self.emit_block(events_tx, block, events).await?;
+        Ok(Indexed::Done)
     }
 
     /// Emits a block's lifecycle events, then its Block event, then records telemetry.
@@ -834,7 +799,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::CENTRAL_LEDGER_FIELDS;
     use crate::state::decode_contract_state;
+    use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use std::time::Duration;
