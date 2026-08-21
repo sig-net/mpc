@@ -165,7 +165,7 @@ the round is not bumped. A deliberator that lacks the presignature sends
 `REJECT MissingArtifact` and resumes waiting for a `PROPOSE` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
 
-TODO: shrink local holder set when receiving `REJECT MissingArtifact`
+Shrinking the holder set on `REJECT MissingArtifact` is proposal 2 in §9.
 
 ### Who each message goes to
 
@@ -441,12 +441,18 @@ by design, so the rotation has to be ended by information, not time.
    today; replying REJECT Completed lets a straggler end its task on the next
    message it sends. To be Byzantine fault tolerant, f+1 such rejects should
    be seen before moving on. One new reject reason, no new message type. It is
-   the minimal form of the round-outcome signal (§3) and addresses the
-   last finding from the analysis above.
+   the minimal form of the round-outcome signal (§3). It covers the subset of
+   "no proposer" where the elected node already completed and retired the
+   request.
 2. **Prune the pool.** Record `MissingArtifact` in the holder set. A `REJECT
    MissingArtifact` is a peer stating it does not hold that share. Feed it to
    `remove_holder_and_prune`, which sync already uses, so the holder set in
-   Redis reflects it and later reservations skip that peer.
+   Redis reflects it and later reservations skip that peer. Do not remove
+   holders for active-set absence: that is transient, and deleting on it would
+   discard usable presignatures during a network blip. Pruning stays keyed on
+   the holder count falling below `t`, never on liveness. Ranked here for
+   recovery value after storage incidents rather than for steady-state churn,
+   which the sign-path reject counts above do not support.
 3. **SKIP.** A proposer that cannot propose (no presignature, no permit,
    paused) says so; receivers end round `r` at once instead of timing out on
    silence. Silent rounds dominate the churn. One class of them is now
