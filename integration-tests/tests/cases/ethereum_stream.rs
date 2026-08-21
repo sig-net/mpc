@@ -1149,3 +1149,164 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     assert!(saw_respond, "did not receive SignatureResponded event");
     Ok(())
 }
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_off_curve_point_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // Submit a respond with an off-curve bigR point
+    let malformed_id = [0xf1; 32];
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::ZERO,
+                y: U256::ZERO,
+            },
+            s: U256::from(12345u64),
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow:
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    // Block order (malformed → valid → later sign request, each receipt awaited
+    // before the next send) guarantees the respond set is complete once the
+    // later sign request is observed.
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream did not survive the malformed respond event")?;
+
+    assert!(
+        respond_ids.contains(&valid_id),
+        "valid respond event was not emitted"
+    );
+    assert!(
+        !respond_ids.contains(&malformed_id),
+        "respond event with off-curve bigR must be skipped"
+    );
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // s = U256::MAX ABI-decodes but exceeds the secp256k1 curve order.
+    let malformed_id = [0xf1; 32];
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::MAX,
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow: 
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream did not survive the malformed respond event")?;
+
+    assert!(
+        respond_ids.contains(&valid_id),
+        "valid respond event was not emitted"
+    );
+    assert!(
+        !respond_ids.contains(&malformed_id),
+        "respond event with out-of-range s must be skipped"
+    );
+    Ok(())
+}
