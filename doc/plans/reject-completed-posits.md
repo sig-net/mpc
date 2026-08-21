@@ -331,6 +331,30 @@ set in the log says whether the push or the pull carried it. The check that
 matters is the one from #891 and #829: sign ids that used to rotate for hours
 after the response landed should stop doing so.
 
+## If this is still too much
+
+The irreducible core is three things: a signal on the wire that a reject means
+"already answered" rather than "not now", a count of `f + 1` distinct senders,
+and some way for a straggler that missed the moment to still learn. Everything
+else is a layer that can be cut.
+
+- **Cut the push, keep the pull.** Removes the fan-out, the transition gate, the
+  round-0 reasoning and one test, roughly a quarter of the change. #891 stays
+  covered, because that node was down when the push would have gone out and only
+  the pull can reach it. What is lost is the presignature-starved straggler,
+  which never proposes and so can never be answered, and the up-to-80-minute
+  wait becomes the normal case rather than the fallback.
+- **Cut the pull, add a deadline.** Removes `completed_ids`, the answering
+  branch and the `AbortChain` interaction, leaving the wire field, the counting
+  and the push, plus a hard cap on how long a sign task may live. Simpler than
+  either half, and not recommended: a timer ends live requests as readily as
+  dead ones, whereas today's endless rotation at least keeps trying. A generous
+  deadline is a reasonable backstop to add on its own merits, but it is not a
+  substitute for evidence-based termination.
+- **Not a simplification, but worth saying**: this whole mechanism is
+  resilience against an indexer that loses respond events. Fixing the catchup
+  gap in #891 removes the stragglers at the source; this removes their effect.
+
 ## Non-goals
 
 No relaying of hearsay, no backlog changes, no changes to triple or
