@@ -101,7 +101,7 @@ Optimization: start round timeout when enough active peers.
 
 Posit is two independent machines, one per role; a node runs exactly one for
 round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5), unless it
-is throttling (§8.6). 
+is throttling (§8.6).
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
@@ -128,18 +128,18 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     state "Organizing" as OrgIn
-    
+
     state "<b>Waiting for Propose</b>
     1. wait for PROPOSE from the elected proposer
     2. reject any other proposer for r" as WaitingForPropose
-    
+
     state "<b>Propose received</b>
     1. check I hold proposed presignature
     2. send ACCEPT to the proposer" as ProposeReceived
-    
+
     state "<b>Waiting for Start</b>
     1. wait for START from the proposer" as WaitingForStart
-    
+
     state "Generating" as GenOut
 
     OrgIn --> WaitingForPropose: deliberator
@@ -349,8 +349,8 @@ because the round timeout ran out.
 1. **No way to leave the state machine except by generating.** No round cap, no
    cross-round deadline, and `round_timeout` saturates at 600s. The one failure
    terminal (`Complete(Err(Aborted))`) needs a closed proposer semaphore, which
-   nothing closes, so no request ever fails from inside the machine. This is 
-   the desired behavior. 
+   nothing closes, so no request ever fails from inside the machine. This is
+   the desired behavior.
 2. **A late accepter burns a full round.** A node that catches up mid-round
    sends `ACCEPT` after the proposer already sent `START`. The proposer is
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
@@ -381,12 +381,13 @@ because the round timeout ran out.
 
 ## 9. What the logs show
 
-48h Cloud Logging sweep, 2026-08-17 to 2026-08-19, all three networks: devnet
+Analysis 1: 48h Cloud Logging sweep, 2026-08-17 to 2026-08-19, all three networks: devnet
 (12 nodes), testnet (9 nodes), mainnet (1 of the 7 participant nodes runs in
 our cluster).
+Analysis 2: Devnet, full day 2026-08-20
 
 Good news
-- **Presignature pipeline is healthy.** ~964 completions
+- **Presignature pipeline is healthy.** Analysis 1: ~964 completions
   per hour on devnet, start:completed exactly 1:1 on both networks, and the two
   proposer-side starvation signals ("skipping presignature due to inactive
   participants", "proposer timeout waiting for presignature") are zero in
@@ -394,11 +395,23 @@ Good news
   Redis master being replaced (each cluster runs one shared Redis, so a node
   cannot lose its storage alone). Steady-state churn is therefore not pool
   starvation.
+  Analysis 2: 3 presignature timeouts in a day, against 7470 generations
+  started and 7008 completed. `MissingArtifact` is rare on the sign path and
+  bursty rather than steady. Counted apart over the analysis-1 window, the
+  sign-path reject ("deliberator does not have access to proposed
+  presignature") fired 298 times against >=5000 for the presignature
+  protocol's separate missing-triples reject; over a recent 6h window the two
+  were 0 and 2.
 - **No reconstruction failures (§8.5).** The
   silent-success branch has never been observed firing; fixing it is insurance
   against a latent path, not an active leak.
+- **Round desync within expectations.** Across 179 `(sign_id, round)`
+  pairs on all 12 pods, pods enter the same round within ~200 ms and
+  `received Propose from non-proposer` is 0 all day. The correction traffic is
+  trivial next to ~3250 rotations/hour: 1153 StaleRound rejects (median gap 3)
+  and 4919 future-round buffers (median gap 1, 89% of them gap 1).
 
-Requiring some more thoughts
+Not so great
 - **Duplicate deliveries are real (§8.4).** Devnet logged ~20k
   "posit ACCEPT duplicate ignored" in episodic bursts (half from one node), in
   the shared posit layer the presignature protocol uses. Zero REJECT
@@ -409,32 +422,36 @@ Requiring some more thoughts
   reorganizes across only 79 distinct sign_ids. ~83% of reorganize reasons are
   "deliberator timeout waiting for Propose": rounds ending because no PROPOSE
   ever arrived.
-- **`MissingArtifact` fires routinely (§8.3):** 3244 on devnet, 375 on testnet,
-  in 48h.
 - **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
   on testnet (§8.1);** on testnet each node logs the same delayed request, so
   the per-node uniform count is one request counted nine times.
+- **No proposer.** Analysis 2: 71.8% of rotations are "deliberator timeout
+  waiting for Propose". Nodes differ widely in how many requests they are live
+  on, so election keeps picking nodes that are not working on the request:
+  `sign_queue_size` ranges from 1 to 20 across the 12 devnet pods against an
+  identical 19-entry Ethereum backlog, stable across repeated sampling. That
+  reading is from metrics rather than logs, so per-pod log ingestion gaps do
+  not affect it.
 
-Proposals against the churn, in order of expected impact. Requests never
-expire by design, so the rotation has to be ended by information, not time:
 
-1. **Prune the pool.** Discard a presignature that cannot reach `t` live
-   holders (MissingArtifact replies shrink its effective holder set; repeated
-   active-set skips finish it). This is not the steady-state churn driver
-   since the pool is healthy, but it frees stockpile slots (`len_mine` counts
-   unusable entries toward `min_presignatures`) and speeds recovery after 
-   storage incidents. 
-2.  **SKIP.** A proposer that cannot propose (no presignature, no permit,
-   paused) says so; receivers end round `r` at once instead of timing out on
-   silence. Silent rounds dominate the churn and their cause is unidentified;
-   SKIP both shortens them and sharpens the diagnosis, since a round that
-   stays silent after SKIP has an absent proposer, not an unwilling one.
-3. **Answer posits for completed requests.** `dead_ids` silently drops them
+Improvement proposals, in recommended order of attack. Requests never expire
+by design, so the rotation has to be ended by information, not time.
+
+1. **Answer posits for completed requests.** `dead_ids` silently drops them
    today; replying REJECT Completed lets a straggler end its task on the next
    message it sends. To be Byzantine fault tolerant, f+1 such rejects should
-   be seen before moving on. 
-   One new reject reason, no new message type. Verification
-   showed completion propagating well, so this is insurance for a node the
-   Completion event misses, and the minimal form of the round-outcome signal
-   (§3). 
+   be seen before moving on. One new reject reason, no new message type. It is
+   the minimal form of the round-outcome signal (§3) and addresses the
+   last finding from the analysis above.
+2. **Prune the pool.** Record `MissingArtifact` in the holder set. A `REJECT
+   MissingArtifact` is a peer stating it does not hold that share. Feed it to
+   `remove_holder_and_prune`, which sync already uses, so the holder set in
+   Redis reflects it and later reservations skip that peer.
+3. **SKIP.** A proposer that cannot propose (no presignature, no permit,
+   paused) says so; receivers end round `r` at once instead of timing out on
+   silence. Silent rounds dominate the churn. One class of them is now
+   accounted for, a proposer that already completed and retired the request,
+   which 1 covers; SKIP covers the rest and sharpens the diagnosis, since a
+   round that stays silent after SKIP has an absent proposer, not an unwilling
+   one.
 
