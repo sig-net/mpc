@@ -412,12 +412,7 @@ Good news
   and 4919 future-round buffers (median gap 1, 89% of them gap 1).
 
 Not so great
-- **Duplicate deliveries are real (§8.4).** Devnet logged ~20k
-  "posit ACCEPT duplicate ignored" in episodic bursts (half from one node), in
-  the shared posit layer the presignature protocol uses. Zero REJECT
-  duplicates, zero START-from-non-proposer, zero conflicting-proposer events
-  anywhere, so reordering damage has not been observed.
-- **Round churn is currently a devnet phenomenon.** ~100k reorganizes in 48h on
+- **Frequent reorganization on devnet.** ~100k reorganizes in 48h on
   devnet against exactly zero on testnet; the midday baseline hour had 3815
   reorganizes across only 79 distinct sign_ids. ~83% of reorganize reasons are
   "deliberator timeout waiting for Propose": rounds ending because no PROPOSE
@@ -432,6 +427,12 @@ Not so great
   identical 19-entry Ethereum backlog, stable across repeated sampling. That
   reading is from metrics rather than logs, so per-pod log ingestion gaps do
   not affect it.
+- **Duplicate deliveries are real (§8.4).** ~20k "posit ACCEPT duplicate
+  ignored" on devnet, episodic, half from one node, in the presignature posit
+  layer. Harmless in themselves: the tallies are sets, so a duplicate costs a
+  log line. They do prove the channel is not exactly-once, which is why §8.4
+  is worth acting on, though reordering itself stays unobserved (zero REJECT
+  duplicates, START-from-non-proposer, or conflicting-proposer anywhere).
 
 
 Improvement proposals, in recommended order of attack. Requests never expire
