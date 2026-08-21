@@ -1062,7 +1062,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     // Watch the replacement transaction
     let replacement_sign_id = SignId::new([0x72; 32]);
     let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
-    
+
     // Insert the replacement sign request into the backlog
     backlog
         .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
@@ -1117,8 +1117,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
 
-    // The nonce-gated sweep must resolve both watchers: 
-    // the replaced respond tx as failed (nonce consumed, receipt absent) instead of hanging, 
+    // The nonce-gated sweep must resolve both watchers:
+    // the replaced respond tx as failed (nonce consumed, receipt absent) instead of hanging,
     // the replacement at its actual mined block with its real outcome.
     let mut confirmations = Vec::new();
     stream
@@ -1507,7 +1507,7 @@ async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Res
         .await
         .context("malformed respond transaction execution failed")?;
 
-    // A valid respond followed by a later sign request must still flow: 
+    // A valid respond followed by a later sign request must still flow:
     // the malformed event is skipped (warn-and-drop), the pipeline survives.
     let valid_id = [0xf2; 32];
     let valid = ChainSignatures::Response {
