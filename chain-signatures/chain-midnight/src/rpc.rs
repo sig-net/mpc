@@ -33,18 +33,24 @@ const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 const TIMESTAMP_PALLET: &str = "Timestamp";
 const TIMESTAMP_NOW: &str = "Now";
 
-/// Read failures carried as marker text because `retry_rpc!` flattens error chains.
+/// The classified read failures, travelling as marker text because `retry_rpc!`
+/// flattens error chains to their message; when the retry layer preserves sources,
+/// [`of`](Self::of) becomes a downcast and call sites stay put.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadFailure {
     /// Pruned or unknown hash: no number of retries makes the node serve it.
     Unservable,
-    /// State beyond the RPC response cap.
+    /// State beyond the rpc response cap: definitive (retrying cannot shrink a
+    /// contract's state) and the contract's own property, so reads of it charge
+    /// the caller.
     TooLarge,
-    /// The client's background task is gone and requires reconnecting.
+    /// The client's background task is gone: every call fails until reconnect, so
+    /// this ends `run()` and is never charged to the entry that observed it.
     ClientClosed,
 }
 
 impl ReadFailure {
+    /// The marker text errors of this class carry.
     pub(crate) const fn marker(self) -> &'static str {
         match self {
             Self::Unservable => {
@@ -55,10 +61,12 @@ impl ReadFailure {
         }
     }
 
+    /// An error of this class: the marker, then the detail.
     fn err(self, detail: impl std::fmt::Display) -> anyhow::Error {
         anyhow::anyhow!("{}: {detail}", self.marker())
     }
 
+    /// The class `err` carries, if any.
     pub(crate) fn of(err: &anyhow::Error) -> Option<Self> {
         let text = err.to_string();
         [Self::Unservable, Self::TooLarge, Self::ClientClosed]
@@ -67,10 +75,13 @@ impl ReadFailure {
     }
 }
 
-/// Websocket liveness when an error's type is inconclusive.
+/// Whether the websocket is still up, consulted when an error's shape alone
+/// cannot say; wraps the raw client's own `is_connected` in live code.
 type Liveness = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Finalized block data detached from its Subxt handle.
+/// One finalized block as plain data: the number plus the `0x`-prefixed hashes
+/// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRef {
     pub number: u64,
@@ -112,7 +123,9 @@ async fn connect_bounded(
     let connect_timeout = config.rpc.connect_timeout;
     let url = config.node_ws_url.as_str();
 
-    // Equivalent to `RpcClient::from_url`, with a configurable response cap.
+    // `RpcClient::from_url` with the one knob it does not expose, the response
+    // cap (`RpcConfig::max_response_size`): the same transport, client and
+    // subscription buffer, through subxt's own jsonrpsee re-export.
     let ws_client = tokio::time::timeout(connect_timeout, async {
         let target = WsUrl::parse(url).context("the midnight node ws url does not parse")?;
         let (sender, receiver) = WsTransportClientBuilder::default()
@@ -134,6 +147,8 @@ async fn connect_bounded(
     .context("timed out connecting to the midnight node rpc")??;
     let ws = Arc::new(ws_client);
     let rpc = RpcClient::new(ws.clone());
+    // `is_connected` is the liveness answer catching dead-client shapes
+    // the error types hide.
     let alive: Liveness = Arc::new(move || ws.is_connected());
     let client = tokio::time::timeout(
         connect_timeout,

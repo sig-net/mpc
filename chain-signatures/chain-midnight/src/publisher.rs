@@ -13,9 +13,7 @@ use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightConfig, PublisherConfig};
-use crate::intent_gen::{
-    is_ambiguous_submit, AmbiguousSubmit, IntentGen, IntentRequest, WirePoint, WireSignature,
-};
+use crate::intent_gen::{is_ambiguous_submit, IntentGen, IntentRequest, WirePoint, WireSignature};
 use crate::reader::{
     decode_response_entry, CENTRAL_LEDGER_FIELDS, RESPOND_BIDIRECTIONAL_MAP_FIELD,
     RESPOND_MAP_FIELD,
@@ -249,23 +247,11 @@ impl MidnightPublisher {
         };
         let bytes = self.intent_gen.build(&request).await?;
 
-        let backstop = submit_backstop(&self.config);
-        let submitted = tokio::time::timeout(backstop, async {
-            self.submitter.submit(&bytes).await.with_context(|| {
-                format!(
-                    "submitting the midnight respond intent built over the chain at {}",
-                    chain.at_hash
-                )
-            })
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(anyhow::anyhow!(
-                "the midnight submit step ran past its {backstop:?} backstop without returning: \
-                 it is not enforcing the {:?} submit_timeout it was given",
-                self.config.submit_timeout
+        let submitted = self.submitter.submit(&bytes).await.with_context(|| {
+            format!(
+                "submitting the midnight respond intent built over the chain at {}",
+                chain.at_hash
             )
-            .context(AmbiguousSubmit))
         });
         let receipt = match submitted {
             Ok(receipt) => receipt,
@@ -480,21 +466,12 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
         .saturating_add(config.submit_timeout.as_secs())
 }
 
-/// The outer bound on the submit step, behind the `submit_timeout` the step itself
-/// enforces. It is deliberately looser than the budget it backs so the two deadlines
-/// cannot race; the extra build budget is belt-and-braces headroom for a child that
-/// violates its own deadline. A fire abandons the wait,
-/// never the transaction, so the result is reconciled against finalized state through
-/// the intent's expiry before a caller may retry.
-fn submit_backstop(config: &PublisherConfig) -> Duration {
-    config.submit_timeout.saturating_add(config.request_timeout)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::config::MidnightConfig;
+    use crate::intent_gen::AmbiguousSubmit;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -638,8 +615,6 @@ mod tests {
     #[derive(Default)]
     struct StubSubmitter {
         submitted: std::sync::atomic::AtomicUsize,
-        /// Held before answering, so a test can drive the caller's deadline.
-        delay: Duration,
         /// What it refuses with, standing in for the child's own verdict.
         failure: Option<&'static str>,
     }
@@ -647,13 +622,6 @@ mod tests {
     impl StubSubmitter {
         fn new() -> Arc<Self> {
             Arc::new(Self::default())
-        }
-
-        fn slow() -> Arc<Self> {
-            Arc::new(Self {
-                delay: Duration::from_secs(300),
-                ..Default::default()
-            })
         }
 
         fn refusing(failure: &'static str) -> Arc<Self> {
@@ -671,7 +639,6 @@ mod tests {
     #[async_trait]
     impl IntentSubmitter for StubSubmitter {
         async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
-            tokio::time::sleep(self.delay).await;
             // The bytes have to be the builder's own: whatever is proved and paid for is this.
             assert_eq!(
                 hex::encode(intent),
@@ -1266,65 +1233,6 @@ mod tests {
             pinned_hashes,
             vec![HEAD_ONE.to_string(); 2],
             "absence and timestamp must come from the same finalized block"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_submit_step_that_never_returns_does_not_hold_the_publisher_task() {
-        // The step is expected to enforce its own budget, and this is what happens when
-        // it does not: the publish ends and says which fault it is.
-        let recorder = Recorder::new("submit-backstop");
-        let mut config = config(granting_child(&recorder));
-        let midnight = MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
-            central_address: CENTRAL.to_string(),
-            publisher: config.clone(),
-            rpc: Default::default(),
-            indexer: Default::default(),
-        };
-        let intent_gen = Arc::new(
-            IntentGen::spawn(&midnight, "undeployed")
-                .await
-                .expect("the stub child spawns with the normal request budget"),
-        );
-        config.submit_timeout = Duration::from_millis(20);
-        config.request_timeout = Duration::from_millis(30);
-
-        // A backstop equal to `submit_timeout` would turn an ordinary slow submit
-        // into a race between two different error messages.
-        let backstop = submit_backstop(&config);
-        assert!(
-            backstop > config.submit_timeout,
-            "the backstop must never fire before the budget it backs: {backstop:?} vs {:?}",
-            config.submit_timeout
-        );
-        assert_eq!(backstop, config.submit_timeout + config.request_timeout);
-
-        let reads = StubReads::new();
-        reads.set_finalized_timestamp(u64::MAX);
-        let publisher = MidnightPublisher::assemble(
-            &config,
-            CENTRAL.to_string(),
-            reads,
-            intent_gen,
-            StubSubmitter::slow(),
-            Arc::new(NoopPublisherTelemetry),
-        );
-
-        let started = std::time::Instant::now();
-        let err = publisher
-            .publish_signature(&respond_action())
-            .await
-            .expect_err("a submit that never returns must not hold the task");
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("backstop"), "got: {rendered}");
-        assert!(
-            rendered.contains("not enforcing"),
-            "the message has to name which of the two faults this is: {rendered}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "waited past the 70ms backstop this config sets"
         );
     }
 
