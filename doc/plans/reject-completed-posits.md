@@ -21,6 +21,13 @@ guarantees at least one honest reporter, so `f` colluding nodes cannot end an
 honest task. The same arithmetic already appears in
 `SinglePositCounter::enough_rejects`, which fires above `n - threshold` rejects.
 
+The tolerated fault count of a `threshold`-of-`n` signing network is
+`min(threshold - 1, n - threshold)`: more corrupt nodes than the first can forge
+a signature, more offline nodes than the second stop it. Using `n - threshold`
+is therefore correct at 5-of-8 and, for any threshold below a majority,
+overestimates `f` and so asks for more reports than strictly needed. It is never
+the weaker of the two.
+
 Decisions:
 
 - **Only chain-observed completions license the reject.** An id qualifies only
@@ -93,6 +100,9 @@ machinery for a case that does not need it.)
   Without this the feature silently disables itself, because a task that exits
   on its own just after `handle_completion` retired the id runs `retire_task`
   a second time through `handle_task_exit`.
+- `handle_completion` and the quorum path share one
+  `fn end_request(&mut self, sign_id, retirement, reason)` that retires and
+  aborts, so the two callers cannot drift apart.
 - `SignEntry` gains `completed_reports: HashSet<Participant>`. Per-request state
   with a lifecycle that already exists: it is created in `add_request` and
   dropped in `retire_task`, so there is no second map to keep in step and no
@@ -163,6 +173,14 @@ upgraded, together with `stale_round`.
   `try_send_lossy` and drops under load. Every report is regenerated the next
   time the straggler proposes, and duplicates are idempotent (the inbox dedups
   by signature, the report set dedups by sender).
+- **A sign id is either tracked or dead, never both.** `add_request` clears the
+  dead tag and `retire_task` drops the request as it sets one, so the answering
+  branch and the counting branch of `handle_posit` are mutually exclusive
+  without an explicit check.
+- **Ending a task releases what it held.** An uncommitted presignature
+  reservation returns to the pool on drop and the limiter permit is released
+  with it, so aborting during organizing or posit costs nothing. A presignature
+  already committed for generation is consumed either way.
 - **Answering costs at most one message per message received.** A participant
   that floods `Propose` for a completed id gets one reply each, so there is no
   amplification, and the replies are dropped rather than queued when the outbox
@@ -195,10 +213,14 @@ Three, each pinning something that would otherwise break silently.
    `Propose` for the dead id draws a reply carrying the flag and creates no
    mailbox; after `AbortChain`, the same `Propose` draws nothing. This is the
    safety branch: never claim a rolled-back request is answered.
-3. **Wire compatibility** (`message/crypto.rs`): a batch from a node that sets
-   the flag decodes on a node that does not know the field, and a batch from a
-   node that does not set it decodes as `request_completed: false`. Mirrors
-   `test_posit_stale_round_field_is_wire_compatible`.
+3. **Wire compatibility** (`message/crypto.rs`): extend
+   `test_posit_stale_round_field_is_wire_compatible` to carry
+   `request_completed` alongside `stale_round` and rename it for both fields,
+   rather than copying thirty lines for a second one. It already asserts the
+   property that matters in both directions: a batch decodes on a node that does
+   not know the field, and a batch without the field decodes as the default.
+   This is the one failure mode that only shows up during a deploy, so it is
+   worth the test even though the pattern is proven.
 
 Tests 1 and 2 need the spawner fixture that
 `test_abort_chain_dead_ids_lifecycle` builds inline today; extract it into a
