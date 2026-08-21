@@ -36,6 +36,15 @@ Fixed decisions:
   after catchup brings the request back if we were wrong.
 - Reports are counted in the spawner, not in the posit phases.
 
+### Why not just a timeout
+
+A cap on how long a sign task may live is far simpler than any of this and would
+end the zombies. It would also end live requests, which today's endless rotation
+never does: a task cannot tell "answered elsewhere" from "slow" from "waiting
+out a partition", and a timer treats all three alike. Termination here is on
+evidence instead. A generous deadline is still worth having as a backstop on its
+own merits, as a different mechanism rather than a substitute for this one.
+
 ### Two phases
 
 1. **Answer on demand.** A node holding a completed id answers a straggler's
@@ -95,8 +104,9 @@ both ways, the same trick as `stale_round`, for about eleven bytes per posit.
     same "the id is an address, not content" convention as the `StaleRound`
     reply. `Accept`, `Reject` and `Start` are never answered, since replying to
     a reject ping-pongs. Everything else keeps today's silent drop. Sent with a
-    new non-blocking `MessageChannel::try_send`, dropping the notice if the
-    outgoing channel is full, which keeps `handle_posit` synchronous.
+    new non-blocking `MessageChannel::try_send`, logging and dropping the
+    notice if the outgoing channel is full, which keeps `handle_posit`
+    synchronous.
   - *Count*: flag set, sender is a current participant, id is tracked, then
     insert into `completed_reports` and compare its size against
     `participants.len().saturating_sub(threshold) + 1`. Membership checked on
@@ -115,12 +125,17 @@ both ways, the same trick as `stale_round`, for about eleven bytes per posit.
 - The flag counts whatever action carries it; coupling it to `RejectWithReason`
   buys no safety, since the same node can send a reject. Senders always pair it
   with one so that a node not knowing the field reads something sane.
-- Observability, and phase 2's decision data: log each new distinct report with
-  its running count, warn on quorum with the reporter set, add
-  `SIGN_ENDED_BY_COMPLETED_QUORUM` by chain, and a gauge of the highest round in
-  flight per chain (`round` is already in `SignEntry`). The gauge is the
-  important one. Quorum successes are visible; the case phase 2 exists for shows
-  up only as an absence.
+- Observability, and phase 2's decision data. Log each new distinct report with
+  its running count and warn on quorum with the reporter set, then three
+  signals, all local, none needing cross-node correlation:
+  - `SIGN_ENDED_BY_COMPLETED_QUORUM` by chain: pull fired and worked.
+  - A gauge of the highest round in flight per chain (`round` is already in
+    `SignEntry`): whether a straggler population exists at all. A healthy
+    request finishes in a few rounds, so anything past a full proposer rotation
+    is a task making no progress.
+  - A counter for rounds where we were the elected proposer and gave up before
+    sending `Propose`, labelled by reason (no presignature, no proposer slot):
+    whether that population can be reached by pull at all.
 
 ### Tests
 
@@ -156,12 +171,18 @@ and deliberator variants (one code path), metric assertions.
 
 ## Phase 2: announce on completion
 
-**Trigger.** Ship phase 1, then read the round gauge for a few weeks on devnet
-and testnet. If requests still sit above a full proposer rotation (round 8 at 8
-nodes) minutes after the network answered them, push earns its place. Expect
-those leftovers on loaded nodes: a straggler cannot propose without a
-presignature and one of the four proposer slots, and cannot be answered until it
-proposes.
+**Trigger.** The question phase 2 answers is whether there is a straggler
+population that pull cannot reach. Note that a quiet pull path is ambiguous on
+its own: it means either that nothing is stuck or that what is stuck never
+proposes, and those call for opposite responses. The three phase 1 signals
+separate them, without needing to know when the network answered the request:
+
+- High rounds in flight, and rounds lost to failed proposals: stuck tasks that
+  pull cannot reach. Push earns its place.
+- High rounds in flight, proposals going out, no quorum: pull is reaching peers
+  and fewer than `f + 1` of them know the request is answered. Push would not
+  help either; the indexers are the problem.
+- No high rounds in flight: nothing to do.
 
 **Changes.** `handle_completion` sends the same notice to every other
 participant, once, when the id is new to `completed_ids` and we were tracking
@@ -218,9 +239,6 @@ re-broadcasts on every catchup, which is a production-only failure.
   one node that could still drive the request to a signature.
 - **Removing the backlog entry on quorum**: survives a restart, at the price of
   deleting a locally pending request on peer testimony alone.
-- **A deadline instead of phase 1**: far simpler, and it ends live requests as
-  readily as dead ones. Worth adding as a backstop on its own merits, not as a
-  substitute for evidence-based termination.
 - **Buffering notices for untracked ids**: a cache keyed by an id a peer
   chooses, for nothing. A merely lagging indexer sees request then respond in
   order; a straggler indexed the request first by definition, so its task exists
