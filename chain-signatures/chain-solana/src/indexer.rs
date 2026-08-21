@@ -386,18 +386,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         };
 
         for tx in transactions {
-            let Some(meta) = tx.meta.as_ref() else {
-                continue;
-            };
-            if meta.err.is_some() {
-                continue;
-            }
-            let OptionSerializer::Some(logs) = meta.log_messages.as_ref() else {
-                continue;
-            };
-
-            let signature = extract_tx_signature(&tx.transaction)?;
-            emit_events(events_tx, &self.program_id, signature, tx, logs).await?;
+            process_transaction(events_tx, &self.program_id, tx).await?;
         }
 
         events_tx.send(ChainEvent::Block(height)).await?;
@@ -858,15 +847,11 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        if let Err(err) = emit_events(
+                        if let Err(err) = process_transaction(
                             &events_tx,
                             &program_id,
-                            signature,
                             &tx_res.transaction,
-                            logs,
-                        )
-                        .await
-                        {
+                        ).await {
                             tracing::warn!(?err, sig = %signature, "failed to parse solana tx events");
                             continue;
                         }
@@ -1058,6 +1043,25 @@ impl SolanaEvents {
             Ok(SolanaEvents::None)
         }
     }
+}
+
+async fn process_transaction(
+    events_tx: &mpsc::Sender<ChainEvent>,
+    program_id: &Pubkey,
+    tx: &EncodedTransactionWithStatusMeta,
+) -> anyhow::Result<()> {
+    let Some(meta) = tx.meta.as_ref() else {
+        return Ok(());
+    };
+    if meta.err.is_some() {
+        return Ok(());
+    }
+    let OptionSerializer::Some(logs) = meta.log_messages.as_ref() else {
+        return Ok(());
+    };
+
+    let signature = extract_tx_signature(&tx.transaction)?;
+    emit_events(events_tx, program_id, signature, tx, logs).await
 }
 
 async fn emit_events(
