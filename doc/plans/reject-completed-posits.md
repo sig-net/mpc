@@ -28,13 +28,18 @@ is therefore correct at 5-of-8 and, for any threshold below a majority,
 overestimates `f` and so asks for more reports than strictly needed. It is never
 the weaker of the two.
 
-End to end: node A's indexer sees the respond event and retires the id as
-completed-on-chain. Straggler S, whose indexer missed it, eventually becomes the
-round's proposer and broadcasts `Propose`. A and every other node holding the
-completed tag answer with a reject carrying `request_completed`. S's spawner
-counts distinct senders across rounds and phases; at `f + 1` it retires the
-request and aborts the task, without itself gaining the right to answer for that
-id.
+The same notice is sent on two triggers, one push and one pull. Push: node A's
+indexer sees the respond event, A retires the id as completed-on-chain and
+sends every participant one notice. Pull: whenever a node holding the
+completed tag receives a `Propose` for that id, it answers the sender with the
+same notice. Straggler S counts distinct senders in its spawner, across rounds
+and phases; at `f + 1` it retires the request and aborts the task, without
+itself gaining the right to answer for that id.
+
+Push is the fast path and covers the straggler that cannot propose at all.
+Pull is the reliable path and covers everything the one-shot missed: S was
+down, restarted, or had not indexed the request yet when the push went out.
+Correctness rests on pull; push only shortens the wait.
 
 Decisions:
 
@@ -50,6 +55,8 @@ Decisions:
   alone; a restart plus catchup requeue re-drives the request and the same
   mechanism ends it again.
 - **Reports are counted in the spawner, not in the posit phases.** See below.
+- **The push is one shot, on the transition to completed-on-chain**, for
+  requests we actually tracked. No repeats, no retries, no state to keep.
 - **The flag is an added message field, not a new `PositRejectReason`
   variant.** See the wire-format section.
 
@@ -137,11 +144,31 @@ machinery for a case that does not need it.)
     current participant set, and compare against
     `participants.len().saturating_sub(threshold) + 1`. On quorum, run the
     same teardown as `handle_completion` with `Retirement::Other`.
+- **Broadcasting.** `handle_completion` sends the same notice to every other
+  participant, once, when the id transitions to `CompletedOnChain` and we were
+  tracking the request. Both triggers build the message through one
+  `fn completed_notice(sign_id, presignature_id, round) -> PositMessage`, so
+  there is a single definition of what a notice is.
+  - Only on the transition, so a duplicate respond event or a checkpoint replay
+    does not re-broadcast.
+  - Only for requests in `self.requests`, which keeps a catchup replay of old
+    respond events quiet and bounds the traffic to requests we participated in.
+  - The unsolicited notice has no attempt to point at, so it carries
+    `presignature_id: 0` and `round: 0`. Zero is the only safe round: a
+    receiver that buffers a message for a future round sets
+    `highest_seen_round` from it, and round 0 can never raise that, nor
+    displace a live mailbox slot (the mailbox only overwrites on a round `>=`
+    the one it holds).
+  - Sent with the same `try_send`, to all participants without consulting the
+    mesh: the outbox already retries unreachable peers for `message_timeout`
+    and then gives up.
 - Observability, because a straggler that never reaches quorum is otherwise
   invisible: log each new distinct report at info with the running count
-  (`2/4`), warn on quorum with the reporter set, and add two counters,
-  `SIGN_COMPLETED_REJECTS_SENT` and `SIGN_ENDED_BY_COMPLETED_QUORUM` (labelled
-  by chain, read off `SignEntry` before the request is dropped).
+  (`2/4`), warn on quorum with the reporter set, and add two counters:
+  `SIGN_COMPLETED_NOTICES_SENT` labelled `kind={broadcast,reply}` (the two
+  triggers answer different questions and must be readable apart) and
+  `SIGN_ENDED_BY_COMPLETED_QUORUM` labelled by chain, read off `SignEntry`
+  before the request is dropped.
 - The flag is counted whatever action carries it. Coupling it to
   `RejectWithReason` would buy no safety, since the same node can send a reject,
   and it would be one more branch to keep in step. The sender always pairs it
@@ -170,7 +197,10 @@ rolling upgrade the nodes that are behind are precisely the ones being
 restarted, i.e. the likely stragglers, so a variant misfires exactly where it is
 needed. Serde ignores unknown struct fields, so an added field is compatible in
 both directions; this is the same trick as `stale_round`. Cost: about eleven
-bytes on every posit message, including triple and presignature posits. Folding
+bytes on every posit message, including triple and presignature posits, plus
+`n * (n - 1)` notices per completed request from the push (56 messages of
+roughly 60 bytes at 8 nodes, batched into the partitions the outbox already
+sends, against kilobytes per peer for the signing protocol itself). Folding
 the flag into `PositRejectReason` is a follow-up for after the fleet is
 upgraded, together with `stale_round`.
 
@@ -197,6 +227,11 @@ upgraded, together with `stale_round`.
   that floods `Propose` for a completed id gets one reply each, so there is no
   amplification, and the replies are dropped rather than queued when the outbox
   is full.
+- **The push cannot make anything worse than not sending it.** A notice for an
+  id the receiver does not track is dropped, a notice that loses the race
+  against the receiver indexing the request is simply not counted, and a
+  duplicate from the same sender collapses in the report set. Every one of
+  those outcomes leaves the pull path exactly where it was.
 - **A report is not tied to a round or an attempt.** It is a statement about the
   request. Counting in the spawner keeps it that way by construction, which is
   why no ordering against the stale-round filter has to be maintained.
@@ -212,7 +247,7 @@ upgraded, together with `stale_round`.
 
 ## Tests
 
-Three, each pinning something that would otherwise break silently.
+Four, each pinning something that would otherwise break silently.
 
 1. **Quorum and wiring** (`request/mod.rs`): with four participants and
    threshold three (quorum two, so the test can tell `f + 1` from both `f` and
@@ -225,7 +260,14 @@ Three, each pinning something that would otherwise break silently.
    `Propose` for the dead id draws a reply carrying the flag and creates no
    mailbox; after `AbortChain`, the same `Propose` draws nothing. This is the
    safety branch: never claim a rolled-back request is answered.
-3. **Wire compatibility** (`message/crypto.rs`): extend
+3. **Push fan-out and its transition rule** (`request/mod.rs`): one
+   `handle_completion` for a tracked id puts one notice per other participant in
+   the outbox, each carrying the flag and round 0; a second `handle_completion`
+   for the same id, and a `handle_completion` for an id we never tracked, put
+   nothing there. Without the transition rule a replayed respond event
+   re-broadcasts on every catchup, which is the kind of thing that is only
+   noticed in production.
+4. **Wire compatibility** (`message/crypto.rs`): extend
    `test_posit_stale_round_field_is_wire_compatible` to carry
    `request_completed` alongside `stale_round` and rename it for both fields,
    rather than copying thirty lines for a second one. It already asserts the
@@ -234,29 +276,35 @@ Three, each pinning something that would otherwise break silently.
    This is the one failure mode that only shows up during a deploy, so it is
    worth the test even though the pattern is proven.
 
-Tests 1 and 2 need the spawner fixture that
+Tests 1 to 3 need the spawner fixture that
 `test_abort_chain_dead_ids_lifecycle` builds inline today; extract it into a
-`fn test_spawner(...)` helper rather than copying fifty lines twice.
+`fn test_spawner(...)` helper rather than copying fifty lines three times.
+Test 3 also needs the outbox interception the posit tests already use
+(`MessageOutbox::intercept_outgoing_messages`).
 
 Not worth writing: an integration test (cannot run here, Docker is x86_64 and
 unavailable, and it would only re-cover the unit-tested logic), separate
-proposer and deliberator variants of test 1 (one code path now), and any test
+proposer and deliberator variants of test 1 (one code path now), a separate test
+for the pull path's message contents (test 2 already reads it), and any test
 asserting a metric increments.
 
 ## Limits
 
-- **Termination takes up to `n` proposing rounds.** A straggler only draws
-  replies in rounds where it proposes, and the proposer rotates as
-  `(entropy[0] + round) % n`, so it proposes once every `n` rounds. It also has
-  to get that far: `OrganizingPhase` gives up before proposing when no
-  presignature can be reserved or no proposer slot is free
-  (`MAX_CONCURRENT_PROPOSERS`), and a starved node stays silent and therefore
-  unanswerable. Once it does propose, every peer answers at once and quorum is
-  reached inside that round. With eight nodes and round timeouts at the 600s
-  ceiling, that is up to about 80 minutes, averaging 40: much better than never,
-  but not immediate. If that is too slow, the fix is a one-shot broadcast when
-  an id is retired as `CompletedOnChain`, at `n - 1` extra messages per
-  completed request, paid whether or not anyone is behind. Out of scope here.
+- **A straggler that misses the push waits for its own next proposal.** With
+  the task alive when the push goes out, termination is immediate. Otherwise it
+  falls back to pull, and a straggler only draws replies in rounds where it
+  proposes: the proposer rotates as `(entropy[0] + round) % n`, so it proposes
+  once every `n` rounds, and with eight nodes at the 600s round ceiling that is
+  up to about 80 minutes. Worse, it has to get that far at all: `OrganizingPhase`
+  gives up before proposing when no presignature can be reserved or no proposer
+  slot is free (`MAX_CONCURRENT_PROPOSERS`), so a starved straggler is
+  unanswerable by pull alone. That case is exactly what the push covers, and it
+  is the reason both paths exist.
+- **The incident that motivated this is a pull case, not a push case.** In #891
+  the node restarts, recovers from a checkpoint older than the respond event and
+  misses that event during catchup. The push went out while it was down, so the
+  notice is gone and only the pull path can end that task. Do not expect the
+  push to shorten that particular scenario.
 - **The evidence expires.** `MAX_DEAD_IDS = 4096` LRU eviction and peer restarts
   both wipe the dead-id tag, after which peers go back to dropping silently and
   an old straggler never reaches `f + 1`.
@@ -266,8 +314,10 @@ asserting a metric increments.
 ## How we will know it works
 
 `SIGN_ENDED_BY_COMPLETED_QUORUM` going above zero on devnet is the signal that a
-straggler was ended by peers rather than by its own indexer, and the paired
-`SIGN_COMPLETED_REJECTS_SENT` shows the answering side is live. The check that
+straggler was ended by peers rather than by its own indexer, and
+`SIGN_COMPLETED_NOTICES_SENT` split by `kind` shows which of the two paths is
+carrying it: `broadcast` should be steady with request volume, `reply` should be
+near zero and spike only when a node is genuinely behind. The check that
 matters is the one from #891 and #829: sign ids that used to rotate for hours
 after the response landed should stop doing so.
 
@@ -285,6 +335,19 @@ presignature posits, no new message type.
 - **Also treating local generation success as evidence**: reaches quorum in more
   cases, but a finished generation is not a landed publish, and it would end the
   task of the one node that could still have driven the request to a signature.
+- **A dedicated `Message` variant for the notice**: reads better than a reject
+  with a flag, and fails on not-yet-upgraded nodes for the same reason a new
+  `PositRejectReason` variant does, only worse, since it drops partitions on
+  every node rather than the few that get a reject.
+- **Buffering notices for sign ids we do not track**, so a straggler that
+  indexes the request after the push still counts them: needs a size-capped
+  cache keyed by an id a peer chooses, and buys nothing. A node whose indexer is
+  merely lagging sees the request and then the respond event in order and never
+  becomes a straggler; the node that does become one indexed the request first
+  by definition, so its task exists when the notice arrives.
+- **Pushing from one node instead of all `n`**: a straggler needs `f + 1`
+  distinct reporters, so a single broadcaster cannot end anything on its own,
+  and picking which node broadcasts would add coordination to save 3KB.
 - **Clearing all of `dead_ids` on a chain regression** instead of downgrading
   the affected entries: simpler, but late posits for unaffected chains would
   start recreating orphan mailboxes, which is the leak `dead_ids` exists to
