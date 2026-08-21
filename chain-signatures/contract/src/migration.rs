@@ -86,7 +86,7 @@ fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractStat
 }
 
 #[derive(BorshDeserialize)]
-struct InlineRunningContractState {
+struct DevnetRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
@@ -98,20 +98,20 @@ struct InlineRunningContractState {
 }
 
 #[derive(BorshDeserialize)]
-enum InlineProtocolContractState {
+enum DevnetProtocolContractState {
     NotInitialized,
     Initializing(LegacyInitializingContractState),
-    Running(InlineRunningContractState),
+    Running(DevnetRunningContractState),
     Resharing(ResharingContractState),
 }
 
-fn upgrade_inline_protocol_state(old: InlineProtocolContractState) -> ProtocolContractState {
+fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolContractState {
     match old {
-        InlineProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-        InlineProtocolContractState::Initializing(state) => {
+        DevnetProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
+        DevnetProtocolContractState::Initializing(state) => {
             ProtocolContractState::Initializing(migrate_initializing(state))
         }
-        InlineProtocolContractState::Running(state) => {
+        DevnetProtocolContractState::Running(state) => {
             ProtocolContractState::Running(RunningContractState {
                 epoch: state.epoch,
                 participants: state.participants,
@@ -123,36 +123,13 @@ fn upgrade_inline_protocol_state(old: InlineProtocolContractState) -> ProtocolCo
                 threshold_votes: state.threshold_votes,
             })
         }
-        InlineProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
-    }
-}
-
-#[derive(BorshDeserialize)]
-pub(crate) struct PreviousInline {
-    protocol_state: InlineProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
-    proposed_updates: ProposedUpdates,
-    config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
-    checkpoint_votes: CheckpointVotes,
-}
-
-impl PreviousInline {
-    fn upgrade(self) -> MpcContract {
-        MpcContract {
-            protocol_state: upgrade_inline_protocol_state(self.protocol_state),
-            pending_requests: self.pending_requests,
-            proposed_updates: self.proposed_updates,
-            config: self.config,
-            latest_checkpoints: self.latest_checkpoints,
-            checkpoint_votes: self.checkpoint_votes,
-        }
+        DevnetProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
     }
 }
 
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousDevnet {
-    protocol_state: OldProtocolContractState,
+    protocol_state: DevnetProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
@@ -162,22 +139,13 @@ pub(crate) struct PreviousDevnet {
 
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
-        } = self;
-
         MpcContract {
-            protocol_state: upgrade_protocol_state(protocol_state),
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints,
-            checkpoint_votes,
+            protocol_state: upgrade_devnet_protocol_state(self.protocol_state),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
         }
     }
 }
@@ -237,11 +205,6 @@ impl PreviousMainnet {
 }
 
 #[derive(BorshDeserialize)]
-enum VersionedPreviousInline {
-    V0(PreviousInline),
-}
-
-#[derive(BorshDeserialize)]
 enum VersionedPreviousDevnet {
     V0(PreviousDevnet),
 }
@@ -254,12 +217,6 @@ enum VersionedPreviousTestnet {
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error> {
     if let Ok(current) = VersionedMpcContract::try_from_slice(state_bytes) {
         return Ok(current);
-    }
-
-    if let Ok(VersionedPreviousInline::V0(previous)) =
-        VersionedPreviousInline::try_from_slice(state_bytes)
-    {
-        return Ok(VersionedMpcContract::V0(previous.upgrade()));
     }
 
     if let Ok(VersionedPreviousDevnet::V0(previous)) =
@@ -289,7 +246,7 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn migrating_inline_initializing_state_preserves_candidates_and_pk_votes() {
+    fn migrating_devnet_initializing_state_preserves_candidates_and_pk_votes() {
         testing_env!(VMContextBuilder::new().build());
 
         let candidate_id: AccountId = "candidate.near".parse().unwrap();
@@ -305,7 +262,7 @@ mod tests {
             .entry(candidate.sign_pk.clone())
             .insert(candidate_id.clone());
 
-        let migrated = upgrade_inline_protocol_state(InlineProtocolContractState::Initializing(
+        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Initializing(
             LegacyInitializingContractState {
                 candidates: LegacyCandidates {
                     candidates: [(candidate_id.clone(), candidate.clone())].into(),
@@ -327,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn migrating_inline_running_state_preserves_candidates_and_join_votes() {
+    fn migrating_devnet_running_state_preserves_candidates_and_join_votes() {
         testing_env!(VMContextBuilder::new().build());
 
         let candidate_id: AccountId = "candidate.near".parse().unwrap();
@@ -347,8 +304,8 @@ mod tests {
             .entry(candidate_id.clone())
             .insert(voter_id.clone());
 
-        let migrated = upgrade_inline_protocol_state(InlineProtocolContractState::Running(
-            InlineRunningContractState {
+        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Running(
+            DevnetRunningContractState {
                 epoch: 3,
                 participants: Participants::new(),
                 threshold: 2,
