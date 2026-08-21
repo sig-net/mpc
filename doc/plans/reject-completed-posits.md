@@ -193,6 +193,20 @@ participant in the outbox; a second one, and one for an untracked id, put
 nothing there. Without the transition gate a replayed respond event
 re-broadcasts on every catchup.
 
+## Size
+
+Phase 1 is roughly 150 to 170 lines across seven files, excluding tests, and
+about 60 of those are the decision logic. The largest single chunk adds no
+behaviour: 19 one-line edits to existing `PositMessage` literals in `posit.rs`,
+`task.rs`, `organize.rs`, `triple.rs` and `presignature.rs`, because Rust wants
+every field in a struct literal even with `#[serde(default)]`. The rest is the
+subscriber payload switch (~20), `try_send` (~12), `completed_ids` and the
+report set (~25), the two `handle_posit` branches (~37), and metrics with their
+call sites and logs (~35).
+
+Phase 2 adds 20 to 25 lines in `handle_completion`. Tests roughly double phase
+1: about 60 lines to extract the spawner fixture, 120 for the three tests.
+
 ## What it does not fix
 
 - Stuck tasks that never propose, until phase 2 exists.
