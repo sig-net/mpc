@@ -1219,15 +1219,12 @@ async fn test_ethereum_stream_respond_event_off_curve_point_skipped() -> Result<
             Duration::from_secs(30),
         )
         .await
-        .context("stream did not survive the malformed respond event")?;
+        .context("stream stalled after the malformed respond event")?;
 
-    assert!(
-        respond_ids.contains(&valid_id),
-        "valid respond event was not emitted"
-    );
-    assert!(
-        !respond_ids.contains(&malformed_id),
-        "respond event with off-curve bigR must be skipped"
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
     );
     Ok(())
 }
@@ -1298,15 +1295,12 @@ async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Res
             Duration::from_secs(30),
         )
         .await
-        .context("stream did not survive the malformed respond event")?;
+        .context("stream stalled after the malformed respond event")?;
 
-    assert!(
-        respond_ids.contains(&valid_id),
-        "valid respond event was not emitted"
-    );
-    assert!(
-        !respond_ids.contains(&malformed_id),
-        "respond event with out-of-range s must be skipped"
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
     );
     Ok(())
 }
