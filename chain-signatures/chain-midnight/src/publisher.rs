@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use midnight_onchain_state::state::StateValue;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
@@ -15,10 +14,9 @@ use mpc_utils::time::current_unix_timestamp;
 use crate::config::{MidnightConfig, PublisherConfig};
 use crate::intent_gen::{is_ambiguous_submit, IntentGen, IntentRequest, WirePoint, WireSignature};
 use crate::reader::{
-    decode_response_entry, CENTRAL_LEDGER_FIELDS, RESPOND_BIDIRECTIONAL_MAP_FIELD,
-    RESPOND_MAP_FIELD,
+    central_map, decode_response_entry, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
-use crate::rpc::MidnightPublisherRpc;
+use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 use crate::state::decode_contract_state;
 
 const RESPOND: &str = "respond";
@@ -33,44 +31,6 @@ enum FinalizedResponse {
     },
 }
 
-/// Finalized reads used by the publisher and its in-process tests.
-#[async_trait]
-pub(crate) trait PinnedReads: Send + Sync {
-    async fn finalized_head(&self) -> anyhow::Result<String>;
-    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
-    async fn contract_state(
-        &self,
-        address_64hex: &str,
-        at_hash_0x: &str,
-    ) -> anyhow::Result<Option<Vec<u8>>>;
-    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>>;
-}
-
-#[async_trait]
-impl PinnedReads for MidnightPublisherRpc {
-    async fn finalized_head(&self) -> anyhow::Result<String> {
-        MidnightPublisherRpc::finalized_head_0x(self).await
-    }
-
-    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-        MidnightPublisherRpc::block_timestamp_seconds(self, at_hash_0x).await
-    }
-
-    async fn contract_state(
-        &self,
-        address_64hex: &str,
-        at_hash_0x: &str,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        // The two surfaces disagree about `0x`; both are decoded to bytes inside
-        // `rpc.rs`, so nothing above it may reintroduce the distinction.
-        MidnightPublisherRpc::contract_state(self, address_64hex, at_hash_0x).await
-    }
-
-    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        MidnightPublisherRpc::ledger_parameters(self, at_hash_0x).await
-    }
-}
-
 /// What one finalized hash yielded. One hash for every read is the whole point: fees
 /// drift per block, so parameters priced at one block against a state read at another
 /// produce an intent the node answers `OutOfGas`.
@@ -80,16 +40,23 @@ pub(crate) struct PinnedState {
     pub ledger_parameters: Vec<u8>,
 }
 
-/// What turns the builder's intent into a transaction the node has accepted. Takes the
-/// bytes the builder wrote: re-serializing a decoded intent would stake the transaction
-/// on a round trip nothing checks. The returned string names the transaction, opaque here.
+/// What builds a respond intent and turns it into a transaction the node has accepted:
+/// the companion process in production, a stand-in in the in-process tests. `submit`
+/// takes the bytes `build` wrote: re-serializing a decoded intent would stake the
+/// transaction on a round trip nothing checks. The returned string names the
+/// transaction, opaque here.
 #[async_trait]
-pub(crate) trait IntentSubmitter: Send + Sync {
+pub(crate) trait IntentClient: Send + Sync {
+    async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>>;
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<String>;
 }
 
 #[async_trait]
-impl IntentSubmitter for IntentGen {
+impl IntentClient for IntentGen {
+    async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+        IntentGen::build(self, request).await
+    }
+
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
         IntentGen::submit(self, intent).await
     }
@@ -109,10 +76,19 @@ impl RespondCircuit {
         }
     }
 
-    const fn map_field(self) -> usize {
+    /// The central ledger field holding this circuit's append-only response map.
+    const fn map_field(self) -> u8 {
         match self {
-            Self::Respond => RESPOND_MAP_FIELD as usize,
-            Self::RespondBidirectional => RESPOND_BIDIRECTIONAL_MAP_FIELD as usize,
+            Self::Respond => RESPOND_MAP_FIELD,
+            Self::RespondBidirectional => RESPOND_BIDIRECTIONAL_MAP_FIELD,
+        }
+    }
+
+    /// The map's name in the deployed contract, as the indexer labels it.
+    const fn map_name(self) -> &'static str {
+        match self {
+            Self::Respond => "respondMap",
+            Self::RespondBidirectional => "respondBidirectionalMap",
         }
     }
 }
@@ -129,8 +105,7 @@ struct RespondCall {
 pub struct MidnightPublisher {
     config: PublisherConfig,
     reads: Arc<dyn PinnedReads>,
-    intent_gen: Arc<IntentGen>,
-    submitter: Arc<dyn IntentSubmitter>,
+    client: Arc<dyn IntentClient>,
     central_address: String,
     telemetry: Arc<dyn PublisherTelemetry>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
@@ -158,34 +133,15 @@ impl MidnightPublisher {
     fn new(
         config: &PublisherConfig,
         central_address: String,
-        rpc: Arc<MidnightPublisherRpc>,
-        intent_gen: Arc<IntentGen>,
-        telemetry: Arc<dyn PublisherTelemetry>,
-    ) -> Self {
-        Self::assemble(
-            config,
-            central_address,
-            rpc,
-            intent_gen.clone(),
-            intent_gen,
-            telemetry,
-        )
-    }
-
-    fn assemble(
-        config: &PublisherConfig,
-        central_address: String,
         reads: Arc<dyn PinnedReads>,
-        intent_gen: Arc<IntentGen>,
-        submitter: Arc<dyn IntentSubmitter>,
+        client: Arc<dyn IntentClient>,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         Self {
             config: config.clone(),
             central_address,
             reads,
-            intent_gen,
-            submitter,
+            client,
             telemetry,
             flow: tokio::sync::Mutex::new(()),
         }
@@ -245,9 +201,9 @@ impl MidnightPublisher {
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: expires_at,
         };
-        let bytes = self.intent_gen.build(&request).await?;
+        let bytes = self.client.build(&request).await?;
 
-        let submitted = self.submitter.submit(&bytes).await.with_context(|| {
+        let submitted = self.client.submit(&bytes).await.with_context(|| {
             format!(
                 "submitting the midnight respond intent built over the chain at {}",
                 chain.at_hash
@@ -419,22 +375,7 @@ fn wire_signature(signature: &Signature) -> anyhow::Result<WireSignature> {
 
 fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
     let root = decode_contract_state(state)?;
-    let StateValue::Array(fields) = &root else {
-        anyhow::bail!("midnight singleton state root is not an array")
-    };
-    anyhow::ensure!(
-        fields.len() == CENTRAL_LEDGER_FIELDS,
-        "midnight singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
-        fields.len()
-    );
-    let field = call.circuit.map_field();
-    let map = fields
-        .iter_deref()
-        .nth(field)
-        .context("midnight singleton response map is absent")?;
-    let StateValue::Map(entries) = map else {
-        anyhow::bail!("midnight singleton ledger field {field} is not a response map")
-    };
+    let entries = central_map(&root, call.circuit.map_field(), call.circuit.map_name())?;
     for entry in entries.iter() {
         let (key, value) = &*entry;
         match decode_response_entry(key, value).and_then(|decoded| {
@@ -470,17 +411,14 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
 mod tests {
     use super::*;
 
-    use crate::config::MidnightConfig;
     use crate::intent_gen::AmbiguousSubmit;
-    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use midnight_base_crypto::fab::{
         AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
     };
-    use midnight_onchain_state::state::{ChargedState, ContractState};
+    use midnight_onchain_state::state::{ChargedState, ContractState, StateValue};
     use midnight_storage::DefaultDB;
-    use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
@@ -495,10 +433,6 @@ mod tests {
     /// Two different heads, so a per-read re-reader cannot pass the one-hash assertion.
     const HEAD_ONE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const HEAD_TWO: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
-
-    fn funding_seed() -> String {
-        "0f".repeat(32)
-    }
 
     /// Distinct per read, so a test can tell which read produced which bytes.
     const CONTRACT_STATE: &[u8] =
@@ -610,25 +544,48 @@ mod tests {
         }
     }
 
-    /// Records what it was asked to submit: counting is the only mark a proving run
-    /// leaves.
+    /// The builder's grant, and so the bytes `submit` must be handed back: the
+    /// pass-through property every stub client asserts.
+    const GRANTED_INTENT: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
+
+    /// A refused build, in the child's own words: the way a managed dir pointed at the
+    /// wrong build refuses.
+    const BUILD_REFUSAL: &str =
+        "midnight intent builder refused the request [contract_mismatch]: exposes no operation";
+
+    /// An in-process child. Grants every build with `GRANTED_INTENT` and keeps the
+    /// request for assertions on the marshalling; counting submits is the only mark a
+    /// proving run leaves.
     #[derive(Default)]
-    struct StubSubmitter {
+    struct StubClient {
+        built: Mutex<Vec<IntentRequest>>,
+        refuse_build: bool,
         submitted: std::sync::atomic::AtomicUsize,
-        /// What it refuses with, standing in for the child's own verdict.
-        failure: Option<&'static str>,
+        /// What `submit` refuses with, standing in for the child's own verdict.
+        submit_failure: Option<&'static str>,
     }
 
-    impl StubSubmitter {
+    impl StubClient {
         fn new() -> Arc<Self> {
             Arc::new(Self::default())
         }
 
-        fn refusing(failure: &'static str) -> Arc<Self> {
+        fn refusing_build() -> Arc<Self> {
             Arc::new(Self {
-                failure: Some(failure),
+                refuse_build: true,
                 ..Default::default()
             })
+        }
+
+        fn refusing_submit(failure: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                submit_failure: Some(failure),
+                ..Default::default()
+            })
+        }
+
+        fn built(&self) -> Vec<IntentRequest> {
+            self.built.lock().unwrap().clone()
         }
 
         fn submissions(&self) -> usize {
@@ -637,15 +594,20 @@ mod tests {
     }
 
     #[async_trait]
-    impl IntentSubmitter for StubSubmitter {
+    impl IntentClient for StubClient {
+        async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+            anyhow::ensure!(!self.refuse_build, "{BUILD_REFUSAL}");
+            self.built.lock().unwrap().push(request.clone());
+            Ok(GRANTED_INTENT.to_vec())
+        }
+
         async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
             // The bytes have to be the builder's own: whatever is proved and paid for is this.
             assert_eq!(
-                hex::encode(intent),
-                GRANTED_INTENT_HEX,
+                intent, GRANTED_INTENT,
                 "the submitter must be handed the bytes the builder wrote"
             );
-            if let Some(failure) = self.failure {
+            if let Some(failure) = self.submit_failure {
                 // Before the record: a submit that failed posted nothing.
                 anyhow::bail!("{failure}");
             }
@@ -662,7 +624,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl IntentSubmitter for LandingWithoutReply {
+    impl IntentClient for LandingWithoutReply {
+        async fn build(&self, _request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+            Ok(GRANTED_INTENT.to_vec())
+        }
+
         async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             self.attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -672,14 +638,18 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct BlockingSubmitter {
+    struct BlockingClient {
         attempts: std::sync::atomic::AtomicUsize,
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
     }
 
     #[async_trait]
-    impl IntentSubmitter for BlockingSubmitter {
+    impl IntentClient for BlockingClient {
+        async fn build(&self, _request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+            Ok(GRANTED_INTENT.to_vec())
+        }
+
         async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             let attempt = self
                 .attempts
@@ -692,100 +662,22 @@ mod tests {
         }
     }
 
-    /// Catches the stub child's request line, for asserting on the marshalling.
-    struct Recorder(PathBuf);
-
-    impl Recorder {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "mpc-midnight-publisher-{name}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&path);
-            Self(path)
-        }
-
-        fn request(&self) -> serde_json::Value {
-            let line = std::fs::read_to_string(&self.0).expect("the stub recorded its request");
-            serde_json::from_str(&line).expect("the recorded request is JSON")
-        }
-    }
-
-    impl Drop for Recorder {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    /// The submitter asserting it received exactly these bytes is the pass-through property.
-    const GRANTED_INTENT_HEX: &str = "deadbeef";
-
-    /// A stub child granting every request with `GRANTED_INTENT_HEX`, echoing the asked id.
-    fn granting_child(recorder: &Recorder) -> Vec<String> {
-        script(&format!(
-            r#"while read -r line; do printf '%s' "$line" > {}; id=$(printf "%s" "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"intent":"{}"}}\n' "$id"; done"#,
-            recorder.0.display(),
-            GRANTED_INTENT_HEX,
-        ))
-    }
-
-    /// A stub child that refuses, the way a managed dir pointed at the wrong build refuses.
-    fn refusing_child() -> Vec<String> {
-        script(
-            r#"read -r line; printf '{"id":0,"ok":false,"code":"contract_mismatch","message":"exposes no operation"}\n'"#,
-        )
-    }
-
-    fn script(body: &str) -> Vec<String> {
-        vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!(
-                r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {body}"#
-            ),
-        ]
-    }
-
-    /// Every field pinned, none inherited: a test reading a default would test the default.
-    fn config(intent_gen_command: Vec<String>) -> PublisherConfig {
+    /// The two budgets the publisher spends, pinned because `ttl_seconds` is their sum
+    /// and a test reading a default would test the default. The rest is the child's.
+    fn config() -> PublisherConfig {
         PublisherConfig {
-            intent_gen_command,
-            funding_seed: funding_seed(),
-            proof_server_url: "http://127.0.0.1:6300".to_string(),
-            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
             request_timeout: Duration::from_secs(5),
             submit_timeout: Duration::from_secs(30),
-            restart_backoff: RetryConfig {
-                min_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(5),
-                max_times: 1,
-                jitter: false,
-            },
+            ..Default::default()
         }
     }
 
-    async fn publisher(
-        config: &PublisherConfig,
-        reads: Arc<dyn PinnedReads>,
-        submitter: Arc<dyn IntentSubmitter>,
-    ) -> MidnightPublisher {
-        let midnight = MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
-            central_address: CENTRAL.to_string(),
-            publisher: config.clone(),
-            rpc: Default::default(),
-            indexer: Default::default(),
-        };
-        let intent_gen = IntentGen::spawn(&midnight, "undeployed")
-            .await
-            .expect("the stub child spawns");
-        MidnightPublisher::assemble(
-            config,
+    fn publisher(reads: Arc<dyn PinnedReads>, client: Arc<dyn IntentClient>) -> MidnightPublisher {
+        MidnightPublisher::new(
+            &config(),
             CENTRAL.to_string(),
             reads,
-            Arc::new(intent_gen),
-            submitter,
+            client,
             Arc::new(NoopPublisherTelemetry),
         )
     }
@@ -830,7 +722,7 @@ mod tests {
 
     fn state_with_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = call.circuit.map_field();
+        let field = usize::from(call.circuit.map_field());
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &CONTRACT_STATE[..])
                 .expect("the initial singleton state decodes");
@@ -866,7 +758,7 @@ mod tests {
 
     fn state_with_malformed_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = call.circuit.map_field();
+        let field = usize::from(call.circuit.map_field());
         let state = state_with_response(action);
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &state[..])
@@ -893,7 +785,7 @@ mod tests {
 
     fn state_with_invalid_signature_response(action: &PublishAction) -> Vec<u8> {
         let call = respond_call(action).expect("the test action maps to a response");
-        let field = call.circuit.map_field();
+        let field = usize::from(call.circuit.map_field());
         let state = state_with_response(action);
         let mut contract: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &state[..])
@@ -949,10 +841,8 @@ mod tests {
         ];
         for (action, named) in cases {
             let reads = StubReads::new();
-            let submitter = StubSubmitter::new();
-            let recorder = Recorder::new("rejected-action");
-            let config = config(granting_child(&recorder));
-            let publisher = publisher(&config, reads.clone(), submitter.clone()).await;
+            let client = StubClient::new();
+            let publisher = publisher(reads.clone(), client.clone());
 
             let err = publisher
                 .publish_signature(&action)
@@ -960,7 +850,11 @@ mod tests {
                 .expect_err("neither circuit answers this action");
             assert!(format!("{err:#}").contains(named), "got: {err:#}");
             assert!(reads.reads().is_empty(), "a refused action read the node");
-            assert_eq!(submitter.submissions(), 0);
+            assert!(
+                client.built().is_empty(),
+                "a refused action reached the builder"
+            );
+            assert_eq!(client.submissions(), 0);
         }
     }
 
@@ -969,15 +863,13 @@ mod tests {
         // The stub serves a different head on every ask, so a per-read taker would
         // spread the two reads across blocks.
         let reads = StubReads::new();
-        let submitter = StubSubmitter::new();
-        let recorder = Recorder::new("one-hash");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, reads.clone(), submitter.clone()).await;
+        let client = StubClient::new();
+        let publisher = publisher(reads.clone(), client.clone());
 
         publisher
             .publish_signature(&respond_action())
             .await
-            .expect("the stub child grants and the stub submitter accepts");
+            .expect("the stub client grants and accepts");
 
         let at_hashes: Vec<String> = reads
             .reads()
@@ -999,16 +891,14 @@ mod tests {
             1,
             "the head is taken once per publish"
         );
-        assert_eq!(submitter.submissions(), 1);
+        assert_eq!(client.submissions(), 1);
     }
 
     #[tokio::test]
     async fn a_rejected_intent_fails_the_publish_without_spending_a_proof() {
         // Proving is the one expensive step, and a refusal means no intent was built.
-        let reads = StubReads::new();
-        let submitter = StubSubmitter::new();
-        let config = config(refusing_child());
-        let publisher = publisher(&config, reads.clone(), submitter.clone()).await;
+        let client = StubClient::refusing_build();
+        let publisher = publisher(StubReads::new(), client.clone());
 
         let err = publisher
             .publish_signature(&respond_action())
@@ -1016,10 +906,11 @@ mod tests {
             .expect_err("a refused request cannot be published");
         assert!(
             format!("{err:#}").contains("contract_mismatch"),
-            "the child's code has to survive to the caller: {err:#}"
+            "the builder's verdict has to reach the caller: {err:#}"
         );
-        assert!(
-            submitter.submissions() == 0,
+        assert_eq!(
+            client.submissions(),
+            0,
             "a refused intent reached the prover"
         );
     }
@@ -1028,16 +919,18 @@ mod tests {
     async fn an_exact_finalized_response_is_not_posted_again() {
         let action = respond_action();
         let reads = StubReads::with_state(state_with_response(&action));
-        let submitter = StubSubmitter::new();
-        let recorder = Recorder::new("duplicate");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, reads.clone(), submitter.clone()).await;
+        let client = StubClient::new();
+        let publisher = publisher(reads.clone(), client.clone());
 
         publisher
             .publish_signature(&action)
             .await
             .expect("a finalized exact response makes the retry complete");
-        assert_eq!(submitter.submissions(), 0);
+        assert!(
+            client.built().is_empty(),
+            "a finalized response needs no intent"
+        );
+        assert_eq!(client.submissions(), 0);
     }
 
     #[test]
@@ -1059,30 +952,26 @@ mod tests {
         let mut other = action.clone();
         other.signature.recovery_id ^= 1;
         let reads = StubReads::with_state(state_with_response(&other));
-        let submitter = StubSubmitter::new();
-        let recorder = Recorder::new("same-id-different-signature");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, reads, submitter.clone()).await;
+        let client = StubClient::new();
+        let publisher = publisher(reads, client.clone());
 
         publisher
             .publish_signature(&action)
             .await
             .expect("only the exact signature makes a retry complete");
-        assert_eq!(submitter.submissions(), 1);
+        assert_eq!(client.submissions(), 1);
     }
 
     #[tokio::test]
     async fn a_landed_submit_with_a_lost_reply_is_reconciled_without_reposting() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let reads = StubReads::new();
-            let submitter = Arc::new(LandingWithoutReply {
+            let client = Arc::new(LandingWithoutReply {
                 reads: reads.clone(),
                 landed_state: state_with_response(&action),
                 attempts: std::sync::atomic::AtomicUsize::new(0),
             });
-            let recorder = Recorder::new("lost-reply");
-            let config = config(granting_child(&recorder));
-            let publisher = publisher(&config, reads, submitter.clone()).await;
+            let publisher = publisher(reads, client.clone());
 
             publisher
                 .publish_signature(&action)
@@ -1090,7 +979,7 @@ mod tests {
                 .expect("the finalized exact response resolves the ambiguous submit");
 
             assert_eq!(
-                submitter.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                client.attempts.load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "an ambiguous landed submit must not be posted twice"
             );
@@ -1100,11 +989,9 @@ mod tests {
     #[tokio::test]
     async fn concurrent_publishes_serialize_before_the_first_pinned_read() {
         let reads = StubReads::new();
-        let submitter = Arc::new(BlockingSubmitter::default());
-        let recorder = Recorder::new("whole-flow-lock");
-        let config = config(granting_child(&recorder));
-        let publisher = Arc::new(publisher(&config, reads.clone(), submitter.clone()).await);
-        let first_entered = submitter.entered.notified();
+        let client = Arc::new(BlockingClient::default());
+        let publisher = Arc::new(publisher(reads.clone(), client.clone()));
+        let first_entered = client.entered.notified();
 
         let first = tokio::spawn({
             let publisher = publisher.clone();
@@ -1127,7 +1014,7 @@ mod tests {
             "the second flow read state while the first still held the funding wallet"
         );
 
-        submitter.release.notify_one();
+        client.release.notify_one();
         first
             .await
             .expect("the first task returns")
@@ -1136,19 +1023,14 @@ mod tests {
             .await
             .expect("the second task returns")
             .expect("the second publish succeeds");
-        assert_eq!(
-            submitter.attempts.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
+        assert_eq!(client.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
     async fn a_submit_that_fails_must_not_be_reported_as_a_published_signature() {
         // An `Ok` here settles the signature as answered and nothing retries it.
-        let submitter = StubSubmitter::refusing("no spendable dust");
-        let recorder = Recorder::new("failing-submit");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::new(), submitter.clone()).await;
+        let client = StubClient::refusing_submit("no spendable dust");
+        let publisher = publisher(StubReads::new(), client.clone());
 
         let err = publisher
             .publish_signature(&respond_action())
@@ -1158,16 +1040,14 @@ mod tests {
             format!("{err:#}").contains("no spendable dust"),
             "got: {err:#}"
         );
-        assert_eq!(submitter.submissions(), 0);
+        assert_eq!(client.submissions(), 0);
     }
 
     #[tokio::test]
     async fn a_finalized_head_at_the_intent_ttl_does_not_release_ambiguity() {
         let reads = StubReads::new();
         reads.set_finalized_timestamp(1);
-        let recorder = Recorder::new("ttl-equality");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, reads.clone(), StubSubmitter::new()).await;
+        let publisher = publisher(reads.clone(), StubClient::new());
         let call = respond_call(&respond_action()).expect("the action maps to a response");
         let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
 
@@ -1184,9 +1064,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reconciliation_read_failure_does_not_release_ambiguity() {
-        let recorder = Recorder::new("reconcile-read-failure");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::too_large(), StubSubmitter::new()).await;
+        let publisher = publisher(StubReads::too_large(), StubClient::new());
         let call = respond_call(&respond_action()).expect("the action maps to a response");
         let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
 
@@ -1205,9 +1083,7 @@ mod tests {
     async fn finalized_expiry_without_the_response_allows_a_fresh_attempt() {
         let reads = StubReads::new();
         reads.set_finalized_timestamp(2);
-        let recorder = Recorder::new("finalized-expiry");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, reads.clone(), StubSubmitter::new()).await;
+        let publisher = publisher(reads.clone(), StubClient::new());
         let call = respond_call(&respond_action()).expect("the action maps to a response");
         let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
 
@@ -1240,9 +1116,7 @@ mod tests {
     async fn a_central_contract_absent_at_the_pinned_hash_fails_the_publish() {
         // A wrong central address or a node that cannot reach the block: either way
         // there is nothing to prove against.
-        let recorder = Recorder::new("absent");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::absent(), StubSubmitter::new()).await;
+        let publisher = publisher(StubReads::absent(), StubClient::new());
 
         let err = publisher
             .publish_signature(&respond_action())
@@ -1252,45 +1126,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_request_is_the_shape_the_child_validates() {
-        // The only place the marshalling is observable: the publisher package pins the
-        // same wire from its own TypeScript input, so it cannot see a transposed field.
-        let recorder = Recorder::new("wire-shape");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::new(), StubSubmitter::new()).await;
+    async fn the_build_request_is_marshalled_from_the_pinned_reads_and_the_action() {
+        // The publisher package pins the same wire from its own TypeScript input, so
+        // only this side can see a field filled from the wrong read or a transposed
+        // coordinate. The JSON encoding of the request is pinned in `intent_gen`.
+        let client = StubClient::new();
+        let publisher = publisher(StubReads::new(), client.clone());
 
         let action = respond_action();
         let before = current_unix_timestamp();
         publisher.publish_signature(&action).await.expect("granted");
         let after = current_unix_timestamp();
 
-        let request = recorder.request();
-        assert_eq!(request["circuit"], RESPOND);
-        assert_eq!(request["contractAddress"], CENTRAL);
-        assert_eq!(request["requestId"], hex::encode(REQUEST_ID));
-        assert_eq!(request["contractState"], hex::encode(CONTRACT_STATE));
-        assert_eq!(request["ledgerParameters"], hex::encode(LEDGER_PARAMETERS));
-        assert!(
-            request.get("serializedOutput").is_none() && request.get("outputLen").is_none(),
-            "the unidirectional circuit carries no output fields: {request}"
-        );
+        let [request] = client.built().try_into().expect("one build per publish");
+        assert_eq!(request.circuit, RESPOND);
+        assert_eq!(request.contract_address, CENTRAL);
+        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+        assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
+        assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
 
         // Against the action's own signature, so a swapped x and y is caught.
         let encoded = action.signature.big_r.to_encoded_point(false);
         assert_eq!(
-            request["signature"],
-            serde_json::json!({
-                "bigR": {
-                    "x": hex::encode(encoded.x().unwrap()),
-                    "y": hex::encode(encoded.y().unwrap()),
+            request.signature,
+            WireSignature {
+                big_r: WirePoint {
+                    x: hex::encode(encoded.x().unwrap()),
+                    y: hex::encode(encoded.y().unwrap()),
                 },
-                "s": hex::encode(action.signature.s.to_bytes()),
-                "recoveryId": action.signature.recovery_id,
-            })
+                s: hex::encode(action.signature.s.to_bytes()),
+                recovery_id: action.signature.recovery_id,
+            }
         );
 
-        let ttl = request["ttlSeconds"].as_u64().expect("ttl is an integer");
-        let budget = config.request_timeout.as_secs() + config.submit_timeout.as_secs();
+        let ttl = request.ttl_seconds;
+        let budget = config().request_timeout.as_secs() + config().submit_timeout.as_secs();
         assert!(
             (before.saturating_add(budget)..=after.saturating_add(budget)).contains(&ttl),
             "the ttl {ttl} is the two-budget sum {budget} from a time in {before}..={after}"
@@ -1298,24 +1168,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_bidirectional_circuit_is_signature_only_on_the_wire() {
-        // The contract's RespondBidirectionalEvent is a bare Signature; a request
-        // carrying an output is rejected by the child's union.
-        let recorder = Recorder::new("bidirectional");
-        let config = config(granting_child(&recorder));
-        let publisher = publisher(&config, StubReads::new(), StubSubmitter::new()).await;
+    async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
+        // The contract's RespondBidirectionalEvent is a bare Signature: the output never
+        // travels, so the two circuits differ in the request by name alone.
+        let client = StubClient::new();
+        let publisher = publisher(StubReads::new(), client.clone());
 
         publisher
             .publish_signature(&bidirectional_action(vec![0xab; 32]))
             .await
             .expect("granted");
 
-        let request = recorder.request();
-        assert_eq!(request["circuit"], RESPOND_BIDIRECTIONAL);
-        assert_eq!(request["contractAddress"], CENTRAL);
-        assert!(
-            request.get("serializedOutput").is_none() && request.get("outputLen").is_none(),
-            "wire v2 carries no output fields: {request}"
-        );
+        let [request] = client.built().try_into().expect("one build per publish");
+        assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
+        assert_eq!(request.contract_address, CENTRAL);
+        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
     }
 }

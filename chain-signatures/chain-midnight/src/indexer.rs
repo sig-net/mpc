@@ -3,16 +3,14 @@
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::reader::{
-    decode_notification, decode_response_entry, resolve_verified_record, signet_field_node_by_path,
-    signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry, Node, Resolved,
-    CENTRAL_LEDGER_FIELDS, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD,
-    RESPOND_MAP_FIELD,
+    central_map, decode_notification, decode_response_entry, resolve_verified_record,
+    signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
+    Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
 use crate::rpc::{BlockRef, ReadFailure};
 use crate::source::{ChainSource, ContractState, LiveSource};
 
 use midnight_base_crypto::fab::AlignedValue;
-use midnight_onchain_state::state::StateValue;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -302,12 +300,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         field: u8,
         field_name: &'static str,
     ) -> anyhow::Result<Vec<MapEntry>> {
-        let node = signet_field_node_by_path(tree, &[field])
-            .with_context(|| format!("central {field_name} field"))?;
-        let StateValue::Map(entries) = node else {
-            anyhow::bail!("central field {field} ({field_name}) is not a map");
-        };
-        Ok(entries
+        Ok(central_map(tree, field, field_name)?
             .iter()
             .map(|entry| {
                 let (key, value) = &*entry;
@@ -323,14 +316,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// Their positions and map shapes are fixed by the deployed singleton, so drift
     /// halts before the block checkpoint can advance.
     fn central_entries(tree: &Node) -> anyhow::Result<CentralEntries> {
-        let StateValue::Array(fields) = tree else {
-            anyhow::bail!("central singleton state root is not an array");
-        };
-        anyhow::ensure!(
-            fields.len() == CENTRAL_LEDGER_FIELDS,
-            "central singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
-            fields.len()
-        );
         Ok(CentralEntries {
             notifications: Self::map_entries(
                 tree,
@@ -814,7 +799,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::CENTRAL_LEDGER_FIELDS;
     use crate::state::decode_contract_state;
+    use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use std::time::Duration;

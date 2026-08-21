@@ -322,7 +322,30 @@ impl MidnightPublisherRpc {
         })
     }
 
-    pub async fn finalized_head_0x(&self) -> anyhow::Result<String> {
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+}
+
+/// Finalized reads used by the publisher and its in-process tests. Every read is
+/// addressed by the `0x`-prefixed hash `finalized_head` answers with.
+#[async_trait::async_trait]
+pub(crate) trait PinnedReads: Send + Sync {
+    async fn finalized_head(&self) -> anyhow::Result<String>;
+    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
+    /// The two node surfaces disagree about `0x`; both are decoded to bytes here, so
+    /// nothing above this trait may reintroduce the distinction.
+    async fn contract_state(
+        &self,
+        address_64hex: &str,
+        at_hash_0x: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>>;
+}
+
+#[async_trait::async_trait]
+impl PinnedReads for MidnightPublisherRpc {
+    async fn finalized_head(&self) -> anyhow::Result<String> {
         let finalized = self
             .client
             .backend()
@@ -332,11 +355,8 @@ impl MidnightPublisherRpc {
         Ok(hex_0x(finalized.hash()))
     }
 
-    pub(crate) async fn block_timestamp_seconds(
-        &self,
-        at_block_hash_0x: &str,
-    ) -> anyhow::Result<u64> {
-        let at = parse_block_hash(at_block_hash_0x)?;
+    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
+        let at = parse_block_hash(at_hash_0x)?;
         let address = subxt::dynamic::storage(
             TIMESTAMP_PALLET,
             TIMESTAMP_NOW,
@@ -353,33 +373,28 @@ impl MidnightPublisherRpc {
             .storage_fetch_value(key, at)
             .await
             .context("failed to fetch midnight runtime storage")?
-            .with_context(|| format!("midnight block {at_block_hash_0x} has no timestamp"))?;
+            .with_context(|| format!("midnight block {at_hash_0x} has no timestamp"))?;
         decode_timestamp_seconds(&encoded)
     }
 
-    pub async fn contract_state(
+    async fn contract_state(
         &self,
         address_64hex: &str,
-        at_block_hash_0x: &str,
+        at_hash_0x: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        publisher_contract_state(&self.rpc, address_64hex, at_block_hash_0x).await
+        publisher_contract_state(&self.rpc, address_64hex, at_hash_0x).await
     }
 
-    pub async fn ledger_parameters(&self, at_block_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
-        let at = parse_block_hash(at_block_hash_0x)?;
+    async fn ledger_parameters(&self, at_hash_0x: &str) -> anyhow::Result<Vec<u8>> {
+        let at = parse_block_hash(at_hash_0x)?;
         let answer = self
             .client
             .backend()
             .call(LEDGER_PARAMETERS_ENTRY, Some(&[]), at)
             .await
             .context("failed to fetch midnight ledger parameters")?;
-        unwrap_runtime_api_result(&answer)?.with_context(|| {
-            format!("midnight node has no ledger parameters at {at_block_hash_0x}")
-        })
-    }
-
-    pub fn network_id(&self) -> &str {
-        &self.network_id
+        unwrap_runtime_api_result(&answer)?
+            .with_context(|| format!("midnight node has no ledger parameters at {at_hash_0x}"))
     }
 }
 
@@ -440,8 +455,36 @@ async fn publisher_contract_state(
     .await
     .context("midnight_contractState reconnect failed")?;
 
-    match response {
-        Ok(state_hex) => Ok(Some(
+    match classify_contract_state_reply(response)? {
+        ContractStateReply::State(state) => Ok(state),
+        ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
+        ContractStateReply::TooLarge(reply) => Err(ReadFailure::TooLarge.err(reply)),
+        ContractStateReply::Other(err) => {
+            Err(anyhow::Error::new(err).context("midnight_contractState failed"))
+        }
+    }
+}
+
+/// One `midnight_contractState` answer, classified once for both transports. The node
+/// builds every rpc error as invalid-params with the reason only in the text, so its
+/// two definitive answers stay text matches under the code gate.
+enum ContractStateReply {
+    /// The state bytes, or `None` when the contract is not present at that block.
+    State(Option<Vec<u8>>),
+    /// Pruned or unknown hash: no number of retries makes the node serve it.
+    Unservable(RawRpcError),
+    /// State beyond the rpc response cap, reachable because our cap sits above the
+    /// server's: definitive, since retrying cannot shrink a contract's state.
+    TooLarge(subxt::ext::subxt_rpcs::UserError),
+    /// Anything else; the transport's own policy decides.
+    Other(RawRpcError),
+}
+
+fn classify_contract_state_reply(
+    response: Result<String, RawRpcError>,
+) -> anyhow::Result<ContractStateReply> {
+    Ok(match response {
+        Ok(state_hex) => ContractStateReply::State(Some(
             hex::decode(state_hex.trim_start_matches("0x"))
                 .context("midnight_contractState returned non-hex state")?,
         )),
@@ -449,7 +492,7 @@ async fn publisher_contract_state(
             if reply.code == INVALID_PARAMS_CODE
                 && reply.message.contains("Contract not present") =>
         {
-            Ok(None)
+            ContractStateReply::State(None)
         }
         Err(RawRpcError::User(reply))
             if reply.code == INVALID_PARAMS_CODE
@@ -457,13 +500,13 @@ async fn publisher_contract_state(
                     .message
                     .contains("Unable to get requested contract state") =>
         {
-            Err(ReadFailure::Unservable.err(RawRpcError::User(reply)))
+            ContractStateReply::Unservable(RawRpcError::User(reply))
         }
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            Err(ReadFailure::TooLarge.err(reply))
+            ContractStateReply::TooLarge(reply)
         }
-        Err(err) => Err(anyhow::Error::new(err).context("midnight_contractState failed")),
-    }
+        Err(err) => ContractStateReply::Other(err),
+    })
 }
 
 /// The bare payload of the ledger-parameters `Result<Vec<u8>, _>` runtime-API answer
@@ -633,35 +676,14 @@ impl Reads {
                     )
                     .await;
 
-                match response {
-                    Ok(state_hex) => {
-                        let state = hex::decode(state_hex.trim_start_matches("0x"))
-                            .context("midnight_contractState returned non-hex state")?;
-                        Ok(Fetched::Value(Some(state)))
+                match classify_contract_state_reply(response)? {
+                    ContractStateReply::State(state) => Ok(Fetched::Value(state)),
+                    // Spends the retry budget like any other `Err`; only the class escapes.
+                    ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
+                    ContractStateReply::TooLarge(reply) => Ok(Fetched::TooLarge(reply.to_string())),
+                    ContractStateReply::Other(err) => {
+                        self.classify(Err(err), "midnight_contractState failed")
                     }
-                    // The node builds every rpc error as invalid-params with the reason
-                    // only in the text, so its two answers stay text matches under the
-                    // code gate.
-                    Err(RawRpcError::User(reply))
-                        if reply.code == INVALID_PARAMS_CODE
-                            && reply.message.contains("Contract not present") =>
-                    {
-                        Ok(Fetched::Value(None))
-                    }
-                    Err(RawRpcError::User(reply))
-                        if reply.code == INVALID_PARAMS_CODE
-                            && reply
-                                .message
-                                .contains("Unable to get requested contract state") =>
-                    {
-                        Err(anyhow::Error::new(RawRpcError::User(reply))
-                            .context(ReadFailure::Unservable.marker()))
-                    }
-                    // Reachable because our response cap sits above the server's.
-                    Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-                        Ok(Fetched::TooLarge(reply.to_string()))
-                    }
-                    Err(err) => self.classify(Err(err), "midnight_contractState failed"),
                 }
             }
         )?;
