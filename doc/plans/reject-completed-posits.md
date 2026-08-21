@@ -28,6 +28,14 @@ is therefore correct at 5-of-8 and, for any threshold below a majority,
 overestimates `f` and so asks for more reports than strictly needed. It is never
 the weaker of the two.
 
+End to end: node A's indexer sees the respond event and retires the id as
+completed-on-chain. Straggler S, whose indexer missed it, eventually becomes the
+round's proposer and broadcasts `Propose`. A and every other node holding the
+completed tag answer with a reject carrying `request_completed`. S's spawner
+counts distinct senders across rounds and phases; at `f + 1` it retires the
+request and aborts the task, without itself gaining the right to answer for that
+id.
+
 Decisions:
 
 - **Only chain-observed completions license the reject.** An id qualifies only
@@ -42,7 +50,7 @@ Decisions:
   alone; a restart plus catchup requeue re-drives the request and the same
   mechanism ends it again.
 - **Reports are counted in the spawner, not in the posit phases.** See below.
-- **The flag is an optional message field, not a new `PositRejectReason`
+- **The flag is an added message field, not a new `PositRejectReason`
   variant.** See the wire-format section.
 
 ### Why the spawner counts, not the task
@@ -99,7 +107,8 @@ machinery for a case that does not need it.)
 - `mark_dead` is monotonic: `CompletedOnChain` is never downgraded to `Other`.
   Without this the feature silently disables itself, because a task that exits
   on its own just after `handle_completion` retired the id runs `retire_task`
-  a second time through `handle_task_exit`.
+  a second time through `handle_task_exit`. The regression downgrade above is
+  the one deliberate exception and goes through its own path, not `mark_dead`.
 - `handle_completion` and the quorum path share one
   `fn end_request(&mut self, sign_id, retirement, reason)` that retires and
   aborts, so the two callers cannot drift apart.
@@ -116,7 +125,7 @@ machinery for a case that does not need it.)
     `(sign_id, presignature_id, round)`, the same "the id is an address, not
     content" convention as the `StaleRound` reply. `Accept`, `Reject` and
     `Start` are never answered: replying to a reject ping-pongs between nodes.
-    A `Other` id keeps today's silent drop. The reply must not block the
+    An `Other` id keeps today's silent drop. The reply must not block the
     spawner select loop and must not spawn a task per inbound message, so add a
     non-blocking `MessageChannel::try_send` (the outgoing channel is a bounded
     tokio mpsc) and drop the reply when the outbox is full. Best effort is the
@@ -145,8 +154,11 @@ machinery for a case that does not need it.)
   as "set by a node that has seen this request answered on chain; paired with
   `RejectWithReason(Unknown)` so that nodes which do not know the flag read an
   ordinary reject".
-- The `signature_posit` subscriber payload is already a six-tuple; carry
-  `SignPositMessage` through it instead of widening the tuple again.
+- The flag has to reach `handle_posit`, so the `signature_posit` subscriber
+  payload carries it. That payload is already a six-tuple: replace it with
+  `SignPositMessage` and add `request_completed` there instead of widening the
+  tuple again. Only the spawner reads the field; the mailbox and the posit
+  phases carry it and ignore it.
 
 Why a field and not a `PositRejectReason::Completed` variant: the outbox groups
 per-peer messages into 256kb partitions, CBOR-encodes each partition as one
@@ -241,15 +253,23 @@ asserting a metric increments.
   (`MAX_CONCURRENT_PROPOSERS`), and a starved node stays silent and therefore
   unanswerable. Once it does propose, every peer answers at once and quorum is
   reached inside that round. With eight nodes and round timeouts at the 600s
-  ceiling, that is up to about 80 minutes, averaging 40. Much better than never, but not immediate. The fix, if
-  that is too slow, is a one-shot broadcast when an id is retired as
-  `CompletedOnChain`: `n - 1` extra messages per completed request, paid on
-  every request whether or not anyone is behind. Out of scope here.
+  ceiling, that is up to about 80 minutes, averaging 40: much better than never,
+  but not immediate. If that is too slow, the fix is a one-shot broadcast when
+  an id is retired as `CompletedOnChain`, at `n - 1` extra messages per
+  completed request, paid whether or not anyone is behind. Out of scope here.
 - **The evidence expires.** `MAX_DEAD_IDS = 4096` LRU eviction and peer restarts
   both wipe the dead-id tag, after which peers go back to dropping silently and
   an old straggler never reaches `f + 1`.
 - **Fewer than `f + 1` observers, no effect.** If a catchup gap made most
   indexers miss the respond event, the request rotates as it does today.
+
+## How we will know it works
+
+`SIGN_ENDED_BY_COMPLETED_QUORUM` going above zero on devnet is the signal that a
+straggler was ended by peers rather than by its own indexer, and the paired
+`SIGN_COMPLETED_REJECTS_SENT` shows the answering side is live. The check that
+matters is the one from #891 and #829: sign ids that used to rotate for hours
+after the response landed should stop doing so.
 
 ## Non-goals
 
