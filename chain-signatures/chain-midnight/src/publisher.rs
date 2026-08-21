@@ -2,7 +2,6 @@
 //! intents built and submitted by the companion process.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -21,15 +20,6 @@ use crate::state::decode_contract_state;
 
 const RESPOND: &str = "respond";
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
-const RECONCILE_POLL: Duration = Duration::from_secs(2);
-
-enum FinalizedResponse {
-    Present(String),
-    Absent {
-        at_hash: String,
-        timestamp_seconds: u64,
-    },
-}
 
 /// What one finalized hash yielded. One hash for every read is the whole point: fees
 /// drift per block, so parameters priced at one block against a state read at another
@@ -191,7 +181,6 @@ impl MidnightPublisher {
             return Ok(());
         }
 
-        let expires_at = ttl_seconds(&self.config, current_unix_timestamp());
         let request = IntentRequest {
             circuit: call.circuit.wire_name(),
             contract_address: self.central_address.clone(),
@@ -199,24 +188,35 @@ impl MidnightPublisher {
             signature: call.signature.clone(),
             contract_state: hex::encode(&chain.contract_state),
             ledger_parameters: hex::encode(&chain.ledger_parameters),
-            ttl_seconds: expires_at,
+            ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
         };
         let bytes = self.client.build(&request).await?;
 
-        let submitted = self.client.submit(&bytes).await.with_context(|| {
-            format!(
-                "submitting the midnight respond intent built over the chain at {}",
-                chain.at_hash
-            )
-        });
-        let receipt = match submitted {
-            Ok(receipt) => receipt,
-            Err(error) if is_ambiguous_submit(&error) => {
-                self.reconcile_ambiguous(&call, expires_at, error).await?;
-                "reconciled-finalized-state".to_string()
-            }
-            Err(error) => return Err(error),
-        };
+        let receipt = self
+            .client
+            .submit(&bytes)
+            .await
+            .with_context(|| {
+                format!(
+                    "submitting the midnight respond intent built over the chain at {}",
+                    chain.at_hash
+                )
+            })
+            .inspect_err(|error| {
+                // The one failure shape worth naming: the transaction may land anyway,
+                // and settlement is deferred to a later attempt's pinned read.
+                if is_ambiguous_submit(error) {
+                    tracing::warn!(
+                        ?sign_id,
+                        circuit = call.circuit.wire_name(),
+                        request_id = %hex::encode(call.request_id),
+                        at_hash = %chain.at_hash,
+                        elapsed = ?action.timestamp.elapsed(),
+                        "midnight: submit answer was lost; deferring settlement to the \
+                         retry attempt's pinned read"
+                    );
+                }
+            })?;
 
         tracing::info!(
             ?sign_id,
@@ -228,71 +228,6 @@ impl MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
-    }
-
-    async fn reconcile_ambiguous(
-        &self,
-        call: &RespondCall,
-        expires_at: u64,
-        original: anyhow::Error,
-    ) -> anyhow::Result<()> {
-        loop {
-            match self.finalized_response(call).await {
-                Ok(FinalizedResponse::Present(at_hash)) => {
-                    tracing::warn!(
-                        circuit = call.circuit.wire_name(),
-                        request_id = %hex::encode(call.request_id),
-                        %at_hash,
-                        "midnight submit answer was lost, but the exact response is finalized"
-                    );
-                    return Ok(());
-                }
-                Ok(FinalizedResponse::Absent {
-                    at_hash,
-                    timestamp_seconds,
-                }) if timestamp_seconds > expires_at => {
-                    return Err(original
-                        .context(format!(
-                            "the exact response was absent at finalized block {at_hash}, whose \
-                             unix timestamp {timestamp_seconds} is past intent expiry {expires_at}"
-                        ))
-                        .context(
-                            "finalized chain time is past the ambiguous transaction's expiry; \
-                             it may be retried",
-                        ));
-                }
-                Ok(FinalizedResponse::Absent { .. }) => {}
-                Err(error) => tracing::warn!(
-                    circuit = call.circuit.wire_name(),
-                    request_id = %hex::encode(call.request_id),
-                    "midnight reconciliation read failed: {error:#}"
-                ),
-            }
-
-            tokio::time::sleep(RECONCILE_POLL).await;
-        }
-    }
-
-    async fn finalized_response(&self, call: &RespondCall) -> anyhow::Result<FinalizedResponse> {
-        let at_hash = self.reads.finalized_head().await?;
-        let state = self
-            .reads
-            .contract_state(&self.central_address, &at_hash)
-            .await?
-            .with_context(|| {
-                format!(
-                    "midnight central contract {} is not present at {at_hash}",
-                    self.central_address
-                )
-            })?;
-        if response_present(&state, call)? {
-            return Ok(FinalizedResponse::Present(at_hash));
-        }
-        let timestamp_seconds = self.reads.block_timestamp_seconds(&at_hash).await?;
-        Ok(FinalizedResponse::Absent {
-            at_hash,
-            timestamp_seconds,
-        })
     }
 }
 
@@ -400,8 +335,9 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-/// The intent's expiry, as the absolute unix seconds the child wants: the sum of the
-/// two budgets a publish spends, past which this publish has already given up.
+/// The intent's expiry, as absolute unix seconds: one publish's build and submit
+/// budgets summed. It bounds how late a transaction whose answer was lost can still
+/// land; whether it did is the next attempt's pinned read to settle.
 fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
     now.saturating_add(config.request_timeout.as_secs())
         .saturating_add(config.submit_timeout.as_secs())
@@ -413,6 +349,7 @@ mod tests {
 
     use crate::intent_gen::AmbiguousSubmit;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use midnight_base_crypto::fab::{
         AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
@@ -452,8 +389,6 @@ mod tests {
         calls: Mutex<Vec<Read>>,
         heads_served: Mutex<usize>,
         contract_state: Mutex<Vec<u8>>,
-        contract_error: Option<crate::rpc::ReadFailure>,
-        finalized_timestamp_seconds: std::sync::atomic::AtomicU64,
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
     }
@@ -479,14 +414,6 @@ mod tests {
             Arc::new(Self::default())
         }
 
-        fn too_large() -> Arc<Self> {
-            Arc::new(Self {
-                contract_present: true,
-                contract_error: Some(crate::rpc::ReadFailure::TooLarge),
-                ..Default::default()
-            })
-        }
-
         fn reads(&self) -> Vec<Read> {
             self.calls.lock().unwrap().clone()
         }
@@ -501,11 +428,6 @@ mod tests {
         fn set_state(&self, state: Vec<u8>) {
             *self.contract_state.lock().unwrap() = state;
         }
-
-        fn set_finalized_timestamp(&self, timestamp_seconds: u64) {
-            self.finalized_timestamp_seconds
-                .store(timestamp_seconds, std::sync::atomic::Ordering::SeqCst);
-        }
     }
 
     #[async_trait]
@@ -517,22 +439,12 @@ mod tests {
             Ok(if *served == 1 { HEAD_ONE } else { HEAD_TWO }.to_string())
         }
 
-        async fn block_timestamp_seconds(&self, at_hash: &str) -> anyhow::Result<u64> {
-            self.record("block_timestamp_seconds", at_hash);
-            Ok(self
-                .finalized_timestamp_seconds
-                .load(std::sync::atomic::Ordering::SeqCst))
-        }
-
         async fn contract_state(
             &self,
             _address: &str,
             at_hash: &str,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.record("contract_state", at_hash);
-            if let Some(error) = self.contract_error {
-                anyhow::bail!(error.marker());
-            }
             Ok(self
                 .contract_present
                 .then(|| self.contract_state.lock().unwrap().clone()))
@@ -934,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_response_entries_do_not_poison_reconciliation() {
+    fn invalid_response_entries_do_not_poison_the_pre_check() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let call = respond_call(&action).expect("the action maps to a response");
             for state in [
@@ -963,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_landed_submit_with_a_lost_reply_is_reconciled_without_reposting() {
+    async fn a_landed_submit_with_a_lost_reply_defers_to_the_retry_and_does_not_repost() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let reads = StubReads::new();
             let client = Arc::new(LandingWithoutReply {
@@ -973,15 +885,36 @@ mod tests {
             });
             let publisher = publisher(reads, client.clone());
 
-            publisher
+            // The first attempt's answer is lost after the post landed: it must fail
+            // as a retryable ambiguity, never report success for an unnamed post.
+            let error = publisher
                 .publish_signature(&action)
                 .await
-                .expect("the finalized exact response resolves the ambiguous submit");
-
+                .expect_err("a lost answer is not a published signature");
+            assert!(
+                is_ambiguous_submit(&error),
+                "the ambiguity must survive to the caller: {error:#}"
+            );
+            assert!(
+                mpc_chain_integration_core::utils::retry::is_retryable(&error),
+                "an ambiguous submit hands settlement to the retry: {error:#}"
+            );
             assert_eq!(
                 client.attempts.load(std::sync::atomic::Ordering::SeqCst),
                 1,
-                "an ambiguous landed submit must not be posted twice"
+                "an ambiguous landed submit must not be posted twice within one attempt"
+            );
+
+            // The retry attempt's pinned read finds the exact response and settles
+            // without building or posting anything.
+            publisher
+                .publish_signature(&action)
+                .await
+                .expect("the retry settles on the already-finalized response");
+            assert_eq!(
+                client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the settled retry must not repost"
             );
         }
     }
@@ -1041,75 +974,6 @@ mod tests {
             "got: {err:#}"
         );
         assert_eq!(client.submissions(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_finalized_head_at_the_intent_ttl_does_not_release_ambiguity() {
-        let reads = StubReads::new();
-        reads.set_finalized_timestamp(1);
-        let publisher = publisher(reads.clone(), StubClient::new());
-        let call = respond_call(&respond_action()).expect("the action maps to a response");
-        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
-
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(25),
-                publisher.reconcile_ambiguous(&call, 1, original),
-            )
-            .await
-            .is_err(),
-            "a transaction remains valid when finalized block time equals its TTL"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reconciliation_read_failure_does_not_release_ambiguity() {
-        let publisher = publisher(StubReads::too_large(), StubClient::new());
-        let call = respond_call(&respond_action()).expect("the action maps to a response");
-        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
-
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(25),
-                publisher.reconcile_ambiguous(&call, 1, original),
-            )
-            .await
-            .is_err(),
-            "an unreadable finalized state cannot prove that retrying is safe"
-        );
-    }
-
-    #[tokio::test]
-    async fn finalized_expiry_without_the_response_allows_a_fresh_attempt() {
-        let reads = StubReads::new();
-        reads.set_finalized_timestamp(2);
-        let publisher = publisher(reads.clone(), StubClient::new());
-        let call = respond_call(&respond_action()).expect("the action maps to a response");
-        let original = anyhow::anyhow!("submit answer was lost").context(AmbiguousSubmit);
-
-        let error = publisher
-            .reconcile_ambiguous(&call, 1, original)
-            .await
-            .expect_err("the expired attempt did not finalize the response");
-        assert!(
-            is_ambiguous_submit(&error),
-            "the original submit diagnosis must survive expiry: {error:#}"
-        );
-        assert!(
-            mpc_chain_integration_core::utils::retry::is_retryable(&error),
-            "a finalized head past the TTL makes a fresh transaction safe: {error:#}"
-        );
-        let pinned_hashes: Vec<_> = reads
-            .reads()
-            .into_iter()
-            .filter(|read| read.method != "finalized_head")
-            .map(|read| read.at_hash)
-            .collect();
-        assert_eq!(
-            pinned_hashes,
-            vec![HEAD_ONE.to_string(); 2],
-            "absence and timestamp must come from the same finalized block"
-        );
     }
 
     #[tokio::test]

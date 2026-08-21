@@ -11,7 +11,6 @@ use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::reconnecting_rpc_client::RpcClient as ReconnectingRpcClient;
 use subxt::backend::rpc::RpcClient;
-use subxt::backend::BackendExt as _;
 use subxt::client::OnlineClient;
 use subxt::ext::codec::DecodeAll as _;
 use subxt::ext::jsonrpsee::client_transport::ws::{Url as WsUrl, WsTransportClientBuilder};
@@ -31,8 +30,6 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
-const TIMESTAMP_PALLET: &str = "Timestamp";
-const TIMESTAMP_NOW: &str = "Now";
 
 /// The classified read failures, travelling as marker text because `retry_rpc!`
 /// flattens error chains to their message; when the retry layer preserves sources,
@@ -333,7 +330,6 @@ impl MidnightPublisherRpc {
 #[async_trait::async_trait]
 pub(crate) trait PinnedReads: Send + Sync {
     async fn finalized_head(&self) -> anyhow::Result<String>;
-    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64>;
     /// The two node surfaces disagree about `0x`; both are decoded to bytes here, so
     /// nothing above this trait may reintroduce the distinction.
     async fn contract_state(
@@ -354,28 +350,6 @@ impl PinnedReads for MidnightPublisherRpc {
             .await
             .context("failed to fetch the midnight finalized head")?;
         Ok(hex_0x(finalized.hash()))
-    }
-
-    async fn block_timestamp_seconds(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
-        let at = parse_block_hash(at_hash_0x)?;
-        let address = subxt::dynamic::storage(
-            TIMESTAMP_PALLET,
-            TIMESTAMP_NOW,
-            Vec::<subxt::dynamic::Value>::new(),
-        );
-        let key = self
-            .client
-            .storage()
-            .address_bytes(&address)
-            .context("midnight runtime metadata has no Timestamp.Now storage entry")?;
-        let encoded = self
-            .client
-            .backend()
-            .storage_fetch_value(key, at)
-            .await
-            .context("failed to fetch midnight runtime storage")?
-            .with_context(|| format!("midnight block {at_hash_0x} has no timestamp"))?;
-        decode_timestamp_seconds(&encoded)
     }
 
     async fn contract_state(
@@ -520,13 +494,6 @@ fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         1 => Ok(None),
         other => anyhow::bail!("runtime api returned Result variant {other}"),
     }
-}
-
-fn decode_timestamp_seconds(encoded: &[u8]) -> anyhow::Result<u64> {
-    let mut payload = encoded;
-    let timestamp_millis = u64::decode_all(&mut payload)
-        .context("midnight block timestamp is not a SCALE-encoded u64")?;
-    Ok(timestamp_millis / 1_000)
 }
 
 /// The one-shot reads over explicit transports, so the offline tests can drive
@@ -1292,24 +1259,6 @@ mod tests {
             err.to_string()
                 .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
             "the decoder boundary must identify the malformed payload: {err:#}"
-        );
-    }
-
-    #[test]
-    fn block_timestamp_matches_the_ledger_s_second_floor() {
-        use subxt::ext::codec::Encode as _;
-
-        assert_eq!(decode_timestamp_seconds(&1_000u64.encode()).unwrap(), 1);
-        assert_eq!(decode_timestamp_seconds(&1_999u64.encode()).unwrap(), 1);
-
-        let mut trailing = 1_000u64.encode();
-        trailing.push(0xff);
-        let err = decode_timestamp_seconds(&trailing)
-            .expect_err("a trailing byte must make the timestamp malformed");
-        assert!(
-            err.to_string()
-                .contains("midnight block timestamp is not a SCALE-encoded u64"),
-            "the decoder boundary must identify the malformed timestamp: {err:#}"
         );
     }
 }

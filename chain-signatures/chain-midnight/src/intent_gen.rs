@@ -25,8 +25,8 @@ pub(crate) struct AmbiguousSubmit;
 impl std::fmt::Display for AmbiguousSubmit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "the answer was lost; the transaction may still reach the chain, so check it for \
-             this request before posting again by reconciling finalized state",
+            "the answer was lost; the transaction may still reach the chain, so the next \
+             attempt checks finalized state for this request before posting again",
         )
     }
 }
@@ -219,8 +219,7 @@ impl IntentGen {
         let outcome = exchange(live, request, operation, &self.config.publisher).await;
         if matches!(
             &outcome,
-            Exchange::Answered(Err(error))
-                if error.downcast_ref::<AmbiguousSubmit>().is_some()
+            Exchange::Answered(Err(error)) if is_ambiguous_submit(error)
         ) {
             // The wallet work may still be running after its answer times out, so no
             // later request may reuse this child.
@@ -880,7 +879,7 @@ mod tests {
 
         assert!(rendered.contains("id 7"), "got: {rendered}");
         assert!(
-            rendered.contains("check it for this request before posting again"),
+            is_ambiguous_submit(&err),
             "an unpairable submit reply must preserve the on-chain uncertainty: {rendered}"
         );
     }
@@ -918,7 +917,7 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("closed its stdout"), "got: {rendered}");
         assert!(
-            rendered.contains("check it for this request before posting again"),
+            is_ambiguous_submit(&err),
             "a lost answer must not be reported as a bare transport fault: {rendered}"
         );
         assert!(
@@ -941,8 +940,8 @@ mod tests {
 
         let err = builder.submit(SAMPLE_INTENT).await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("check it for this request before posting again"),
-            "the error has to say what an operator must do before retrying by hand: {err:#}"
+            is_ambiguous_submit(&err),
+            "a blown submit deadline must keep the on-chain uncertainty: {err:#}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
@@ -968,9 +967,9 @@ mod tests {
             format!("{err:#}").contains("no spendable dust"),
             "got: {err:#}"
         );
-        // A refusal is an answer: nothing here should send an operator to the chain.
+        // A refusal is an answer: nothing was posted, so nothing is ambiguous.
         assert!(
-            !format!("{err:#}").contains("may still reach the chain"),
+            !is_ambiguous_submit(&err),
             "a refusal spent nothing: {err:#}"
         );
     }
@@ -1029,9 +1028,9 @@ mod tests {
 
         let err = builder.build(&sample_request()).await.unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "got: {err:#}");
-        // A build leaves nothing behind: sending its operator to the chain would be a false alarm.
+        // A build leaves nothing behind, so its timeout is never ambiguous.
         assert!(
-            !format!("{err:#}").contains("may still reach the chain"),
+            !is_ambiguous_submit(&err),
             "a build that timed out spent nothing: {err:#}"
         );
 
