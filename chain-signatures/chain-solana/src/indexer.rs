@@ -386,14 +386,13 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         };
 
         for tx in transactions {
-            let Some(logs) = tx
-                .meta
-                .as_ref()
-                .and_then(|meta| match meta.log_messages.as_ref() {
-                    OptionSerializer::Some(logs) => Some(logs),
-                    _ => None,
-                })
-            else {
+            let Some(meta) = tx.meta.as_ref() else {
+                continue;
+            };
+            if meta.err.is_some() {
+                continue;
+            }
+            let OptionSerializer::Some(logs) = meta.log_messages.as_ref() else {
                 continue;
             };
 
@@ -1698,6 +1697,41 @@ mod tests {
             Some(ChainEvent::Respond(event)) if event.request_id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(8))));
+    }
+
+    #[tokio::test]
+    async fn catchup_skips_failed_transactions_like_live() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let mut transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            "Sign",
+            cpi_event_instruction(&request),
+        );
+        let error = serde_json::json!({ "InstructionError": [0, { "Custom": 1 }] });
+        transaction["meta"]["err"] = error.clone();
+        transaction["meta"]["status"] = serde_json::json!({ "Err": error });
+
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[tokio::test]
