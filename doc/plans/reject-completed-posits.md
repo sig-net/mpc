@@ -89,20 +89,29 @@ both ways, the same trick as `stale_round`, for about eleven bytes per posit.
     licences and, unlike clearing `dead_ids`, cannot resurrect orphan mailboxes.
 - `SignEntry` gains `completed_reports: HashSet<Participant>`, created and
   dropped with the request, so there is no extra lifecycle and nothing to bound.
-- `handle_posit` takes `&GovernanceInfo`, becomes async, and gains two branches:
+- `handle_posit` takes `&GovernanceInfo` and gains two branches:
   - *Answer*: id in `completed_ids` and action is `Propose` gets a notice back,
     with the id echoing the sender's `(sign_id, presignature_id, round)`, the
     same "the id is an address, not content" convention as the `StaleRound`
     reply. `Accept`, `Reject` and `Start` are never answered, since replying to
-    a reject ping-pongs. Everything else keeps today's silent drop. Await the
-    send like every other sender: `MAX_MESSAGE_OUTGOING` is about a million, so
-    there is no backpressure to design around.
+    a reject ping-pongs. Everything else keeps today's silent drop. Sent with a
+    new non-blocking `MessageChannel::try_send`, dropping the notice if the
+    outgoing channel is full, which keeps `handle_posit` synchronous.
   - *Count*: flag set, sender is a current participant, id is tracked, then
     insert into `completed_reports` and compare its size against
     `participants.len().saturating_sub(threshold) + 1`. Membership checked on
     insert keeps the quorum test to one comparison. On quorum, retire the
     request and abort the task exactly as `handle_completion` does, but leave
     `completed_ids` alone.
+- Why `try_send` rather than awaiting `send` like every other caller: a notice
+  is a hint, not a delivery obligation. Losing one costs nothing, since the
+  straggler asks again on its next `Propose`, so dropping on a full channel is
+  the semantically correct failure, not a compromise. Awaiting would also put
+  the one loop that routes every posit, sign command and task exit behind a
+  channel, where every other sender is a single request's task blocking only
+  itself. `MAX_MESSAGE_OUTGOING` is about a million, so this is defence against
+  a pathological case rather than an expected one, and `try_send_lossy` on the
+  inbox side is the same idea already in the codebase.
 - The flag counts whatever action carries it; coupling it to `RejectWithReason`
   buys no safety, since the same node can send a reject. Senders always pair it
   with one so that a node not knowing the field reads something sane.
@@ -165,8 +174,10 @@ the request. Both triggers build it through one `completed_notice(...)`.
   `presignature_id: 0` and `round: 0`. Zero is the only safe round: a receiver
   buffering a future-round message sets `highest_seen_round` from it, and 0 can
   neither raise that nor displace a live mailbox slot.
-- Sent to all participants without consulting the mesh; the outbox already
-  retries unreachable peers for `message_timeout` and gives up.
+- Sent with the same `try_send` to all participants without consulting the
+  mesh; the outbox already retries unreachable peers for `message_timeout` and
+  gives up. This is `n - 1` sends from the spawner loop at once, which is the
+  case that makes a non-blocking send worth its eight lines.
 - Cost `n(n - 1)` per completed request, paid whether or not anyone is behind:
   56 messages of roughly 60 bytes at 8 nodes, batched into partitions the outbox
   already sends.
