@@ -13,6 +13,7 @@ use subxt::backend::rpc::reconnecting_rpc_client::RpcClient as ReconnectingRpcCl
 use subxt::backend::rpc::RpcClient;
 use subxt::backend::BackendExt as _;
 use subxt::client::OnlineClient;
+use subxt::ext::codec::DecodeAll as _;
 use subxt::ext::jsonrpsee::client_transport::ws::{Url as WsUrl, WsTransportClientBuilder};
 use subxt::ext::jsonrpsee::core::client::async_client::PingConfig;
 use subxt::ext::jsonrpsee::core::client::{Client as RawWsClient, Error as JsonrpseeClientError};
@@ -399,8 +400,6 @@ impl PinnedReads for MidnightPublisherRpc {
 }
 
 async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<String> {
-    use subxt::ext::codec::Decode as _;
-
     let finalized = client
         .backend()
         .latest_finalized_block_ref()
@@ -411,15 +410,12 @@ async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<St
         .call(NETWORK_ID_ENTRY, Some(&[]), finalized.hash())
         .await
         .context("failed to fetch the midnight network id")?;
-    let mut payload = &answer[..];
-    let network_id =
-        String::decode(&mut payload).context("midnight runtime returned a malformed network id")?;
-    anyhow::ensure!(
-        payload.is_empty(),
-        "midnight runtime network id has {} trailing bytes",
-        payload.len()
-    );
-    Ok(network_id)
+    decode_network_id(&answer)
+}
+
+fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
+    let mut payload = answer;
+    String::decode_all(&mut payload).context("midnight runtime returned a malformed network id")
 }
 
 async fn connect_publisher_transport(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
@@ -457,9 +453,9 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
-        ContractStateReply::TooLarge(reply) => Err(ReadFailure::TooLarge.err(reply)),
-        ContractStateReply::Other(err) => {
+        ContractStateReply::Unservable(err)
+        | ContractStateReply::TooLarge(err)
+        | ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
     }
@@ -475,7 +471,7 @@ enum ContractStateReply {
     Unservable(RawRpcError),
     /// State beyond the rpc response cap, reachable because our cap sits above the
     /// server's: definitive, since retrying cannot shrink a contract's state.
-    TooLarge(subxt::ext::subxt_rpcs::UserError),
+    TooLarge(RawRpcError),
     /// Anything else; the transport's own policy decides.
     Other(RawRpcError),
 }
@@ -503,7 +499,7 @@ fn classify_contract_state_reply(
             ContractStateReply::Unservable(RawRpcError::User(reply))
         }
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            ContractStateReply::TooLarge(reply)
+            ContractStateReply::TooLarge(RawRpcError::User(reply))
         }
         Err(err) => ContractStateReply::Other(err),
     })
@@ -513,37 +509,23 @@ fn classify_contract_state_reply(
 /// at `MidnightRuntimeApi` version 2 (node 2.0.0-rc.4). `None` is the `Err` variant:
 /// only its discriminant is decoded, so an unseen ledger error stays `Err`.
 fn unwrap_runtime_api_result(answer: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-    use subxt::ext::codec::Decode as _;
     let (variant, mut payload) = answer
         .split_first()
         .context("runtime api returned an empty Result envelope")?;
     match *variant {
-        0 => {
-            let value = Vec::<u8>::decode(&mut payload)
-                .context("runtime api Ok payload is not a SCALE Vec<u8>")?;
-            anyhow::ensure!(
-                payload.is_empty(),
-                "runtime api Ok payload has {} trailing bytes",
-                payload.len()
-            );
-            Ok(Some(value))
-        }
+        0 => Ok(Some(
+            Vec::<u8>::decode_all(&mut payload)
+                .context("runtime api Ok payload is not a SCALE Vec<u8>")?,
+        )),
         1 => Ok(None),
         other => anyhow::bail!("runtime api returned Result variant {other}"),
     }
 }
 
 fn decode_timestamp_seconds(encoded: &[u8]) -> anyhow::Result<u64> {
-    use subxt::ext::codec::Decode as _;
-
     let mut payload = encoded;
-    let timestamp_millis =
-        u64::decode(&mut payload).context("midnight block timestamp is not a SCALE-encoded u64")?;
-    anyhow::ensure!(
-        payload.is_empty(),
-        "midnight block timestamp has {} trailing bytes",
-        payload.len()
-    );
+    let timestamp_millis = u64::decode_all(&mut payload)
+        .context("midnight block timestamp is not a SCALE-encoded u64")?;
     Ok(timestamp_millis / 1_000)
 }
 
@@ -680,7 +662,7 @@ impl Reads {
                     ContractStateReply::State(state) => Ok(Fetched::Value(state)),
                     // Spends the retry budget like any other `Err`; only the class escapes.
                     ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
-                    ContractStateReply::TooLarge(reply) => Ok(Fetched::TooLarge(reply.to_string())),
+                    ContractStateReply::TooLarge(err) => Ok(Fetched::TooLarge(err.to_string())),
                     ContractStateReply::Other(err) => {
                         self.classify(Err(err), "midnight_contractState failed")
                     }
@@ -1048,6 +1030,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publisher_contract_state_preserves_raw_failures_without_indexer_markers() {
+        for (code, message) in [
+            (INVALID_PARAMS_CODE, UNSERVABLE_MSG),
+            (OVERSIZED_RESPONSE_CODE, "state exceeds the response limit"),
+        ] {
+            let node = StubNode::new(vec![(
+                "midnight_contractState",
+                vec![Canned::User(code, message)],
+            )]);
+            let rpc = RpcClient::new(node);
+
+            let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+                .await
+                .expect_err("the node reply is a publisher read failure");
+
+            assert_eq!(
+                ReadFailure::of(&err),
+                None,
+                "publisher errors must not acquire indexer policy markers: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains(message),
+                "the original node diagnostic must remain in the error chain: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn contract_state_definitive_answers_spend_no_retries() {
         // The oversized refusal classifies by its code, whatever the server words it as.
         let node = StubNode::new(vec![(
@@ -1239,6 +1249,24 @@ mod tests {
     }
 
     #[test]
+    fn network_id_decoder_consumes_the_whole_scale_value() {
+        use subxt::ext::codec::Encode as _;
+
+        let encoded = "preview".to_string().encode();
+        assert_eq!(decode_network_id(&encoded).unwrap(), "preview");
+
+        let mut trailing = encoded;
+        trailing.push(0xff);
+        let err = decode_network_id(&trailing)
+            .expect_err("a trailing byte must make the network id malformed");
+        assert!(
+            err.to_string()
+                .contains("midnight runtime returned a malformed network id"),
+            "the decoder boundary must identify the malformed network id: {err:#}"
+        );
+    }
+
+    #[test]
     fn runtime_api_result_envelope_unwraps_ok_err_and_garbage() {
         use subxt::ext::codec::Encode as _;
         // Ok(vec![0xaa, 0xbb]): discriminant 0, then a SCALE Vec<u8>.
@@ -1258,7 +1286,13 @@ mod tests {
         let mut trailing = vec![0u8];
         trailing.extend(vec![0xaau8].encode());
         trailing.push(0x99);
-        assert!(unwrap_runtime_api_result(&trailing).is_err());
+        let err = unwrap_runtime_api_result(&trailing)
+            .expect_err("a trailing byte must make the runtime API payload malformed");
+        assert!(
+            err.to_string()
+                .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
+            "the decoder boundary must identify the malformed payload: {err:#}"
+        );
     }
 
     #[test]
@@ -1270,6 +1304,12 @@ mod tests {
 
         let mut trailing = 1_000u64.encode();
         trailing.push(0xff);
-        assert!(decode_timestamp_seconds(&trailing).is_err());
+        let err = decode_timestamp_seconds(&trailing)
+            .expect_err("a trailing byte must make the timestamp malformed");
+        assert!(
+            err.to_string()
+                .contains("midnight block timestamp is not a SCALE-encoded u64"),
+            "the decoder boundary must identify the malformed timestamp: {err:#}"
+        );
     }
 }
