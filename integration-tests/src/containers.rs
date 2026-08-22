@@ -909,10 +909,19 @@ impl Solana {
 
     /// Kill and relaunch the validator against the same ledger
     pub async fn restart(&mut self) -> anyhow::Result<()> {
-        // Kill the existing process and wait a bit for it to exit
+        // Kill the existing process and wait for it to exit, so its ports
+        // are free before the relaunch
         let _ = self.process.kill();
-        sleep(Duration::from_millis(500)).await;
+        while self
+            .process
+            .try_status()
+            .context("failed to inspect validator status")?
+            .is_none()
+        {
+            sleep(Duration::from_millis(100)).await;
+        }
 
+        // Port layout mirrors run(): gossip = rpc + 3, dynamic range = rpc + 4..=rpc + 36
         let gossip_port = self.rpc_port + 3;
         let dynamic_port_start = self.rpc_port + 4;
 
@@ -1385,9 +1394,8 @@ impl Solana {
             let statuses = self.rpc_client.get_signature_statuses(&[signature]).await?;
             let confirmed = statuses
                 .value
-                .into_iter()
-                .next()
-                .flatten()
+                .first()
+                .and_then(|status| status.as_ref())
                 .filter(|status| status.confirmation_status.is_some());
             match confirmed {
                 Some(status) => {
