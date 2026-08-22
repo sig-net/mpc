@@ -77,6 +77,22 @@ async fn wait_for_sign_request(
     }
 }
 
+/// Wait for a SignCommand::Request to arrive on the sign channel
+async fn next_sign_command(
+    sign_rx: &mut mpsc::Receiver<SignCommand>,
+) -> Result<Arc<IndexedSignRequest>> {
+    loop {
+        match timeout(Duration::from_secs(20), sign_rx.recv()).await {
+            Ok(Some(SignCommand::Request(request))) => return Ok(request),
+            Ok(Some(other)) => {
+                tracing::debug!(?other, "ignoring non-request sign command")
+            }
+            Ok(None) => anyhow::bail!("sign command channel closed"),
+            Err(_) => anyhow::bail!("timeout waiting for SignCommand::Request"),
+        }
+    }
+}
+
 /// Test that the Solana indexer can parse basic Sign events
 ///
 /// This test:
@@ -639,5 +655,161 @@ async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
         "stream must keep parsing sign requests after a failed tx"
     );
 
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_validator_restart_gap_free_resume() -> Result<()> {
+    let mut solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+
+    let backlog = Backlog::new();
+    let indexer = SolanaIndexer::new(config, backlog.clone(), NoopChainTelemetry)
+        .context("failed to create SolanaIndexer")?;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(16);
+    let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
+    let rpc = RpcChannel { tx: rpc_tx };
+
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+        &account_id,
+        AffinePoint::GENERATOR,
+        1,
+        Participants::default(),
+    );
+
+    let mut mesh_state = MeshState::default();
+    mesh_state.update(
+        Participant::from(0u32),
+        NodeStatus::Active,
+        ParticipantInfo::new(0),
+    );
+    let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let node_client = NodeClient::new(&Default::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+
+    let run_handle = {
+        let backlog = backlog.clone();
+        tokio::spawn(async move {
+            run_supervised(
+                indexer,
+                StreamContext::new(
+                    backlog,
+                    sign_tx,
+                    rpc,
+                    contract_watcher,
+                    mesh_rx,
+                    node_client,
+                    checkpoints_rx,
+                ),
+                NoopChainTelemetry,
+            )
+            .await;
+        })
+    };
+
+    let payload_a = [0xA1; 32];
+
+    // Snapshot the processed block before submitting request A
+    let processed_before = backlog.get_processed_block(Chain::Solana).await;
+    solana
+        .sign(
+            payload_a,
+            "restart-before-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request_a = next_sign_command(&mut sign_rx).await?;
+    assert_eq!(
+        request_a.args.payload,
+        Scalar::from_bytes(payload_a).unwrap()
+    );
+
+    // Wait for the processed block to advance past the snapshot
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let processed = backlog.get_processed_block(Chain::Solana).await;
+        if processed.is_some_and(|slot| processed_before.is_none_or(|prev| slot > prev)) {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "processed block never advanced past A"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Kill the validator and submit a request while it's down
+    solana
+        .process
+        .kill()
+        .context("failed to kill solana-test-validator")?;
+    let payload_b = [0xB2; 32];
+    let down = solana
+        .sign(
+            payload_b,
+            "restart-during-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await;
+    assert!(down.is_err(), "sign must fail while the validator is down");
+
+    // Restart the validator and submit a request after it's back up
+    solana.restart().await.context("validator restart failed")?;
+
+    let payload_c = [0xC3; 32];
+    solana
+        .sign(
+            payload_c,
+            "restart-after-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    let mut seen = vec![request_a.id];
+    let request_c_id;
+
+    // Wait for the post-restart request to appear on the sign channel, and record its id
+    loop {
+        let request = next_sign_command(&mut sign_rx).await?;
+        seen.push(request.id);
+        if request.args.payload == Scalar::from_bytes(payload_c).unwrap() {
+            request_c_id = request.id;
+            break;
+        }
+    }
+
+    // Drain any remaining requests from the sign channel for a few seconds, to ensure that no other requests are emitted.
+    let drain_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < drain_until {
+        match timeout(drain_until - Instant::now(), sign_rx.recv()).await {
+            Ok(Some(SignCommand::Request(request))) => seen.push(request.id),
+            Ok(_) | Err(_) => break,
+        }
+    }
+
+    let distinct: std::collections::HashSet<_> = seen.iter().collect();
+    assert_eq!(
+        distinct,
+        std::collections::HashSet::from([&request_a.id, &request_c_id]),
+        "gap-free resume: exactly the submitted requests appear"
+    );
+    assert_eq!(
+        seen.iter().filter(|id| **id == request_c_id).count(),
+        1,
+        "the post-restart request must be indexed exactly once"
+    );
+    run_handle.abort();
     Ok(())
 }

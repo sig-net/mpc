@@ -907,6 +907,56 @@ impl Solana {
         anyhow::bail!("solana-test-validator did not become ready in time")
     }
 
+    /// Kill and relaunch the validator against the same ledger
+    pub async fn restart(&mut self) -> anyhow::Result<()> {
+        // Kill the existing process and wait a bit for it to exit
+        let _ = self.process.kill();
+        sleep(Duration::from_millis(500)).await;
+
+        let gossip_port = self.rpc_port + 3;
+        let dynamic_port_start = self.rpc_port + 4;
+
+        // Restart the validator with the same ledger and ports
+        let mut command = Command::new("solana-test-validator");
+        command
+            .kill_on_drop(true)
+            .arg("--ledger")
+            .arg(&self.ledger_dir)
+            .arg("--rpc-port")
+            .arg(self.rpc_port.to_string())
+            .arg("--faucet-port")
+            .arg(self.faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
+            .arg("--dynamic-port-range")
+            .arg(format!("{dynamic_port_start}-{}", dynamic_port_start + 32))
+            .arg("--bind-address")
+            .arg("127.0.0.1")
+            .arg("--mint")
+            .arg(self.payer_keypair.pubkey().to_string())
+            .arg("--quiet");
+
+        let mut process = command
+            .spawn()
+            .context("failed to restart solana-test-validator")?;
+        Self::wait_for_validator_ready(
+            &mut process,
+            &self.rpc_client,
+            &self.ws_address,
+            &self.payer_keypair.pubkey(),
+        )
+        .await
+        .context("restarted solana-test-validator did not become ready")?;
+
+        // Wait for the program to be ready after the validator restart
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await
+            .context("program missing after validator restart")?;
+        self.process = process;
+
+        Ok(())
+    }
+
     pub fn get_config(&self, program_address: String) -> SolConfig {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
