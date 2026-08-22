@@ -8,6 +8,7 @@ use crate::local::NodeEnvConfig;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
 use crate::NodeConfig;
 
+use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use bollard::container::LogsOptions;
@@ -40,6 +41,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 use solana_sdk::signature::Keypair as SolanaKeypair;
@@ -1254,6 +1256,108 @@ impl Solana {
         );
 
         Ok(signature)
+    }
+
+    /// Submit a tx whose first instruction emits a sign CPI event and whose
+    /// second instruction fails, rolling the whole
+    /// tx back. Returns the slot the failed tx landed in.
+    pub async fn sign_failed_tx(
+        &self,
+        payload: [u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> anyhow::Result<u64> {
+        let program_id = self.program_keypair.pubkey();
+        let (program_state_pda, _) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+        let (event_authority_pda, _) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        // Emits a real sign CPI event
+        let sign_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Sign {
+                program_state: program_state_pda,
+                requester: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+                event_authority: event_authority_pda,
+                program: program_id,
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Sign {
+                payload,
+                key_version,
+                path: path.to_string(),
+                algo: "secp256k1".to_string(),
+                dest: String::new(),
+                params: String::new(),
+            }
+            .data(),
+        };
+
+        // The second instruction is a duplicate initialize, which will fail because the program-state PDA already exists.
+        let initialize_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Initialize {
+                program_state: program_state_pda,
+                admin: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Initialize {
+                signature_deposit: 1_000_000,
+                chain_id: Chain::Solana.caip2_chain_id().to_string(),
+            }
+            .data(),
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[sign_ix, initialize_ix],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+
+        // Send the transaction with skip_preflight to avoid preflight checks that would prevent the transaction from being sent due to the second instruction failing.
+        let signature = self
+            .rpc_client
+            .send_transaction_with_config(
+                &transaction,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Wait for the transaction to be confirmed and check that it failed as expected.
+        for _ in 0..40 {
+            let statuses = self.rpc_client.get_signature_statuses(&[signature]).await?;
+            let confirmed = statuses
+                .value
+                .into_iter()
+                .next()
+                .flatten()
+                .filter(|status| status.confirmation_status.is_some());
+            match confirmed {
+                Some(status) => {
+                    return match status.err {
+                        Some(_) => {
+                            tracing::info!(
+                                ?signature,
+                                slot = status.slot,
+                                "failed sign tx confirmed as expected"
+                            );
+                            Ok(status.slot)
+                        }
+                        None => anyhow::bail!("duplicate initialize unexpectedly succeeded"),
+                    }
+                }
+                None => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+
+        anyhow::bail!("failed sign tx was not confirmed in time")
     }
 
     #[allow(clippy::too_many_arguments)]

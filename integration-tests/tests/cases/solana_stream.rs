@@ -595,3 +595,49 @@ async fn test_solana_respond_round_trip() -> Result<()> {
 
     Ok(())
 }
+
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+    let mut indexer = run_solana_indexer(config).await?;
+
+    let failed_payload = [8u8; 32];
+    let failed_slot = solana
+        .sign_failed_tx(failed_payload, "failed-tx", LATEST_MPC_KEY_VERSION)
+        .await?;
+
+    // Wait for the failed transaction's slot to be emitted as a Block event, and verify that no SignRequest events from the failed transaction leak into the stream.
+    loop {
+        match timeout(Duration::from_secs(30), indexer.next_event()).await {
+            Ok(Some(ChainEvent::SignRequest { .. })) => {
+                anyhow::bail!("sign CPI event from the failed tx leaked into the stream")
+            }
+            Ok(Some(ChainEvent::Block(slot))) if slot >= failed_slot => break,
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("indexer stream closed"),
+            Err(_) => anyhow::bail!("failed tx slot never surfaced as a Block event"),
+        }
+    }
+
+    let valid_payload = [9u8; 32];
+    solana
+        .sign(
+            valid_payload,
+            "failed-tx-survival",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request = wait_for_sign_request(&mut indexer).await?;
+    assert_eq!(
+        request.args.payload,
+        Scalar::from_bytes(valid_payload).unwrap(),
+        "stream must keep parsing sign requests after a failed tx"
+    );
+
+    Ok(())
+}
