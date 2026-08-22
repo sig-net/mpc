@@ -13,6 +13,10 @@ use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
 
+fn midnight_args(cfg: &NodeConfig) -> MidnightArgs {
+    MidnightArgs::from_config(cfg.midnight.clone())
+}
+
 pub struct Node {
     pub address: String,
     pub account: Account,
@@ -85,7 +89,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: MidnightArgs::from_config(None),
+            midnight: midnight_args(cfg),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -186,7 +190,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: MidnightArgs::from_config(None),
+            midnight: midnight_args(&config.cfg),
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -246,5 +250,48 @@ impl Drop for Node {
         // during teardown when nodes are trying to write to Redis.
         std::thread::sleep(std::time::Duration::from_millis(100));
         self.process.kill().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+
+    #[test]
+    fn midnight_args_preserve_complete_responder_config() {
+        let config = MidnightConfig {
+            node_ws_url: "ws://127.0.0.1:19944".into(),
+            central_address: "ab".repeat(32),
+            publisher: PublisherConfig {
+                intent_gen_command: vec!["node".into(), "/fixture/midnight-publisher.js".into()],
+                funding_seed: "0f".repeat(32),
+                proof_server_url: "http://127.0.0.1:16300".into(),
+                indexer_url: "http://127.0.0.1:18088/api/v3/graphql".into(),
+                indexer_ws_url: "ws://127.0.0.1:18088/api/v3/graphql/ws".into(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let cfg = NodeConfig {
+            midnight: Some(config),
+            ..Default::default()
+        };
+
+        let args = midnight_args(&cfg).into_str_args();
+
+        for expected in [
+            "--midnight-node-ws-url",
+            "ws://127.0.0.1:19944",
+            "--midnight-central-address",
+            "--midnight-funding-seed",
+            "--midnight-intent-gen-command",
+            "--midnight-proof-server-url",
+            "--midnight-indexer-url",
+            "--midnight-indexer-ws-url",
+        ] {
+            assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
+        }
     }
 }

@@ -21,5 +21,6 @@
     "resolveJsonModule": true
   },
   // Everything is typechecked here; only `src/` is emitted, by `tsconfig.build.json`.
-  "include": ["src/**/*.ts", "tests/**/*.ts", "devtools/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "devtools/**/*.ts"],
+  "exclude": ["devtools/real-stack"]
 }
