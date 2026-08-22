@@ -25,6 +25,7 @@ on:
 
 jobs:
   test:
+    name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:
       run:
