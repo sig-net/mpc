@@ -1718,6 +1718,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_bails_when_observed_slot_frozen() {
+        let mut server = mockito::Server::new_async().await;
+
+        // A frozen RPC node: getSlot keeps returning the same slot forever.
+        // The heartbeat keeps Block events flowing, so only the indexer-side
+        // slot-stall watchdog can catch this.
+        let _slot = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getSlot".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":10}"#)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 9).await;
+        let mut indexer = test_indexer(&server.url(), state_manager);
+        indexer.polling = PollingConfig {
+            poll_interval: Duration::from_millis(5),
+            slot_stall_timeout: Duration::from_millis(100),
+        };
+
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let result = indexer
+            .run(events_tx, CancellationToken::new())
+            .await;
+
+        let err = result.expect_err("run should bail on a frozen observed slot");
+        assert!(err.to_string().contains("frozen"));
+    }
+
+    #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
         // interrupt the retry loop without waiting for it.
