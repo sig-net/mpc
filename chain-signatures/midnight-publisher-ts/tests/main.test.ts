@@ -150,63 +150,69 @@ describe("dist/main.js over a pipe", () => {
     expect(replies.at(-1)).toMatchObject({ ok: false, code: "bad_request" });
   }, 120_000);
 
-  it("takes startup config from the parent-set environment", async () => {
-    const blackHole = await openBlackHole();
-    const run = await drive(
-      [ready()],
-      envFor(blackHole.port),
-      CHILD_PROCESS_TIMEOUT_MS,
-    ).finally(blackHole.close);
-
-    expect(run.timedOut).toBe(false);
-    expect(run.code).toBe(0);
-    expect(run.stderr).toContain(`node=ws://127.0.0.1:${blackHole.port}`);
-  }, CHILD_PROCESS_TIMEOUT_MS + 5_000);
-
-  it("flushes ready and exits when its publisher warmup never settles", async () => {
-    const blackHole = await openBlackHole();
-    const httpUrl = `http://127.0.0.1:${blackHole.port}`;
-    const wsUrl = `ws://127.0.0.1:${blackHole.port}`;
-    try {
-      const run = await drive(
-        [
-          JSON.stringify({
-            id: 40,
-            op: "ready",
-            protocolVersion: 1,
-          }),
-        ],
-        {
-          ...STARTUP_ENV,
-          MIDNIGHT_PUB_NODE_URL: wsUrl,
-          MIDNIGHT_PUB_PROOF_SERVER_URL: httpUrl,
-          MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,
-          MIDNIGHT_PUB_INDEXER_WS_URL: `${wsUrl}/api/v3/graphql/ws`,
-        },
-        CHILD_PROCESS_TIMEOUT_MS,
+  it(
+    "takes startup config from the parent-set environment",
+    async () => {
+      const blackHole = await openBlackHole();
+      const run = await drive([ready()], envFor(blackHole.port), CHILD_PROCESS_TIMEOUT_MS).finally(
+        blackHole.close,
       );
 
       expect(run.timedOut).toBe(false);
       expect(run.code).toBe(0);
-      expect(run.stdout.endsWith("\n")).toBe(true);
-      expect(
-        run.stdout
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line)),
-      ).toEqual([
-        {
-          id: 40,
-          ok: true,
-          ready: true,
-          protocolVersion: 1,
-          submitTimeoutMs: 6 * 60 * 1_000,
-          recipeTtlMs: 5 * 60 * 1_000,
-        },
-      ]);
-      expect(blackHole.accepted()).toBeGreaterThan(0);
-    } finally {
-      await blackHole.close();
-    }
-  }, CHILD_PROCESS_TIMEOUT_MS + 5_000);
+      expect(run.stderr).toContain(`node=ws://127.0.0.1:${blackHole.port}`);
+    },
+    CHILD_PROCESS_TIMEOUT_MS + 5_000,
+  );
+
+  it(
+    "flushes ready and exits when its publisher warmup never settles",
+    async () => {
+      const blackHole = await openBlackHole();
+      const httpUrl = `http://127.0.0.1:${blackHole.port}`;
+      const wsUrl = `ws://127.0.0.1:${blackHole.port}`;
+      try {
+        const run = await drive(
+          [
+            JSON.stringify({
+              id: 40,
+              op: "ready",
+              protocolVersion: 1,
+            }),
+          ],
+          {
+            ...STARTUP_ENV,
+            MIDNIGHT_PUB_NODE_URL: wsUrl,
+            MIDNIGHT_PUB_PROOF_SERVER_URL: httpUrl,
+            MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,
+            MIDNIGHT_PUB_INDEXER_WS_URL: `${wsUrl}/api/v3/graphql/ws`,
+          },
+          CHILD_PROCESS_TIMEOUT_MS,
+        );
+
+        expect(run.timedOut).toBe(false);
+        expect(run.code).toBe(0);
+        expect(run.stdout.endsWith("\n")).toBe(true);
+        expect(
+          run.stdout
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+        ).toEqual([
+          {
+            id: 40,
+            ok: true,
+            ready: true,
+            protocolVersion: 1,
+            submitTimeoutMs: 6 * 60 * 1_000,
+            recipeTtlMs: 5 * 60 * 1_000,
+          },
+        ]);
+        expect(blackHole.accepted()).toBeGreaterThan(0);
+      } finally {
+        await blackHole.close();
+      }
+    },
+    CHILD_PROCESS_TIMEOUT_MS + 5_000,
+  );
 });
