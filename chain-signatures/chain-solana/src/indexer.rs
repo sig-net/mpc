@@ -51,13 +51,30 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-/// Delay between polling iterations once caught up.
-// TODO: make configurable (e.g. via `SolConfig`) so it can be tuned to RPC budget / latency needs.
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Live polling configuration.
+#[derive(Clone, Copy, Debug)]
+struct PollingConfig {
+    /// Delay between polling iterations once caught up.
+    // TODO: make configurable (e.g. via `SolConfig`) so it can be tuned to RPC budget / latency needs.
+    poll_interval: Duration,
+    /// Maximum time to wait for the anchor slot to advance before bailing. This is a safety check against frozen RPC nodes.
+    /// Supervisor watchdog is not enough because it only sees the last block event, which can be a heartbeat from a lagging replica.
+    slot_stall_timeout: Duration,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(500),
+            slot_stall_timeout: Duration::from_secs(60),
+        }
+    }
+}
 
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
     client: SolanaClient,
+    polling: PollingConfig,
     state_manager: S,
     telemetry: T,
 }
@@ -86,6 +103,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         Ok(Self {
             program_id,
             client,
+            polling: PollingConfig::default(),
             state_manager,
             telemetry,
         })
@@ -388,12 +406,47 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     ) -> anyhow::Result<()> {
         let mut catchup_completed_emitted = false;
 
+        // Watchdog state for the anchor slot
+        let mut last_observed_slot: Option<u64> = None;
+        let mut slot_last_advanced_at = Instant::now();
+        let mut heartbeat_floor: u64 = 0;
+
         loop {
             let anchor = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 slot = self.client.get_slot_confirmed() => slot,
             }
             .context("solana failed to fetch anchor slot")?;
+
+            // Slot-stall watchdog:
+            // If the anchor slot has not advanced for `slot_stall_timeout`, we assume the RPC node is frozen and bail so the supervisor can restart.
+            // `Block` events are emitted even on a frozen node, so the supervisor cannot detect it otherwise.
+            match last_observed_slot {
+                Some(prev) if anchor > prev => {
+                    last_observed_slot = Some(anchor);
+                    slot_last_advanced_at = Instant::now();
+                }
+                Some(prev) => {
+                    let stalled_for = slot_last_advanced_at.elapsed();
+                    if stalled_for >= self.polling.slot_stall_timeout {
+                        anyhow::bail!(
+                            "solana observed slot frozen at {prev} for {stalled_for:?}; \
+                             bailing so the supervisor restarts and surfaces it"
+                        );
+                    }
+                    if stalled_for >= self.polling.slot_stall_timeout / 2 {
+                        tracing::warn!(
+                            last_slot = prev,
+                            ?stalled_for,
+                            "solana observed slot has not advanced; RPC node may be frozen"
+                        );
+                    }
+                }
+                None => {
+                    last_observed_slot = Some(anchor);
+                    slot_last_advanced_at = Instant::now();
+                }
+            }
 
             let tick_started_at = Instant::now();
             let mut catchup_iter = self.catchup_blocks(anchor).await?;
@@ -407,6 +460,17 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                 let (slot, block) = res?;
                 self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
                     .await;
+            }
+
+            // Heartbeat: advance the watermark to the covered tip.
+            // This ensures that the backlog sees a `Block` event even if no new transactions have been emitted since the last catchup.
+            let heartbeat = anchor.saturating_sub(1).max(heartbeat_floor);
+            heartbeat_floor = heartbeat;
+            if heartbeat > 0 {
+                events_tx
+                    .send(ChainEvent::Block(heartbeat))
+                    .await
+                    .context("failed to send heartbeat block event")?;
             }
 
             if !catchup_completed_emitted {
@@ -430,7 +494,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
 
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                _ = tokio::time::sleep(self.polling.poll_interval) => {}
             }
         }
     }
@@ -999,6 +1063,7 @@ mod tests {
         SolanaIndexer {
             program_id,
             client,
+            polling: PollingConfig::default(),
             state_manager,
             telemetry: NoopChainTelemetry,
         }
@@ -1604,6 +1669,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_emits_heartbeat_and_single_catchup_completed_when_idle() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Frozen anchor: an idle chain whose tip never moves.
+        // The indexer must still emit a heartbeat for the covered tip and a
+        // single CatchupCompleted event.
+        let _slot = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getSlot".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":10}"#)
+            .create_async()
+            .await;
+
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 9).await;
+        let mut indexer = test_indexer(&server.url(), state_manager);
+        indexer.polling = PollingConfig {
+            poll_interval: Duration::from_millis(5),
+            slot_stall_timeout: Duration::from_secs(30),
+        };
+
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let cancel = CancellationToken::new();
+        let run = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move { indexer.run(events_tx, cancel).await })
+        };
+
+        // First tick: heartbeat for the covered tip, then exactly one
+        // CatchupCompleted.
+        // Second tick (after POLL_INTERVAL): heartbeat again — same height
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(9))));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::CatchupCompleted)
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(9))));
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("run should stop promptly on cancel")
+            .expect("run task should not panic")
+            .expect("run should return Ok on cancel");
+    }
+
+    #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
         // interrupt the retry loop without waiting for it.
@@ -1653,6 +1767,7 @@ mod tests {
         let indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
+            polling: PollingConfig::default(),
             state_manager,
             telemetry: NoopChainTelemetry,
         };
