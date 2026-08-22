@@ -961,9 +961,20 @@ impl Solana {
         self.wait_for_program_ready(self.program_keypair.pubkey())
             .await
             .context("program missing after validator restart")?;
-        self.process = process;
 
-        Ok(())
+        // Wait for the validator to resume block production after restart
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut slot = self.rpc_client.get_slot().await?;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let next = self.rpc_client.get_slot().await?;
+            if next > slot {
+                self.process = process;
+                return Ok(());
+            }
+            slot = next;
+        }
+        anyhow::bail!("validator did not resume block production after restart")
     }
 
     pub fn get_config(&self, program_address: String) -> SolConfig {
