@@ -207,9 +207,8 @@ enum Indexed {
 /// The per-item retry the other chains' indexers apply around their own block
 /// processing: a node hiccup costs one retry here, not a supervised
 /// restart that re-runs backlog recovery, re-anchors and
-/// re-queues the pending backlog. The pruning signature escapes as `Err`: no number
-/// of retries makes a pruned node serve state, so retrying it would spin until the
-/// watchdog fires. Cancellation is `Ok(None)`.
+/// re-queues the pending backlog. The pruning signature escapes as `Err` — retrying
+/// cannot serve a pruned node. Cancellation is `Ok(None)`.
 async fn retry_until_cancelled<T, F, Fut>(
     what: &'static str,
     height: u64,
@@ -542,9 +541,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let record = match resolve_verified_record(field, rid) {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
-                // Not a fault: the caller's own index does not hold the id. The reference
-                // caller files its record and notifies in one circuit, so this is a caller
-                // that computed the id wrong or notified without filing.
+                // Not a fault: the id is absent from the caller's own index.
                 tracing::debug!(
                     reason = "request-absent",
                     height,
@@ -575,9 +572,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
     /// Spelled out because holding `&mut cache` across attempts needs an `async ||`,
     /// whose lending future defeats `Send` inference at the node's spawn boundary on
-    /// stable Rust. A halt (schema drift, undecodable central state) is the `Err`:
-    /// permanent at this height and never the caller's, logged where it is classified,
-    /// so the caller ends the run and the restart holds.
+    /// stable Rust; a halt there (schema drift, undecodable central state) ends the run.
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,

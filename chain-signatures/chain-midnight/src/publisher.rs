@@ -292,7 +292,7 @@ fn wire_signature(signature: &Signature) -> anyhow::Result<WireSignature> {
     let (Some(x), Some(y)) = (encoded.x(), encoded.y()) else {
         anyhow::bail!("midnight respond: big_r has no affine coordinates (identity point)");
     };
-    // The circuit's field is one bit wide.
+    // The circuit takes Uint<8>; only the parities 0 and 1 recover the key.
     anyhow::ensure!(
         signature.recovery_id <= 1,
         "midnight respond: recovery_id {} is not 0 or 1",
