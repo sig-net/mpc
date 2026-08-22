@@ -6,7 +6,6 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
-use anyhow::Context;
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
@@ -18,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub use mpc_primitives::Checkpoint;
+pub use checkpoints::Checkpoint;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -114,21 +113,9 @@ impl PendingRequests {
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
-        fn decode(pending: &mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
-            let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
-                .with_context(|| {
-                    format!(
-                        "failed to deserialize pending backlog entry for sign_id {:?}",
-                        pending.sign_id
-                    )
-                })?;
-            Ok((pending.sign_id, entry))
-        }
-
         let mut requests = HashMap::new();
-        for pending_tx in &checkpoint.pending_requests {
-            let (sign_id, tx) = decode(pending_tx)?;
-            requests.insert(sign_id, tx);
+        for entry in &checkpoint.pending_requests {
+            requests.insert(entry.sign_id(), entry.clone());
         }
         Ok(Self {
             requests,
@@ -140,7 +127,7 @@ impl PendingRequests {
 #[derive(Debug, Clone)]
 struct ExecutionWatcher {
     sign_id: SignId,
-    tx: BidirectionalTx,
+    tx: Arc<BidirectionalTx>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -161,10 +148,10 @@ impl ExecutionWatchers {
         self.watchers.remove(tx_id)
     }
 
-    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, watcher)| (*id, (watcher.sign_id, watcher.tx.clone())))
+            .map(|(id, watcher)| (*id, (watcher.sign_id, Arc::clone(&watcher.tx))))
             .collect()
     }
 }
@@ -301,16 +288,16 @@ impl Backlog {
     pub async fn publishable_requests(
         &self,
         chain: Chain,
-    ) -> Vec<(Arc<IndexedSignRequest>, PublishState)> {
+    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
         let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
             .requests
             .values()
-            .filter_map(|entry| match entry.status() {
+            .filter_map(|entry| match &entry.status {
                 SignStatus::PendingPublish { publish }
                 | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((Arc::clone(&entry.request), publish))
+                    Some((Arc::clone(&entry.request), Arc::clone(publish)))
                 }
                 _ => None,
             })
@@ -361,7 +348,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        publish: PublishState,
+        publish: Arc<PublishState>,
     ) -> Result<(), BacklogError> {
         let mut pending = self.pending(&chain).write().await;
 
@@ -425,8 +412,8 @@ impl Backlog {
         &self,
         chain: Chain,
         sign_id: SignId,
-        tx: BidirectionalTx,
-    ) -> Option<(SignId, BidirectionalTx)> {
+        tx: Arc<BidirectionalTx>,
+    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
         if sign_id != SignId::new(tx.request_id) {
             tracing::warn!(
                 ?chain,
@@ -450,7 +437,7 @@ impl Backlog {
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<(SignId, BidirectionalTx)> {
+    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
         let mut entry = self.watchers(&chain).write().await;
 
         entry
@@ -490,7 +477,7 @@ impl Backlog {
         &self,
         chain: Chain,
         sign_id: SignId,
-        bidirectional_tx: BidirectionalTx,
+        bidirectional_tx: Arc<BidirectionalTx>,
     ) -> Result<(), BacklogError> {
         // Update the transaction in the backlog from Sign to Bidirectional
         let mut pending = self.pending(&chain).write().await;
@@ -500,7 +487,7 @@ impl Backlog {
             .get_mut(&sign_id)
             .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
 
-        entry.advance_to_execution(bidirectional_tx.clone())?;
+        entry.advance_to_execution(Arc::clone(&bidirectional_tx))?;
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
@@ -700,9 +687,9 @@ impl Backlog {
         }
 
         // now repopulate our execution watchers
-        for (sign_id, tx) in execution_to_watch {
+        for (sign_id, entry) in execution_to_watch {
             // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = tx.execution_tx().cloned() {
+            if let Some(tx) = entry.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
@@ -726,13 +713,13 @@ impl StateManager for Backlog {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
     }
 }
 
 /// Errors that can occur when working with Backlog
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
     NotFound { chain: Chain, id: SignId },
@@ -740,15 +727,15 @@ pub enum BacklogError {
     ChainNotInitialized { chain: Chain },
     #[error("transaction not found")]
     TransactionNotFound,
-    #[error("cannot mark publishing for current backlog state")]
-    InvalidPublishingTransition,
-    #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
+    #[error("cannot advance sign request: status must be pending generation or publishing")]
     InvalidAdvanceTransition,
-    #[error("cannot transition backlog entry to a bidirectional response request")]
+    #[error("cannot mark publishing: status must be pending generation")]
+    InvalidPublishingTransition,
+    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
     InvalidBidirectionalResponseTransition,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
@@ -766,7 +753,7 @@ impl BacklogEntry {
         Self { request, status }
     }
 
-    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: BidirectionalTx) -> Self {
+    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
         Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
@@ -826,8 +813,8 @@ impl BacklogEntry {
         Ok(())
     }
 
-    pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
-        match (&self.request.kind, self.status.clone()) {
+    pub fn mark_publishing(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+        match (&self.request.kind, &self.status) {
             (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
                 self.status = SignStatus::PendingPublish { publish };
                 Ok(())
@@ -842,7 +829,7 @@ impl BacklogEntry {
 
     pub fn advance_to_execution(
         &mut self,
-        bidirectional_tx: BidirectionalTx,
+        bidirectional_tx: Arc<BidirectionalTx>,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
             (
@@ -876,7 +863,7 @@ impl BacklogEntry {
         matches!(self.request.kind, SignKind::SignBidirectional(_))
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         self.status.execution_tx()
     }
 
@@ -923,16 +910,18 @@ mod tests {
         mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
     }
 
-    fn test_publish_state(is_proposer: bool) -> PublishState {
-        PublishState {
+    fn test_publish_state(is_proposer: bool) -> Arc<PublishState> {
+        Arc::new(PublishState {
             signature: test_signature(),
             participants: vec![Participant::from(0u32), Participant::from(1u32)],
             is_proposer,
-        }
+        })
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-        SignStatus::PendingExecution { tx: tx.clone() }
+        SignStatus::PendingExecution {
+            tx: Arc::new(tx.clone()),
+        }
     }
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
@@ -1046,7 +1035,9 @@ mod tests {
         ));
 
         match status {
-            SignStatus::PendingExecution { .. } => BacklogEntry::pending_execution(request, tx),
+            SignStatus::PendingExecution { .. } => {
+                BacklogEntry::pending_execution(request, Arc::new(tx))
+            }
             status => BacklogEntry::with_status(request, status),
         }
     }
@@ -1106,7 +1097,7 @@ mod tests {
                         },
                     )
                     .await;
-                backlog.advance(chain, sign_id, tx).await.unwrap();
+                backlog.advance(chain, sign_id, Arc::new(tx)).await.unwrap();
             }
             SignStatus::PendingPublishBidirectional { .. } => {
                 let completion_request = IndexedSignRequest::respond_bidirectional(
@@ -1581,7 +1572,7 @@ mod tests {
             err,
             BacklogError::InvalidBidirectionalResponseTransition
         ));
-        assert_eq!(entry.request.id, original_sign_id);
+        assert_eq!(entry.sign_id(), original_sign_id);
         assert!(matches!(
             entry.status(),
             SignStatus::PendingExecution { .. }
@@ -1689,27 +1680,20 @@ mod tests {
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
-        let (sign_id, restored_tx) = {
-            let pending = &deserialized.pending_requests[0];
-            let backlog_entry: BacklogEntry =
-                ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
-            let tx = backlog_entry
-                .execution_tx()
-                .cloned()
-                .expect("Expected pending execution entry");
-            (pending.sign_id, tx)
+        let restored_entry = &deserialized.pending_requests[0];
+        assert_eq!(restored_entry.sign_id(), SignId::new(tx1.request_id));
+        let SignKind::SignBidirectional(ref event) = restored_entry.request.kind else {
+            panic!("Expected SignBidirectional kind");
         };
-        assert_eq!(sign_id, SignId::new(tx1.request_id));
-        assert_eq!(
-            restored_tx.serialized_transaction,
-            tx1.serialized_transaction
-        );
+        assert_eq!(event.dest, "ethereum");
+        assert_eq!(restored_entry.status, pending_execution_status(&tx1));
     }
 
     #[tokio::test]
     async fn test_recover_restores_execution_watchers() {
         let backlog = Backlog::new();
         let tx = create_test_tx(6);
+        let sign_id = SignId::new(tx.request_id);
 
         insert_bidirectional_with_status(
             &backlog,
@@ -1728,6 +1712,13 @@ mod tests {
             .recover_by_checkpoint(checkpoint)
             .await
             .expect("failed to recover");
+
+        let entry = recovered
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("entry should exist");
+        assert_eq!(entry.sign_id(), sign_id);
+        assert_eq!(entry.status(), pending_execution_status(&tx));
 
         let watchers = recovered.get_execution_watchers(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
@@ -2022,7 +2013,7 @@ mod tests {
 
         // Watch execution on the target chain
         backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
             .await;
 
         // Unwatch should return the watcher
@@ -2248,7 +2239,7 @@ mod tests {
             .await;
 
         let err = backlog
-            .advance(tx.source_chain, sign_id, tx)
+            .advance(tx.source_chain, sign_id, Arc::new(tx))
             .await
             .expect_err("advance should fail for plain Sign requests");
 
@@ -2271,7 +2262,7 @@ mod tests {
             .await;
 
         backlog
-            .advance(tx.source_chain, sign_id, tx.clone())
+            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
             .await
             .expect("advance should accept catchup advancement from PendingGeneration");
 
@@ -2307,7 +2298,7 @@ mod tests {
             .await;
 
         backlog
-            .advance(tx.source_chain, sign_id, tx.clone())
+            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
             .await
             .expect("advance should succeed once respond() is confirmed from PendingPublish");
 

@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use crate::sign_bidirectional::PublishState;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -145,6 +146,20 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
+    }
+
+    pub fn publish_with_state(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: Arc<IndexedSignRequest>,
+        publish: &PublishState,
+    ) {
+        self.publish_signature(
+            public_key,
+            request,
+            publish.signature,
+            publish.participants.clone(),
+        );
     }
 }
 
@@ -720,7 +735,6 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
