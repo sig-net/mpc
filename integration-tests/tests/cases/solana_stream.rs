@@ -3,9 +3,10 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
+    utils::test::ChainIndexerStream, ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry,
+    PublishAction, StateManager,
 };
-use mpc_chain_solana::{SolConfig, SolanaIndexer};
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
@@ -535,5 +536,62 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     }
 
     run_handle.abort();
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_respond_round_trip() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+    let mut indexer = run_solana_indexer(config.clone()).await?;
+
+    let payload = [7u8; 32];
+
+    // Submit a sign request to the Solana contract
+    solana
+        .sign(
+            payload,
+            "respond-round-trip",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request = wait_for_sign_request(&mut indexer).await?;
+
+    let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
+
+    // Publish a signature for the request
+    publisher
+        .publish_signature(&PublishAction {
+            public_key: AffinePoint::GENERATOR,
+            request: request.clone(),
+            signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32)],
+            timestamp: std::time::Instant::now(),
+        })
+        .await
+        .context("failed to publish signature")?;
+
+    // Wait for the indexer to emit a Respond event for the request
+    let event = indexer
+        .wait_for(
+            |event| matches!(event, ChainEvent::Respond(_)),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("indexer never emitted the on-chain respond event")?;
+
+    let ChainEvent::Respond(responded) = event else {
+        panic!("expected Respond event, got {event:?}");
+    };
+    assert_eq!(responded.request_id, request.id.request_id);
+    assert_eq!(responded.chain, Chain::Solana);
+    assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
+    assert_eq!(responded.signature.s, Scalar::ONE);
+    assert_eq!(responded.signature.recovery_id, 0);
+
     Ok(())
 }
