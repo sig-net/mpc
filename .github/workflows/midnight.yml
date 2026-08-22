@@ -1,0 +1,134 @@
+name: Midnight Integration Tests
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - integration-tests/**
+      - chain-signatures/**
+  pull_request:
+  merge_group:
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  midnight-real-stack:
+    name: Midnight Real Stack
+    runs-on: warp-ubuntu-latest-x64-4x
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+
+      - name: Restore Compact toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.compact
+            ~/.local/bin/compact
+          key: compact-${{ runner.os }}-launcher0.5.1-compactc0.33.0-rc.2
+
+      - name: Install pinned Compact toolchain
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$HOME/.compact/bin:$PATH"
+          if ! command -v compact >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/compact-installer.sh https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+            sh /tmp/compact-installer.sh
+          fi
+          RC_DIR="$HOME/.compact/versions/0.33.0-rc.2/x86_64-unknown-linux-musl"
+          if [ ! -x "$RC_DIR/compactc" ]; then
+            mkdir -p "$RC_DIR"
+            curl -fsSL -o /tmp/compactc-rc.zip https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.33.0-rc.2/compactc_v0.33.0-rc.2_x86_64-unknown-linux-musl.zip
+            unzip -qo /tmp/compactc-rc.zip -d "$RC_DIR"
+            chmod +x "$RC_DIR"/*
+          fi
+          compact update 0.33.0-rc.2 || ln -sfn "$RC_DIR"/* "$HOME/.compact/bin/"
+          compact compile --version
+
+      - name: Build real-stack TypeScript fixtures
+        working-directory: chain-signatures/midnight-publisher-ts
+        run: |
+          npm ci
+          npm run build
+          npm run compile:real-stack-caller
+          npm run typecheck:real-stack
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+          target: wasm32-unknown-unknown
+
+      - name: Install system OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Use system OpenSSL
+        run: echo "OPENSSL_NO_VENDOR=1" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-real-stack
+          cache-targets: true
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/cargo-near-installer.sh https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh
+            sh /tmp/cargo-near-installer.sh
+          fi
+
+      - name: Pull pinned Midnight services
+        run: |
+          docker pull midnightntwrk/midnight-node:2.0.0-rc.4
+          docker pull midnightntwrk/indexer-standalone:4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df
+          docker pull midnightntwrk/proof-server:9.0.0-rc.5_experimental
+
+      - name: Build integration artifacts
+        run: MPC_SETUP_ALWAYS=1 ./setup.sh
+
+      - name: List Midnight integration test
+        run: |
+          test_name='cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response'
+          test_list=/tmp/midnight-real-stack-tests.txt
+          cargo test -p integration-tests --test lib "$test_name" -- --exact --list > "$test_list"
+          cat "$test_list"
+          match_count=$(grep -Fxc "$test_name: test" "$test_list" || true)
+          summary_count=$(grep -Fxc '1 test, 0 benchmarks' "$test_list" || true)
+          if [ "$match_count" -ne 1 ]; then
+            echo "expected exactly one Midnight real-stack test, found $match_count"
+            exit 1
+          fi
+          if [ "$summary_count" -ne 1 ]; then
+            echo "Midnight real-stack test listing did not report exactly one test"
+            exit 1
+          fi
+
+      - name: Test Midnight end-to-end stream
+        run: cargo test -p integration-tests --test lib 'cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response' -- --exact --ignored --nocapture --test-threads 1
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+      - name: Upload Midnight service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: midnight-real-stack-logs
+          path: target/tmp_*/midnight
+          if-no-files-found: warn
