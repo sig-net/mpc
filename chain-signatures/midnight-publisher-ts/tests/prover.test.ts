@@ -120,9 +120,13 @@ describe("the proving provider", () => {
       Uint8Array.of(7, 8, 9),
     );
     expect(contentType).toBe("application/octet-stream");
-    expect(Uint8Array.from(body)).toEqual(
-      createProvingPayload(request.preimage, 4n, await live.lookupKey(request.keyLocation)),
+    const expectedBody = createProvingPayload(
+      request.preimage,
+      4n,
+      await live.lookupKey(request.keyLocation),
     );
+    expect(body.length).toBe(expectedBody.length);
+    expect(Buffer.compare(body, expectedBody)).toBe(0);
   });
 
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {

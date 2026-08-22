@@ -1,9 +1,8 @@
-//! Ledger-tree path walk and record decode over the ledger's own `StateValue`.
+//! Ledger-tree path walk, record decode, and emitted-payload decode over the ledger's
+//! own `StateValue`.
 
-use anyhow::Context as _;
 use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, ValueAtom};
 use midnight_onchain_state::state::StateValue;
-use midnight_storage::storage::HashMap;
 use midnight_storage::DefaultDB;
 
 use crate::records::{
@@ -28,11 +27,6 @@ const TX_PARAM_TYPE_ATOM: usize = 7;
 
 pub type Node = StateValue<DefaultDB>;
 
-pub(crate) const CENTRAL_LEDGER_FIELDS: usize = 6;
-pub(crate) const NOTIFICATION_MAP_FIELD: u8 = 1;
-pub(crate) const RESPOND_MAP_FIELD: u8 = 3;
-pub(crate) const RESPOND_BIDIRECTIONAL_MAP_FIELD: u8 = 5;
-
 /// Follow a resolved ledger-tree path to its node, exactly as the generated `ledger()`
 /// accessor does. The path is what compactc records for the field in the caller's own
 /// `contract-info.json` (`"index"`): `[4]` for a flat contract, `[1, 14]` once the
@@ -56,30 +50,6 @@ pub fn signet_field_node_by_path<'a>(root: &'a Node, path: &[u8]) -> anyhow::Res
         })?;
     }
     Ok(node)
-}
-
-/// The central singleton's map at ledger field `field`, after checking the root is the
-/// deployed contract's six-field array; both shapes are circuit-fixed, so failure here
-/// is schema drift or an upgraded chain, never caller data.
-pub(crate) fn central_map<'a>(
-    root: &'a Node,
-    field: u8,
-    field_name: &'static str,
-) -> anyhow::Result<&'a HashMap<AlignedValue, Node, DefaultDB>> {
-    let StateValue::Array(fields) = root else {
-        anyhow::bail!("central singleton state root is not an array");
-    };
-    anyhow::ensure!(
-        fields.len() == CENTRAL_LEDGER_FIELDS,
-        "central singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
-        fields.len()
-    );
-    let node = signet_field_node_by_path(root, &[field])
-        .with_context(|| format!("central {field_name} field"))?;
-    let StateValue::Map(entries) = node else {
-        anyhow::bail!("central field {field} ({field_name}) is not a map");
-    };
-    Ok(entries)
 }
 
 /// The declared width of each atom. Signet declares only `Bytes` atoms, so a widthless
@@ -255,111 +225,69 @@ pub enum Resolved {
     },
 }
 
-/// The request id of a composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`
-/// wire key: two trimmed atoms, the count checked as a `Uint<64>` and the rid re-padded.
-pub(crate) fn signet_map_key_rid(key: &AlignedValue) -> Option<[u8; 32]> {
-    let [count, rid] = key.value.0.as_slice() else {
-        return None;
-    };
-    u64::try_from(count).ok()?;
-    <[u8; 32]>::try_from(rid.clone()).ok()
-}
-
-pub(crate) struct DecodedResponseEntry {
+pub(crate) struct DecodedResponse {
     pub request_id: [u8; 32],
     pub signature: anyhow::Result<mpc_primitives::Signature>,
 }
 
-/// Decode the deployed singleton's complete response shape before interpreting its
-/// caller-controlled signature values. An outer error is contract-schema drift; an
-/// inner signature error is one invalid candidate that a later counted entry may replace.
-pub(crate) fn decode_response_entry(
-    key: &AlignedValue,
-    value: &Node,
-) -> anyhow::Result<DecodedResponseEntry> {
+fn decode_response_signature(
+    x: [u8; 32],
+    y: [u8; 32],
+    s: [u8; 32],
+    recovery_id: u8,
+) -> anyhow::Result<mpc_primitives::Signature> {
     use k256::elliptic_curve::sec1::FromEncodedPoint as _;
     use mpc_primitives::ScalarExt as _;
 
-    let key_widths = declared_widths(key, "response map key")?;
-    let key_cursor = &mut AtomCursor {
-        atoms: &key.value.0,
-        widths: &key_widths,
-        pos: 0,
-    };
-    let _count = uint::<u64>(key_cursor, 8, "response count")?;
-    let request_id = bytes_n::<32>(key_cursor, "response request id")?;
-    anyhow::ensure!(
-        key_cursor.pos == key.value.0.len(),
-        "response map key decoded {} of {} atoms",
-        key_cursor.pos,
-        key.value.0.len()
+    let encoded = k256::EncodedPoint::from_affine_coordinates(
+        &k256::FieldBytes::from(x),
+        &k256::FieldBytes::from(y),
+        false,
     );
-
-    let cell = cell_of(value, "response signature")?;
-    let widths = declared_widths(cell, "response signature")?;
-    let cursor = &mut AtomCursor {
-        atoms: &cell.value.0,
-        widths: &widths,
-        pos: 0,
-    };
-    let x = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.x")?);
-    let y = k256::FieldBytes::from(bytes_n::<32>(cursor, "response bigR.y")?);
-    let s = bytes_n::<32>(cursor, "response s")?;
-    let recovery_id = uint::<u8>(cursor, 1, "response recovery_id")?;
+    let big_r = Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(&encoded))
+        .ok_or_else(|| anyhow::anyhow!("response bigR is not a secp256k1 point"))?;
+    let s = k256::Scalar::from_bytes(s)
+        .ok_or_else(|| anyhow::anyhow!("response s is not a secp256k1 scalar"))?;
     anyhow::ensure!(
-        cursor.pos == cell.value.0.len(),
-        "response signature decoded {} of {} atoms",
-        cursor.pos,
-        cell.value.0.len()
+        recovery_id <= 1,
+        "response recovery_id: {recovery_id} exceeds the maximum 1"
     );
-
-    let signature = (|| {
-        let encoded = k256::EncodedPoint::from_affine_coordinates(&x, &y, false);
-        let big_r =
-            Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(&encoded))
-                .ok_or_else(|| anyhow::anyhow!("response bigR is not a secp256k1 point"))?;
-        let s = k256::Scalar::from_bytes(s)
-            .ok_or_else(|| anyhow::anyhow!("response s is not a secp256k1 scalar"))?;
-        anyhow::ensure!(
-            recovery_id <= 1,
-            "response recovery_id: {recovery_id} exceeds the maximum 1"
-        );
-        Ok(mpc_primitives::Signature::new(big_r, s, recovery_id))
-    })();
-
-    Ok(DecodedResponseEntry {
-        request_id,
-        signature,
-    })
+    Ok(mpc_primitives::Signature::new(big_r, s, recovery_id))
 }
 
-/// Decode the two-atom notification cell: version, then the 128-byte payload. Every
-/// property here is circuit-enforced, the version included (`signBidirectional`
-/// asserts `version == 1`), so a failure is schema drift or a future singleton this
-/// build does not understand, never caller data.
-pub fn decode_notification(node: &Node) -> anyhow::Result<SignBidirectionalEventNotification> {
-    let cell = cell_of(node, "notification")?;
-    let widths = declared_widths(cell, "notification")?;
-    anyhow::ensure!(
-        widths.len() == 2,
-        "notification cell has {} atoms, expected 2 (version, payload)",
-        widths.len()
-    );
-    let cursor = &mut AtomCursor {
-        atoms: &cell.value.0,
-        widths: &widths,
-        pos: 0,
-    };
-    let notification = SignBidirectionalEventNotification {
-        version: uint::<u8>(cursor, 1, "notification version")?,
-        payload: bytes_n::<128>(cursor, "notification payload")?,
-    };
-    anyhow::ensure!(
-        notification.version == 1,
-        "notification version {} is not supported (this decoder understands version 1)",
-        notification.version
-    );
-    Ok(notification)
+/// Decode the fields at the front of a singleton response event payload. The fixed
+/// 256-byte input has already been recovered from the VM's `Misc` log item.
+pub(crate) fn decode_response_payload(
+    emitted: &[u8; crate::emissions::MISC_PAYLOAD_LEN],
+) -> DecodedResponse {
+    let mut request_id = [0u8; 32];
+    request_id.copy_from_slice(&emitted[..32]);
+    let mut x = [0u8; 32];
+    x.copy_from_slice(&emitted[32..64]);
+    let mut y = [0u8; 32];
+    y.copy_from_slice(&emitted[64..96]);
+    let mut s = [0u8; 32];
+    s.copy_from_slice(&emitted[96..128]);
+    DecodedResponse {
+        request_id,
+        signature: decode_response_signature(x, y, s, emitted[128]),
+    }
+}
+
+/// Decode the version, request id, and packed notification from a singleton event
+/// payload. Interpretation and version validation remain in [`unpack_notification_v1`].
+pub(crate) fn decode_notification(
+    emitted: &[u8; crate::emissions::MISC_PAYLOAD_LEN],
+) -> SignBidirectionalEventNotification {
+    let mut request_id = [0u8; 32];
+    request_id.copy_from_slice(&emitted[1..33]);
+    let mut payload = [0u8; 128];
+    payload.copy_from_slice(&emitted[33..161]);
+    SignBidirectionalEventNotification {
+        version: emitted[0],
+        request_id,
+        payload,
+    }
 }
 
 /// Maximum ledger-tree path depth the V1 payload carries, matching the
@@ -380,15 +308,15 @@ pub struct NotificationV1 {
 }
 
 /// Unpack the caller-supplied payload bytes, so a failure here is a per-entry data
-/// fault: fails closed on a depth of zero or one past [`MAX_LEDGER_PATH_DEPTH`], the
-/// width the circuit packs. The version is [`decode_notification`]'s to check, which is
-/// the only producer of the input type.
+/// fault: fails closed on an unsupported version, a depth of zero, or one past
+/// [`MAX_LEDGER_PATH_DEPTH`], the width the circuit packs.
 pub fn unpack_notification_v1(
     notification: &SignBidirectionalEventNotification,
 ) -> anyhow::Result<NotificationV1> {
-    debug_assert_eq!(
-        notification.version, 1,
-        "unpack_notification_v1 reached without decode_notification's version gate"
+    anyhow::ensure!(
+        notification.version == 1,
+        "notification version {} is not supported (this decoder understands version 1)",
+        notification.version
     );
     let mut caller_address = [0u8; 32];
     caller_address.copy_from_slice(&notification.payload[..32]);
@@ -585,29 +513,63 @@ fn decode_tx_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
     use crate::records::SignBidirectionalEventNotification;
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
         key_of, map_of, minimal_record, sample_record, sample_record_with_partial_access_list,
-        sample_record_with_unused_access_list, trim, widths_from_record,
+        sample_record_with_unused_access_list, widths_from_record,
     };
-    use midnight_base_crypto::fab::{Alignment, Value};
+    use midnight_base_crypto::fab::Alignment;
 
-    fn response_key(count: u64, rid: [u8; 32]) -> AlignedValue {
-        AlignedValue {
-            value: Value(vec![
-                ValueAtom(trim(&count.to_le_bytes())),
-                ValueAtom(trim(&rid)),
-            ]),
-            alignment: alignment_of(&[8, 32]),
-        }
+    const CAPTURE_SINGLETON: &str =
+        "b116cd0482b84922e761278a25d1ee2305fd6d630f0d48954d2af6537f8e214e";
+    const CAPTURE_CALLER: &str = "e4ae041a1c3f1538902c6a8f5aedb1e791b66cef7a715114153f3bba44a87eb6";
+    const CAPTURE_REQUEST_ID: &str =
+        "1cd10eb1f4fa5c665084d24a7982b09aa321886dce77d85b5f6feee0687a414b";
+    const NOTIFY_TX_156: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
+    const RESPOND_TX_161: &[u8] = include_bytes!("../fixtures/respond-tx-161.mn");
+    const RESPOND_BIDIRECTIONAL_TX_181: &[u8] =
+        include_bytes!("../fixtures/respond-bidirectional-tx-181.mn");
+
+    fn hex_32(value: &str) -> [u8; 32] {
+        let mut decoded = [0u8; 32];
+        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
+        decoded
     }
 
-    fn response_value(x: [u8; 32], y: [u8; 32], s: [u8; 32], recovery_id: u8) -> Node {
-        cell_from_atoms(
-            &[trim(&x), trim(&y), trim(&s), trim(&[recovery_id])],
-            &[32, 32, 32, 1],
-        )
+    fn captured_emission(bytes: &[u8], expected_kind: EmissionKind) -> Emission {
+        let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
+            .expect("captured transaction must decode");
+        let singleton = hex_32(CAPTURE_SINGLETON);
+        let calls = emissions_in(&tx, &singleton, true).expect("captured emissions must decode");
+        let [call] = calls.as_slice() else {
+            panic!("expected exactly one captured singleton call, got {calls:?}");
+        };
+        let [emission] = call.emissions.as_slice() else {
+            panic!(
+                "expected exactly one captured singleton emission, got {:?}",
+                call.emissions
+            );
+        };
+        assert_eq!(emission.kind, expected_kind);
+        emission.clone()
+    }
+
+    fn response_payload(
+        request_id: [u8; 32],
+        x: [u8; 32],
+        y: [u8; 32],
+        s: [u8; 32],
+        recovery_id: u8,
+    ) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
+        let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
+        payload[..32].copy_from_slice(&request_id);
+        payload[32..64].copy_from_slice(&x);
+        payload[64..96].copy_from_slice(&y);
+        payload[96..128].copy_from_slice(&s);
+        payload[128] = recovery_id;
+        payload
     }
 
     fn leaf(marker: u8) -> Node {
@@ -665,58 +627,113 @@ mod tests {
     }
 
     #[test]
-    fn response_entry_decodes_only_supported_signature_values() {
+    fn decode_notification_reads_the_emitted_layout() {
+        let request_id = [0x5a; 32];
+        let caller_address = [0xab; 32];
+        let mut notification_payload = [0u8; 128];
+        notification_payload[..32].copy_from_slice(&caller_address);
+        notification_payload[32] = 1;
+        notification_payload[33] = 4;
+
+        let mut emitted = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
+        emitted[0] = 1;
+        emitted[1..33].copy_from_slice(&request_id);
+        emitted[33..161].copy_from_slice(&notification_payload);
+
+        let decoded = decode_notification(&emitted);
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.request_id, request_id);
+        assert_eq!(decoded.payload, notification_payload);
+
+        let unpacked =
+            unpack_notification_v1(&decoded).expect("the V1 notification payload unpacks");
+        assert_eq!(unpacked.caller_address, caller_address);
+        assert_eq!(unpacked.requests_path, vec![4]);
+    }
+
+    #[test]
+    fn decode_notification_reads_the_captured_emission() {
+        let emission = captured_emission(NOTIFY_TX_156, EmissionKind::SignBidirectional);
+        let decoded = decode_notification(&emission.payload);
+
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.request_id, hex_32(CAPTURE_REQUEST_ID));
+        let unpacked = unpack_notification_v1(&decoded).expect("captured V1 notification unpacks");
+        assert_eq!(unpacked.caller_address, hex_32(CAPTURE_CALLER));
+        assert_eq!(unpacked.requests_path, vec![4]);
+    }
+
+    #[test]
+    fn decode_response_payload_reads_both_emitted_response_layouts() {
         use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 
-        let rid = [0xa7; 32];
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("generator x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("generator y"));
+
+        for (request_id, scalar, recovery_id) in [([0x31; 32], 7u64, 0u8), ([0x42; 32], 11u64, 1u8)]
+        {
+            let s: [u8; 32] = k256::Scalar::from(scalar).to_bytes().into();
+            let decoded =
+                decode_response_payload(&response_payload(request_id, x, y, s, recovery_id));
+            assert_eq!(decoded.request_id, request_id);
+            let signature = decoded.signature.expect("the signature values are valid");
+            assert_eq!(signature.big_r, k256::AffinePoint::GENERATOR);
+            assert_eq!(signature.s, k256::Scalar::from(scalar));
+            assert_eq!(signature.recovery_id, recovery_id);
+        }
+    }
+
+    #[test]
+    fn decode_response_payload_reads_the_captured_emissions() {
+        for (name, bytes, kind) in [
+            (
+                "respond-tx-161",
+                RESPOND_TX_161,
+                EmissionKind::SignatureResponded,
+            ),
+            (
+                "respond-bidirectional-tx-181",
+                RESPOND_BIDIRECTIONAL_TX_181,
+                EmissionKind::RespondBidirectional,
+            ),
+        ] {
+            let emission = captured_emission(bytes, kind);
+            let decoded = decode_response_payload(&emission.payload);
+            assert_eq!(decoded.request_id, hex_32(CAPTURE_REQUEST_ID), "{name}");
+            decoded
+                .signature
+                .unwrap_or_else(|err| panic!("{name}: captured signature must be valid: {err:#}"));
+        }
+    }
+
+    #[test]
+    fn decode_response_payload_rejects_invalid_signature_values() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let request_id = [0x5a; 32];
         let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
         let mut x = [0u8; 32];
         x.copy_from_slice(encoded.x().expect("generator x"));
         let mut y = [0u8; 32];
         y.copy_from_slice(encoded.y().expect("generator y"));
         let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
-        let decoded = decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 1))
-            .expect("the contract's response shape decodes");
-        assert_eq!(decoded.request_id, rid);
-        let signature = decoded.signature.expect("the signature values are valid");
-        assert_eq!(signature.big_r, k256::AffinePoint::GENERATOR);
-        assert_eq!(signature.s, k256::Scalar::from(9u64));
-        assert_eq!(signature.recovery_id, 1);
 
-        let bad_widths = cell_from_atoms(&[trim(&x), trim(&y), trim(&s), vec![]], &[32, 32, 31, 1]);
-        assert!(decode_response_entry(&response_key(3, rid), &bad_widths).is_err());
-        assert!(
-            decode_response_entry(&AlignedValue::from(rid), &response_value(x, y, s, 1)).is_err(),
-            "a key that is not a counted SignetMapKey is structural drift"
-        );
-        assert!(decode_response_entry(
-            &response_key(3, rid),
-            &response_value([0xff; 32], [0xff; 32], s, 1),
-        )
-        .expect("the invalid point still has the contract's shape")
-        .signature
-        .is_err());
-        assert!(
-            decode_response_entry(&response_key(3, rid), &response_value(x, y, [0xff; 32], 1),)
-                .expect("the invalid scalar still has the contract's shape")
-                .signature
-                .is_err()
-        );
-        assert!(
-            decode_response_entry(&response_key(3, rid), &response_value(x, y, s, 2),)
-                .expect("recovery id 2 still fits the contract's Uint<8>")
-                .signature
-                .is_err()
-        );
-
-        let invalid_point_with_extra_atom = cell_from_atoms(
-            &[vec![0xff; 32], vec![0xff; 32], trim(&s), vec![], vec![1]],
-            &[32, 32, 32, 1, 1],
-        );
-        assert!(
-            decode_response_entry(&response_key(3, rid), &invalid_point_with_extra_atom).is_err(),
-            "the complete contract shape is checked before cryptographic values"
-        );
+        for (name, payload) in [
+            (
+                "point",
+                response_payload(request_id, [0xff; 32], [0xff; 32], s, 1),
+            ),
+            ("scalar", response_payload(request_id, x, y, [0xff; 32], 1)),
+            ("recovery id", response_payload(request_id, x, y, s, 2)),
+        ] {
+            assert!(
+                decode_response_payload(&payload).signature.is_err(),
+                "invalid {name} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -932,27 +949,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_notification_rejects_any_other_shape_or_version() {
-        // Bytes<1> then Bytes<128> carrying version 1, and nothing else.
-        let mut payload = [0u8; 128];
-        payload[..32].copy_from_slice(&[0xab; 32]);
-        for (atoms, widths, expected) in [
-            (vec![vec![1u8]], vec![1u32], "expected 2"),
-            (
-                vec![vec![1u8], payload.to_vec(), vec![0u8]],
-                vec![1, 128, 1],
-                "expected 2",
-            ),
-            (vec![vec![1u8], payload.to_vec()], vec![1, 64], "Bytes<128>"),
-            // The circuit asserts version 1, so any other is drift and fails closed
-            // here rather than being misread under the V1 offsets.
-            (vec![vec![2u8], payload.to_vec()], vec![1, 128], "version 2"),
-        ] {
-            let err = decode_notification(&cell_from_atoms(&atoms, &widths))
-                .expect_err("only a two-atom version-1 notification decodes")
-                .to_string();
-            assert!(err.contains(expected), "err: {err}");
-        }
+    fn unpack_notification_v1_rejects_an_unsupported_version() {
+        let notification = SignBidirectionalEventNotification {
+            version: 2,
+            request_id: [0u8; 32],
+            payload: [0u8; 128],
+        };
+        let err = unpack_notification_v1(&notification)
+            .expect_err("the V1 unpacker must reject version 2")
+            .to_string();
+        assert!(err.contains("version 2"), "err: {err}");
     }
 
     #[test]
@@ -966,9 +972,11 @@ mod tests {
         payload[34] = 14; // path[1]
         payload[35] = 99; // past the depth: must not appear in requests_path
 
-        let notification =
-            decode_notification(&cell_from_atoms(&[vec![1u8], payload.to_vec()], &[1, 128]))
-                .expect("v1 notification decodes");
+        let notification = SignBidirectionalEventNotification {
+            version: 1,
+            request_id: [0u8; 32],
+            payload,
+        };
         let unpacked = unpack_notification_v1(&notification).expect("v1 payload unpacks");
         assert_eq!(unpacked.caller_address, [0xab; 32]);
         assert_eq!(unpacked.requests_path, vec![1, 14]);
@@ -980,6 +988,7 @@ mod tests {
             p[32] = bad_depth;
             let bad = SignBidirectionalEventNotification {
                 version: 1,
+                request_id: [0u8; 32],
                 payload: p,
             };
             let err = unpack_notification_v1(&bad)

@@ -13,16 +13,21 @@ use subxt::backend::rpc::reconnecting_rpc_client::RpcClient as ReconnectingRpcCl
 use subxt::backend::rpc::RpcClient;
 use subxt::client::OnlineClient;
 use subxt::ext::codec::DecodeAll as _;
+use subxt::ext::codec::Encode as _;
 use subxt::ext::jsonrpsee::client_transport::ws::{Url as WsUrl, WsTransportClientBuilder};
 use subxt::ext::jsonrpsee::core::client::async_client::PingConfig;
 use subxt::ext::jsonrpsee::core::client::{Client as RawWsClient, Error as JsonrpseeClientError};
 use subxt::ext::jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
+use subxt::ext::scale_decode::DecodeAsType;
 use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::MidnightConfig;
+use crate::emissions::{emissions_in, DecodedTransaction};
+use crate::indexer::Hold;
+use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 
@@ -30,6 +35,60 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct SendMnTransaction {
+    midnight_tx: Vec<u8>,
+}
+
+impl subxt::blocks::StaticExtrinsic for SendMnTransaction {
+    const PALLET: &'static str = "Midnight";
+    const CALL: &'static str = "send_mn_transaction";
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxAppliedDetails {
+    tx_hash: [u8; 32],
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxApplied(TxAppliedDetails);
+
+impl subxt::events::StaticEvent for TxApplied {
+    const PALLET: &'static str = "Midnight";
+    const EVENT: &'static str = "TxApplied";
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxPartialSuccess(TxAppliedDetails);
+
+impl subxt::events::StaticEvent for TxPartialSuccess {
+    const PALLET: &'static str = "Midnight";
+    const EVENT: &'static str = "TxPartialSuccess";
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentStatus {
+    Applied,
+    GuaranteedOnly,
+}
+
+const fn fallible_allowed(status: SegmentStatus) -> bool {
+    matches!(status, SegmentStatus::Applied)
+}
+
+fn hold(reason: &'static str, height: u64, cause: impl Into<anyhow::Error>) -> anyhow::Error {
+    Hold {
+        reason,
+        height,
+        cause: cause.into(),
+    }
+    .into()
+}
 
 /// The classified read failures, travelling as marker text because `retry_rpc!`
 /// flattens error chains to their message; when the retry layer preserves sources,
@@ -276,11 +335,158 @@ impl MidnightRpc {
             parent_hash: hex_0x(header.parent_hash),
         })
     }
+
+    pub(crate) async fn block_emissions(
+        &self,
+        block_ref: &BlockRef,
+        singleton: &[u8; 32],
+    ) -> anyhow::Result<Option<BlockEmissions>> {
+        let hash = parse_block_hash(&block_ref.hash)?;
+        let block = retry_rpc!(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block",
+            {
+                self.reads.classify_subxt(
+                    self.client.blocks().at(hash).await,
+                    "failed to fetch a midnight block",
+                )
+            }
+        )?;
+        let block = Reads::resolve(block)?;
+        let extrinsics = retry_rpc!(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block_body",
+            {
+                self.reads.classify_subxt(
+                    block.extrinsics().await,
+                    "failed to fetch a midnight block body",
+                )
+            }
+        )?;
+        let extrinsics = Reads::resolve(extrinsics)?;
+
+        let mut candidates = Vec::new();
+        for found in extrinsics.find::<SendMnTransaction>() {
+            let found = found.map_err(|err| {
+                hold(
+                    "emission-schema-hold",
+                    u64::from(block.number()),
+                    anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
+                )
+            })?;
+            if memchr::memmem::find(&found.value.midnight_tx, singleton).is_some() {
+                candidates.push(found);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let height = u64::from(block.number());
+        let mut decoded_candidates = Vec::with_capacity(candidates.len());
+        let mut scale_system_events = None;
+        for found in candidates {
+            let events = retry_rpc!(
+                self.reads.request_timeout,
+                self.reads.retry,
+                "midnight_block_events",
+                {
+                    self.reads.classify_subxt(
+                        found.details.events().await,
+                        "failed to fetch midnight block events",
+                    )
+                }
+            )?;
+            let events = Reads::resolve(events)?;
+            scale_system_events
+                .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
+
+            let applied = events.find_first::<TxApplied>().map_err(|err| {
+                hold(
+                    "emission-schema-hold",
+                    height,
+                    anyhow::Error::new(err).context("TxApplied did not match metadata"),
+                )
+            })?;
+            let (status, _ledger_tx_hash) = if let Some(TxApplied(details)) = applied {
+                (SegmentStatus::Applied, details.tx_hash)
+            } else {
+                match events.find_first::<TxPartialSuccess>().map_err(|err| {
+                    hold(
+                        "emission-schema-hold",
+                        height,
+                        anyhow::Error::new(err).context("TxPartialSuccess did not match metadata"),
+                    )
+                })? {
+                    Some(TxPartialSuccess(details)) => {
+                        (SegmentStatus::GuaranteedOnly, details.tx_hash)
+                    }
+                    None => {
+                        return Err(hold(
+                            "singleton-tx-without-status",
+                            height,
+                            anyhow::anyhow!(
+                                "candidate extrinsic {} has no Midnight status event",
+                                found.details.index()
+                            ),
+                        ));
+                    }
+                }
+            };
+
+            let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
+                &mut &found.value.midnight_tx[..],
+            )
+            .map_err(|err| {
+                hold(
+                    "singleton-tx-undecodable",
+                    height,
+                    anyhow::Error::new(err).context(format!(
+                        "candidate extrinsic {} ledger transaction",
+                        found.details.index()
+                    )),
+                )
+            })?;
+            let calls = emissions_in(&tx, singleton, fallible_allowed(status)).map_err(|err| {
+                hold(
+                    "emission-schema-hold",
+                    height,
+                    err.context(format!(
+                        "candidate extrinsic {} singleton emissions",
+                        found.details.index()
+                    )),
+                )
+            })?;
+            decoded_candidates.push(CandidateTransactionEmissions {
+                extrinsic_index: found.details.index(),
+                calls,
+            });
+        }
+
+        Ok(Some(BlockEmissions {
+            proof_seed: BlockProofSeed {
+                reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
+                reported_block_number: height,
+                reported_block_hash: *block.hash().as_fixed_bytes(),
+                singleton_address: *singleton,
+                scale_header: block.header().encode(),
+                scale_body: extrinsics
+                    .iter()
+                    .map(|extrinsic| extrinsic.bytes().to_vec())
+                    .collect(),
+                scale_system_events: scale_system_events
+                    .expect("a prefiltered candidate always fetched block events"),
+            },
+            candidates: decoded_candidates,
+        }))
+    }
 }
 
 /// Finalized reads for the Midnight publisher. Subxt owns connection recovery;
 /// callers keep one instance instead of rebuilding or retrying a dead transport.
-pub(crate) struct MidnightPublisherRpc {
+pub struct MidnightPublisherRpc {
     client: OnlineClient<SubstrateConfig>,
     rpc: RpcClient,
     network_id: String,
@@ -554,6 +760,30 @@ impl Reads {
         }
     }
 
+    /// Applies the same dead-client policy to Subxt's higher-level read errors.
+    fn classify_subxt<T>(
+        &self,
+        res: Result<T, subxt::Error>,
+        what: &'static str,
+    ) -> anyhow::Result<Fetched<T>> {
+        match res {
+            Ok(value) => Ok(Fetched::Value(value)),
+            Err(subxt::Error::Rpc(subxt::error::RpcError::ClientError(RawRpcError::Client(
+                client_err,
+            )))) if matches!(
+                client_err.downcast_ref::<JsonrpseeClientError>(),
+                Some(JsonrpseeClientError::RestartNeeded(_))
+            ) =>
+            {
+                Ok(Fetched::ClientClosed(client_err.to_string()))
+            }
+            Err(err) if !(self.alive)() => Ok(Fetched::ClientClosed(format!(
+                "connection is down behind an unclassified error: {err}"
+            ))),
+            Err(err) => Err(anyhow::Error::new(err).context(what)),
+        }
+    }
+
     fn resolve<T>(fetched: Fetched<T>) -> anyhow::Result<T> {
         match fetched {
             Fetched::Value(value) => Ok(value),
@@ -667,11 +897,56 @@ mod tests {
     use jsonrpsee::server::{ServerBuilder, ServerHandle};
     use jsonrpsee::RpcModule;
     use std::collections::{HashMap, VecDeque};
+    use std::io::Write as _;
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClientT};
+    use subxt::ext::scale_decode::DecodeAsType;
     use subxt::ext::subxt_rpcs::UserError;
+
+    #[test]
+    fn applied_status_scans_fallible_transcripts() {
+        assert!(fallible_allowed(SegmentStatus::Applied));
+    }
+
+    #[test]
+    fn partial_success_scans_only_guaranteed_transcripts() {
+        assert!(!fallible_allowed(SegmentStatus::GuaranteedOnly));
+    }
+
+    #[derive(DecodeAsType)]
+    #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+    struct CaptureCallDetails {
+        tx_hash: [u8; 32],
+        contract_address: Vec<u8>,
+    }
+
+    #[derive(DecodeAsType)]
+    #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+    struct CaptureContractCall(CaptureCallDetails);
+
+    impl subxt::events::StaticEvent for CaptureContractCall {
+        const PALLET: &'static str = "Midnight";
+        const EVENT: &'static str = "ContractCall";
+    }
+
+    fn capture_output_dir(value: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            !value.is_empty(),
+            "MIDNIGHT_CAPTURE_OUT_DIR must not be empty"
+        );
+        Ok(PathBuf::from(value))
+    }
+
+    fn write_new_capture(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(bytes)
+    }
 
     async fn contract_state_server(
         address: impl tokio::net::ToSocketAddrs,
@@ -838,6 +1113,187 @@ mod tests {
         assert_ne!(block.hash, block.parent_hash);
     }
 
+    fn fresh_capture_test_dir() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "mpc-chain-midnight-capture-path-test-{}",
+            std::process::id()
+        ));
+        for suffix in 0..1024 {
+            let candidate = base.with_extension(suffix.to_string());
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return candidate,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => panic!("create capture path test directory: {err}"),
+            }
+        }
+        panic!("could not allocate a capture path test directory");
+    }
+
+    #[test]
+    fn capture_path_rejects_an_empty_output_directory() {
+        let err = capture_output_dir("").expect_err("an empty output path must be rejected");
+
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected empty-path error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn capture_path_refuses_an_existing_target_without_changing_it() {
+        let output_dir = fresh_capture_test_dir();
+        let target = output_dir.join("tx-42-7.mn");
+        let original = b"existing capture that must survive";
+        std::fs::write(&target, original).expect("seed existing capture");
+
+        let err = write_new_capture(&target, b"replacement")
+            .expect_err("an existing capture target must be refused");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&target).expect("read preserved capture"),
+            original
+        );
+        std::fs::remove_file(&target).expect("remove capture path test file");
+        std::fs::remove_dir(&output_dir).expect("remove capture path test directory");
+    }
+
+    #[tokio::test]
+    #[ignore = "capture tool: MIDNIGHT_NODE_WS_URL, MIDNIGHT_CAPTURE_BLOCK, MIDNIGHT_CAPTURE_SINGLETON, MIDNIGHT_CAPTURE_OUT_DIR"]
+    async fn capture_block_fixtures() {
+        let node_ws_url = std::env::var("MIDNIGHT_NODE_WS_URL")
+            .expect("MIDNIGHT_NODE_WS_URL must name the capture node websocket");
+        let height = std::env::var("MIDNIGHT_CAPTURE_BLOCK")
+            .expect("MIDNIGHT_CAPTURE_BLOCK must name one capture height")
+            .parse::<u64>()
+            .expect("MIDNIGHT_CAPTURE_BLOCK must be a u64");
+        let singleton_hex = std::env::var("MIDNIGHT_CAPTURE_SINGLETON")
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be 32 bytes of hex")
+            .trim_start_matches("0x")
+            .to_ascii_lowercase();
+        let singleton: [u8; 32] = hex::decode(&singleton_hex)
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be hex")
+            .try_into()
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be exactly 32 bytes");
+        let output_dir = capture_output_dir(
+            &std::env::var("MIDNIGHT_CAPTURE_OUT_DIR")
+                .expect("MIDNIGHT_CAPTURE_OUT_DIR must name the fixture output directory"),
+        )
+        .expect("MIDNIGHT_CAPTURE_OUT_DIR must name a non-empty fixture output directory");
+        std::fs::create_dir_all(&output_dir).expect("create capture output directory");
+
+        let config = crate::config::MidnightConfig {
+            node_ws_url,
+            central_address: singleton_hex.clone(),
+            publisher: Default::default(),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let rpc = MidnightRpc::connect(&config)
+            .await
+            .expect("connect to capture node");
+        let block_ref = rpc
+            .block_ref_at(height)
+            .await
+            .expect("resolve capture block");
+        let block_hash = parse_block_hash(&block_ref.hash).expect("parse capture block hash");
+        let block = rpc
+            .client
+            .blocks()
+            .at(block_hash)
+            .await
+            .expect("read capture block");
+        let extrinsics = block.extrinsics().await.expect("read capture block body");
+
+        let mut captured = 0usize;
+        for found in extrinsics.find::<SendMnTransaction>() {
+            let found = found.expect("decode send_mn_transaction from live metadata");
+            if !found
+                .value
+                .midnight_tx
+                .windows(singleton.len())
+                .any(|window| window == singleton)
+            {
+                continue;
+            }
+
+            let extrinsic_index = found.details.index();
+            let path = output_dir.join(format!("tx-{height}-{extrinsic_index}.mn"));
+            let events = found.details.events().await.expect("read extrinsic events");
+            let applied = events
+                .find_first::<TxApplied>()
+                .expect("decode TxApplied from live metadata");
+            let partial = events
+                .find_first::<TxPartialSuccess>()
+                .expect("decode TxPartialSuccess from live metadata");
+            let (status, status_hash) = match (applied, partial) {
+                (Some(TxApplied(details)), None) => ("TxApplied", details.tx_hash),
+                (None, Some(TxPartialSuccess(details))) => ("TxPartialSuccess", details.tx_hash),
+                (None, None) => panic!("capture candidate has no Midnight status event"),
+                (Some(_), Some(_)) => panic!("capture candidate has both Midnight status events"),
+            };
+            let contract_calls = events
+                .find::<CaptureContractCall>()
+                .map(|call| {
+                    let CaptureContractCall(details) =
+                        call.expect("decode ContractCall from live metadata");
+                    assert_eq!(
+                        details.tx_hash, status_hash,
+                        "ContractCall and status must name the same ledger transaction"
+                    );
+                    format!("0x{}", hex::encode(details.contract_address))
+                })
+                .collect::<Vec<_>>();
+            write_new_capture(&path, &found.value.midnight_tx)
+                .expect("create new transaction fixture without replacing an existing capture");
+
+            println!(
+                "capture block={height} hash={} extrinsic_index={extrinsic_index} \
+                 status={status} tx_hash=0x{} contract_calls={contract_calls:?} file={}",
+                block_ref.hash,
+                hex::encode(status_hash),
+                path.display()
+            );
+            captured += 1;
+        }
+        assert!(
+            captured > 0,
+            "capture block contains no singleton candidate"
+        );
+
+        if let Ok(caller_hex) = std::env::var("MIDNIGHT_CAPTURE_CALLER") {
+            let caller_hex = caller_hex.trim_start_matches("0x").to_ascii_lowercase();
+            let caller: [u8; 32] = hex::decode(&caller_hex)
+                .expect("MIDNIGHT_CAPTURE_CALLER must be hex")
+                .try_into()
+                .expect("MIDNIGHT_CAPTURE_CALLER must be exactly 32 bytes");
+            let caller_hex = hex::encode(caller);
+            let caller_state = rpc
+                .contract_state(&caller_hex, &block_ref.hash)
+                .await
+                .expect("read caller state at capture block")
+                .expect("caller contract must exist at capture block");
+            let caller_path = output_dir.join(format!("caller-post-state-{height}.mn"));
+
+            let singleton_state = rpc
+                .contract_state(&singleton_hex, &block_ref.hash)
+                .await
+                .expect("read singleton state at capture block")
+                .expect("singleton contract must exist at capture block");
+            let singleton_path = output_dir.join(format!("singleton-state-{height}.mn"));
+            write_new_capture(&caller_path, &caller_state)
+                .expect("create new caller state fixture without replacing an existing capture");
+            write_new_capture(&singleton_path, &singleton_state)
+                .expect("create new singleton state fixture without replacing an existing capture");
+
+            println!(
+                "capture block={height} caller_state={} singleton_state={}",
+                caller_path.display(),
+                singleton_path.display()
+            );
+        }
+    }
+
     // Contract-state reads over an in-process JSON-RPC stub.
 
     /// One canned reply for a stubbed JSON-RPC method: a value, a JSON-RPC error
@@ -978,6 +1434,84 @@ mod tests {
             retry,
             Arc::new(move || alive),
         )
+    }
+
+    fn subxt_restart_needed() -> subxt::Error {
+        subxt::Error::Rpc(subxt::error::RpcError::ClientError(RawRpcError::Client(
+            Box::new(JsonrpseeClientError::RestartNeeded(Arc::new(
+                JsonrpseeClientError::Transport("stub ws died".into()),
+            ))),
+        )))
+    }
+
+    #[tokio::test]
+    async fn subxt_restart_needed_classifies_client_closed_without_retries() {
+        let node = StubNode::new(Vec::<(&str, Vec<Canned>)>::new());
+        let reads = stub_reads(&node, attempts(2), true);
+        let calls = AtomicUsize::new(0);
+
+        let fetched = retry_rpc!(READ_TIMEOUT, attempts(2), "subxt_test", {
+            calls.fetch_add(1, Ordering::SeqCst);
+            reads.classify_subxt::<()>(
+                Err(subxt_restart_needed()),
+                "failed to perform a Subxt read",
+            )
+        })
+        .expect("a closed client is a definitive classified outcome");
+        let err = Reads::resolve(fetched).expect_err("a closed client is a failure");
+
+        assert_eq!(
+            ReadFailure::of(&err),
+            Some(ReadFailure::ClientClosed),
+            "{err:#}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn any_subxt_error_on_a_dead_connection_classifies_without_retries() {
+        let node = StubNode::new(Vec::<(&str, Vec<Canned>)>::new());
+        let reads = stub_reads(&node, attempts(2), false);
+        let calls = AtomicUsize::new(0);
+
+        let fetched = retry_rpc!(READ_TIMEOUT, attempts(2), "subxt_test", {
+            calls.fetch_add(1, Ordering::SeqCst);
+            reads.classify_subxt::<()>(
+                Err(subxt::Error::Other("unclassified Subxt fault".to_string())),
+                "failed to perform a Subxt read",
+            )
+        })
+        .expect("a dead connection is a definitive classified outcome");
+        let err = Reads::resolve(fetched).expect_err("a dead connection is a failure");
+
+        assert_eq!(
+            ReadFailure::of(&err),
+            Some(ReadFailure::ClientClosed),
+            "{err:#}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_live_subxt_errors_remain_retryable_and_unclassified() {
+        let node = StubNode::new(Vec::<(&str, Vec<Canned>)>::new());
+        let reads = stub_reads(&node, attempts(2), true);
+        let calls = AtomicUsize::new(0);
+
+        let result = retry_rpc!(READ_TIMEOUT, attempts(2), "subxt_test", {
+            calls.fetch_add(1, Ordering::SeqCst);
+            reads.classify_subxt::<()>(
+                Err(subxt::Error::Other("ordinary Subxt fault".to_string())),
+                "failed to perform a Subxt read",
+            )
+        });
+        let err = match result {
+            Ok(_) => panic!("a live Subxt fault must remain retryable"),
+            Err(err) => err,
+        };
+
+        assert_eq!(ReadFailure::of(&err), None, "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

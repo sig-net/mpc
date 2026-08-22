@@ -12,7 +12,12 @@ async-trait.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 k256.workspace = true
+memchr.workspace = true
 midnight-base-crypto.workspace = true
+# `Transaction` and the call transcripts come from these two crates; nothing in
+# the pinned set re-exports them.
+midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-onchain-runtime.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
@@ -32,6 +37,5 @@ url.workspace = true
 
 [dev-dependencies]
 jsonrpsee = { version = "0.24.10", features = ["server"] }
-midnight-ledger-v9 = { version = "1.0.0", default-features = false }
 midnight-transient-crypto = "3.0.0"
 tokio-tungstenite = "0.29"

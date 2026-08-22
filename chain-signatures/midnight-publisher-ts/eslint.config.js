@@ -14,7 +14,7 @@ export default defineConfig([
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["devtools/real-stack/*.ts"],
+          allowDefaultProject: ["devtools/real-stack/*.ts", "vitest.config.ts"],
         },
         tsconfigRootDir: import.meta.dirname,
       },

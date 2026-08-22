@@ -2,3 +2,4 @@ node_modules/
 dist/
 *.log
 devtools/real-stack/managed/
+devtools/real-stack/*.leveldb/

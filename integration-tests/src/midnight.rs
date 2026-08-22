@@ -6,12 +6,10 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{MidnightConfig, MidnightPublisherRpc, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use subxt::ext::codec::DecodeAll as _;
-use subxt::{OnlineClient, SubstrateConfig};
 use testcontainers::core::logs::LogFrame;
 use testcontainers::core::{IntoContainerPort as _, WaitFor};
 use testcontainers::{GenericImage, ImageExt as _};
@@ -35,7 +33,6 @@ const PROOF_PORT: u16 = 6300;
 const INDEXER_SECRET: &str = "303132333435363738393031323334353637383930313233343536373839303132";
 const SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e";
-const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
 struct MidnightEndpoints {
     node_ws_url: String,
@@ -467,10 +464,17 @@ fn log_consumer(path: &Path) -> impl Fn(&LogFrame) + Clone + Send + Sync + 'stat
 }
 
 async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
+    let config = MidnightConfig {
+        node_ws_url: node_ws_url.to_string(),
+        central_address: "00".repeat(32),
+        publisher: Default::default(),
+        rpc: Default::default(),
+        indexer: Default::default(),
+    };
     let mut last_error = None;
     for _ in 0..120 {
-        match fetch_network_id(node_ws_url).await {
-            Ok(network_id) => return Ok(network_id),
+        match MidnightPublisherRpc::connect(&config).await {
+            Ok(rpc) => return Ok(rpc.network_id().to_string()),
             Err(error) => last_error = Some(format!("connect: {error:#}")),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -479,23 +483,6 @@ async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
         "Midnight node at {node_ws_url} did not become ready: {}",
         last_error.unwrap_or_else(|| "no response".into())
     )
-}
-
-async fn fetch_network_id(node_ws_url: &str) -> anyhow::Result<String> {
-    let client = OnlineClient::<SubstrateConfig>::from_insecure_url(node_ws_url)
-        .await
-        .context("connecting to the Midnight node")?;
-    let runtime_api = client
-        .runtime_api()
-        .at_latest()
-        .await
-        .context("fetching the latest finalized Midnight block")?;
-    let answer = runtime_api
-        .call_raw(NETWORK_ID_ENTRY, Some(&[]))
-        .await
-        .context("fetching the Midnight network id")?;
-    let mut payload = answer.as_slice();
-    String::decode_all(&mut payload).context("Midnight returned a malformed network id")
 }
 
 async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {

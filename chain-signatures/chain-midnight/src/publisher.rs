@@ -12,11 +12,7 @@ use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightConfig, PublisherConfig};
 use crate::intent_gen::{is_ambiguous_submit, IntentGen, IntentRequest, WirePoint, WireSignature};
-use crate::reader::{
-    central_map, decode_response_entry, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
-};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
-use crate::state::decode_contract_state;
 
 const RESPOND: &str = "respond";
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
@@ -65,22 +61,6 @@ impl RespondCircuit {
             Self::RespondBidirectional => RESPOND_BIDIRECTIONAL,
         }
     }
-
-    /// The central ledger field holding this circuit's append-only response map.
-    const fn map_field(self) -> u8 {
-        match self {
-            Self::Respond => RESPOND_MAP_FIELD,
-            Self::RespondBidirectional => RESPOND_BIDIRECTIONAL_MAP_FIELD,
-        }
-    }
-
-    /// The map's name in the deployed contract, as the indexer labels it.
-    const fn map_name(self) -> &'static str {
-        match self {
-            Self::Respond => "respondMap",
-            Self::RespondBidirectional => "respondBidirectionalMap",
-        }
-    }
 }
 
 /// One respond call, marshalled off the action before anything is read or spawned.
@@ -88,7 +68,6 @@ struct RespondCall {
     circuit: RespondCircuit,
     request_id: [u8; 32],
     signature: WireSignature,
-    stored_signature: Signature,
 }
 
 /// Posts MPC responses back to the Midnight central contract.
@@ -170,17 +149,6 @@ impl MidnightPublisher {
         // One head for every read below it.
         let at_hash = self.reads.finalized_head().await?;
         let chain = self.pin(&self.central_address, at_hash).await?;
-        if response_present(&chain.contract_state, &call)? {
-            tracing::info!(
-                ?sign_id,
-                circuit = call.circuit.wire_name(),
-                at_hash = %chain.at_hash,
-                "midnight: exact response is already finalized"
-            );
-            self.telemetry.record_publish_metrics(action);
-            return Ok(());
-        }
-
         let request = IntentRequest {
             circuit: call.circuit.wire_name(),
             contract_address: self.central_address.clone(),
@@ -203,8 +171,8 @@ impl MidnightPublisher {
                 )
             })
             .inspect_err(|error| {
-                // The one failure shape worth naming: the transaction may land anyway,
-                // and settlement is deferred to a later attempt's pinned read.
+                // The transaction may land even when its answer is lost. The backlog
+                // retries the publish, which can post a duplicate response.
                 if is_ambiguous_submit(error) {
                     tracing::warn!(
                         ?sign_id,
@@ -212,8 +180,7 @@ impl MidnightPublisher {
                         request_id = %hex::encode(call.request_id),
                         at_hash = %chain.at_hash,
                         elapsed = ?action.timestamp.elapsed(),
-                        "midnight: submit answer was lost; deferring settlement to the \
-                         retry attempt's pinned read"
+                        "midnight: submit answer was lost; a retry may repost"
                     );
                 }
             })?;
@@ -252,8 +219,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
         "midnight publisher was handed a {:?} request",
         action.request.chain
     );
-    let stored_signature = action.signature;
-    let signature = wire_signature(&stored_signature)?;
+    let signature = wire_signature(&action.signature)?;
     let request_id = action.request.id.request_id;
 
     match &action.request.kind {
@@ -267,7 +233,6 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 circuit: RespondCircuit::Respond,
                 request_id,
                 signature,
-                stored_signature,
             })
         }
         // The output never travels: the contract stores a bare signature, and the
@@ -276,7 +241,6 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
             circuit: RespondCircuit::RespondBidirectional,
             request_id,
             signature,
-            stored_signature,
         }),
         SignKind::Sign => anyhow::bail!(
             "midnight publisher serves SignBidirectional and RespondBidirectional only, not Sign"
@@ -308,36 +272,8 @@ fn wire_signature(signature: &Signature) -> anyhow::Result<WireSignature> {
     })
 }
 
-fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
-    let root = decode_contract_state(state)?;
-    let entries = central_map(&root, call.circuit.map_field(), call.circuit.map_name())?;
-    for entry in entries.iter() {
-        let (key, value) = &*entry;
-        match decode_response_entry(key, value).and_then(|decoded| {
-            decoded
-                .signature
-                .map(|signature| (decoded.request_id, signature))
-        }) {
-            Ok((stored_request_id, stored_signature))
-                if stored_request_id == call.request_id
-                    && stored_signature == call.stored_signature =>
-            {
-                return Ok(true);
-            }
-            Ok(_) => {}
-            Err(err) => tracing::warn!(
-                circuit = call.circuit.wire_name(),
-                request_id = %hex::encode(call.request_id),
-                "midnight finalized response entry ignored: {err:#}"
-            ),
-        }
-    }
-    Ok(false)
-}
-
 /// The intent's expiry, as absolute unix seconds: one publish's build and submit
-/// budgets summed. It bounds how late a transaction whose answer was lost can still
-/// land; whether it did is the next attempt's pinned read to settle.
+/// budgets summed. It bounds how late a transaction whose answer was lost can land.
 fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
     now.saturating_add(config.request_timeout.as_secs())
         .saturating_add(config.submit_timeout.as_secs())
@@ -351,18 +287,11 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use midnight_base_crypto::fab::{
-        AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
-    };
-    use midnight_onchain_state::state::{ChargedState, ContractState, StateValue};
-    use midnight_storage::DefaultDB;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
         BidirectionalTxId, Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind,
     };
-
-    use crate::test_utils::{array_of, cell_from_atoms, map_of, trim};
 
     /// An arbitrary well-formed central address.
     const CENTRAL: &str = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
@@ -388,7 +317,6 @@ mod tests {
     struct StubReads {
         calls: Mutex<Vec<Read>>,
         heads_served: Mutex<usize>,
-        contract_state: Mutex<Vec<u8>>,
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
     }
@@ -397,15 +325,6 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 contract_present: true,
-                contract_state: Mutex::new(CONTRACT_STATE.to_vec()),
-                ..Default::default()
-            })
-        }
-
-        fn with_state(state: Vec<u8>) -> Arc<Self> {
-            Arc::new(Self {
-                contract_present: true,
-                contract_state: Mutex::new(state),
                 ..Default::default()
             })
         }
@@ -424,10 +343,6 @@ mod tests {
                 at_hash: at_hash.to_string(),
             });
         }
-
-        fn set_state(&self, state: Vec<u8>) {
-            *self.contract_state.lock().unwrap() = state;
-        }
     }
 
     #[async_trait]
@@ -445,9 +360,7 @@ mod tests {
             at_hash: &str,
         ) -> anyhow::Result<Option<Vec<u8>>> {
             self.record("contract_state", at_hash);
-            Ok(self
-                .contract_present
-                .then(|| self.contract_state.lock().unwrap().clone()))
+            Ok(self.contract_present.then(|| CONTRACT_STATE.to_vec()))
         }
 
         async fn ledger_parameters(&self, at_hash: &str) -> anyhow::Result<Vec<u8>> {
@@ -530,8 +443,6 @@ mod tests {
     }
 
     struct LandingWithoutReply {
-        reads: Arc<StubReads>,
-        landed_state: Vec<u8>,
         attempts: std::sync::atomic::AtomicUsize,
     }
 
@@ -544,7 +455,6 @@ mod tests {
         async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             self.attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.reads.set_state(self.landed_state.clone());
             Err(anyhow::anyhow!("stdout closed after submit").context(AmbiguousSubmit))
         }
     }
@@ -630,99 +540,6 @@ mod tests {
             }),
             SignId::new(REQUEST_ID),
         )
-    }
-
-    fn state_with_response(action: &PublishAction) -> Vec<u8> {
-        let call = respond_call(action).expect("the test action maps to a response");
-        let field = usize::from(call.circuit.map_field());
-        let mut contract: ContractState<DefaultDB> =
-            midnight_serialize::tagged_deserialize(&mut &CONTRACT_STATE[..])
-                .expect("the initial singleton state decodes");
-        let StateValue::Array(fields) = contract.data.get_ref() else {
-            panic!("the initial singleton root is an array")
-        };
-        let mut fields: Vec<_> = fields.iter_deref().cloned().collect();
-        let key = AlignedValue {
-            value: Value(vec![ValueAtom(vec![1]), ValueAtom(trim(&call.request_id))]),
-            alignment: Alignment(vec![
-                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 8 }),
-                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
-            ]),
-        };
-        let encoded = call.stored_signature.big_r.to_encoded_point(false);
-        let value = cell_from_atoms(
-            &[
-                trim(encoded.x().expect("affine x")),
-                trim(encoded.y().expect("affine y")),
-                trim(call.stored_signature.s.to_bytes().as_slice()),
-                trim(&[call.stored_signature.recovery_id]),
-            ],
-            &[32, 32, 32, 1],
-        );
-        fields[field] = map_of(vec![(key, value)]);
-        contract.data = ChargedState::new(array_of(fields));
-
-        let mut encoded = Vec::new();
-        midnight_serialize::tagged_serialize(&contract, &mut encoded)
-            .expect("the singleton state serializes");
-        encoded
-    }
-
-    fn state_with_malformed_response(action: &PublishAction) -> Vec<u8> {
-        let call = respond_call(action).expect("the test action maps to a response");
-        let field = usize::from(call.circuit.map_field());
-        let state = state_with_response(action);
-        let mut contract: ContractState<DefaultDB> =
-            midnight_serialize::tagged_deserialize(&mut &state[..])
-                .expect("the singleton response state decodes");
-        let StateValue::Array(fields) = contract.data.get_ref() else {
-            panic!("the singleton root is an array")
-        };
-        let mut fields: Vec<_> = fields.iter_deref().cloned().collect();
-        let StateValue::Map(entries) = &fields[field] else {
-            panic!("the response field is a map")
-        };
-        let (key, _) = &*entries.iter().next().expect("one response entry");
-        fields[field] = map_of(vec![(
-            (**key).clone(),
-            cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
-        )]);
-        contract.data = ChargedState::new(array_of(fields));
-
-        let mut encoded = Vec::new();
-        midnight_serialize::tagged_serialize(&contract, &mut encoded)
-            .expect("the malformed singleton state serializes");
-        encoded
-    }
-
-    fn state_with_invalid_signature_response(action: &PublishAction) -> Vec<u8> {
-        let call = respond_call(action).expect("the test action maps to a response");
-        let field = usize::from(call.circuit.map_field());
-        let state = state_with_response(action);
-        let mut contract: ContractState<DefaultDB> =
-            midnight_serialize::tagged_deserialize(&mut &state[..])
-                .expect("the singleton response state decodes");
-        let StateValue::Array(fields) = contract.data.get_ref() else {
-            panic!("the singleton root is an array")
-        };
-        let mut fields: Vec<_> = fields.iter_deref().cloned().collect();
-        let StateValue::Map(entries) = &fields[field] else {
-            panic!("the response field is a map")
-        };
-        let (key, _) = &*entries.iter().next().expect("one response entry");
-        fields[field] = map_of(vec![(
-            (**key).clone(),
-            cell_from_atoms(
-                &[vec![0xff; 32], vec![0xff; 32], vec![1], vec![]],
-                &[32, 32, 32, 1],
-            ),
-        )]);
-        contract.data = ChargedState::new(array_of(fields));
-
-        let mut encoded = Vec::new();
-        midnight_serialize::tagged_serialize(&contract, &mut encoded)
-            .expect("the invalid-signature singleton state serializes");
-        encoded
     }
 
     #[tokio::test]
@@ -828,93 +645,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exact_finalized_response_is_not_posted_again() {
-        let action = respond_action();
-        let reads = StubReads::with_state(state_with_response(&action));
-        let client = StubClient::new();
-        let publisher = publisher(reads.clone(), client.clone());
-
-        publisher
-            .publish_signature(&action)
-            .await
-            .expect("a finalized exact response makes the retry complete");
-        assert!(
-            client.built().is_empty(),
-            "a finalized response needs no intent"
-        );
-        assert_eq!(client.submissions(), 0);
-    }
-
-    #[test]
-    fn invalid_response_entries_do_not_poison_the_pre_check() {
+    async fn a_lost_submit_reply_is_a_retryable_error_and_the_retry_posts_again() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
-            let call = respond_call(&action).expect("the action maps to a response");
-            for state in [
-                state_with_malformed_response(&action),
-                state_with_invalid_signature_response(&action),
-            ] {
-                assert!(!response_present(&state, &call).expect("invalid entries are skipped"));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn a_different_signature_under_the_same_request_id_is_still_posted() {
-        let action = respond_action();
-        let mut other = action.clone();
-        other.signature.recovery_id ^= 1;
-        let reads = StubReads::with_state(state_with_response(&other));
-        let client = StubClient::new();
-        let publisher = publisher(reads, client.clone());
-
-        publisher
-            .publish_signature(&action)
-            .await
-            .expect("only the exact signature makes a retry complete");
-        assert_eq!(client.submissions(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_landed_submit_with_a_lost_reply_defers_to_the_retry_and_does_not_repost() {
-        for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
-            let reads = StubReads::new();
             let client = Arc::new(LandingWithoutReply {
-                reads: reads.clone(),
-                landed_state: state_with_response(&action),
                 attempts: std::sync::atomic::AtomicUsize::new(0),
             });
-            let publisher = publisher(reads, client.clone());
+            let publisher = publisher(StubReads::new(), client.clone());
 
-            // The first attempt's answer is lost after the post landed: it must fail
-            // as a retryable ambiguity, never report success for an unnamed post.
-            let error = publisher
-                .publish_signature(&action)
-                .await
-                .expect_err("a lost answer is not a published signature");
-            assert!(
-                is_ambiguous_submit(&error),
-                "the ambiguity must survive to the caller: {error:#}"
-            );
-            assert!(
-                mpc_chain_integration_core::utils::retry::is_retryable(&error),
-                "an ambiguous submit hands settlement to the retry: {error:#}"
-            );
+            for expected_attempts in 1..=2 {
+                let error = publisher
+                    .publish_signature(&action)
+                    .await
+                    .expect_err("a lost answer is not a published signature");
+                assert!(
+                    is_ambiguous_submit(&error),
+                    "the ambiguity must survive to the caller: {error:#}"
+                );
+                assert!(
+                    mpc_chain_integration_core::utils::retry::is_retryable(&error),
+                    "an ambiguous submit remains retryable: {error:#}"
+                );
+                assert!(
+                    format!("{error:#}")
+                        .contains("a later publisher retry may post the response again"),
+                    "the error must disclose the duplicate-post policy: {error:#}"
+                );
+                assert_eq!(
+                    client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                    expected_attempts,
+                    "each publish attempt submits exactly once"
+                );
+            }
             assert_eq!(
                 client.attempts.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "an ambiguous landed submit must not be posted twice within one attempt"
-            );
-
-            // The retry attempt's pinned read finds the exact response and settles
-            // without building or posting anything.
-            publisher
-                .publish_signature(&action)
-                .await
-                .expect("the retry settles on the already-finalized response");
-            assert_eq!(
-                client.attempts.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "the settled retry must not repost"
+                2,
+                "the retry must repost when settlement is handled by the backlog"
             );
         }
     }
