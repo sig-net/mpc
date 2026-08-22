@@ -46,7 +46,9 @@ const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
 
-/// Default retry strategy
+// TODO: adopt `retry_rpc_gated!` with a shared `SharedBackoff` (as chain-ethereum does) for
+// the indexer-path call sites (`get_slot_confirmed`, `fetch_signatures_from_latest`,
+// `fetch_blocks`, `get_block`).
 fn default_retry_strategy() -> RetryConfig {
     RetryConfig {
         min_delay: SOL_RPC_MIN_DELAY,
@@ -190,6 +192,21 @@ impl SolanaClient {
         retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot", {
             self.rpc_client
                 .get_slot()
+                .await
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+    }
+
+    // Get the latest confirmed slot from the Solana RPC. This is used to determine the upper bound for catchup.
+    // TODO: the whole indexing pipeline runs Confirmed (this anchor, block_fetch_config,
+    // signature pagination), matching the old WS semantics. Confirmed can theoretically be
+    // revoked (rare optimistic-confirmation violation). Decide with real rollback data whether
+    // to flip to Finalized end-to-end (~13s extra detection latency); if so, all commitment
+    // sites must change together.
+    pub async fn get_slot_confirmed(&self) -> anyhow::Result<u64> {
+        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot_confirmed", {
+            self.rpc_client
+                .get_slot_with_commitment(CommitmentConfig::confirmed())
                 .await
                 .map_err(|e| anyhow::anyhow!(e))
         })
