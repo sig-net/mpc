@@ -18,12 +18,7 @@ pub struct SolArgs {
     #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
     /// Polling interval for the Solana indexer in milliseconds
-    #[clap(
-        long,
-        env("MPC_SOL_POLL_INTERVAL_MS"),
-        requires = "sol_account_sk",
-        default_value = "1000"
-    )]
+    #[clap(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "1000")]
     pub sol_poll_interval_ms: u64,
 }
 
