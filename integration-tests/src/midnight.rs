@@ -10,6 +10,9 @@ use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use subxt::backend::legacy::rpc_methods::NumberOrHex;
+use subxt::backend::legacy::LegacyRpcMethods;
+use subxt::backend::rpc::RpcClient;
 use subxt::ext::codec::DecodeAll as _;
 use subxt::{OnlineClient, SubstrateConfig};
 use testcontainers::core::logs::LogFrame;
@@ -43,20 +46,6 @@ struct MidnightEndpoints {
     indexer_url: String,
     indexer_ws_url: String,
     proof_server_url: String,
-}
-
-fn host_endpoints(
-    node_host_port: u16,
-    indexer_host_port: u16,
-    proof_host_port: u16,
-) -> MidnightEndpoints {
-    MidnightEndpoints {
-        node_ws_url: format!("ws://127.0.0.1:{node_host_port}"),
-        node_http_url: format!("http://127.0.0.1:{node_host_port}"),
-        indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
-        indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
-        proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
-    }
 }
 
 struct MidnightStack {
@@ -392,6 +381,11 @@ impl MidnightStack {
             .get_host_port_ipv4(NODE_PORT)
             .await
             .context("resolving Midnight node host port")?;
+        let node_ws_url = format!("ws://127.0.0.1:{node_host_port}");
+        // The indexer's SPO sub-indexer opens a client at block 1 as soon as it
+        // connects and exits for good if the node has not imported that block yet,
+        // so the indexer starts only once the node is producing blocks.
+        let network_id = wait_for_node(&node_ws_url).await?;
 
         let node_internal_ws = format!("ws://{node_ip}:{NODE_PORT}");
         let indexer_log = log_consumer(&artifact_dir.join("indexer.log"));
@@ -438,8 +432,13 @@ impl MidnightStack {
             .await
             .context("resolving Midnight proof-server host port")?;
 
-        let endpoints = host_endpoints(node_host_port, indexer_host_port, proof_host_port);
-        let network_id = wait_for_node(&endpoints.node_ws_url).await?;
+        let endpoints = MidnightEndpoints {
+            node_ws_url,
+            node_http_url: format!("http://127.0.0.1:{node_host_port}"),
+            indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
+            indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
+            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
+        };
         wait_for_indexer(&endpoints.indexer_url).await?;
         wait_for_http("proof server", &endpoints.proof_server_url).await?;
 
@@ -466,11 +465,13 @@ fn log_consumer(path: &Path) -> impl Fn(&LogFrame) + Clone + Send + Sync + 'stat
     }
 }
 
+/// The node's network id, once its RPC answers and it has imported block 1.
 async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
     let mut last_error = None;
     for _ in 0..120 {
-        match fetch_network_id(node_ws_url).await {
-            Ok(network_id) => return Ok(network_id),
+        match probe_node(node_ws_url).await {
+            Ok(Some(network_id)) => return Ok(network_id),
+            Ok(None) => last_error = Some("block 1 is not imported yet".to_string()),
             Err(error) => last_error = Some(format!("connect: {error:#}")),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -481,10 +482,21 @@ async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
     )
 }
 
-async fn fetch_network_id(node_ws_url: &str) -> anyhow::Result<String> {
-    let client = OnlineClient::<SubstrateConfig>::from_insecure_url(node_ws_url)
+/// `Ok(None)` while the node answers but has not imported block 1.
+async fn probe_node(node_ws_url: &str) -> anyhow::Result<Option<String>> {
+    let rpc = RpcClient::from_insecure_url(node_ws_url)
         .await
         .context("connecting to the Midnight node")?;
+    let block_one = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone())
+        .chain_get_block_hash(Some(NumberOrHex::Number(1)))
+        .await
+        .context("fetching the hash of Midnight block 1")?;
+    if block_one.is_none() {
+        return Ok(None);
+    }
+    let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc)
+        .await
+        .context("initialising the Midnight node client")?;
     let runtime_api = client
         .runtime_api()
         .at_latest()
@@ -495,7 +507,9 @@ async fn fetch_network_id(node_ws_url: &str) -> anyhow::Result<String> {
         .await
         .context("fetching the Midnight network id")?;
     let mut payload = answer.as_slice();
-    String::decode_all(&mut payload).context("Midnight returned a malformed network id")
+    let network_id =
+        String::decode_all(&mut payload).context("Midnight returned a malformed network id")?;
+    Ok(Some(network_id))
 }
 
 async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {
