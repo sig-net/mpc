@@ -1111,6 +1111,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_transaction_slot_emits_single_block_after_all_events() {
+        let mut server = mockito::Server::new_async().await;
+        let state_manager = MockStateManager::new();
+        state_manager.set_processed_block(Chain::Solana, 5).await;
+        let indexer = test_indexer(&server.url(), state_manager);
+
+        // Two requests in the same slot, with different payloads. The
+        // indexer must emit both of them, then exactly one Block(7).
+        let req_a = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let req_b = SignatureRequestedEvent {
+            payload: [2; 32],
+            ..req_a.clone()
+        };
+
+        let entries: Vec<_> = [7, 5].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Construct the block containing both transactions.
+        let mut block = event_block_response(
+            0,
+            7,
+            event_transaction(
+                indexer.program_id,
+                Signature::new_unique(),
+                "Sign",
+                cpi_event_instruction(&req_a),
+            ),
+        );
+
+        block["result"]["transactions"]
+            .as_array_mut()
+            .unwrap()
+            .push(event_transaction(
+                indexer.program_id,
+                Signature::new_unique(),
+                "Sign",
+                cpi_event_instruction(&req_b),
+            ));
+
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#""method":"getBlock".*"encoding":"jsonParsed""#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([block]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Verify that the indexer emits both requests, then exactly one Block(7).
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        let mut catchup = indexer.catchup_blocks(8, 6).await.unwrap();
+        while let Some(item) = catchup.next().await {
+            let (slot, block_item) = item.unwrap();
+            indexer
+                .process_catchup_item(&events_tx, slot, &block_item)
+                .await
+                .unwrap();
+        }
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { .. })
+        ));
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { .. })
+        ));
+
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+        assert!(
+            events_rx.try_recv().is_err(),
+            "Block(7) must be emitted exactly once for the multi-transaction slot"
+        );
+    }
+
+    #[tokio::test]
     async fn block_fetch_pages_preserve_slot_order() {
         let mut server = mockito::Server::new_async().await;
 
