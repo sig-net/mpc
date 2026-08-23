@@ -71,7 +71,7 @@ impl Default for PollingConfig {
     }
 }
 
-/// Per-run state for the indexer poll loop. 
+/// Per-run state for the indexer poll loop.
 /// Seeded once from persisted state (resume point), then advanced by drained ticks.
 #[derive(Clone, Copy)]
 struct PollState {
@@ -82,7 +82,7 @@ struct PollState {
     last_observed_slot: Option<u64>,
     /// When `last_observed_slot` last advanced.
     slot_last_advanced_at: Instant,
-    /// Lowest slot that has been fully drained and emitted as a heartbeat. 
+    /// Lowest slot that has been fully drained and emitted as a heartbeat.
     heartbeat_floor: u64,
     /// Whether [`ChainEvent::CatchupCompleted`] has been emitted
     caught_up: bool,
@@ -507,9 +507,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             state = state.observe_anchor(anchor, self.polling.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
-            let mut catchup_iter = self
-                .catchup_blocks(anchor, state.next_start)
-                .await?;
+            let mut catchup_iter = self.catchup_blocks(anchor, state.next_start).await?;
             loop {
                 let item = tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
@@ -1067,7 +1065,7 @@ pub fn to_mpc_signature(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
 
     use super::*;
     use anchor_lang::AnchorSerialize;
@@ -1238,6 +1236,123 @@ mod tests {
         mockito::Matcher::Regex(format!(r#""params"\s*:\s*\[\s*{slot}\s*,"#))
     }
 
+    /// Fixture for driving `run()` against a mockito RPC server. Owns the
+    /// mock server, indexer, event channel and run task; tests only script
+    /// RPC responses and assert on the event sequence.
+    struct RunFixture {
+        _server: mockito::ServerGuard,
+        cancel: CancellationToken,
+        run: tokio::task::JoinHandle<anyhow::Result<()>>,
+        events_rx: mpsc::Receiver<ChainEvent>,
+    }
+
+    /// JSON-RPC reply body for `getSlot` returning `slot`.
+    fn getslot_body(slot: u64) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"result":{slot}}}"#)
+    }
+
+    impl RunFixture {
+        /// Spawn `run()` with a getSlot mock serving `slots` in order (the
+        /// last repeats forever), an optional persisted watermark, and an
+        /// optional `PollingConfig` (defaults: fast poll, slow stall timeout).
+        async fn spawn(
+            slots: &[u64],
+            processed: Option<u64>,
+            polling: impl Into<Option<PollingConfig>>,
+        ) -> Self {
+            let server = mockito::Server::new_async().await;
+            Self::spawn_with_server(server, slots, processed, polling).await
+        }
+
+        /// Variant taking a pre-built mockito server (additional RPC mocks
+        /// may already be mounted on it).
+        async fn spawn_with_server(
+            mut server: mockito::ServerGuard,
+            slots: &[u64],
+            processed: Option<u64>,
+            polling: impl Into<Option<PollingConfig>>,
+        ) -> Self {
+            // Scripted getSlot responses served in order; once the script
+            // runs dry, the last body repeats forever (frozen-node
+            // semantics). `with_body_from_request` takes an `Fn`, so state
+            // must live behind a mutex.
+            let bodies = Arc::new(std::sync::Mutex::new(
+                slots
+                    .iter()
+                    .map(|s| getslot_body(*s))
+                    .collect::<VecDeque<_>>(),
+            ));
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::Regex("getSlot".to_string()))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request({
+                    let bodies = bodies.clone();
+                    move |_req| {
+                        let mut script = bodies.lock().expect("script lock");
+                        let body = if script.len() > 1 {
+                            script.pop_front().expect("script body")
+                        } else {
+                            script.front().cloned().expect("script body")
+                        };
+                        body.into_bytes()
+                    }
+                })
+                .create_async()
+                .await;
+
+            let state_manager = MockStateManager::new();
+            if let Some(height) = processed {
+                state_manager
+                    .set_processed_block(Chain::Solana, height)
+                    .await;
+            }
+            let mut indexer = test_indexer(&server.url(), state_manager);
+            indexer.polling = polling.into().unwrap_or(PollingConfig {
+                poll_interval: Duration::from_millis(5),
+                slot_stall_timeout: Duration::from_secs(30),
+            });
+
+            let (events_tx, events_rx) = mpsc::channel(64);
+            let cancel = CancellationToken::new();
+            let run = {
+                let cancel = cancel.clone();
+                tokio::spawn(async move { indexer.run(events_tx, cancel).await })
+            };
+
+            Self {
+                _server: server,
+                cancel,
+                run,
+                events_rx,
+            }
+        }
+
+        async fn next_event(&mut self) -> Option<ChainEvent> {
+            tokio::time::timeout(Duration::from_secs(5), self.events_rx.recv())
+                .await
+                .expect("timed out waiting for chain event")
+        }
+
+        async fn cancel_and_join(&mut self) {
+            self.cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), &mut self.run)
+                .await
+                .expect("run should stop promptly on cancel")
+                .expect("run task should not panic")
+                .expect("run should return Ok on cancel");
+        }
+
+        /// Await the run task to completion without cancelling it.
+        async fn await_result(self) -> anyhow::Result<()> {
+            tokio::time::timeout(Duration::from_secs(5), self.run)
+                .await
+                .expect("run should finish within timeout")
+                .expect("run task should not panic")
+        }
+    }
+
     #[test]
     fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
@@ -1394,7 +1509,10 @@ mod tests {
         const ANCHOR_SLOT: u64 = 10;
 
         // No processed block persisted: start == anchor, so no catchup and no RPC calls.
-        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT, ANCHOR_SLOT).await.unwrap();
+        let mut stream = indexer
+            .catchup_blocks(ANCHOR_SLOT, ANCHOR_SLOT)
+            .await
+            .unwrap();
         assert!(stream.next().await.is_none());
     }
 
@@ -1728,87 +1846,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_state_resumes_after_persisted_watermark_or_seeds_from_anchor() {
+        // Persisted watermark: resume from the slot after it.
+        let sm = MockStateManager::new();
+        sm.set_processed_block(Chain::Solana, 41).await;
+        let state = PollState::resumed(&sm, 100).await;
+        assert_eq!(state.next_start, 42);
+        assert_eq!(state.last_observed_slot, None);
+        assert!(!state.caught_up);
+
+        // Fresh deployment: nothing persisted, start live from the seed anchor.
+        let fresh = PollState::resumed(&MockStateManager::new(), 100).await;
+        assert_eq!(fresh.next_start, 100);
+    }
+
+    #[tokio::test]
+    async fn poll_state_advance_requires_strictly_greater_anchor() {
+        let timeout = Duration::from_secs(60);
+        let sm = MockStateManager::new();
+        let state = PollState::resumed(&sm, 10).await;
+
+        // First observation initializes the high-water slot.
+        let state = state
+            .observe_anchor(10, timeout)
+            .expect("first observation should succeed");
+        assert_eq!(state.last_observed_slot, Some(10));
+
+        // A lower anchor (lagging replica behind an LB) is not progress: the
+        // high-water slot must not regress.
+        let state = state
+            .observe_anchor(7, timeout)
+            .expect("regressed anchor is tolerated (no bail this fast)");
+        assert_eq!(state.last_observed_slot, Some(10));
+
+        // A strictly greater anchor advances and resets the stall timer.
+        let state = state
+            .observe_anchor(20, timeout)
+            .expect("advancing anchor should succeed");
+        assert_eq!(state.last_observed_slot, Some(20));
+    }
+
+    #[tokio::test]
+    async fn poll_state_drained_advances_watermark_and_monotonic_heartbeat() {
+        let sm = MockStateManager::new();
+        let state = PollState::resumed(&sm, 10).await;
+
+        // anchor 10 drains `[next_start, 10)`: watermark advances to 10,
+        // heartbeat covers slot 9, catchup gate flips.
+        let (state, heartbeat) = state.drained(10);
+        assert_eq!(state.next_start, 10);
+        assert_eq!(heartbeat, Some(9));
+        assert_eq!(state.heartbeat_floor, 9);
+        assert!(state.caught_up);
+
+        // Heartbeat advances with the anchor: 30 - 1 = 29 beats the floor of 9.
+        let (state, heartbeat) = state.drained(30);
+        assert_eq!(state.next_start, 30);
+        assert_eq!(heartbeat, Some(29));
+        assert_eq!(state.heartbeat_floor, 29);
+
+        // A regressing anchor cannot regress the heartbeat: the floor holds at 29
+        let (_state, heartbeat) = state.drained(5);
+        assert_eq!(heartbeat, Some(29));
+    }
+
+    #[tokio::test]
     async fn run_emits_heartbeat_and_single_catchup_completed_when_idle() {
-        let mut server = mockito::Server::new_async().await;
-
-        // Frozen anchor: an idle chain whose tip never moves.
-        // The indexer must still emit a heartbeat for the covered tip and a
-        // single CatchupCompleted event.
-        let _slot = server
-            .mock("POST", "/")
-            .match_body(mockito::Matcher::Regex("getSlot".to_string()))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":10}"#)
-            .create_async()
-            .await;
-
-        let state_manager = MockStateManager::new();
-        state_manager.set_processed_block(Chain::Solana, 9).await;
-        let mut indexer = test_indexer(&server.url(), state_manager);
-        indexer.polling = PollingConfig {
-            poll_interval: Duration::from_millis(5),
-            slot_stall_timeout: Duration::from_secs(30),
-        };
-
-        let (events_tx, mut events_rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
-        let run = {
-            let cancel = cancel.clone();
-            tokio::spawn(async move { indexer.run(events_tx, cancel).await })
-        };
+        // Frozen anchor: an idle chain whose tip never moves. The indexer
+        // must still emit a heartbeat for the covered tip and a single
+        // CatchupCompleted event.
+        let mut f = RunFixture::spawn(&[10], Some(9), None).await;
 
         // First tick: heartbeat for the covered tip, then exactly one
-        // CatchupCompleted.
-        // Second tick (after POLL_INTERVAL): heartbeat again — same height
-        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(9))));
+        // CatchupCompleted. Second tick: heartbeat again — same height.
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
         assert!(matches!(
-            events_rx.recv().await,
+            f.next_event().await,
             Some(ChainEvent::CatchupCompleted)
         ));
-        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(9))));
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
 
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("run should stop promptly on cancel")
-            .expect("run task should not panic")
-            .expect("run should return Ok on cancel");
+        f.cancel_and_join().await;
     }
 
     #[tokio::test]
     async fn run_bails_when_observed_slot_frozen() {
-        let mut server = mockito::Server::new_async().await;
-
         // A frozen RPC node: getSlot keeps returning the same slot forever.
         // The heartbeat keeps Block events flowing, so only the indexer-side
         // slot-stall watchdog can catch this.
-        let _slot = server
-            .mock("POST", "/")
-            .match_body(mockito::Matcher::Regex("getSlot".to_string()))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":10}"#)
-            .create_async()
-            .await;
+        let f = RunFixture::spawn(
+            &[10],
+            Some(9),
+            PollingConfig {
+                poll_interval: Duration::from_millis(5),
+                slot_stall_timeout: Duration::from_millis(100),
+            },
+        )
+        .await;
 
-        let state_manager = MockStateManager::new();
-        state_manager.set_processed_block(Chain::Solana, 9).await;
-        let mut indexer = test_indexer(&server.url(), state_manager);
-        indexer.polling = PollingConfig {
-            poll_interval: Duration::from_millis(5),
-            slot_stall_timeout: Duration::from_millis(100),
-        };
-
-        let (events_tx, _events_rx) = mpsc::channel(64);
-        let result = indexer
-            .run(events_tx, CancellationToken::new())
-            .await;
-
-        let err = result.expect_err("run should bail on a frozen observed slot");
+        let err = f
+            .await_result()
+            .await
+            .expect_err("run should bail on a frozen observed slot");
         assert!(err.to_string().contains("frozen"));
     }
 
+    /// Anchor advances mid-run: the newly covered range is drained exactly
+    /// once, `CatchupCompleted` is not re-emitted, and later ticks do not
+    /// re-paginate the drained range.
+    #[tokio::test]
+    async fn run_drains_new_range_once_when_anchor_advances() {
+        let mut server = mockito::Server::new_async().await;
+
+        // One signature page: slots 11, 10 in range; slot 9 (< start 10)
+        // terminates pagination. Exactly one pagination pass covers the whole
+        // advance — a regression to a stale watermark would re-fetch and fail
+        // the `.expect(1)` on drop.
+        let entries: Vec<_> = [11, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([block_response(0, 10), block_response(1, 11),]).to_string();
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // getSlot script: seed 10, tick 1 at 10 (empty range), tick 2 at 12
+        // (drains [10, 12)), tick 3 at 12 again (empty, proves no re-drain).
+        let mut f = RunFixture::spawn_with_server(server, &[10, 10, 12], Some(9), None).await;
+
+        // Tick 1: caught up at anchor 10.
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
+        assert!(matches!(
+            f.next_event().await,
+            Some(ChainEvent::CatchupCompleted)
+        ));
+
+        // Tick 2: drain [10, 12) — both slots' block events, then the
+        // heartbeat for the new tip. No second CatchupCompleted.
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(10))));
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
+
+        // Tick 3: anchor unchanged — heartbeat only, same height.
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
+
+        f.cancel_and_join().await;
+    }
     #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
