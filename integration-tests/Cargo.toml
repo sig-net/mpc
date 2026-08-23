@@ -27,7 +27,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
-subxt = { workspace = true, features = ["jsonrpsee", "native"] }
 testcontainers = "0.23.1"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
 tokio-util.workspace = true
@@ -74,7 +73,7 @@ mpc-chain-canton.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
 mpc-chain-near.workspace = true
-mpc-chain-midnight.workspace = true
+mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",

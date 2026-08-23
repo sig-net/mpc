@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -6,15 +7,10 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{probe_network_id, MidnightConfig, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use subxt::backend::legacy::rpc_methods::NumberOrHex;
-use subxt::backend::legacy::LegacyRpcMethods;
-use subxt::backend::rpc::RpcClient;
-use subxt::ext::codec::DecodeAll as _;
-use subxt::{OnlineClient, SubstrateConfig};
 use testcontainers::core::logs::LogFrame;
 use testcontainers::core::{IntoContainerPort as _, WaitFor};
 use testcontainers::{GenericImage, ImageExt as _};
@@ -38,7 +34,6 @@ const PROOF_PORT: u16 = 6300;
 const INDEXER_SECRET: &str = "303132333435363738393031323334353637383930313233343536373839303132";
 const SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e";
-const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
 struct MidnightEndpoints {
     node_ws_url: String,
@@ -465,87 +460,64 @@ fn log_consumer(path: &Path) -> impl Fn(&LogFrame) + Clone + Send + Sync + 'stat
     }
 }
 
-/// The node's network id, once its RPC answers and it has imported block 1.
-async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
+/// Retries `probe` every 500 ms for `attempts` tries, reporting the last failure.
+async fn wait_until_ready<T, F, Fut>(
+    label: &str,
+    url: &str,
+    attempts: usize,
+    probe: F,
+) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
     let mut last_error = None;
-    for _ in 0..120 {
-        match probe_node(node_ws_url).await {
-            Ok(Some(network_id)) => return Ok(network_id),
-            Ok(None) => last_error = Some("block 1 is not imported yet".to_string()),
-            Err(error) => last_error = Some(format!("connect: {error:#}")),
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    anyhow::bail!(
-        "Midnight node at {node_ws_url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
-    )
-}
-
-/// `Ok(None)` while the node answers but has not imported block 1.
-async fn probe_node(node_ws_url: &str) -> anyhow::Result<Option<String>> {
-    let rpc = RpcClient::from_insecure_url(node_ws_url)
-        .await
-        .context("connecting to the Midnight node")?;
-    let block_one = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone())
-        .chain_get_block_hash(Some(NumberOrHex::Number(1)))
-        .await
-        .context("fetching the hash of Midnight block 1")?;
-    if block_one.is_none() {
-        return Ok(None);
-    }
-    let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc)
-        .await
-        .context("initialising the Midnight node client")?;
-    let runtime_api = client
-        .runtime_api()
-        .at_latest()
-        .await
-        .context("fetching the latest finalized Midnight block")?;
-    let answer = runtime_api
-        .call_raw(NETWORK_ID_ENTRY, Some(&[]))
-        .await
-        .context("fetching the Midnight network id")?;
-    let mut payload = answer.as_slice();
-    let network_id =
-        String::decode_all(&mut payload).context("Midnight returned a malformed network id")?;
-    Ok(Some(network_id))
-}
-
-async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {
-    let client = Client::new();
-    let mut last_error = None;
-    for _ in 0..180 {
-        match client
-            .post(indexer_url)
-            .json(&serde_json::json!({ "query": "{ __typename }" }))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => last_error = Some(format!("status {}", response.status())),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    anyhow::bail!(
-        "Midnight indexer at {indexer_url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
-    )
-}
-
-async fn wait_for_http(label: &str, url: &str) -> anyhow::Result<()> {
-    let client = Client::new();
-    let mut last_error = None;
-    for _ in 0..120 {
-        match client.get(url).send().await {
-            Ok(_) => return Ok(()),
-            Err(error) => last_error = Some(error.to_string()),
+    for _ in 0..attempts {
+        match probe().await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!(
         "Midnight {label} at {url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
+        last_error.map_or_else(|| "no response".to_string(), |error| format!("{error:#}"))
     )
+}
+
+/// The node's network id, once its RPC answers and it has imported block 1.
+async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
+    wait_until_ready("node", node_ws_url, 120, || async {
+        probe_network_id(node_ws_url)
+            .await?
+            .context("block 1 is not imported yet")
+    })
+    .await
+}
+
+async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {
+    let client = Client::new();
+    wait_until_ready("indexer", indexer_url, 180, || async {
+        let response = client
+            .post(indexer_url)
+            .json(&serde_json::json!({ "query": "{ __typename }" }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "status {}",
+            response.status()
+        );
+        Ok(())
+    })
+    .await
+}
+
+async fn wait_for_http(label: &str, url: &str) -> anyhow::Result<()> {
+    let client = Client::new();
+    wait_until_ready(label, url, 120, || async {
+        client.get(url).send().await?;
+        Ok(())
+    })
+    .await
 }

@@ -6792,7 +6792,6 @@ dependencies = [
  "solana-client",
  "solana-sdk",
  "solana-transaction-status",
- "subxt",
  "test-log",
  "testcontainers",
  "thiserror 1.0.69",
