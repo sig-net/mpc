@@ -71,6 +71,98 @@ impl Default for PollingConfig {
     }
 }
 
+/// Per-run state for the indexer poll loop. 
+/// Seeded once from persisted state (resume point), then advanced by drained ticks.
+#[derive(Clone, Copy)]
+struct PollState {
+    /// Slot the next tick starts draining from
+    // TODO: https://github.com/sig-net/mpc/issues/777
+    next_start: u64,
+    /// Highest anchor slot observed this run; `None` until the first tick.
+    last_observed_slot: Option<u64>,
+    /// When `last_observed_slot` last advanced.
+    slot_last_advanced_at: Instant,
+    /// Lowest slot that has been fully drained and emitted as a heartbeat. 
+    heartbeat_floor: u64,
+    /// Whether [`ChainEvent::CatchupCompleted`] has been emitted
+    caught_up: bool,
+}
+
+impl PollState {
+    /// Initialize from persisted state (resume point) or the current anchor slot if none exists.
+    async fn resumed<S: StateManager>(state_manager: &S, seed_anchor: u64) -> Self {
+        // The persisted watermark is the last fully drained slot, so the next tick starts at the next slot.
+        let next_start = state_manager
+            .get_processed_block(Chain::Solana)
+            .await
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(seed_anchor);
+
+        Self {
+            next_start,
+            last_observed_slot: None,
+            slot_last_advanced_at: Instant::now(),
+            heartbeat_floor: 0,
+            caught_up: false,
+        }
+    }
+
+    /// Slot-stall watchdog: only a strictly greater anchor counts as progress
+    /// Warns at half the budget, bails at the full budget so the supervisor
+    /// restarts and surfaces the frozen node (The heartbeat keeps `Block`
+    /// events flowing even on a frozen node, so the supervisor cannot detect
+    /// this on its own)
+    fn observe_anchor(self, anchor: u64, timeout: Duration) -> anyhow::Result<Self> {
+        // Only a strictly greater anchor counts as progress
+        match self.last_observed_slot {
+            Some(prev) if anchor > prev => Ok(Self {
+                last_observed_slot: Some(anchor),
+                slot_last_advanced_at: Instant::now(),
+                ..self
+            }),
+            // If the anchor has not advanced, check how long it has been stalled for
+            Some(prev) => {
+                let stalled_for = self.slot_last_advanced_at.elapsed();
+                if stalled_for >= timeout {
+                    anyhow::bail!(
+                        "solana observed slot frozen at {prev} for {stalled_for:?}; \
+                         bailing so the supervisor restarts and surfaces it"
+                    );
+                }
+                if stalled_for >= timeout / 2 {
+                    tracing::warn!(
+                        last_slot = prev,
+                        ?stalled_for,
+                        "solana observed slot has not advanced; RPC node may be frozen"
+                    );
+                }
+                Ok(self)
+            }
+            // If this is the first tick, seed the last observed slot so the watchdog has a baseline
+            None => Ok(Self {
+                last_observed_slot: Some(anchor),
+                slot_last_advanced_at: Instant::now(),
+                ..self
+            }),
+        }
+    }
+
+    /// Update the heartbeat floor and next start slot after a tick has drained to the anchor.
+    fn drained(self, anchor: u64) -> (Self, Option<u64>) {
+        // The heartbeat is the highest slot that has been fully drained and emitted as a `Block` event.
+        let heartbeat = anchor.saturating_sub(1).max(self.heartbeat_floor);
+        (
+            Self {
+                next_start: anchor,
+                heartbeat_floor: heartbeat,
+                caught_up: true,
+                ..self
+            },
+            (heartbeat > 0).then_some(heartbeat),
+        )
+    }
+}
+
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
     client: SolanaClient,
@@ -84,6 +176,16 @@ type CatchupBlockItem = (u64, SolanaCatchupBlock);
 impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     /// Delay between retries of transient RPC failures
     const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+    /// Current confirmed anchor slot, or `None` on cancellation.
+    async fn next_anchor(&self, cancel: &CancellationToken) -> Option<anyhow::Result<u64>> {
+        tokio::select! {
+            _ = cancel.cancelled() => None,
+            slot = self.client.get_slot_confirmed() => Some(
+                slot.context("solana failed to fetch anchor slot")
+            ),
+        }
+    }
 
     pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
@@ -109,18 +211,20 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         })
     }
 
-    /// Catchup items in `[processed + 1, anchor)` fetched in chunks.
+    /// Catchup items in `[start_slot, anchor)` fetched in chunks.
     /// `fetch_slots` failures are propagated so the supervisor can restart.
     async fn catchup_blocks(
         &self,
         anchor_height: u64,
+        start_slot: u64,
     ) -> anyhow::Result<
         Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
     > {
-        let Some((start_slot, end_slot)) = self.catchup_range(anchor_height).await else {
+        let end_slot = anchor_height.saturating_sub(1);
+        if start_slot > end_slot {
             tracing::info!(anchor_slot = anchor_height, "solana catchup not required");
             return Ok(Box::pin(stream::empty()));
-        };
+        }
 
         tracing::info!(
             anchor_slot = anchor_height,
@@ -200,21 +304,6 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             }
             chunks
         })
-    }
-
-    /// Range of slots that still need to be caught up, inclusive on both ends.
-    /// `None` means we're already caught up.
-    // TODO: https://github.com/sig-net/mpc/issues/777
-    async fn catchup_range(&self, anchor_height: u64) -> Option<(u64, u64)> {
-        let start_slot = self
-            .state_manager
-            .get_processed_block(Chain::Solana)
-            .await
-            .map(|n| n.saturating_add(1))
-            .unwrap_or(anchor_height);
-
-        let end_slot = anchor_height.saturating_sub(1);
-        (start_slot <= end_slot).then_some((start_slot, end_slot))
     }
 
     /// Paginate `getSignaturesForAddress` backwards from the anchor, yielding
@@ -404,52 +493,23 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut catchup_completed_emitted = false;
-
-        // Watchdog state for the anchor slot
-        let mut last_observed_slot: Option<u64> = None;
-        let mut slot_last_advanced_at = Instant::now();
-        let mut heartbeat_floor: u64 = 0;
+        // Seed the resume point before entering the loop
+        let Some(seed) = self.next_anchor(&cancel).await else {
+            return Ok(());
+        };
+        let mut state = PollState::resumed(&self.state_manager, seed?).await;
 
         loop {
-            let anchor = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                slot = self.client.get_slot_confirmed() => slot,
-            }
-            .context("solana failed to fetch anchor slot")?;
-
-            // Slot-stall watchdog:
-            // If the anchor slot has not advanced for `slot_stall_timeout`, we assume the RPC node is frozen and bail so the supervisor can restart.
-            // `Block` events are emitted even on a frozen node, so the supervisor cannot detect it otherwise.
-            match last_observed_slot {
-                Some(prev) if anchor > prev => {
-                    last_observed_slot = Some(anchor);
-                    slot_last_advanced_at = Instant::now();
-                }
-                Some(prev) => {
-                    let stalled_for = slot_last_advanced_at.elapsed();
-                    if stalled_for >= self.polling.slot_stall_timeout {
-                        anyhow::bail!(
-                            "solana observed slot frozen at {prev} for {stalled_for:?}; \
-                             bailing so the supervisor restarts and surfaces it"
-                        );
-                    }
-                    if stalled_for >= self.polling.slot_stall_timeout / 2 {
-                        tracing::warn!(
-                            last_slot = prev,
-                            ?stalled_for,
-                            "solana observed slot has not advanced; RPC node may be frozen"
-                        );
-                    }
-                }
-                None => {
-                    last_observed_slot = Some(anchor);
-                    slot_last_advanced_at = Instant::now();
-                }
-            }
+            let Some(res) = self.next_anchor(&cancel).await else {
+                return Ok(());
+            };
+            let anchor = res?;
+            state = state.observe_anchor(anchor, self.polling.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
-            let mut catchup_iter = self.catchup_blocks(anchor).await?;
+            let mut catchup_iter = self
+                .catchup_blocks(anchor, state.next_start)
+                .await?;
             loop {
                 let item = tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
@@ -462,19 +522,18 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                     .await;
             }
 
-            // Heartbeat: advance the watermark to the covered tip.
-            // This ensures that the backlog sees a `Block` event even if no new transactions have been emitted since the last catchup.
-            let heartbeat = anchor.saturating_sub(1).max(heartbeat_floor);
-            heartbeat_floor = heartbeat;
-            if heartbeat > 0 {
+            let was_caught_up = state.caught_up;
+            let (next_state, heartbeat) = state.drained(anchor);
+            state = next_state;
+
+            if let Some(height) = heartbeat {
                 events_tx
-                    .send(ChainEvent::Block(heartbeat))
+                    .send(ChainEvent::Block(height))
                     .await
                     .context("failed to send heartbeat block event")?;
             }
 
-            if !catchup_completed_emitted {
-                catchup_completed_emitted = true;
+            if !was_caught_up {
                 tracing::info!(
                     anchor_slot = anchor,
                     elapsed = ?tick_started_at.elapsed(),
@@ -1335,7 +1394,7 @@ mod tests {
         const ANCHOR_SLOT: u64 = 10;
 
         // No processed block persisted: start == anchor, so no catchup and no RPC calls.
-        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT, ANCHOR_SLOT).await.unwrap();
         assert!(stream.next().await.is_none());
     }
 
@@ -1354,7 +1413,7 @@ mod tests {
         let indexer = test_indexer(&server.url(), state_manager);
         const ANCHOR_SLOT: u64 = 10;
 
-        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT, 6).await.unwrap();
         let first = stream.next().await;
         assert!(first.is_some() && first.unwrap().is_err());
     }
@@ -1401,7 +1460,7 @@ mod tests {
         let cancel = CancellationToken::new();
         const ANCHOR_SLOT: u64 = 10;
 
-        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT).await.unwrap();
+        let mut stream = indexer.catchup_blocks(ANCHOR_SLOT, 6).await.unwrap();
 
         while let Some(res) = stream.next().await {
             let (slot, block) = res.unwrap();
@@ -1511,7 +1570,7 @@ mod tests {
             .await;
 
         let (events_tx, mut events_rx) = mpsc::channel(8);
-        let mut catchup = indexer.catchup_blocks(9).await.unwrap();
+        let mut catchup = indexer.catchup_blocks(9, 6).await.unwrap();
         while let Some(item) = catchup.next().await {
             let (slot, block) = item.unwrap();
             indexer
@@ -1639,7 +1698,7 @@ mod tests {
             .create_async()
             .await;
 
-        let mut catchup = indexer.catchup_blocks(10).await.unwrap();
+        let mut catchup = indexer.catchup_blocks(10, 6).await.unwrap();
 
         let mut replayed_slots = Vec::new();
         let mut request_pending = false;
