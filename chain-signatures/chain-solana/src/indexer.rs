@@ -149,11 +149,11 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     /// Delay between retries of transient RPC failures
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-    /// Current confirmed anchor slot, or `None` on cancellation.
+    /// Current finalized anchor slot, or `None` on cancellation.
     async fn next_anchor(&self, cancel: &CancellationToken) -> Option<anyhow::Result<u64>> {
         tokio::select! {
             _ = cancel.cancelled() => None,
-            slot = self.client.get_slot_confirmed() => Some(
+            slot = self.client.get_slot_finalized() => Some(
                 slot.context("solana failed to fetch anchor slot")
             ),
         }
@@ -804,7 +804,7 @@ mod tests {
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|commitment| commitment.commitment),
-            Some(CommitmentLevel::Confirmed)
+            Some(CommitmentLevel::Finalized)
         );
     }
 
@@ -1428,6 +1428,7 @@ mod tests {
 
         f.cancel_and_join().await;
     }
+
     #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must

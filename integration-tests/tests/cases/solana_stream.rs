@@ -30,6 +30,9 @@ use tokio::time::Instant;
 
 use std::time::Duration;
 
+/// Timeout for waiting for a finalized event from the Solana indexer. This is set to a higher value than the default 5s because the Solana test-validator finalizes blocks slowly and unreliably, especially on CI.
+const FINALIZED_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
+
 async fn solana_sandbox() -> Result<Solana> {
     let solana = Solana::run().await;
     solana.deploy_contract().await?;
@@ -62,7 +65,7 @@ async fn wait_for_sign_request(
     indexer: &mut ChainIndexerStream,
 ) -> Result<Arc<IndexedSignRequest>> {
     loop {
-        match timeout(Duration::from_secs(6), indexer.next_event()).await {
+        match timeout(FINALIZED_EVENT_TIMEOUT, indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(ChainEvent::CatchupCompleted)) => {
@@ -158,13 +161,20 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
             .await?;
     }
 
-    // Collect some events from first client
+    // Collect events from the first client until it has seen both requests
+    // (they surface only after finalization; heartbeats stream meanwhile).
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
-    for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), indexer1.next_event()).await {
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer1.next_event()).await {
             match event {
-                ChainEvent::SignRequest { .. } => seen_by_client1 += 1,
+                ChainEvent::SignRequest { .. } => {
+                    seen_by_client1 += 1;
+                    if seen_by_client1 >= 2 {
+                        break;
+                    }
+                }
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
                 _ => {}
             }
@@ -190,7 +200,8 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     // Client should process new events
     let mut sign_events = Vec::new();
     let mut caught_up = false;
-    for _ in 0..20 {
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
+    while Instant::now() < deadline {
         if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer2.next_event()).await {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
@@ -279,7 +290,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     // Collect all sign request events
     let mut sign_events = Vec::new();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + FINALIZED_EVENT_TIMEOUT;
     while sign_events.len() < num_requests {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -332,7 +343,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         )
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     let mut checkpoint_block = None;
     while Instant::now() < deadline {
         match timeout(Duration::from_secs(1), indexer1.next_event()).await {
@@ -380,7 +391,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         .await?;
 
     // New client should pick up new events
-    timeout(Duration::from_secs(5), async {
+    timeout(FINALIZED_EVENT_TIMEOUT, async {
         loop {
             match indexer2.next_event().await {
                 Some(ChainEvent::SignRequest { request, .. }) => break Ok(request),

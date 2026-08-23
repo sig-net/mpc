@@ -146,7 +146,7 @@ impl SolanaClient {
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
-            CommitmentConfig::confirmed(),
+            CommitmentConfig::finalized(),
         );
         let rpc_client = Arc::new(RpcClient::new(rpc_http_url.clone()));
         Self {
@@ -183,7 +183,7 @@ impl SolanaClient {
             encoding: Some(UiTransactionEncoding::JsonParsed),
             transaction_details: Some(TransactionDetails::Full),
             rewards: Some(false),
-            commitment: Some(CommitmentConfig::confirmed()),
+            commitment: Some(CommitmentConfig::finalized()),
             max_supported_transaction_version: Some(0),
         }
     }
@@ -197,16 +197,14 @@ impl SolanaClient {
         })
     }
 
-    // Get the latest confirmed slot from the Solana RPC. This is used to determine the upper bound for catchup.
-    // TODO: the whole indexing pipeline runs Confirmed (this anchor, block_fetch_config,
-    // signature pagination), matching the old WS semantics. Confirmed can theoretically be
-    // revoked (rare optimistic-confirmation violation). Decide with real rollback data whether
-    // to flip to Finalized end-to-end (~13s extra detection latency); if so, all commitment
-    // sites must change together.
-    pub async fn get_slot_confirmed(&self) -> anyhow::Result<u64> {
-        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot_confirmed", {
+    // Get the latest finalized slot from the Solana RPC. This is used to determine the upper bound for catchup.
+    // The whole indexing pipeline (this anchor, `block_fetch_config`, signature
+    // pagination) runs Finalized, matching the Ethereum indexer: no reliance on
+    // optimistic confirmation, at the cost of ~13s extra detection latency.
+    pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
+        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot_finalized", {
             self.rpc_client
-                .get_slot_with_commitment(CommitmentConfig::confirmed())
+                .get_slot_with_commitment(CommitmentConfig::finalized())
                 .await
                 .map_err(|e| anyhow::anyhow!(e))
         })
@@ -365,7 +363,7 @@ impl SolanaClient {
                     before,
                     until: None,
                     limit: Some(CATCHUP_PAGE_SIZE),
-                    commitment: Some(CommitmentConfig::confirmed()),
+                    commitment: Some(CommitmentConfig::finalized()),
                 };
                 self.rpc_client
                     .get_signatures_for_address_with_config(address, config)
@@ -647,7 +645,7 @@ mod tests {
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|c| c.commitment),
-            Some(solana_sdk::commitment_config::CommitmentLevel::Confirmed)
+            Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
         );
         assert_eq!(config.max_supported_transaction_version, Some(0));
     }
