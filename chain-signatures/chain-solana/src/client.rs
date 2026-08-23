@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
+    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
@@ -46,9 +46,6 @@ const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
 
-// TODO: adopt `retry_rpc_gated!` with a shared `SharedBackoff` (as chain-ethereum does) for
-// the indexer-path call sites (`get_slot_confirmed`, `fetch_signatures_from_latest`,
-// `fetch_blocks`, `get_block`).
 fn default_retry_strategy() -> RetryConfig {
     RetryConfig {
         min_delay: SOL_RPC_MIN_DELAY,
@@ -96,6 +93,8 @@ pub struct SolanaClient {
     rpc_retry: RetryConfig,
     /// Retry strategy for RPC calls that are part of catchup (e.g. get_block, fetch_blocks, fetch_signatures_from_latest)
     catchup_retry: RetryConfig,
+    /// Shared 429 cooldown across all RPC call sites
+    shared_backoff: SharedBackoff,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
     pub rpc_ws_url: String,
@@ -124,6 +123,7 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             rpc_ws_url: sol.rpc_ws_url.clone(),
@@ -153,6 +153,7 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url,
             rpc_ws_url,
@@ -189,12 +190,18 @@ impl SolanaClient {
     }
 
     pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot", {
-            self.rpc_client
-                .get_slot()
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        })
+        retry_rpc_gated!(
+            SOL_RPC_TIMEOUT,
+            self.rpc_retry,
+            self.shared_backoff,
+            "get_slot",
+            {
+                self.rpc_client
+                    .get_slot()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
     }
 
     // Get the latest finalized slot from the Solana RPC. This is used to determine the upper bound for catchup.
@@ -202,12 +209,18 @@ impl SolanaClient {
     // pagination) runs Finalized, matching the Ethereum indexer: no reliance on
     // optimistic confirmation, at the cost of ~13s extra detection latency.
     pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
-        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot_finalized", {
-            self.rpc_client
-                .get_slot_with_commitment(CommitmentConfig::finalized())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        })
+        retry_rpc_gated!(
+            SOL_RPC_TIMEOUT,
+            self.rpc_retry,
+            self.shared_backoff,
+            "get_slot_finalized",
+            {
+                self.rpc_client
+                    .get_slot_with_commitment(CommitmentConfig::finalized())
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
     }
 
     pub async fn get_tx(
@@ -215,9 +228,10 @@ impl SolanaClient {
         signature: &Signature,
     ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
         let max_attempts = self.rpc_retry.max_times;
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.rpc_retry,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     operation = %signature,
@@ -247,9 +261,10 @@ impl SolanaClient {
     // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -277,9 +292,10 @@ impl SolanaClient {
         }
 
         let max_attempts = self.catchup_retry.max_times;
-        let res = retry_rpc!(
+        let res = retry_rpc_gated!(
             SOL_BATCH_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -346,9 +362,10 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
