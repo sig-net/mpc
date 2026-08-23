@@ -20,28 +20,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
+use crate::config::SolIndexerConfig;
 use crate::events::{emit_events, extract_tx_signature};
 use crate::{SolConfig, SolanaClient};
-
-/// Live polling configuration.
-#[derive(Clone, Copy, Debug)]
-struct PollingConfig {
-    /// Delay between polling iterations once caught up.
-    // TODO: make configurable (e.g. via `SolConfig`) so it can be tuned to RPC budget / latency needs.
-    poll_interval: Duration,
-    /// Maximum time to wait for the anchor slot to advance before bailing. This is a safety check against frozen RPC nodes.
-    /// Supervisor watchdog is not enough because it only sees the last block event, which can be a heartbeat from a lagging replica.
-    slot_stall_timeout: Duration,
-}
-
-impl Default for PollingConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval: Duration::from_millis(500),
-            slot_stall_timeout: Duration::from_secs(60),
-        }
-    }
-}
 
 /// Per-run state for the indexer poll loop.
 /// Seeded once from persisted state (resume point), then advanced by drained ticks.
@@ -138,7 +119,7 @@ impl PollState {
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
     client: SolanaClient,
-    polling: PollingConfig,
+    config: SolIndexerConfig,
     state_manager: S,
     telemetry: T,
 }
@@ -159,17 +140,17 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
+    pub fn new(config: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        let program_id = Pubkey::from_str(&config.program_address).with_context(|| {
             format!(
                 "failed to parse solana program address: {}",
-                sol.program_address
+                config.program_address
             )
         })?;
 
         let client = SolanaClient::for_indexer(
-            sol.rpc_http_url.clone(),
-            sol.rpc_ws_url.clone(),
+            config.rpc_http_url.clone(),
+            config.rpc_ws_url.clone(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
@@ -177,7 +158,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         Ok(Self {
             program_id,
             client,
-            polling: PollingConfig::default(),
+            config: config.indexer,
             state_manager,
             telemetry,
         })
@@ -476,7 +457,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                 return Ok(());
             };
             let anchor = res?;
-            state = state.observe_anchor(anchor, self.polling.slot_stall_timeout)?;
+            state = state.observe_anchor(anchor, self.config.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
             let mut catchup_iter = self.catchup_blocks(anchor, state.next_start).await?;
@@ -523,7 +504,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
 
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(self.polling.poll_interval) => {}
+                _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
     }
@@ -561,7 +542,7 @@ mod tests {
         SolanaIndexer {
             program_id,
             client,
-            polling: PollingConfig::default(),
+            config: SolIndexerConfig::default(),
             state_manager,
             telemetry: NoopChainTelemetry,
         }
@@ -695,14 +676,14 @@ mod tests {
     impl RunFixture {
         /// Spawn `run()` with a getSlot mock serving `slots` in order (the
         /// last repeats forever), an optional persisted watermark, and an
-        /// optional `PollingConfig` (defaults: fast poll, slow stall timeout).
+        /// optional `SolIndexerConfig` (defaults: fast poll, slow stall timeout).
         async fn spawn(
             slots: &[u64],
             processed: Option<u64>,
-            polling: impl Into<Option<PollingConfig>>,
+            config: impl Into<Option<SolIndexerConfig>>,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, polling).await
+            Self::spawn_with_server(server, slots, processed, config).await
         }
 
         /// Variant taking a pre-built mockito server (additional RPC mocks
@@ -711,7 +692,7 @@ mod tests {
             mut server: mockito::ServerGuard,
             slots: &[u64],
             processed: Option<u64>,
-            polling: impl Into<Option<PollingConfig>>,
+            config: impl Into<Option<SolIndexerConfig>>,
         ) -> Self {
             // Scripted getSlot responses served in order; once the script
             // runs dry, the last body repeats forever (frozen-node
@@ -750,7 +731,7 @@ mod tests {
                     .await;
             }
             let mut indexer = test_indexer(&server.url(), state_manager);
-            indexer.polling = polling.into().unwrap_or(PollingConfig {
+            indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
                 slot_stall_timeout: Duration::from_secs(30),
             });
@@ -1357,7 +1338,7 @@ mod tests {
         let f = RunFixture::spawn(
             &[10],
             Some(9),
-            PollingConfig {
+            SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
                 slot_stall_timeout: Duration::from_millis(100),
             },
@@ -1479,7 +1460,7 @@ mod tests {
         let indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
-            polling: PollingConfig::default(),
+            config: SolIndexerConfig::default(),
             state_manager,
             telemetry: NoopChainTelemetry,
         };
