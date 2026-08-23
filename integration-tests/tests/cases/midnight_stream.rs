@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::{keccak256, Address, Bytes, U256};
@@ -6,23 +5,16 @@ use alloy::providers::ext::AnvilApi as _;
 use alloy::providers::{Provider as _, ProviderBuilder};
 use anyhow::Context as _;
 use integration_tests::cluster;
-use mpc_chain_integration_core::{ChainIndexer as _, MockStateManager, NoopChainTelemetry};
+use mpc_chain_integration_core::utils::test::ChainIndexerStream;
+use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
 use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignKind};
+use mpc_primitives::{Chain, ChainEvent, SignKind};
 use serial_test::serial;
 use test_log::test;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const RETURN_TRUE_RUNTIME_BYTECODE: &str = "600160005260206000f3";
-
-struct MidnightEvents {
-    rx: mpsc::Receiver<ChainEvent>,
-    cancel: CancellationToken,
-    task: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
 
 async fn wait_for_completed_checkpoint(
     cluster: &cluster::Cluster,
@@ -55,52 +47,6 @@ async fn wait_for_completed_checkpoint(
     Ok(())
 }
 
-impl MidnightEvents {
-    async fn start(config: mpc_chain_midnight::MidnightConfig) -> anyhow::Result<Self> {
-        let indexer =
-            MidnightIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await?;
-        let (tx, rx) = mpsc::channel(16_384);
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let task = tokio::spawn(async move { indexer.run(tx, task_cancel).await });
-        let mut events = Self { rx, cancel, task };
-        events
-            .wait_for("catchup completion", |event| {
-                matches!(event, ChainEvent::CatchupCompleted).then_some(())
-            })
-            .await?;
-        Ok(events)
-    }
-
-    async fn wait_for<T>(
-        &mut self,
-        description: &str,
-        mut take: impl FnMut(ChainEvent) -> Option<T>,
-    ) -> anyhow::Result<T> {
-        tokio::time::timeout(EVENT_TIMEOUT, async {
-            loop {
-                let event =
-                    self.rx.recv().await.with_context(|| {
-                        format!("Midnight indexer stopped before {description}")
-                    })?;
-                if let Some(value) = take(event) {
-                    return Ok(value);
-                }
-            }
-        })
-        .await
-        .with_context(|| format!("timed out waiting for {description}"))?
-    }
-
-    async fn shutdown(self) -> anyhow::Result<()> {
-        self.cancel.cancel();
-        self.task
-            .await
-            .context("joining Midnight event monitor")??;
-        Ok(())
-    }
-}
-
 #[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
 #[serial]
 #[test(tokio::test)]
@@ -111,7 +57,13 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .midnight
         .as_ref()
         .context("Midnight context was not started")?;
-    let mut events = MidnightEvents::start(midnight.config.clone()).await?;
+    let indexer = MidnightIndexer::new(
+        midnight.config.clone(),
+        MockStateManager::new(),
+        NoopChainTelemetry,
+    )
+    .await?;
+    let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
 
     let ethereum = cluster
         .nodes
@@ -134,17 +86,23 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     midnight
         .submit_is_even(0, target.into_array(), argument)
         .await?;
-    let request: Arc<IndexedSignRequest> = events
-        .wait_for("the caller SignRequest", |event| match event {
-            ChainEvent::SignRequest { request, .. }
-                if request.chain == Chain::Midnight
-                    && matches!(request.kind, SignKind::SignBidirectional(_)) =>
-            {
-                Some(request)
-            }
-            _ => None,
-        })
-        .await?;
+    let ChainEvent::SignRequest { request, .. } = events
+        .wait_for(
+            |event| {
+                matches!(
+                    event,
+                    ChainEvent::SignRequest { request, .. }
+                        if request.chain == Chain::Midnight
+                            && matches!(request.kind, SignKind::SignBidirectional(_))
+                )
+            },
+            EVENT_TIMEOUT,
+        )
+        .await
+        .context("waiting for the caller SignRequest")?
+    else {
+        unreachable!("filtered above")
+    };
     let request_id = request.id.request_id;
     let SignKind::SignBidirectional(sign_event) = &request.kind else {
         unreachable!("filtered above")
@@ -152,11 +110,12 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
 
     events
-        .wait_for("the finalized respond entry", |event| {
-            matches!(event, ChainEvent::Respond(response) if response.request_id == request_id)
-                .then_some(())
-        })
-        .await?;
+        .wait_for(
+            |event| matches!(event, ChainEvent::Respond(response) if response.request_id == request_id),
+            EVENT_TIMEOUT,
+        )
+        .await
+        .context("waiting for the finalized respond entry")?;
     let root_public_key =
         mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
@@ -186,23 +145,26 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     anyhow::ensure!(receipt.status(), "the MPC-signed EVM transaction reverted");
 
     events
-        .wait_for("the finalized respondBidirectional entry", |event| {
-            matches!(
-                event,
-                ChainEvent::RespondBidirectional(response) if response.request_id == request_id
-            )
-            .then_some(())
-        })
-        .await?;
+        .wait_for(
+            |event| {
+                matches!(
+                    event,
+                    ChainEvent::RespondBidirectional(response) if response.request_id == request_id
+                )
+            },
+            EVENT_TIMEOUT,
+        )
+        .await
+        .context("waiting for the finalized respondBidirectional entry")?;
     midnight.settle_response(request_id).await?;
-    let final_block = events
-        .wait_for("a block after respondBidirectional", |event| match event {
-            ChainEvent::Block(height) => Some(height),
-            _ => None,
-        })
-        .await?;
+    let ChainEvent::Block(final_block) = events
+        .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
+        .await
+        .context("waiting for a block after respondBidirectional")?
+    else {
+        unreachable!("filtered above")
+    };
     wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
-    events.shutdown().await?;
     midnight.shutdown().await?;
     Ok(())
 }

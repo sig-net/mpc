@@ -3,18 +3,13 @@ import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from "@midnight-ntwrk/midnight-js-level-private-state-provider";
 import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
 import {
-  createProofProvider,
   ZKConfigRegistry,
-  zkConfigToProvingKeyMaterial,
   type MidnightProvider,
   type MidnightProviders,
-  type ProofProvider,
   type UnboundTransaction,
   type WalletProvider,
-  type ZKConfigProvider,
 } from "@midnight-ntwrk/midnight-js/types";
-import { httpClientProvingProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
-import type { ProvingKeyMaterial, ProvingProvider } from "@midnightntwrk/ledger-v9";
+import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
 import type { WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import {
   makeCompiledContract,
@@ -57,31 +52,6 @@ function walletProvider(
   };
 }
 
-function crossContractProofProvider(
-  proofServerUrl: string,
-  providers: readonly ZKConfigProvider<string>[],
-): ProofProvider {
-  const registry = new ZKConfigRegistry([...providers]);
-  const base = httpClientProvingProvider(
-    proofServerUrl,
-    registry as unknown as ZKConfigProvider<string>,
-  );
-  const lookupKey = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> => {
-    const resolved = await registry.resolveKeyLocation(keyLocation);
-    if (resolved !== undefined) return zkConfigToProvingKeyMaterial(resolved);
-    for (const provider of providers) {
-      try {
-        return zkConfigToProvingKeyMaterial(await provider.get(keyLocation));
-      } catch {
-        // The key may belong to the next contract in the call tree.
-      }
-    }
-    return undefined;
-  };
-  const provingProvider: ProvingProvider = { ...base, lookupKey };
-  return createProofProvider(provingProvider);
-}
-
 export function buildCallerProviders(
   facade: WalletFacade,
   keys: AccountKeys,
@@ -104,7 +74,12 @@ export function buildCallerProviders(
       subscriptionURL: config.indexerWsUrl,
     }),
     zkConfigProvider: callerZk,
-    proofProvider: crossContractProofProvider(config.proofServerUrl, [callerZk, signetZk]),
+    // `submitIsEvenRequest` calls into the Signet singleton, so one transaction carries a
+    // proof per contract; the registry binds each call to its bundle by deployed verifier key.
+    proofProvider: httpClientProofProvider(
+      config.proofServerUrl,
+      new ZKConfigRegistry([callerZk, signetZk]),
+    ),
     walletProvider: wallet,
     midnightProvider: wallet,
   };

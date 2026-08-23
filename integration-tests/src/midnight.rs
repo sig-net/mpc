@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -6,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{MidnightConfig, MidnightPublisherRpc, PublisherConfig};
+use mpc_chain_midnight::{probe_network_id, MidnightConfig, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,20 +41,6 @@ struct MidnightEndpoints {
     indexer_url: String,
     indexer_ws_url: String,
     proof_server_url: String,
-}
-
-fn host_endpoints(
-    node_host_port: u16,
-    indexer_host_port: u16,
-    proof_host_port: u16,
-) -> MidnightEndpoints {
-    MidnightEndpoints {
-        node_ws_url: format!("ws://127.0.0.1:{node_host_port}"),
-        node_http_url: format!("http://127.0.0.1:{node_host_port}"),
-        indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
-        indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
-        proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
-    }
 }
 
 struct MidnightStack {
@@ -389,6 +376,11 @@ impl MidnightStack {
             .get_host_port_ipv4(NODE_PORT)
             .await
             .context("resolving Midnight node host port")?;
+        let node_ws_url = format!("ws://127.0.0.1:{node_host_port}");
+        // The indexer's SPO sub-indexer opens a client at block 1 as soon as it
+        // connects and exits for good if the node has not imported that block yet,
+        // so the indexer starts only once the node is producing blocks.
+        let network_id = wait_for_node(&node_ws_url).await?;
 
         let node_internal_ws = format!("ws://{node_ip}:{NODE_PORT}");
         let indexer_log = log_consumer(&artifact_dir.join("indexer.log"));
@@ -435,8 +427,13 @@ impl MidnightStack {
             .await
             .context("resolving Midnight proof-server host port")?;
 
-        let endpoints = host_endpoints(node_host_port, indexer_host_port, proof_host_port);
-        let network_id = wait_for_node(&endpoints.node_ws_url).await?;
+        let endpoints = MidnightEndpoints {
+            node_ws_url,
+            node_http_url: format!("http://127.0.0.1:{node_host_port}"),
+            indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
+            indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
+            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
+        };
         wait_for_indexer(&endpoints.indexer_url).await?;
         wait_for_http("proof server", &endpoints.proof_server_url).await?;
 
@@ -463,62 +460,64 @@ fn log_consumer(path: &Path) -> impl Fn(&LogFrame) + Clone + Send + Sync + 'stat
     }
 }
 
-async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
-    let config = MidnightConfig {
-        node_ws_url: node_ws_url.to_string(),
-        central_address: "00".repeat(32),
-        publisher: Default::default(),
-        rpc: Default::default(),
-        indexer: Default::default(),
-    };
+/// Retries `probe` every 500 ms for `attempts` tries, reporting the last failure.
+async fn wait_until_ready<T, F, Fut>(
+    label: &str,
+    url: &str,
+    attempts: usize,
+    probe: F,
+) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
     let mut last_error = None;
-    for _ in 0..120 {
-        match MidnightPublisherRpc::connect(&config).await {
-            Ok(rpc) => return Ok(rpc.network_id().to_string()),
-            Err(error) => last_error = Some(format!("connect: {error:#}")),
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    anyhow::bail!(
-        "Midnight node at {node_ws_url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
-    )
-}
-
-async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {
-    let client = Client::new();
-    let mut last_error = None;
-    for _ in 0..180 {
-        match client
-            .post(indexer_url)
-            .json(&serde_json::json!({ "query": "{ __typename }" }))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => last_error = Some(format!("status {}", response.status())),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    anyhow::bail!(
-        "Midnight indexer at {indexer_url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
-    )
-}
-
-async fn wait_for_http(label: &str, url: &str) -> anyhow::Result<()> {
-    let client = Client::new();
-    let mut last_error = None;
-    for _ in 0..120 {
-        match client.get(url).send().await {
-            Ok(_) => return Ok(()),
-            Err(error) => last_error = Some(error.to_string()),
+    for _ in 0..attempts {
+        match probe().await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!(
         "Midnight {label} at {url} did not become ready: {}",
-        last_error.unwrap_or_else(|| "no response".into())
+        last_error.map_or_else(|| "no response".to_string(), |error| format!("{error:#}"))
     )
+}
+
+/// The node's network id, once its RPC answers and it has imported block 1.
+async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
+    wait_until_ready("node", node_ws_url, 120, || async {
+        probe_network_id(node_ws_url)
+            .await?
+            .context("block 1 is not imported yet")
+    })
+    .await
+}
+
+async fn wait_for_indexer(indexer_url: &str) -> anyhow::Result<()> {
+    let client = Client::new();
+    wait_until_ready("indexer", indexer_url, 180, || async {
+        let response = client
+            .post(indexer_url)
+            .json(&serde_json::json!({ "query": "{ __typename }" }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "status {}",
+            response.status()
+        );
+        Ok(())
+    })
+    .await
+}
+
+async fn wait_for_http(label: &str, url: &str) -> anyhow::Result<()> {
+    let client = Client::new();
+    wait_until_ready(label, url, 120, || async {
+        client.get(url).send().await?;
+        Ok(())
+    })
+    .await
 }

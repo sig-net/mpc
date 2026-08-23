@@ -37,22 +37,32 @@ jobs:
             ~/.local/bin/compact
           key: compact-${{ runner.os }}-launcher0.5.1-compactc0.33.0-rc.2
 
+      # The recipe sig-net/midnight-integration's ci.yml uses for the same pins.
       - name: Install pinned Compact toolchain
         run: |
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$HOME/.compact/bin:$PATH"
+          # Launcher pinned to compact-v0.5.1 (never releases/latest).
           if ! command -v compact >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/compact-installer.sh https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+            curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh \
+              https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+            echo "85e74a53ae4a67b31fa4d854f3b6ffb4c29f7c53e3372c5008b6a4729a8b4a73  /tmp/compact-installer.sh" | sha256sum -c
             sh /tmp/compact-installer.sh
           fi
+          # compactc 0.33.0-rc.2 is a ledger-9 prerelease the launcher's channel does
+          # not serve (`compact update 0.33.0-rc.2` alone fails), so fetch it by exact
+          # URL and let the launcher adopt the on-disk copy.
           RC_DIR="$HOME/.compact/versions/0.33.0-rc.2/x86_64-unknown-linux-musl"
           if [ ! -x "$RC_DIR/compactc" ]; then
             mkdir -p "$RC_DIR"
-            curl -fsSL -o /tmp/compactc-rc.zip https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.33.0-rc.2/compactc_v0.33.0-rc.2_x86_64-unknown-linux-musl.zip
+            curl -fsSL --retry 4 -o /tmp/compactc-rc.zip \
+              https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.33.0-rc.2/compactc_v0.33.0-rc.2_x86_64-unknown-linux-musl.zip
+            echo "3055ab92bbc8d5bb0d6282b661b83761d2a0de2ee37e21cf7107e25aaf2a9aad  /tmp/compactc-rc.zip" | sha256sum -c
             unzip -qo /tmp/compactc-rc.zip -d "$RC_DIR"
             chmod +x "$RC_DIR"/*
           fi
+          # Adopt the on-disk version. If the launcher refuses, wire its symlinks.
           compact update 0.33.0-rc.2 || ln -sfn "$RC_DIR"/* "$HOME/.compact/bin/"
           compact compile --version
 
@@ -86,6 +96,9 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Install cargo-near
         run: |
           if ! command -v cargo-near >/dev/null; then
@@ -93,34 +106,16 @@ jobs:
             sh /tmp/cargo-near-installer.sh
           fi
 
-      - name: Pull pinned Midnight services
-        run: |
-          docker pull midnightntwrk/midnight-node:2.0.0-rc.4
-          docker pull midnightntwrk/indexer-standalone:4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df
-          docker pull midnightntwrk/proof-server:9.0.0-rc.5_experimental
-
       - name: Build integration artifacts
-        run: MPC_SETUP_ALWAYS=1 ./setup.sh
+        run: ./setup.sh
 
-      - name: List Midnight integration test
-        run: |
-          test_name='cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response'
-          test_list=/tmp/midnight-real-stack-tests.txt
-          cargo test -p integration-tests --test lib "$test_name" -- --exact --list > "$test_list"
-          cat "$test_list"
-          match_count=$(grep -Fxc "$test_name: test" "$test_list" || true)
-          summary_count=$(grep -Fxc '1 test, 0 benchmarks' "$test_list" || true)
-          if [ "$match_count" -ne 1 ]; then
-            echo "expected exactly one Midnight real-stack test, found $match_count"
-            exit 1
-          fi
-          if [ "$summary_count" -ne 1 ]; then
-            echo "Midnight real-stack test listing did not report exactly one test"
-            exit 1
-          fi
+      - name: Build integration tests
+        run: cargo build -p integration-tests --tests
 
+      # nextest fails on an empty selection, so a renamed test cannot turn this
+      # step into a silent no-op.
       - name: Test Midnight end-to-end stream
-        run: cargo test -p integration-tests --test lib 'cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response' -- --exact --ignored --nocapture --test-threads 1
+        run: cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

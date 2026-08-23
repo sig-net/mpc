@@ -486,7 +486,7 @@ impl MidnightRpc {
 
 /// Finalized reads for the Midnight publisher. Subxt owns connection recovery;
 /// callers keep one instance instead of rebuilding or retrying a dead transport.
-pub struct MidnightPublisherRpc {
+pub(crate) struct MidnightPublisherRpc {
     client: OnlineClient<SubstrateConfig>,
     rpc: RpcClient,
     network_id: String,
@@ -596,6 +596,27 @@ async fn network_id(client: &OnlineClient<SubstrateConfig>) -> anyhow::Result<St
 fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
     let mut payload = answer;
     String::decode_all(&mut payload).context("midnight runtime returned a malformed network id")
+}
+
+/// The network id of the node at `node_ws_url` once it has imported block 1, or `None`
+/// while it has not. Dials afresh on every call, so a sandbox that is still booting
+/// answers with a connection error and the caller keeps polling.
+#[cfg(feature = "sandbox")]
+pub async fn probe_network_id(node_ws_url: &str) -> anyhow::Result<Option<String>> {
+    let rpc = RpcClient::from_insecure_url(node_ws_url)
+        .await
+        .context("connecting to the midnight node")?;
+    let block_one = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone())
+        .chain_get_block_hash(Some(NumberOrHex::Number(1)))
+        .await
+        .context("fetching the hash of midnight block 1")?;
+    if block_one.is_none() {
+        return Ok(None);
+    }
+    let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc)
+        .await
+        .context("initialising the midnight node client")?;
+    network_id(&client).await.map(Some)
 }
 
 async fn connect_publisher_transport(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
