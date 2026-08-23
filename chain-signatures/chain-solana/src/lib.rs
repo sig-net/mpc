@@ -1,5 +1,6 @@
 mod client;
 mod config;
+mod events;
 mod indexer;
 mod utils;
 
