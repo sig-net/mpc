@@ -514,10 +514,11 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
 
     if let Some(public_key) = spawner.pregenerated_keys.public_key() {
         // Use init_running to skip key generation
-        let participants =
-            mpc_contract::primitives::Participants::from(mpc_contract::primitives::Candidates {
+        let participants = mpc_contract::primitives::Participants::from(
+            mpc_contract::primitives::CandidatesView {
                 candidates: candidates.clone().into_iter().collect(),
-            });
+            },
+        );
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let near_pk = near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
@@ -651,7 +652,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let init_contract_start = std::time::Instant::now();
     if let Some(public_key) = spawner.pregenerated_keys.public_key() {
         // Use init_running to skip key generation
-        let candidates_struct = mpc_contract::primitives::Candidates {
+        let candidates_struct = mpc_contract::primitives::CandidatesView {
             candidates: candidates.clone().into_iter().collect(),
         };
         let participants = mpc_contract::primitives::Participants::from(candidates_struct);

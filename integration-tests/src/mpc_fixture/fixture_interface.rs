@@ -149,8 +149,6 @@ impl MpcFixture {
             // the threshold.
             threshold: resharing.new_threshold,
             public_key: resharing.public_key,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold_votes: Default::default(),
         };
