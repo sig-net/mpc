@@ -16,14 +16,15 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>;
+    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>;
 
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
 }
 
 /// Type alias to make clippy happy
-type Watchers = Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>;
+type Watchers =
+    Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>>>>;
 
 /// In-memory mock implementation of [`StateManager`] intended for use in tests.
 ///
@@ -44,7 +45,7 @@ impl StateManager for MockStateManager {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .read()
             .await
@@ -64,7 +65,7 @@ impl MockStateManager {
     }
 
     /// Register a bidirectional transaction awaiting execution on `chain`.
-    pub async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: BidirectionalTx) {
+    pub async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
         self.watchers
             .write()
             .await

@@ -8,6 +8,7 @@ use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use alloy::primitives::{Address, B256};
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
@@ -243,11 +244,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
     for (index, server) in servers.iter().enumerate() {
         let mut info = ParticipantInfo::new(index as u32);
         info.url = server.url();
-        mesh_state.update(
-            cait_sith::protocol::Participant::from(index as u32),
-            NodeStatus::Active,
-            info,
-        );
+        mesh_state.update(Participant::from(index as u32), NodeStatus::Active, info);
     }
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
     let (_cp_tx, cp_rx) = watch::channel(None);

@@ -7,6 +7,7 @@ use mpc_primitives::{
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
 use mpc_utils::time::current_unix_timestamp;
+use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -25,11 +26,11 @@ fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
 }
 
 pub struct CompletedTx {
-    tx: BidirectionalTx,
+    tx: Arc<BidirectionalTx>,
 }
 
 impl CompletedTx {
-    pub fn new(tx: BidirectionalTx) -> Self {
+    pub fn new(tx: Arc<BidirectionalTx>) -> Self {
         Self { tx }
     }
 
@@ -144,8 +145,8 @@ mod tests {
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
     /// Sample tx with a Solana source chain, required by `epsilon`/path derivation.
-    fn sample_bidirectional_tx() -> BidirectionalTx {
-        BidirectionalTx {
+    fn sample_bidirectional_tx() -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
             id: BidirectionalTxId(B256::repeat_byte(0xab).0),
             sender: [0x11; 32],
             serialized_transaction: Vec::new(),
@@ -163,7 +164,7 @@ mod tests {
             request_id: [0x22; 32],
             from_address: **Address::ZERO,
             nonce: 0,
-        }
+        })
     }
 
     #[tokio::test]

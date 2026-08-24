@@ -26,8 +26,8 @@ use near_sdk::{
     PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants, PendingRequest,
-    PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants,
+    PendingRequest, PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
@@ -39,7 +39,9 @@ use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
 pub use state::{
-    InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
+    InitializingContractState, InitializingContractStateView, ProtocolContractState,
+    ProtocolContractStateView, ResharingContractState, RunningContractState,
+    RunningContractStateView,
 };
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
@@ -116,9 +118,13 @@ impl MpcContract {
         candidates: BTreeMap<AccountId, CandidateInfo>,
         config: Option<Config>,
     ) -> Self {
+        let mut stored_candidates = Candidates::new();
+        for (account_id, info) in candidates {
+            stored_candidates.insert(account_id, info);
+        }
         MpcContract {
             protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: Candidates { candidates },
+                candidates: stored_candidates,
                 threshold,
                 pk_votes: PkVotes::new(),
             }),
@@ -206,7 +212,7 @@ impl VersionedMpcContract {
     /// This is the root public key combined from all the public keys of the participants.
     #[handle_result]
     pub fn public_key(&self) -> Result<PublicKey, Error> {
-        match self.state() {
+        match self.state_ref() {
             ProtocolContractState::Running(state) => Ok(state.public_key.clone()),
             ProtocolContractState::Resharing(state) => Ok(state.public_key.clone()),
             _ => Err(InvalidState::ProtocolStateNotRunningOrResharing.into()),
@@ -425,6 +431,7 @@ impl VersionedMpcContract {
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
                     new_participants.insert(candidate, candidate_info.clone().into());
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
@@ -459,6 +466,7 @@ impl VersionedMpcContract {
                 participants,
                 threshold,
                 public_key,
+                candidates,
                 leave_votes,
                 ..
             }) => {
@@ -473,6 +481,7 @@ impl VersionedMpcContract {
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
                     new_participants.remove(&kick);
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
@@ -513,6 +522,7 @@ impl VersionedMpcContract {
                 participants,
                 threshold,
                 public_key,
+                candidates,
                 threshold_votes,
                 ..
             }) => {
@@ -531,6 +541,7 @@ impl VersionedMpcContract {
                 if threshold_votes.vote(new_threshold, voter) >= *threshold {
                     // Same participants, different threshold; the resharing
                     // protocol re-shares the key with a new threshold.
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
@@ -568,9 +579,11 @@ impl VersionedMpcContract {
                 let voted = pk_votes.entry(public_key.clone());
                 voted.insert(voter);
                 if voted.len() >= *threshold {
+                    let participants = Participants::from(&*candidates);
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: 0,
-                        participants: candidates.clone().into(),
+                        participants,
                         threshold: *threshold,
                         public_key,
                         candidates: Candidates::new(),
@@ -837,9 +850,18 @@ impl VersionedMpcContract {
         migration::migrate(&state_bytes)
     }
 
-    pub fn state(&self) -> &ProtocolContractState {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.protocol_state,
+    pub fn state(&self) -> ProtocolContractStateView {
+        match self.state_ref() {
+            ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
+            ProtocolContractState::Initializing(state) => {
+                ProtocolContractStateView::Initializing(state.into())
+            }
+            ProtocolContractState::Running(state) => {
+                ProtocolContractStateView::Running(state.into())
+            }
+            ProtocolContractState::Resharing(state) => {
+                ProtocolContractStateView::Resharing(state.clone())
+            }
         }
     }
 
@@ -853,12 +875,30 @@ impl VersionedMpcContract {
         self.latest_checkpoints().get(&chain)
     }
 
+    /// Returns information and admission votes for a running candidate.
+    pub fn candidate_info(&self, account_id: AccountId) -> Option<CandidateEntry> {
+        match self.state_ref() {
+            ProtocolContractState::Running(state) => {
+                state.candidates.get(&account_id).cloned().map(|info| {
+                    let join_votes = state
+                        .join_votes
+                        .votes
+                        .get(&account_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    CandidateEntry { info, join_votes }
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
         let mut views = Vec::with_capacity(reads.len());
 
         for read in reads {
             let view = match read {
-                Read::State => View::State(self.state().clone()),
+                Read::State => View::State(self.state()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
@@ -914,7 +954,7 @@ impl VersionedMpcContract {
         checkpoint: ConsensusCheckpointDigest,
     ) -> Result<bool, Error> {
         let voter = self.voter()?;
-        let threshold = match self.state() {
+        let threshold = match self.state_ref() {
             ProtocolContractState::Running(state) => state.threshold,
             _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
         };
@@ -1101,6 +1141,12 @@ impl VersionedMpcContract {
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.protocol_state,
+        }
+    }
+
+    fn state_ref(&self) -> &ProtocolContractState {
+        match self {
+            Self::V0(mpc_contract) => &mpc_contract.protocol_state,
         }
     }
 

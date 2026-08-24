@@ -286,12 +286,12 @@ impl SignGenerator {
                         ctx.governance.public_key,
                         &self.request,
                         &output,
-                        self.participants.clone(),
+                        &self.participants,
                         is_proposer,
                     ) {
                         if let Err(err) = ctx
                             .backlog
-                            .mark_publishing(self.request.chain, &sign_id, publish)
+                            .mark_publishing(self.request.chain, &sign_id, Arc::clone(&publish))
                             .await
                         {
                             tracing::warn!(
@@ -342,9 +342,9 @@ fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
     request: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
-    participants: Vec<Participant>,
+    participants: &[Participant],
     is_proposer: bool,
-) -> Option<PublishState> {
+) -> Option<Arc<PublishState>> {
     let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
     let signature = mpc_crypto::reconstruct_signature(
         &expected_public_key,
@@ -355,11 +355,11 @@ fn build_publish_state(
     .ok()?;
     let publish = PublishState {
         signature,
-        participants,
+        participants: participants.to_vec(),
         is_proposer,
     };
 
-    Some(publish)
+    Some(Arc::new(publish))
 }
 
 impl Drop for SignGenerator {

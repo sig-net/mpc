@@ -23,7 +23,7 @@ use mpc_primitives::{
     SignId,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Scheduling state for the watcher nonce gate. Persisted across blocks by the
 /// indexer (it borrows this) so first-appearance detection and retry tracking
@@ -37,13 +37,13 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, BidirectionalTx));
+type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
     BidirectionalTxId,
     SignId,
-    BidirectionalTx,
+    Arc<BidirectionalTx>,
     anyhow::Result<BackfillOutcome>,
 );
 
@@ -197,7 +197,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>,
+        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
@@ -653,6 +653,7 @@ mod tests {
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn late_watcher_backfill_uses_tx_hash_and_mined_block() {
@@ -737,7 +738,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -821,24 +822,26 @@ mod tests {
         // Setup Indexer & Watchers
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256, nonce: u64| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce,
+        let create_tx = |hash: alloy::primitives::B256, nonce: u64| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce,
+            })
         };
 
         harness
@@ -960,7 +963,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
@@ -1032,24 +1035,26 @@ mod tests {
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce: 0,
+        let create_tx = |hash: alloy::primitives::B256| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce: 0,
+            })
         };
 
         harness
@@ -1151,7 +1156,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), Arc::new(tx))
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1235,7 +1240,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([4; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1253,7 +1258,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1328,7 +1333,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([5; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1346,7 +1351,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1442,7 +1447,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([6; 32]),
-                BidirectionalTx {
+                Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
                     serialized_transaction: vec![],
@@ -1460,7 +1465,7 @@ mod tests {
                     request_id: tx_hash.0,
                     from_address: **from_address,
                     nonce: 0,
-                },
+                }),
             )
             .await;
 
@@ -1592,8 +1597,8 @@ mod tests {
     fn empty_output_schema_tx(
         tx_hash: alloy::primitives::B256,
         from_address: alloy::primitives::Address,
-    ) -> BidirectionalTx {
-        BidirectionalTx {
+    ) -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
@@ -1611,7 +1616,7 @@ mod tests {
             request_id: tx_hash.0,
             from_address: **from_address,
             nonce: 0,
-        }
+        })
     }
 
     /// A deterministic extraction failure — trace return data that contradicts
@@ -2041,24 +2046,26 @@ mod tests {
             .await;
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
-        let create_tx = |hash: alloy::primitives::B256| BidirectionalTx {
-            id: BidirectionalTxId(hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: hash.0,
-            from_address: **from_address,
-            nonce: 0,
+        let create_tx = |hash: alloy::primitives::B256| {
+            Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(hash.0),
+                sender: [0u8; 32],
+                serialized_transaction: vec![],
+                source_chain: Chain::Solana,
+                target_chain: Chain::Ethereum,
+                caip2_id: "eip155:31337".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+                deposit: 0,
+                path: "m/44'/60'/0'/0/0".to_string(),
+                algo: "secp256k1".to_string(),
+                dest: Chain::Ethereum.to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                request_id: hash.0,
+                from_address: **from_address,
+                nonce: 0,
+            })
         };
 
         harness
