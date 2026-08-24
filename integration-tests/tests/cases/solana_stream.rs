@@ -659,7 +659,7 @@ async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_solana_validator_restart_gap_free_resume() -> Result<()> {
+async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let mut solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
