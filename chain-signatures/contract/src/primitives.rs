@@ -1,4 +1,4 @@
-pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use mpc_primitives::ConsensusCheckpointDigest;
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
@@ -308,7 +308,7 @@ impl Candidates {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, Default)]
 pub struct CandidatesView {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
 }

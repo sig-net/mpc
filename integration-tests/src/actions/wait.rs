@@ -4,8 +4,9 @@ use std::time::Duration;
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
+use mpc_node::backlog::Checkpoint;
 use mpc_node::web::StateView;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;

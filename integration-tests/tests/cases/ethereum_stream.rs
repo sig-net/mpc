@@ -544,7 +544,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
             execution_tx.source_chain,
             &execution_sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -552,12 +552,12 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
     backlog
-        .advance(Chain::Solana, execution_sign_id, execution_tx)
+        .advance(Chain::Solana, execution_sign_id, Arc::new(execution_tx))
         .await
         .context("failed to seed execution watcher")?;
 
@@ -733,7 +733,9 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         nonce: 0,
     };
     let sign_id = SignId::new([7u8; 32]);
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+    backlog
+        .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+        .await;
 
     let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
 
@@ -877,7 +879,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
             tx.source_chain,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -885,12 +887,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
     backlog
-        .advance(Chain::Solana, sign_id, tx)
+        .advance(Chain::Solana, sign_id, Arc::new(tx))
         .await
         .context("failed to seed late execution watcher")?;
 

@@ -430,11 +430,11 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature,
                     participants: vec![Participant::from(0u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;

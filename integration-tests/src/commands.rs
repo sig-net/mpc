@@ -133,9 +133,7 @@ pub fn init_running_command(
 }
 
 pub fn dummy_candidates() -> Candidates {
-    let mut candidates = Candidates {
-        candidates: Default::default(),
-    };
+    let mut candidates = Candidates::default();
     let names: Vec<AccountId> = vec![
         "alice.near".parse().unwrap(),
         "bob.near".parse().unwrap(),

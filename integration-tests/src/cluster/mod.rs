@@ -3,7 +3,8 @@ pub mod spawner;
 use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_node::backlog::Checkpoint;
+use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};

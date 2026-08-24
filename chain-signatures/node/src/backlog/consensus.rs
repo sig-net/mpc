@@ -4,8 +4,9 @@ use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
+use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -198,7 +199,8 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
+    use crate::backlog::BacklogEntry;
+    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -347,9 +349,8 @@ mod tests {
             },
         ];
 
-        let chain = Chain::Ethereum;
-
         for case in cases {
+            let chain = Chain::Ethereum;
             let mut fixture = AlignFixture::new(None);
 
             // 1. Setup local checkpoints
@@ -388,10 +389,18 @@ mod tests {
             let mut peer_digest = [0u8; 32];
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
-                    vec![PendingTx {
-                        sign_id: SignId::new([1u8; 32]),
-                        transaction: vec![1, 2, 3],
-                    }]
+                    vec![BacklogEntry::new(Arc::new(IndexedSignRequest::sign(
+                        SignId::new([1u8; 32]),
+                        SignArgs {
+                            entropy: [1u8; 32],
+                            epsilon: k256::Scalar::ONE,
+                            payload: k256::Scalar::ONE,
+                            path: "test".to_string(),
+                            key_version: 0,
+                        },
+                        chain,
+                        0,
+                    )))]
                 } else {
                     vec![]
                 };
@@ -555,12 +564,12 @@ mod tests {
             .await;
 
         let peers = [
-            (cait_sith::protocol::Participant::from(0u32), {
+            (Participant::from(0u32), {
                 let mut info = ParticipantInfo::new(0);
                 info.url = newer_server.url();
                 info
             }),
-            (cait_sith::protocol::Participant::from(1u32), {
+            (Participant::from(1u32), {
                 let mut info = ParticipantInfo::new(1);
                 info.url = current_server.url();
                 info
