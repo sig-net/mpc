@@ -153,8 +153,11 @@ impl MidnightPublisher {
             ledger_parameters,
         })
     }
+}
 
-    async fn publish_inner(&self, action: &PublishAction) -> anyhow::Result<()> {
+#[async_trait]
+impl ChainPublisher for MidnightPublisher {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
         let _flow = self.flow.lock().await;
         let sign_id = action.request.id;
@@ -228,19 +231,6 @@ impl MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
-    }
-}
-
-#[async_trait]
-impl ChainPublisher for MidnightPublisher {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        self.publish_inner(action).await.inspect_err(|e| {
-            tracing::error!(
-                sign_id = ?action.request.id,
-                ?e,
-                "midnight: failed to publish signature"
-            );
-        })
     }
 }
 
