@@ -157,6 +157,8 @@ impl MidnightPublisher {
 
 #[async_trait]
 impl ChainPublisher for MidnightPublisher {
+    // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
+    // Retries and finalized-state reconciliation currently operate per request.
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
         let _flow = self.flow.lock().await;
