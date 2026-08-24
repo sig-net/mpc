@@ -46,6 +46,7 @@ const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
 
+/// Default retry strategy
 fn default_retry_strategy() -> RetryConfig {
     RetryConfig {
         min_delay: SOL_RPC_MIN_DELAY,
