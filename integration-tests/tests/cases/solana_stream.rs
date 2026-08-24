@@ -3,9 +3,10 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
+    utils::test::ChainIndexerStream, ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry,
+    PublishAction, StateManager,
 };
-use mpc_chain_solana::{SolConfig, SolanaIndexer};
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
@@ -22,6 +23,7 @@ use mpc_primitives::{
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -74,6 +76,79 @@ async fn wait_for_sign_request(
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),
         }
     }
+}
+
+/// Wait for a SignCommand::Request to arrive on the sign channel
+async fn next_sign_command(
+    sign_rx: &mut mpsc::Receiver<SignCommand>,
+) -> Result<Arc<IndexedSignRequest>> {
+    loop {
+        match timeout(Duration::from_secs(20), sign_rx.recv()).await {
+            Ok(Some(SignCommand::Request(request))) => return Ok(request),
+            Ok(Some(other)) => {
+                tracing::debug!(?other, "ignoring non-request sign command")
+            }
+            Ok(None) => anyhow::bail!("sign command channel closed"),
+            Err(_) => anyhow::bail!("timeout waiting for SignCommand::Request"),
+        }
+    }
+}
+
+/// Spawn a supervised Solana indexer over `backlog` (test wiring for
+/// `run_supervised`).
+/// Returns its abort handle and sign command receiver.
+async fn spawn_supervised_stream(
+    config: SolConfig,
+    backlog: Backlog,
+) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
+    let indexer = SolanaIndexer::new(config, backlog.clone(), NoopChainTelemetry)
+        .context("failed to create SolanaIndexer")?;
+
+    let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
+    let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
+    let rpc = RpcChannel { tx: rpc_tx };
+
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+        &account_id,
+        AffinePoint::GENERATOR,
+        1,
+        Participants::default(),
+    );
+
+    let mut mesh_state = MeshState::default();
+    mesh_state.update(
+        Participant::from(0u32),
+        NodeStatus::Active,
+        ParticipantInfo::new(0),
+    );
+    let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let node_client = NodeClient::new(&Default::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+
+    // We need to forget the tx handles because they are not used after this point
+    // and we don't want them to be dropped and close the channels.
+    // The indexer will use the channels internally.
+    std::mem::forget((_mesh_tx, _cp_tx));
+
+    let run_handle = tokio::spawn(async move {
+        run_supervised(
+            indexer,
+            StreamContext::new(
+                backlog,
+                sign_tx,
+                rpc,
+                contract_watcher,
+                mesh_rx,
+                node_client,
+                checkpoints_rx,
+            ),
+            NoopChainTelemetry,
+        )
+        .await;
+    });
+
+    Ok((run_handle, sign_rx))
 }
 
 /// Test that the Solana indexer can parse basic Sign events
@@ -535,5 +610,347 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     }
 
     run_handle.abort();
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_respond_round_trip() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+    let mut indexer = run_solana_indexer(config.clone()).await?;
+
+    let payload = [7u8; 32];
+
+    // Submit a sign request to the Solana contract
+    solana
+        .sign(
+            payload,
+            "respond-round-trip",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request = wait_for_sign_request(&mut indexer).await?;
+
+    let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
+
+    // Publish a signature for the request
+    publisher
+        .publish_signature(&PublishAction {
+            public_key: AffinePoint::GENERATOR,
+            request: request.clone(),
+            signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32)],
+            timestamp: std::time::Instant::now(),
+        })
+        .await
+        .context("failed to publish signature")?;
+
+    // Wait for the indexer to emit a Respond event for the request
+    let event = indexer
+        .wait_for(
+            |event| matches!(event, ChainEvent::Respond(_)),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("indexer never emitted the on-chain respond event")?;
+
+    let ChainEvent::Respond(responded) = event else {
+        panic!("expected Respond event, got {event:?}");
+    };
+    assert_eq!(responded.request_id, request.id.request_id);
+    assert_eq!(responded.chain, Chain::Solana);
+    assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
+    assert_eq!(responded.signature.s, Scalar::ONE);
+    assert_eq!(responded.signature.recovery_id, 0);
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+    let mut indexer = run_solana_indexer(config).await?;
+
+    let failed_payload = [8u8; 32];
+    let failed_slot = solana
+        .sign_failed_tx(failed_payload, "failed-tx", LATEST_MPC_KEY_VERSION)
+        .await?;
+
+    // Wait for the failed transaction's slot to be emitted as a Block event, and verify that no SignRequest events from the failed transaction leak into the stream.
+    loop {
+        match timeout(Duration::from_secs(30), indexer.next_event()).await {
+            Ok(Some(ChainEvent::SignRequest { .. })) => {
+                anyhow::bail!("sign CPI event from the failed tx leaked into the stream")
+            }
+            Ok(Some(ChainEvent::Block(slot))) if slot >= failed_slot => break,
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("indexer stream closed"),
+            Err(_) => anyhow::bail!("failed tx slot never surfaced as a Block event"),
+        }
+    }
+
+    let valid_payload = [9u8; 32];
+    solana
+        .sign(
+            valid_payload,
+            "failed-tx-survival",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request = wait_for_sign_request(&mut indexer).await?;
+    assert_eq!(
+        request.args.payload,
+        Scalar::from_bytes(valid_payload).unwrap(),
+        "stream must keep parsing sign requests after a failed tx"
+    );
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
+    let mut solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+
+    let backlog = Backlog::new();
+    let (run_handle, mut sign_rx) = spawn_supervised_stream(config, backlog.clone()).await?;
+
+    let payload_a = [0xA1; 32];
+
+    // Snapshot the processed block before submitting request A
+    let processed_before = backlog.get_processed_block(Chain::Solana).await;
+    solana
+        .sign(
+            payload_a,
+            "restart-before-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+    let request_a = next_sign_command(&mut sign_rx).await?;
+    assert_eq!(
+        request_a.args.payload,
+        Scalar::from_bytes(payload_a).unwrap()
+    );
+
+    // Wait for the processed block to advance past the snapshot
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let processed = backlog.get_processed_block(Chain::Solana).await;
+        if processed.is_some_and(|slot| processed_before.is_none_or(|prev| slot > prev)) {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "processed block never advanced past A"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Kill the validator and submit a request while it's down
+    solana
+        .process
+        .kill()
+        .context("failed to kill solana-test-validator")?;
+    let payload_b = [0xB2; 32];
+    let down = solana
+        .sign(
+            payload_b,
+            "restart-during-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await;
+    assert!(down.is_err(), "sign must fail while the validator is down");
+
+    // Restart the validator and submit a request after it's back up
+    solana.restart().await.context("validator restart failed")?;
+
+    let payload_c = [0xC3; 32];
+    solana
+        .sign(
+            payload_c,
+            "restart-after-outage",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    let mut seen = vec![request_a.id];
+    let request_c_id;
+
+    // Wait for the post-restart request to appear on the sign channel, and record its id
+    loop {
+        let request = next_sign_command(&mut sign_rx).await?;
+        seen.push(request.id);
+        if request.args.payload == Scalar::from_bytes(payload_c).unwrap() {
+            request_c_id = request.id;
+            break;
+        }
+    }
+
+    // Drain any remaining requests from the sign channel for a few seconds, to ensure that no other requests are emitted.
+    let drain_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < drain_until {
+        match timeout(drain_until - Instant::now(), sign_rx.recv()).await {
+            Ok(Some(SignCommand::Request(request))) => seen.push(request.id),
+            Ok(_) | Err(_) => break,
+        }
+    }
+
+    let distinct: HashSet<_> = seen.iter().collect();
+    assert_eq!(
+        distinct,
+        HashSet::from([&request_a.id, &request_c_id]),
+        "gap-free resume: exactly the submitted requests appear"
+    );
+    assert_eq!(
+        seen.iter().filter(|id| **id == request_c_id).count(),
+        1,
+        "the post-restart request must be indexed exactly once"
+    );
+    run_handle.abort();
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+
+    let backlog = Backlog::new();
+    let (run1, mut sign_rx1) = spawn_supervised_stream(config.clone(), backlog.clone()).await?;
+
+    let payload_a = [0xA1; 32];
+
+    // Snapshot the processed block before submitting request A
+    let processed_before = backlog.get_processed_block(Chain::Solana).await;
+    solana
+        .sign(
+            payload_a,
+            "downtime-before",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    // Wait for the first request to appear on the sign channel, and verify its payload
+    let request_a = next_sign_command(&mut sign_rx1).await?;
+    assert_eq!(
+        request_a.args.payload,
+        Scalar::from_bytes(payload_a).unwrap()
+    );
+
+    // Wait for the processed block to advance past the snapshot,
+    // ensuring that the indexer has processed request A
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let processed = backlog.get_processed_block(Chain::Solana).await;
+        if processed.is_some_and(|slot| processed_before.is_none_or(|prev| slot > prev)) {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "processed block never advanced past A"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Kill the first run, simulate downtime, and submit a request while it's down
+    run1.abort();
+    let _ = run1.await;
+    let payload_b = [0xB2; 32];
+    solana
+        .sign(
+            payload_b,
+            "downtime-during",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    // Wait for the Solana chain to produce a new slot after the downtime request
+    let slot_after_b = solana.rpc_client.get_slot().await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while solana.rpc_client.get_slot().await? <= slot_after_b {
+        anyhow::ensure!(Instant::now() < deadline, "chain stopped producing slots");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Restart the indexer: same backlog, so catchup resumes from its watermark.
+    let (run2, mut sign_rx2) = spawn_supervised_stream(config, backlog.clone()).await?;
+
+    // Submit a request after the restart, which should be processed live.
+    let payload_c = [0xC3; 32];
+    solana
+        .sign(
+            payload_c,
+            "downtime-after",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    // Collect all requests from the sign channel until we see the post-restart request
+    let mut payloads = Vec::new();
+    loop {
+        let request = next_sign_command(&mut sign_rx2).await?;
+        payloads.push(<[u8; 32]>::from(request.args.payload.to_bytes()));
+        if request.args.payload == Scalar::from_bytes(payload_c).unwrap() {
+            break;
+        }
+    }
+
+    // Drain any remaining requests from the sign channel
+    let drain_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < drain_until {
+        match timeout(drain_until - Instant::now(), sign_rx2.recv()).await {
+            Ok(Some(SignCommand::Request(request))) => {
+                payloads.push(<[u8; 32]>::from(request.args.payload.to_bytes()))
+            }
+            Ok(_) | Err(_) => break,
+        }
+    }
+
+    assert_eq!(
+        payloads.iter().collect::<HashSet<_>>(),
+        HashSet::from([&payload_a, &payload_b, &payload_c]),
+        "backfill: the pre-downtime, missed-during-downtime and post-restart requests all appear"
+    );
+    for (payload, label) in [
+        (payload_a, "pre-downtime"),
+        (payload_b, "backfilled"),
+        (payload_c, "post-restart"),
+    ] {
+        assert_eq!(
+            payloads.iter().filter(|p| **p == payload).count(),
+            1,
+            "{label} request must be indexed exactly once"
+        );
+    }
+    run2.abort();
     Ok(())
 }
