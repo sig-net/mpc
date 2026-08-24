@@ -1022,7 +1022,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
             tx.source_chain,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -1030,14 +1030,14 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
 
     // Advance the sign request to execution
     backlog
-        .advance(Chain::Solana, sign_id, tx.clone())
+        .advance(Chain::Solana, sign_id, Arc::new(tx.clone()))
         .await
         .context("failed to register execution watcher")?;
 
@@ -1082,7 +1082,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
             Chain::Solana,
             &replacement_sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -1090,7 +1090,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
@@ -1100,11 +1100,11 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         .advance(
             Chain::Solana,
             replacement_sign_id,
-            BidirectionalTx {
+            Arc::new(BidirectionalTx {
                 id: replacement_tx_id,
                 request_id: replacement_sign_id.request_id,
                 ..tx.clone()
-            },
+            }),
         )
         .await
         .context("failed to register replacement watcher")?;
