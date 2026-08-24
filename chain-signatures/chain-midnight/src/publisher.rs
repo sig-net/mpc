@@ -313,12 +313,11 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
     let entries = central_map(&root, call.circuit.map_field(), call.circuit.map_name())?;
     for entry in entries.iter() {
         let (key, value) = &*entry;
-        match decode_response_entry(key, value).and_then(|decoded| {
-            decoded
-                .signature
-                .map(|signature| (decoded.request_id, signature))
-        }) {
-            Ok((stored_request_id, stored_signature))
+        let decoded = decode_response_entry(key, value)
+            .context("midnight finalized response schema drift")?;
+        let stored_request_id = decoded.request_id;
+        match decoded.signature {
+            Ok(stored_signature)
                 if stored_request_id == call.request_id
                     && stored_signature == call.stored_signature =>
             {
@@ -328,7 +327,7 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
             Err(err) => tracing::warn!(
                 circuit = call.circuit.wire_name(),
                 request_id = %hex::encode(call.request_id),
-                "midnight finalized response entry ignored: {err:#}"
+                "midnight finalized response signature ignored: {err:#}"
             ),
         }
     }
@@ -685,7 +684,7 @@ mod tests {
         let (key, _) = &*entries.iter().next().expect("one response entry");
         fields[field] = map_of(vec![(
             (**key).clone(),
-            cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+            cell_from_atoms(&[vec![1], vec![2], vec![3]], &[400, 1, 1]),
         )]);
         contract.data = ChargedState::new(array_of(fields));
 
@@ -846,15 +845,30 @@ mod tests {
     }
 
     #[test]
-    fn invalid_response_entries_do_not_poison_the_pre_check() {
+    fn response_schema_drift_preserves_its_cause_and_is_retryable() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let call = respond_call(&action).expect("the action maps to a response");
-            for state in [
-                state_with_malformed_response(&action),
-                state_with_invalid_signature_response(&action),
-            ] {
-                assert!(!response_present(&state, &call).expect("invalid entries are skipped"));
-            }
+            let err = response_present(&state_with_malformed_response(&action), &call)
+                .expect_err("a malformed response entry is contract-schema drift");
+            assert!(
+                format!("{err:#}").contains("response bigR.x"),
+                "the structural cause must reach the caller: {err:#}"
+            );
+            assert!(
+                mpc_chain_integration_core::utils::retry::is_retryable(&err),
+                "schema drift must remain at the shared retry boundary: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_signature_entries_do_not_poison_the_pre_check() {
+        for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
+            let call = respond_call(&action).expect("the action maps to a response");
+            assert!(
+                !response_present(&state_with_invalid_signature_response(&action), &call)
+                    .expect("an invalid signature candidate is skipped")
+            );
         }
     }
 
