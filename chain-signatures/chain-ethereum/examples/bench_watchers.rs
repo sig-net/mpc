@@ -29,6 +29,7 @@ use anyhow::anyhow;
 use helpers::{env_u64, init_tracing, make_config, run_catchup};
 use mpc_chain_integration_core::{MockStateManager, StateManager};
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId, LATEST_MPC_KEY_VERSION};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         };
 
         state
-            .watch_execution(Chain::Ethereum, SignId::new(hash), tx)
+            .watch_execution(Chain::Ethereum, SignId::new(hash), Arc::new(tx))
             .await;
     }
     tracing::info!("bench_watchers: injected {watchers_count} dummy watchers");
