@@ -6,9 +6,6 @@ use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
 
 use async_trait::async_trait;
-use futures_util::StreamExt as _;
-use mpc_utils::task::AbortOnDrop;
-use tokio::sync::mpsc;
 
 /// What a contract-state read found.
 pub(crate) enum ContractState {
@@ -30,10 +27,6 @@ pub(crate) trait ChainSource: Send + Sync {
         address_64hex: &str,
         at_hash: &str,
     ) -> anyhow::Result<ContractState>;
-    /// Pushes live finalized blocks into `tx` until the underlying stream ends; the
-    /// returned guard aborts the producer on drop.
-    async fn spawn_block_producer(&self, tx: mpsc::Sender<BlockRef>)
-        -> anyhow::Result<AbortOnDrop>;
 }
 
 /// Bytes that do not deserialize are charged to the contract that owns them, never to
@@ -78,19 +71,5 @@ impl ChainSource for LiveSource {
             // no network call beyond the node read above.
             Some(state) => Ok(classify_decode(decode_contract_state(&state))),
         }
-    }
-
-    async fn spawn_block_producer(
-        &self,
-        tx: mpsc::Sender<BlockRef>,
-    ) -> anyhow::Result<AbortOnDrop> {
-        let mut stream = self.rpc.subscribe_finalized().await?;
-        Ok(AbortOnDrop(tokio::spawn(async move {
-            while let Some(block) = stream.next().await {
-                if tx.send(block).await.is_err() {
-                    return;
-                }
-            }
-        })))
     }
 }

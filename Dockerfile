@@ -26,7 +26,7 @@ RUN chmod +x /opt/midnight-publisher/dist/main.js \
     && test "$(printf '{"id":0,"op":"ready","protocolVersion":1}\n' | env -i \
       PATH=/usr/local/bin:/usr/bin:/bin \
       MIDNIGHT_PUB_NETWORK_ID=undeployed \
-      MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
+      MIDNIGHT_PUB_NODE_URL=http://127.0.0.1:9944 \
       MIDNIGHT_PUB_PROOF_SERVER_URL=http://127.0.0.1:6300 \
       MIDNIGHT_PUB_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
       MIDNIGHT_PUB_INDEXER_WS_URL=ws://127.0.0.1:8088/api/v3/graphql/ws \
