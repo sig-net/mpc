@@ -46,7 +46,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * Entities: n nodes; membership, threshold t, and epoch are fixed by the NEAR governance contract. 
     * Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
     * Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
-  * Request and response (per supported chain): NEAR holds pending requests, verifies signatures for them and settles them. The others mostly emit an event for whoever submits, which is why exactly-once is the consumer's job (§1).
+  * Request and response (per supported chain): 
   
   (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
   (ii) nodes act only on finalized state (finalization definition may differ per chain).  
