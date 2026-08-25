@@ -1,21 +1,20 @@
 use crate::protocol::Chain;
 
 use crate::backlog::Checkpoint;
+use crate::util::ChainMap;
 use anyhow::Context;
 use deadpool_redis::Pool;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
-use tokio::sync::RwLock;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
     InMemory {
-        latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
-        pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        latest: ChainMap<Option<Checkpoint>>,
+        pending: ChainMap<BTreeMap<u64, Checkpoint>>,
     },
     /// A storage that fails every operation, used to exercise error paths in tests.
     #[cfg(test)]
@@ -31,8 +30,8 @@ impl Default for CheckpointStorage {
 impl CheckpointStorage {
     pub fn in_memory() -> Self {
         Self::InMemory {
-            latest: Arc::new(RwLock::new(HashMap::new())),
-            pending: Arc::new(RwLock::new(HashMap::new())),
+            latest: ChainMap::default(),
+            pending: ChainMap::default(),
         }
     }
 
@@ -100,9 +99,8 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { latest, .. } => {
                 latest
-                    .write()
-                    .await
-                    .insert(checkpoint.chain, checkpoint.clone());
+                    .write(checkpoint.chain, |slot| *slot = Some(checkpoint.clone()))
+                    .await;
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
@@ -144,16 +142,19 @@ impl CheckpointStorage {
                 }
             }
             CheckpointStorage::InMemory { pending, .. } => {
-                let mut pending = pending.write().await;
-                let checkpoints = pending.entry(checkpoint.chain).or_default();
-                if let Some(existing) = checkpoints.get(&checkpoint.block_height) {
-                    anyhow::ensure!(
-                        existing == checkpoint,
-                        "conflicting pending checkpoint at height {}",
-                        checkpoint.block_height
-                    );
-                }
-                checkpoints.insert(checkpoint.block_height, checkpoint.clone());
+                pending
+                    .write(checkpoint.chain, |checkpoints| {
+                        if let Some(existing) = checkpoints.get(&checkpoint.block_height) {
+                            anyhow::ensure!(
+                                existing == checkpoint,
+                                "conflicting pending checkpoint at height {}",
+                                checkpoint.block_height
+                            );
+                        }
+                        checkpoints.insert(checkpoint.block_height, checkpoint.clone());
+                        Ok(())
+                    })
+                    .await?;
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
@@ -181,11 +182,8 @@ impl CheckpointStorage {
                 Ok(checkpoints)
             }
             CheckpointStorage::InMemory { pending, .. } => Ok(pending
-                .read()
-                .await
-                .get(&chain)
-                .map(|checkpoints| checkpoints.values().cloned().collect())
-                .unwrap_or_default()),
+                .read(chain, |checkpoints| checkpoints.values().cloned().collect())
+                .await),
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
@@ -227,14 +225,14 @@ impl CheckpointStorage {
                     None => Ok(None),
                 }
             }
-            CheckpointStorage::InMemory { pending, .. } => {
-                Ok(pending.read().await.get(&chain).and_then(|checkpoints| {
+            CheckpointStorage::InMemory { pending, .. } => Ok(pending
+                .read(chain, |checkpoints| {
                     checkpoints
                         .values()
                         .find(|checkpoint| checkpoint.digest() == digest)
                         .cloned()
-                }))
-            }
+                })
+                .await),
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
@@ -282,18 +280,17 @@ impl CheckpointStorage {
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
-                let promoted = {
-                    let mut pending = pending.write().await;
-                    let Some(checkpoints) = pending.get_mut(&chain) else {
-                        return Ok(false);
-                    };
-                    let Some(promoted) = checkpoints.remove(&height) else {
-                        return Ok(false);
-                    };
-                    checkpoints.retain(|height, _| *height > promoted.block_height);
-                    promoted
+                let promoted = pending
+                    .write(chain, |checkpoints| {
+                        let promoted = checkpoints.remove(&height)?;
+                        checkpoints.retain(|height, _| *height > promoted.block_height);
+                        Some(promoted)
+                    })
+                    .await;
+                let Some(promoted) = promoted else {
+                    return Ok(false);
                 };
-                latest.write().await.insert(chain, promoted);
+                latest.write(chain, |slot| *slot = Some(promoted)).await;
                 Ok(true)
             }
             #[cfg(test)]
@@ -325,11 +322,12 @@ impl CheckpointStorage {
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
-                pending.write().await.remove(&checkpoint.chain);
+                pending
+                    .write(checkpoint.chain, |checkpoints| checkpoints.clear())
+                    .await;
                 latest
-                    .write()
-                    .await
-                    .insert(checkpoint.chain, checkpoint.clone());
+                    .write(checkpoint.chain, |slot| *slot = Some(checkpoint.clone()))
+                    .await;
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
@@ -355,7 +353,7 @@ impl CheckpointStorage {
                 }
             }
             CheckpointStorage::InMemory { latest, .. } => {
-                Ok(latest.read().await.get(&chain).cloned())
+                Ok(latest.read(chain, |slot| slot.clone()).await)
             }
             #[cfg(test)]
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),

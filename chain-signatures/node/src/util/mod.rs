@@ -1,3 +1,7 @@
+mod chain_map;
+
+pub use chain_map::ChainMap;
+
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
 
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};

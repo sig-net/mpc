@@ -1,13 +1,11 @@
 use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::util::ChainMap;
 
-use enum_map::EnumMap;
 use mpc_primitives::Chain;
 use sha3::Digest;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// A checkpoint represents the backlog state at a specific block height.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
@@ -74,7 +72,8 @@ impl Checkpoint {
 #[derive(Debug, Clone)]
 pub(super) struct Checkpoints {
     storage: CheckpointStorage,
-    pending: Arc<EnumMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
+    /// Local mirror of durable pending checkpoints, keyed by height per chain.
+    pending: ChainMap<BTreeMap<u64, Checkpoint>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,13 +106,8 @@ impl Checkpoints {
     pub(super) fn new(storage: CheckpointStorage) -> Self {
         Self {
             storage,
-            pending: Arc::default(),
+            pending: ChainMap::default(),
         }
-    }
-
-    /// Returns the pending-checkpoint map for `chain`.
-    fn pending(&self, chain: Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
-        &self.pending[chain]
     }
 
     /// Updates the pending-checkpoint metric for `chain`.
@@ -124,13 +118,16 @@ impl Checkpoints {
     }
 
     /// Durably records an unconfirmed checkpoint and adds it to the local cache.
+    ///
+    /// The chain's mirror lock is held across the durable write so concurrent
+    /// persists for one chain are serialized against the cap check.
     pub(super) async fn persist_pending(
         &self,
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
         let height = checkpoint.block_height;
-        let mut pending = self.pending(chain).write().await;
+        let mut pending = self.pending.lock(chain).write().await;
         if let Some(existing) = pending.get(&height) {
             if existing == checkpoint {
                 return Ok(());
@@ -183,11 +180,13 @@ impl Checkpoints {
 
     /// Removes pending checkpoints through `height` after a confirmed checkpoint advances state.
     async fn update_pending(&self, chain: Chain, height: u64) {
-        let len = {
-            let mut pending = self.pending(chain).write().await;
-            pending.retain(|&pending_height, _| pending_height > height);
-            pending.len()
-        };
+        let len = self
+            .pending
+            .write(chain, |pending| {
+                pending.retain(|&pending_height, _| pending_height > height);
+                pending.len()
+            })
+            .await;
         self.observe(chain, len);
     }
 
@@ -272,17 +271,19 @@ impl Checkpoints {
             })
             .collect::<Vec<_>>();
 
-        let len = {
-            let mut local = self.pending(chain).write().await;
-            local.clear();
-            local.extend(
-                pending
-                    .iter()
-                    .cloned()
-                    .map(|checkpoint| (checkpoint.block_height, checkpoint)),
-            );
-            local.len()
-        };
+        let len = self
+            .pending
+            .write(chain, |local| {
+                local.clear();
+                local.extend(
+                    pending
+                        .iter()
+                        .cloned()
+                        .map(|checkpoint| (checkpoint.block_height, checkpoint)),
+                );
+                local.len()
+            })
+            .await;
         self.observe(chain, len);
         Ok(pending.into_iter().next_back().or(latest))
     }
@@ -290,7 +291,9 @@ impl Checkpoints {
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(super) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         self.storage.reset_to_latest(checkpoint).await?;
-        self.pending(checkpoint.chain).write().await.clear();
+        self.pending
+            .write(checkpoint.chain, |pending| pending.clear())
+            .await;
         self.observe(checkpoint.chain, 0);
         Ok(())
     }
@@ -298,12 +301,9 @@ impl Checkpoints {
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
     pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
         if let Some(checkpoint) = self
-            .pending(chain)
-            .read()
+            .pending
+            .read(chain, |pending| pending.values().next_back().cloned())
             .await
-            .values()
-            .next_back()
-            .cloned()
         {
             return Some(checkpoint);
         }
@@ -312,12 +312,14 @@ impl Checkpoints {
 
     /// Reports whether `chain` can create another pending checkpoint.
     pub(super) async fn has_slot(&self, chain: Chain) -> bool {
-        self.pending(chain).read().await.len() < MAX_PENDING_CHECKPOINTS
+        self.pending
+            .read(chain, |pending| pending.len() < MAX_PENDING_CHECKPOINTS)
+            .await
     }
 
     /// Returns the number of locally pending checkpoints for `chain`.
     pub(super) async fn count(&self, chain: Chain) -> usize {
-        self.pending(chain).read().await.len()
+        self.pending.read(chain, |pending| pending.len()).await
     }
 
     /// Finds a checkpoint by digest, searching the in-memory pending mirror, the
@@ -336,14 +338,16 @@ impl Checkpoints {
         chain: Chain,
         digest: [u8; 32],
     ) -> Result<Option<CheckpointKind>, CheckpointError> {
-        if let Some(checkpoint) = self
-            .pending(chain)
-            .read()
-            .await
-            .values()
-            .find(|checkpoint| checkpoint.digest() == digest)
-            .cloned()
-        {
+        let local_match = self
+            .pending
+            .read(chain, |pending| {
+                pending
+                    .values()
+                    .find(|checkpoint| checkpoint.digest() == digest)
+                    .cloned()
+            })
+            .await;
+        if let Some(checkpoint) = local_match {
             return Ok(Some(CheckpointKind::Pending(checkpoint)));
         }
         let latest = match self.storage.load_latest(chain).await {
@@ -383,6 +387,7 @@ impl Checkpoints {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::sync::Barrier;
 
     fn checkpoint(height: u64) -> Checkpoint {
@@ -613,7 +618,8 @@ mod tests {
         // Seed the in-memory mirror directly so the lookup succeeds and the
         // durable promotion is the failing step.
         checkpoints
-            .pending(checkpoint.chain)
+            .pending
+            .lock(checkpoint.chain)
             .write()
             .await
             .insert(checkpoint.block_height, checkpoint.clone());

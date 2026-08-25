@@ -3,10 +3,10 @@ pub mod consensus;
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::util::ChainMap;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
-use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
@@ -15,7 +15,6 @@ use mpc_primitives::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub use checkpoints::Checkpoint;
 
@@ -163,9 +162,9 @@ impl ExecutionWatchers {
 pub struct Backlog {
     checkpoints: Checkpoints,
     /// Pending requests indexed by chain
-    requests: Arc<EnumMap<Chain, RwLock<PendingRequests>>>,
+    requests: ChainMap<PendingRequests>,
     /// Execution watchers indexed by chain
-    execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
+    execution_watchers: ChainMap<ExecutionWatchers>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
 }
@@ -185,22 +184,10 @@ impl Backlog {
     pub fn persisted(storage: CheckpointStorage) -> Self {
         Self {
             checkpoints: Checkpoints::new(storage),
-            requests: Arc::default(),
-            execution_watchers: Arc::default(),
+            requests: ChainMap::default(),
+            execution_watchers: ChainMap::default(),
             total_pending: Arc::new(AtomicUsize::new(0)),
         }
-    }
-
-    /// Get the pending requests for a specific chain.
-    #[inline]
-    fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
-        &self.requests[*chain]
-    }
-
-    /// Get the execution watchers for a specific chain.
-    #[inline]
-    fn watchers(&self, chain: &Chain) -> &RwLock<ExecutionWatchers> {
-        &self.execution_watchers[*chain]
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
@@ -208,11 +195,13 @@ impl Backlog {
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(request);
-        let (prev, len) = {
-            let mut pending = self.pending(&chain).write().await;
-            let p = pending.insert(id, entry);
-            (p, pending.len())
-        };
+        let (prev, len) = self
+            .requests
+            .write(chain, |pending| {
+                let prev = pending.insert(id, entry);
+                (prev, pending.len())
+            })
+            .await;
 
         // Only increment total pending if this is a new entry
         if prev.is_none() {
@@ -225,11 +214,13 @@ impl Backlog {
 
     /// Remove a Sign request from the backlog for the specified chain.
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        let (removed, len) = {
-            let mut pending = self.pending(&chain).write().await;
-            let rem = pending.remove(id);
-            (rem, pending.len())
-        };
+        let (removed, len) = self
+            .requests
+            .write(chain, |pending| {
+                let removed = pending.remove(id);
+                (removed, pending.len())
+            })
+            .await;
 
         // Only decrement total pending if an entry was actually removed
         if removed.is_some() {
@@ -242,7 +233,9 @@ impl Backlog {
 
     /// Get a Sign request from the backlog for the specified chain.
     pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.pending(&chain).read().await.get(id).cloned()
+        self.requests
+            .read(chain, |pending| pending.get(id).cloned())
+            .await
     }
 
     /// Returns the number of pending requests in total
@@ -265,22 +258,24 @@ impl Backlog {
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
-        let pending = self.pending(&chain).write().await;
+        self.requests
+            .write(chain, |pending| {
+                let mut requeueable: Vec<_> = pending
+                    .requests
+                    .values()
+                    .filter(|entry| entry.status().is_pending_generation())
+                    .map(|entry| Arc::clone(&entry.request))
+                    .collect();
 
-        let mut requeueable: Vec<_> = pending
-            .requests
-            .values()
-            .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| Arc::clone(&entry.request))
-            .collect();
+                requeueable.sort_by(|left, right| {
+                    left.unix_timestamp_indexed
+                        .cmp(&right.unix_timestamp_indexed)
+                        .then_with(|| left.id.request_id.cmp(&right.id.request_id))
+                });
 
-        requeueable.sort_by(|left, right| {
-            left.unix_timestamp_indexed
-                .cmp(&right.unix_timestamp_indexed)
-                .then_with(|| left.id.request_id.cmp(&right.id.request_id))
-        });
-
-        requeueable
+                requeueable
+            })
+            .await
     }
 
     /// Returns backlog requests for a chain that are ready to be published.
@@ -289,33 +284,37 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
-        let pending = self.pending(&chain).write().await;
+        self.requests
+            .write(chain, |pending| {
+                let mut publishable: Vec<_> = pending
+                    .requests
+                    .values()
+                    .filter_map(|entry| match &entry.status {
+                        SignStatus::PendingPublish { publish }
+                        | SignStatus::PendingPublishBidirectional { publish } => {
+                            Some((Arc::clone(&entry.request), Arc::clone(publish)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
 
-        let mut publishable: Vec<_> = pending
-            .requests
-            .values()
-            .filter_map(|entry| match &entry.status {
-                SignStatus::PendingPublish { publish }
-                | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((Arc::clone(&entry.request), Arc::clone(publish)))
-                }
-                _ => None,
+                publishable.sort_by(|left, right| {
+                    left.0
+                        .unix_timestamp_indexed
+                        .cmp(&right.0.unix_timestamp_indexed)
+                        .then_with(|| left.0.id.request_id.cmp(&right.0.id.request_id))
+                });
+
+                publishable
             })
-            .collect();
-
-        publishable.sort_by(|left, right| {
-            left.0
-                .unix_timestamp_indexed
-                .cmp(&right.0.unix_timestamp_indexed)
-                .then_with(|| left.0.id.request_id.cmp(&right.0.id.request_id))
-        });
-
-        publishable
+            .await
     }
 
     /// Returns backlog requests for a chain that are still pending generation
     pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
-        self.pending(&chain).read().await.pending_generations()
+        self.requests
+            .read(chain, PendingRequests::pending_generations)
+            .await
     }
 
     /// Returns backlog requests for a chain that are still pending generation for bidirectional transactions
@@ -323,24 +322,21 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> HashMap<SignId, BacklogEntry> {
-        self.pending(&chain)
-            .read()
+        self.requests
+            .read(chain, PendingRequests::pending_generation_bidirectionals)
             .await
-            .pending_generation_bidirectionals()
     }
 
     /// Returns backlog entries that are pending execution for a given chain and request id
     pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.pending(&chain)
-            .read()
+        self.requests
+            .read(chain, |pending| pending.pending_execution(id).cloned())
             .await
-            .pending_execution(id)
-            .cloned()
     }
 
     /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
-        self.pending(&chain).read().await.len()
+        self.requests.read(chain, PendingRequests::len).await
     }
 
     /// Marks a request as publishing for a specific chain and request id, with the given publish state.
@@ -350,13 +346,14 @@ impl Backlog {
         id: &SignId,
         publish: Arc<PublishState>,
     ) -> Result<(), BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
-        };
-
-        entry.mark_publishing(publish)
+        self.requests
+            .write(chain, |pending| {
+                let Some(entry) = pending.requests.get_mut(id) else {
+                    return Err(BacklogError::NotFound { chain, id: *id });
+                };
+                entry.mark_publishing(publish)
+            })
+            .await
     }
 
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
@@ -374,13 +371,15 @@ impl Backlog {
         id: &SignId,
         request: Arc<IndexedSignRequest>,
     ) -> Result<(), BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
-        };
-        entry.set_request(request);
-        Ok(())
+        self.requests
+            .write(chain, |pending| {
+                let Some(entry) = pending.requests.get_mut(id) else {
+                    return Err(BacklogError::NotFound { chain, id: *id });
+                };
+                entry.set_request(request);
+                Ok(())
+            })
+            .await
     }
 
     /// Atomically move a completed target-chain execution into final response signing.
@@ -390,14 +389,16 @@ impl Backlog {
         id: &SignId,
         request: Arc<IndexedSignRequest>,
     ) -> Result<BacklogEntry, BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(id)
-            .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.transition_to_bidirectional_response(request)?;
-        Ok(entry.clone())
+        self.requests
+            .write(chain, |pending| {
+                let entry = pending
+                    .requests
+                    .get_mut(id)
+                    .ok_or(BacklogError::NotFound { chain, id: *id })?;
+                entry.transition_to_bidirectional_response(request)?;
+                Ok(entry.clone())
+            })
+            .await
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -425,11 +426,15 @@ impl Backlog {
             );
         }
 
-        let mut entry = self.watchers(&chain).write().await;
-
-        entry
-            .insert(tx.id, ExecutionWatcher { sign_id, tx })
-            .map(|previous| (previous.sign_id, previous.tx))
+        let previous = self
+            .execution_watchers
+            .write(chain, |entry| {
+                entry
+                    .insert(tx.id, ExecutionWatcher { sign_id, tx })
+                    .map(|previous| (previous.sign_id, previous.tx))
+            })
+            .await;
+        previous
     }
 
     /// Stop watching for execution of a bidirectional transaction on the destination chain.
@@ -438,11 +443,13 @@ impl Backlog {
         chain: Chain,
         tx_id: &BidirectionalTxId,
     ) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        let mut entry = self.watchers(&chain).write().await;
-
-        entry
-            .remove(tx_id)
-            .map(|watcher| (watcher.sign_id, watcher.tx))
+        self.execution_watchers
+            .write(chain, |entry| {
+                entry
+                    .remove(tx_id)
+                    .map(|watcher| (watcher.sign_id, watcher.tx))
+            })
+            .await
     }
 
     /// Update the status of a tracked bidirectional transaction on the source chain.
@@ -455,20 +462,22 @@ impl Backlog {
         id: &SignId,
         status: SignStatus,
     ) -> Option<BacklogEntry> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            tracing::warn!(
-                ?chain,
-                ?id,
-                ?status,
-                "set_status: tx id not found in chain pending requests"
-            );
-            return None;
-        };
-        tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
-        entry.set_status(status);
-        Some(entry.clone())
+        self.requests
+            .write(chain, |pending| {
+                let Some(entry) = pending.requests.get_mut(id) else {
+                    tracing::warn!(
+                        ?chain,
+                        ?id,
+                        ?status,
+                        "set_status: tx id not found in chain pending requests"
+                    );
+                    return None;
+                };
+                tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
+                entry.set_status(status);
+                Some(entry.clone())
+            })
+            .await
     }
 
     /// Advances a `Sign` transaction to its execution phase and register execution watcher.
@@ -479,19 +488,20 @@ impl Backlog {
         sign_id: SignId,
         bidirectional_tx: Arc<BidirectionalTx>,
     ) -> Result<(), BacklogError> {
-        // Update the transaction in the backlog from Sign to Bidirectional
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(&sign_id)
-            .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
-
-        entry.advance_to_execution(Arc::clone(&bidirectional_tx))?;
+        // Update the transaction in the backlog from Sign to Bidirectional. The
+        // source-chain lock is released before registering the watcher.
+        self.requests
+            .write(chain, |pending| {
+                let entry = pending
+                    .requests
+                    .get_mut(&sign_id)
+                    .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
+                entry.advance_to_execution(Arc::clone(&bidirectional_tx))
+            })
+            .await?;
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
-        drop(pending);
         self.watch_execution(target_chain, sign_id, bidirectional_tx)
             .await;
         Ok(())
@@ -512,9 +522,15 @@ impl Backlog {
         height: u64,
         interval: u64,
     ) -> Option<Checkpoint> {
-        let mut pending = self.pending(&chain).write().await;
-        let prev = pending.processed_block_height().unwrap_or(0);
-        pending.set_processed_block(height);
+        let (crossed, tx_count) = self
+            .requests
+            .write(chain, |pending| {
+                let prev = pending.processed_block_height().unwrap_or(0);
+                pending.set_processed_block(height);
+                let crossed = interval != 0 && height / interval > prev / interval;
+                (crossed, pending.len())
+            })
+            .await;
 
         tracing::trace!(
             ?chain,
@@ -523,7 +539,7 @@ impl Backlog {
             "backlog updated processed block height"
         );
 
-        if interval == 0 {
+        if !crossed {
             return None;
         }
 
@@ -539,40 +555,34 @@ impl Backlog {
         // boundary. On restart/recovery, the node still resumes from the latest
         // confirmed checkpoint and replays only the post-checkpoint same-bucket
         // tail.
-        if height / interval > prev / interval {
-            let tx_count = pending.len();
-            drop(pending);
-            match self.checkpoint(chain).await {
-                Ok(checkpoint) => {
-                    tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
-                    Some(checkpoint)
-                }
-                Err(CheckpointError::PendingCap { .. }) => {
-                    tracing::warn!(
-                        ?chain,
-                        height,
-                        tx_count,
-                        "checkpoint creation stalled (pending cap reached)"
-                    );
-                    None
-                }
-                Err(err @ CheckpointError::Storage { .. }) => {
-                    tracing::error!(?chain, %err, "failed to create checkpoint");
-                    None
-                }
+        match self.checkpoint(chain).await {
+            Ok(checkpoint) => {
+                tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
+                Some(checkpoint)
             }
-        } else {
-            None
+            Err(CheckpointError::PendingCap { .. }) => {
+                tracing::warn!(
+                    ?chain,
+                    height,
+                    tx_count,
+                    "checkpoint creation stalled (pending cap reached)"
+                );
+                None
+            }
+            Err(err @ CheckpointError::Storage { .. }) => {
+                tracing::error!(?chain, %err, "failed to create checkpoint");
+                None
+            }
         }
     }
 
     /// Create a checkpoint of the current backlog state for a specific chain.
     ///
     pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
-        let checkpoint = {
-            let requests = self.pending(&chain).read().await;
-            Checkpoints::snapshot(&requests, chain)
-        };
+        let checkpoint = self
+            .requests
+            .read(chain, |requests| Checkpoints::snapshot(requests, chain))
+            .await;
         self.checkpoints.persist_pending(&checkpoint).await?;
         Ok(checkpoint)
     }
@@ -653,37 +663,42 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        let execution_to_watch = {
-            let mut pending = self.pending(&checkpoint.chain).write().await;
-            let previous_height = pending.processed_block_height().unwrap_or(0);
+        let execution_to_watch = self
+            .requests
+            .write(checkpoint.chain, |pending| {
+                let previous_height = pending.processed_block_height().unwrap_or(0);
 
-            // Execution watchers are ephemeral, we need to get all the execution watchers here
-            let cleared = pending.len();
-            let restored_len = restored.len();
-            *pending = restored;
+                // Execution watchers are ephemeral, we need to get all the execution watchers here
+                let cleared = pending.len();
+                let restored_len = restored.len();
+                *pending = restored;
 
-            // Update total pending count based on the difference between cleared and restored requests
-            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending
-                .fetch_add(restored_len, Ordering::Relaxed);
+                // Update total pending count based on the difference between cleared and restored requests
+                self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
+                self.total_pending
+                    .fetch_add(restored_len, Ordering::Relaxed);
 
-            tracing::info!(
-                ?chain,
-                old_block = previous_height,
-                new_block = checkpoint_height,
-                cleared_requests = cleared,
-                restored_requests = restored_len,
-                "successfully recovered from checkpoint"
-            );
-            pending.pending_executions()
-        };
+                tracing::info!(
+                    ?chain,
+                    old_block = previous_height,
+                    new_block = checkpoint_height,
+                    cleared_requests = cleared,
+                    restored_requests = restored_len,
+                    "successfully recovered from checkpoint"
+                );
+                pending.pending_executions()
+            })
+            .await;
 
         // Clear execution watchers whose source chain is the recovered chain
         for destination_chain in Chain::iter() {
-            let mut watchers = self.watchers(&destination_chain).write().await;
-            watchers
-                .watchers
-                .retain(|_, watcher| watcher.tx.source_chain != chain);
+            self.execution_watchers
+                .write(destination_chain, |watchers| {
+                    watchers
+                        .watchers
+                        .retain(|_, watcher| watcher.tx.source_chain != chain);
+                })
+                .await;
         }
 
         // now repopulate our execution watchers
@@ -700,21 +715,24 @@ impl Backlog {
 #[async_trait::async_trait]
 impl StateManager for Backlog {
     async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
-        self.pending(&chain).read().await.processed_block_height()
+        self.requests
+            .read(chain, PendingRequests::processed_block_height)
+            .await
     }
 
     async fn set_processed_block(&self, chain: Chain, height: u64) {
-        self.pending(&chain)
-            .write()
-            .await
-            .set_processed_block(height);
+        self.requests
+            .write(chain, |pending| pending.set_processed_block(height))
+            .await;
     }
 
     async fn get_execution_watchers(
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
-        self.watchers(&chain).read().await.all()
+        self.execution_watchers
+            .read(chain, ExecutionWatchers::all)
+            .await
     }
 }
 
