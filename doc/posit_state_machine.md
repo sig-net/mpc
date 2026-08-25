@@ -492,3 +492,60 @@ by design, so the rotation has to be ended by information, not time.
    which 1 covers; SKIP covers the rest and sharpens the diagnosis, since a
    round that stays silent after SKIP has an absent proposer, not an unwilling
    one.
+
+
+## 10. Open design questions
+
+Each is a decision about what the machine should do rather than a description
+of what it does, so none of them changed the model above. Recorded here to be
+settled separately.
+
+1. **Does governance belong in this state machine?** Governance transitions
+   are rare, and carrying them as spawner state costs a branch on paths that
+   run for every request. The alternative is to keep no governance state in
+   the machine and kill and recreate the spawner on a governance change. What
+   has to hold: that no in-flight request needs to survive the recreation,
+   which is the same question as whether a governance change may abort
+   running signatures.
+2. **Should `pause_proposing_until` exist?** §8.6 records it as a hidden mode.
+   It is set only when enough rejects arrive and the rejects say a quorum is
+   already generating, and cleared when the node commits to generating itself.
+   Removing it costs little per occurrence: the node reorganizes, is usually
+   not the proposer at `r+1`, and waits for a PROPOSE that the generating
+   group makes unnecessary; if it is elected again it is rejected again. The
+   objection is that those waits are silent rounds, the exact pattern §9
+   measures, so removing the pause without a round-outcome signal trades a
+   hidden mode for more churn. A flat delay on entering reorganization, for
+   any reason, would keep the back-off without a per-node mode only that node
+   knows about.
+3. **Is the `active` check worth its complexity?** Reservation requires `t`
+   active holders and PROPOSE goes only to active holders, so `active` filters
+   twice before the posit asks the same question and gets a real answer. It is
+   a pure optimization: it saves calling nodes known to be offline, and costs
+   a second source of truth about who is available. Removing it also changes
+   the arithmetic in §3, since `enough_rejects` is relative to the size of the
+   PROPOSE set, so a wider set is harder to trip.
+4. **Should a deliberator check `from == proposer`?** The check exists twice,
+   for PROPOSE and for START. Election is a pure function of round, membership
+   and entropy, so among nodes that agree the check can never fire, and §9
+   confirms `received Propose from non-proposer` is zero all day. It only
+   fires against a node that disagrees, which is when it matters. Keeping it
+   depends on what the machine is meant to defend against.
+5. **What should trigger state sync?** Today it is the `inactive -> active`
+   edge. Every node already syncs on start, so a `REJECT MissingArtifact` in
+   steady state says something larger than one missing share is wrong. Two
+   candidates, not exclusive: sync all artifacts rather than keying on a
+   liveness edge, and treat the reject itself as a trigger. Overlaps proposal
+   2 above, which uses the same signal for a different purpose.
+6. **Is one buffering layer enough?** §5 describes two, the ingress
+   `PositMailbox` and the per-round buffer, both keeping one slot per sender
+   and both overwriting on arrival. Filtering rather than overwriting at
+   ingress may remove the need for the second. §8.4 is the constraint:
+   whatever remains has to survive PROPOSE and START arriving out of order.
+7. **Is the ordering problem in §8.4 real?** `r` is a nonce and two messages
+   can carry the same one, but an honest proposer cannot send START without
+   first receiving an ACCEPT, which itself follows PROPOSE. The out-of-order
+   case therefore needs a PROPOSE delayed past a full round trip. A rule that
+   START may not overwrite a buffered PROPOSE for the same round closes it
+   without new messages or state; the question is whether that is cheap
+   insurance or dead code.
