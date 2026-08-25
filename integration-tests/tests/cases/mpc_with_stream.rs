@@ -38,29 +38,10 @@ async fn test_sign() {
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
 
-    let timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
-    let actions = loop {
-        let rpc_actions = network.output.rpc_actions.lock().await;
-        let filtered_actions: Vec<_> = rpc_actions
-            .iter()
-            .filter(|action| !action.contains("kind: Checkpoint"))
-            .cloned()
-            .collect();
-        if !filtered_actions.is_empty() {
-            break filtered_actions;
-        }
-        if start.elapsed() > timeout {
-            drop(rpc_actions);
-            network.print_actions().await;
-            panic!(
-                "timed out waiting for 1 signature, got {}",
-                filtered_actions.len()
-            );
-        }
-        drop(rpc_actions);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let actions = network
+        .assert_publish_actions(1, Duration::from_secs(10))
+        .await;
+
     let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
@@ -119,29 +100,10 @@ async fn check_channel_contention(
     }
 
     let timeout = Duration::from_secs(150);
-    let start = std::time::Instant::now();
-    let actions = loop {
-        let rpc_actions = network.output.rpc_actions.lock().await;
-        let filtered_actions: Vec<_> = rpc_actions
-            .iter()
-            .filter(|action| !action.contains("kind: Checkpoint"))
-            .cloned()
-            .collect();
-        if filtered_actions.len() >= expected_signatures {
-            break filtered_actions;
-        }
-        if start.elapsed() > timeout {
-            drop(rpc_actions);
-            network.print_actions().await;
-            panic!(
-                "timed out waiting for {} signatures, got {}",
-                expected_signatures,
-                filtered_actions.len()
-            );
-        }
-        drop(rpc_actions);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let actions = network
+        .assert_publish_actions(expected_signatures, timeout)
+        .await;
+
     let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
@@ -210,24 +172,12 @@ async fn test_divergent_active_views_still_converge() {
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
 
-    let deadline = Duration::from_secs(90);
-    let start = std::time::Instant::now();
-    loop {
-        let settled = {
-            let actions = network.output.rpc_actions.lock().await;
-            actions.iter().any(|action| {
-                !action.contains("kind: Checkpoint") && action.contains("RpcAction::Publish")
-            })
-        };
-        if settled {
-            break;
-        }
-        if start.elapsed() >= deadline {
-            network.print_actions().await;
-            panic!("request never settled under divergent active views within {deadline:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // The request is settled once a non-checkpoint publish action appears.
+    network
+        .assert_actions_matching(1, Duration::from_secs(90), |action| {
+            !action.contains("kind: Checkpoint") && action.contains("RpcAction::Publish")
+        })
+        .await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -277,7 +227,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     use mpc_primitives::ChainEvent;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     #[derive(Default, Clone, Debug)]
     struct MessageCounts {
@@ -285,13 +235,21 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         signature: usize,
     }
 
+    /// Tracks the number of posit and signature messages observed for each participant and sign request.
     #[derive(Default)]
     struct SignatureTracker {
+        /// Keyed by (participant, sign_id) to count messages per participant and request.
         counts: Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        /// Notifies when a posit message has been observed, so the test can wait for it.
+        posit_delivered: Arc<Notify>,
     }
 
     impl CollectMessages for SignatureTracker {
-        fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
+        /// Observes messages and counts posit and signature messages per participant and sign request.
+        fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
+            if !passed_filter {
+                return;
+            }
             let SendMessage { message, from, .. } = msg;
             match message {
                 Message::Posit(posit_msg) => {
@@ -302,6 +260,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
                             .entry((*from, sign_id))
                             .or_default()
                             .posit += 1;
+                        self.posit_delivered.notify_one();
                     }
                 }
                 Message::Signature(sig_msg) => {
@@ -318,6 +277,31 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         fn print_summary(&self) {}
     }
 
+    /// Waits for a posit message from a specific participant and sign request to be observed, or times out.
+    async fn wait_for_delivered_posit(
+        counts: &Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        posit_delivered: &Notify,
+        from: Participant,
+        id: SignId,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if counts
+                    .lock()
+                    .unwrap()
+                    .get(&(from, id))
+                    .is_some_and(|c| c.posit > 0)
+                {
+                    return;
+                }
+                posit_delivered.notified().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     let node_0 = Participant::from(0);
     let node_1 = Participant::from(1);
     let node_2 = Participant::from(2);
@@ -327,6 +311,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let tracker = SignatureTracker::default();
     let tracker_counts = Arc::clone(&tracker.counts);
+    let posit_delivered = Arc::clone(&tracker.posit_delivered);
 
     let mut builder = MpcFixtureBuilder::new(3, 2)
         .only_generate_signatures()
@@ -371,9 +356,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let network = builder.build().await;
 
+    // Timeout for each request to complete, after which we assume a clog has occurred.
     let per_request_timeout = Duration::from_secs(60);
+    // Time we wait for a stale posit to be observed from node 2, after which we continue sending requests.
+    let stale_posit_timeout = Duration::from_secs(30);
 
-    // Send requests with delays so the stale task has time to send proposals.
     let mut completed = 0u32;
     for seed in 0..20 {
         network
@@ -396,7 +383,23 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // If we dropped the respond event for the bad request, wait for node 2 to send a posit for it before continuing.
+        if drop_respond_event
+            && seed == bad_request_seed
+            && !wait_for_delivered_posit(
+                &tracker_counts,
+                &posit_delivered,
+                node_2,
+                bad_sign_id,
+                stale_posit_timeout,
+            )
+            .await
+        {
+            tracing::warn!(
+                seed,
+                "stale posit from node 2 not observed in time, continuing"
+            );
+        }
     }
 
     if drop_respond_event {
