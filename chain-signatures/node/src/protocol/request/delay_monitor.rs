@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::time::delay_queue::{DelayQueue, Key};
 
-struct WatchEntry {
+struct DelayEntry {
     key: Key,
     chain: Chain,
     unix_timestamp_indexed: u64,
@@ -67,6 +67,7 @@ impl DelayMonitor {
         is_proposer: Arc<AtomicBool>,
     ) {
         if remaining_time == Duration::ZERO {
+            tracing::warn!(?sign_id, "trying to watch for zero budget sign task");
             return;
         }
         let expected_response_time_secs = chain.expected_response_time_secs();
@@ -87,7 +88,7 @@ impl DelayMonitor {
     }
 
     async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
-        let mut entries: HashMap<SignId, WatchEntry> = HashMap::new();
+        let mut entries: HashMap<SignId, DelayEntry> = HashMap::new();
         let mut queue: DelayQueue<SignId> = DelayQueue::new();
 
         loop {
@@ -120,11 +121,13 @@ impl DelayMonitor {
                 }
             }
         }
+
+        tracing::info!("delay monitor shutting down");
     }
 
     fn handle_command(
         cmd: DelayCommand,
-        entries: &mut HashMap<SignId, WatchEntry>,
+        entries: &mut HashMap<SignId, DelayEntry>,
         queue: &mut DelayQueue<SignId>,
     ) {
         match cmd {
@@ -142,7 +145,7 @@ impl DelayMonitor {
                 let key = queue.insert_at(sign_id, deadline);
                 entries.insert(
                     sign_id,
-                    WatchEntry {
+                    DelayEntry {
                         key,
                         chain,
                         unix_timestamp_indexed,
@@ -154,9 +157,9 @@ impl DelayMonitor {
             DelayCommand::Unwatch { sign_id, reason } => {
                 if let Some(old) = entries.remove(&sign_id) {
                     queue.remove(&old.key);
-                    tracing::info!(?sign_id, reason = %reason, "unwatching delayed request");
+                    tracing::info!(?sign_id, %reason, "unwatching delayed request");
                 } else {
-                    tracing::debug!(?sign_id, reason = %reason, "no delayed request to unwatch");
+                    tracing::debug!(?sign_id, %reason, "no delayed request to unwatch");
                 }
             }
         }
