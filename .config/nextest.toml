@@ -1,3 +1,6 @@
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [test-groups]
 cluster = { max-threads = "num-cpus" }
 fixture = { max-threads = "num-cpus" }
