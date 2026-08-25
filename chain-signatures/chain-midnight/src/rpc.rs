@@ -23,63 +23,30 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
-/// The classified contract-state read failures. The marker survives retry context;
-/// the underlying RPC error remains in the cause chain for diagnostics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReadFailure {
-    /// Pruned or unknown hash: no number of retries makes the node serve it.
-    Unservable,
-    /// State beyond the rpc response cap: definitive (retrying cannot shrink a
-    /// contract's state) and the contract's own property, so reads of it charge
-    /// the caller.
-    TooLarge,
-}
+pub(crate) const STATE_TOO_LARGE: &str = "midnight contract state exceeds the rpc response cap";
 
 #[derive(Debug)]
-struct ClassifiedReadFailure {
-    class: ReadFailure,
-    source: RawRpcError,
-}
+struct OversizedContractState(RawRpcError);
 
-impl std::fmt::Display for ClassifiedReadFailure {
+impl std::fmt::Display for OversizedContractState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.class.marker(), self.source)
+        write!(formatter, "{STATE_TOO_LARGE}: {}", self.0)
     }
 }
 
-impl std::error::Error for ClassifiedReadFailure {
+impl std::error::Error for OversizedContractState {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        Some(&self.0)
     }
 }
 
-impl ReadFailure {
-    /// The marker text errors of this class carry.
-    pub(crate) const fn marker(self) -> &'static str {
-        match self {
-            Self::Unservable => {
-                "midnight node cannot serve contract state at that block (pruned or unknown hash)"
-            }
-            Self::TooLarge => "midnight contract state exceeds the rpc response cap",
-        }
-    }
+pub(crate) fn oversized_contract_state(source: RawRpcError) -> anyhow::Error {
+    anyhow::Error::new(OversizedContractState(source))
+}
 
-    /// An error of this class whose original RPC error remains its source.
-    pub(crate) fn err(self, source: RawRpcError) -> anyhow::Error {
-        anyhow::Error::new(ClassifiedReadFailure {
-            class: self,
-            source,
-        })
-    }
-
-    /// The class `err` carries, if any.
-    pub(crate) fn of(err: &anyhow::Error) -> Option<Self> {
-        err.chain().find_map(|cause| {
-            cause
-                .downcast_ref::<ClassifiedReadFailure>()
-                .map(|classified| classified.class)
-        })
-    }
+pub(crate) fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.is::<OversizedContractState>())
 }
 
 struct Params(Option<Box<RawValue>>);
@@ -338,22 +305,18 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        ContractStateReply::Unservable(err)
-        | ContractStateReply::TooLarge(err)
-        | ContractStateReply::Other(err) => {
+        ContractStateReply::TooLarge(err) | ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
     }
 }
 
 /// One `midnight_contractState` answer, classified once for both transports. The node
-/// builds every rpc error as invalid-params with the reason only in the text, so its
-/// two definitive answers stay text matches under the code gate.
+/// builds every rpc error as invalid-params with the reason only in the text, so
+/// contract absence stays a text match under the code gate.
 enum ContractStateReply {
     /// The state bytes, or `None` when the contract is not present at that block.
     State(Option<Vec<u8>>),
-    /// Pruned or unknown hash: no number of retries makes the node serve it.
-    Unservable(RawRpcError),
     /// State beyond the rpc response cap, reachable because our cap sits above the
     /// server's: definitive, since retrying cannot shrink a contract's state.
     TooLarge(RawRpcError),
@@ -374,14 +337,6 @@ fn classify_contract_state_reply(
                 && reply.message.contains("Contract not present") =>
         {
             ContractStateReply::State(None)
-        }
-        Err(RawRpcError::User(reply))
-            if reply.code == INVALID_PARAMS_CODE
-                && reply
-                    .message
-                    .contains("Unable to get requested contract state") =>
-        {
-            ContractStateReply::Unservable(RawRpcError::User(reply))
         }
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
             ContractStateReply::TooLarge(RawRpcError::User(reply))
@@ -435,7 +390,7 @@ fn rejected_http_status(error: &anyhow::Error) -> Option<u16> {
 }
 
 fn is_read_retryable(error: &anyhow::Error) -> bool {
-    if ReadFailure::of(error) == Some(ReadFailure::TooLarge) {
+    if is_oversized_contract_state(error) {
         return false;
     }
     if let Some(status) = rejected_http_status(error) {
@@ -571,8 +526,7 @@ impl Reads {
 
                 match classify_contract_state_reply(response)? {
                     ContractStateReply::State(state) => Ok(state),
-                    ContractStateReply::Unservable(err) => Err(ReadFailure::Unservable.err(err)),
-                    ContractStateReply::TooLarge(err) => Err(ReadFailure::TooLarge.err(err)),
+                    ContractStateReply::TooLarge(err) => Err(oversized_contract_state(err)),
                     ContractStateReply::Other(err) => {
                         Err(anyhow::Error::new(err).context("midnight_contractState failed"))
                     }
@@ -991,9 +945,8 @@ mod tests {
                 .await
                 .expect_err("the node reply is a publisher read failure");
 
-            assert_eq!(
-                ReadFailure::of(&err),
-                None,
+            assert!(
+                !is_oversized_contract_state(&err),
                 "publisher errors must not acquire indexer policy markers: {err:#}"
             );
             assert!(
@@ -1022,7 +975,7 @@ mod tests {
         for (reply, expected_class, expected_attempts) in [
             (
                 Canned::UserWithData(INVALID_PARAMS_CODE, UNSERVABLE_MSG, DATA),
-                Some(ReadFailure::Unservable),
+                false,
                 3,
             ),
             (
@@ -1031,15 +984,11 @@ mod tests {
                     "state exceeds the response limit",
                     DATA,
                 ),
-                Some(ReadFailure::TooLarge),
+                true,
                 1,
             ),
-            (
-                Canned::UserWithData(12345, ReadFailure::TooLarge.marker(), DATA),
-                None,
-                3,
-            ),
-            (Canned::ClientErr, None, 3),
+            (Canned::UserWithData(12345, STATE_TOO_LARGE, DATA), false, 3),
+            (Canned::ClientErr, false, 3),
         ] {
             let (reads, calls) = stub_reads(reply, attempts(2));
             let err = reads
@@ -1047,7 +996,7 @@ mod tests {
                 .await
                 .expect_err("the canned node answer is a failure");
 
-            assert_eq!(ReadFailure::of(&err), expected_class, "{err:#}");
+            assert_eq!(is_oversized_contract_state(&err), expected_class, "{err:#}");
             let cause = err
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<RawRpcError>())

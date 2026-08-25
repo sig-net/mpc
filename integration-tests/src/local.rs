@@ -282,8 +282,8 @@ mod tests {
         let args = midnight_args(&cfg).into_str_args();
 
         for expected in [
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:19944",
+            "--midnight-node-url",
+            "http://127.0.0.1:19944",
             "--midnight-central-address",
             "--midnight-funding-seed",
             "--midnight-intent-gen-command",

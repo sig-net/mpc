@@ -7,7 +7,7 @@ use crate::reader::{
     signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
     Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
-use crate::rpc::{BlockRef, ReadFailure};
+use crate::rpc::{is_oversized_contract_state, BlockRef, STATE_TOO_LARGE};
 use crate::source::{ChainSource, ContractState, LiveSource};
 
 use midnight_base_crypto::fab::AlignedValue;
@@ -128,22 +128,6 @@ fn drop_entry<T>(
     None
 }
 
-/// [`drop_entry`] at ERROR: the failure may be node-local, not the caller's.
-fn drop_entry_unattributed<T>(
-    reason: &'static str,
-    height: u64,
-    request_id: Option<[u8; 32]>,
-    detail: &str,
-) -> Option<T> {
-    tracing::error!(
-        reason,
-        height,
-        request_id = request_id.map(hex::encode),
-        "midnight entry dropped: {detail}"
-    );
-    None
-}
-
 fn response_event(
     entry: &MapEntry,
     response_map: &'static str,
@@ -183,19 +167,6 @@ fn response_event(
             &format!("{response_map}: {err:#}"),
         )),
     }
-}
-
-/// Names the one failure a retry never clears. The supervised restart resumes from
-/// the retained watermark and arrives back here, so the node holds at this height
-/// until its rpc node can serve the state.
-fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
-    tracing::error!(
-        reason = "state-unservable-hold",
-        height,
-        "midnight node cannot serve state at this height; holding until it can. If \
-         this persists, switch to an archive node"
-    );
-    err
 }
 
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
@@ -346,12 +317,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// One notification entry: decode and unpack it, read the caller's ledger at
     /// `at_hash`, gate through `resolve_verified_record`, convert.
     ///
-    /// `Err` is reserved for our own schema drift: the singleton's circuits fix the
-    /// map-key shape and the notification's shape and version, so callers cannot
-    /// produce those failures, and dropping them would silently lose every request
-    /// while the checkpoint advances. Everything caller-attributable is a counted drop,
-    /// classified purely by which stage failed: `decode_notification` covers the
-    /// circuit-enforced half, `unpack_notification_v1` the caller-supplied payload.
+    /// An unreadable dependency returns `Err` so the block cannot be checkpointed.
+    /// Decoded caller-owned invalid data is a counted `Ok(None)` drop.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -414,40 +381,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &format!("{caller_hex}: {err:#}"),
                 ));
             }
-            Err(err) => match ReadFailure::of(&err) {
-                // An oversized state is the contract's own property (retrying
-                // cannot shrink it), and pruning the request index is the
-                // integrator's job.
-                Some(ReadFailure::TooLarge) => {
-                    return Ok(drop_entry(
-                        "caller-state-too-large",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-                // The transport already spent its retry budget, and block-level
-                // retries cannot be bounded per entry, so escalating would let one
-                // caller whose state cannot be served (`caller_address` is
-                // producer-supplied) halt the chain. Charged to the entry instead,
-                // the unservable answer included, but only once a head probe
-                // proves the node healthy: the node collapses transient faults
-                // into the same answer, and an ambient fault must hold, not drop.
-                Some(ReadFailure::Unservable) | None => {
-                    if let Err(probe_err) = source.finalized_head().await {
-                        return Err(err.context(format!(
-                            "caller state read failed and the head probe failed too \
-                             ({probe_err:#}): the fault is ambient, holding the block"
-                        )));
-                    }
-                    return Ok(drop_entry_unattributed(
-                        "caller-state-unreadable",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-            },
+            Err(err) if is_oversized_contract_state(&err) => {
+                return Ok(drop_entry(
+                    "caller-state-too-large",
+                    height,
+                    Some(rid),
+                    &format!("{caller_hex}: {err:#}"),
+                ));
+            }
+            Err(err) => {
+                return Err(err.context(format!("failed to read caller state {caller_hex}")));
+            }
         };
         let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
             Ok(field) => field,
@@ -513,14 +457,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             };
             match result {
                 Ok(requests) => return Ok(Some(requests)),
-                Err(err) => match ReadFailure::of(&err) {
-                    Some(ReadFailure::Unservable) => {
-                        return Err(note_unservable(err, block.number));
+                Err(err) => {
+                    if is_oversized_contract_state(&err) {
+                        return Err(err.context(format!(
+                            "{STATE_TOO_LARGE} for central contract at height {}",
+                            block.number
+                        )));
                     }
-                    None if err.downcast_ref::<ResponseSchemaDrift>().is_some() => {
+                    if err.downcast_ref::<ResponseSchemaDrift>().is_some() {
                         return Err(err);
                     }
-                    None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
+                    if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) {
                         tracing::error!(
                             reason = "central-state-undecodable-hold",
                             height = block.number,
@@ -530,12 +477,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         );
                         return Err(err);
                     }
-                    _ => tracing::warn!(
+                    tracing::warn!(
                         reason = "retrying",
                         height = block.number,
                         "midnight block processing failed: {err:#}; retrying"
-                    ),
-                },
+                    );
+                }
             }
             if cancel.cancelled_within(RETRY_DELAY).await {
                 return Ok(None);
@@ -909,11 +856,6 @@ mod tests {
         Park,
     }
 
-    enum FixtureStateError {
-        Ordinary(String),
-        Classified(ReadFailure),
-    }
-
     #[derive(Default)]
     struct FixtureSource {
         head: u64,
@@ -923,9 +865,8 @@ mod tests {
         /// (address, at_hash) -> tree; absent means Ok(None), contract not present at
         /// that block.
         states: HashMap<(String, String), Node>,
-        /// (address, at_hash) -> error message; checked BEFORE `states`, so a read can
-        /// fail with e.g.
-        state_errors: HashMap<(String, String), FixtureStateError>,
+        /// Contract states that exceed the response cap; checked before `states`.
+        oversized_states: HashSet<(String, String)>,
         /// (address, at_hash) -> (error message, failures still owed). Counts down per
         /// read and then lets the read succeed, which is how a test distinguishes a
         /// retry from a restart: a restarting indexer never reaches the success.
@@ -936,8 +877,7 @@ mod tests {
         /// `finalized_head` failures still owed before the read succeeds, the
         /// startup twin of `transient_state_errors`.
         transient_head_errors: std::sync::Mutex<usize>,
-        /// A permanent `finalized_head` failure (e.g. the dead-client marker),
-        /// checked before the transient debt.
+        /// A permanent `finalized_head` failure, checked before the transient debt.
         sticky_head_error: Option<String>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         /// Deterministic suspension: the read named here announces itself on `reached`
@@ -985,12 +925,9 @@ mod tests {
             Some(message.clone())
         }
 
-        /// Injects the pruning signature for one (address, height) read.
-        fn set_unservable(&mut self, address: &str, at: u64) {
-            self.state_errors.insert(
-                (address.to_string(), hash_of(at)),
-                FixtureStateError::Classified(ReadFailure::Unservable),
-            );
+        fn set_oversized(&mut self, address: &str, at: u64) {
+            self.oversized_states
+                .insert((address.to_string(), hash_of(at)));
         }
 
         /// Injects a real decode failure for one (address, height): the ledger's own
@@ -1059,15 +996,12 @@ mod tests {
             if let Some(message) = self.take_transient_error(&key) {
                 anyhow::bail!("{message}");
             }
-            if let Some(error) = self.state_errors.get(&key) {
-                return Err(match error {
-                    FixtureStateError::Ordinary(message) => anyhow::anyhow!(message.clone()),
-                    FixtureStateError::Classified(class) => {
-                        class.err(subxt::ext::subxt_rpcs::Error::Client(Box::new(
-                            std::io::Error::other("fixture classified contract-state failure"),
-                        )))
-                    }
-                });
+            if self.oversized_states.contains(&key) {
+                return Err(crate::rpc::oversized_contract_state(
+                    subxt::ext::subxt_rpcs::Error::Client(Box::new(std::io::Error::other(
+                        "fixture oversized contract state",
+                    ))),
+                ));
             }
             if let Some(message) = self.undecodable_states.get(&key) {
                 return Ok(ContractState::Undecodable(anyhow::anyhow!("{message}")));
@@ -1875,40 +1809,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_entry_drops_a_caller_read_that_exhausts_retries() {
-        // The transport budget is the only retry a caller read gets: `caller_address`
-        // is producer-supplied, so escalating to block-level retries would let one
-        // unservable caller halt the chain. Both persistent-error shapes drop.
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        let mut source = FixtureSource::default();
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            FixtureStateError::Ordinary(
-                "contract state read failed: connection reset by peer".to_string(),
-            ),
-        );
-        let dropped = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect("a dead caller read is charged to the entry");
-        assert!(dropped.is_none());
-
-        let mut source = FixtureSource::default();
-        source.set_unservable(&hex::encode(CALLER), 9);
-        let dropped = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect("an unservable caller read drops rather than restarting the run");
-        assert!(dropped.is_none());
-    }
-
-    #[tokio::test]
     async fn process_entry_drops_too_large_caller_state() {
         // An oversized state is the contract's own property, so the entry drops.
         let (_record, rid) = caller_record_and_rid();
@@ -1919,10 +1819,7 @@ mod tests {
         };
 
         let mut source = FixtureSource::default();
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            FixtureStateError::Classified(ReadFailure::TooLarge),
-        );
+        source.set_oversized(&hex::encode(CALLER), 9);
         let dropped = indexer
             .process_entry(&source, &entry, &hash_of(9), 9, 0)
             .await
@@ -1931,48 +1828,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_entry_holds_when_caller_read_and_node_probe_both_fail() {
-        // Charging `caller-state-unreadable` to an entry is only sound while the
-        // node is provably healthy: when even the head probe fails, the fault is
-        // ambient (node or transport), so the entry must abort the block into the
-        // lossless retry path rather than be destroyed.
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        // Both persistent caller-read shapes that drop when the node is healthy:
-        // a generic fault and the unservable answer.
-        for unservable in [false, true] {
-            let mut source = FixtureSource::default();
-            if unservable {
-                source.set_unservable(&hex::encode(CALLER), 9);
-            } else {
-                source.state_errors.insert(
-                    (hex::encode(CALLER), hash_of(9)),
-                    FixtureStateError::Ordinary(
-                        "contract state read failed: connection reset by peer".to_string(),
-                    ),
-                );
-            }
-            source.transient_head_errors = std::sync::Mutex::new(usize::MAX);
-            let err = indexer
-                .process_entry(&source, &entry, &hash_of(9), 9, 0)
-                .await
-                .expect_err("an ambient fault must hold the block, never destroy the entry");
-            assert!(
-                format!("{err:#}").contains("probe"),
-                "the hold must name the failed probe: {err:#}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn catchup_retries_a_transient_central_read() {
-        // A node hiccup costs a retry, not a supervised restart: block 8's OWN
-        // emission proves the faulted read was re-attempted.
+    async fn catchup_retries_a_transient_caller_read() {
+        // The request before block 8 proves a caller read must recover before the
+        // watermark can advance past it.
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1994,9 +1852,8 @@ mod tests {
             central_state(vec![notification_entry(1, &rid)]),
         );
         source.set_state(&hex::encode(CALLER), 8, caller_state(&record, &rid));
-        // A transport fault on the central read, not the pruning signature.
         source.set_transient_error(
-            &central,
+            &hex::encode(CALLER),
             8,
             1,
             "contract state read failed: connection reset by peer",
@@ -2016,10 +1873,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_surfaces_the_pruning_signature_from_the_live_loop() {
-        // The one failure the retry must NOT swallow: no number of retries makes a
-        // pruned node serve the state, so it ends `run()` and the restart re-anchors
-        // and re-anchors.
+    async fn run_surfaces_an_oversized_central_state() {
+        // The central state cannot be skipped, and the same finalized response cannot
+        // shrink, so surface the error instead of polling it twice per second forever.
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
         let mut source = FixtureSource {
@@ -2029,7 +1885,7 @@ mod tests {
         };
         source.set_state(&central, 8, central_state(vec![]));
         source.set_state(&central, 9, central_state(vec![]));
-        source.set_unservable(&central, 10);
+        source.set_oversized(&central, 10);
 
         let mut harness = RunFixture::spawn(source, 8).await;
         assert_block(&harness.next_event().await, 9);
@@ -2043,11 +1899,8 @@ mod tests {
             .await
             .expect("run() returns promptly")
             .expect("run task panicked")
-            .expect_err("a pruned node must surface for the supervised restart");
-        assert!(
-            err.to_string().contains("cannot serve contract state"),
-            "err: {err}"
-        );
+            .expect_err("an oversized central state must surface for operator action");
+        assert!(err.to_string().contains(STATE_TOO_LARGE), "err: {err}");
         drop(live_tx);
     }
 
