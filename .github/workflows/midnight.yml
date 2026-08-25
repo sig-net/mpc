@@ -1,0 +1,129 @@
+name: Midnight Integration Tests
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - integration-tests/**
+      - chain-signatures/**
+  pull_request:
+  merge_group:
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  midnight-real-stack:
+    name: Midnight Real Stack
+    runs-on: warp-ubuntu-latest-x64-4x
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+
+      - name: Restore Compact toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.compact
+            ~/.local/bin/compact
+          key: compact-${{ runner.os }}-launcher0.5.1-compactc0.33.0-rc.2
+
+      # The recipe sig-net/midnight-integration's ci.yml uses for the same pins.
+      - name: Install pinned Compact toolchain
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$HOME/.compact/bin:$PATH"
+          # Launcher pinned to compact-v0.5.1 (never releases/latest).
+          if ! command -v compact >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh \
+              https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
+            echo "85e74a53ae4a67b31fa4d854f3b6ffb4c29f7c53e3372c5008b6a4729a8b4a73  /tmp/compact-installer.sh" | sha256sum -c
+            sh /tmp/compact-installer.sh
+          fi
+          # compactc 0.33.0-rc.2 is a ledger-9 prerelease the launcher's channel does
+          # not serve (`compact update 0.33.0-rc.2` alone fails), so fetch it by exact
+          # URL and let the launcher adopt the on-disk copy.
+          RC_DIR="$HOME/.compact/versions/0.33.0-rc.2/x86_64-unknown-linux-musl"
+          if [ ! -x "$RC_DIR/compactc" ]; then
+            mkdir -p "$RC_DIR"
+            curl -fsSL --retry 4 -o /tmp/compactc-rc.zip \
+              https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.33.0-rc.2/compactc_v0.33.0-rc.2_x86_64-unknown-linux-musl.zip
+            echo "3055ab92bbc8d5bb0d6282b661b83761d2a0de2ee37e21cf7107e25aaf2a9aad  /tmp/compactc-rc.zip" | sha256sum -c
+            unzip -qo /tmp/compactc-rc.zip -d "$RC_DIR"
+            chmod +x "$RC_DIR"/*
+          fi
+          # Adopt the on-disk version. If the launcher refuses, wire its symlinks.
+          compact update 0.33.0-rc.2 || ln -sfn "$RC_DIR"/* "$HOME/.compact/bin/"
+          compact compile --version
+
+      - name: Build real-stack TypeScript fixtures
+        working-directory: chain-signatures/midnight-publisher-ts
+        run: |
+          npm ci
+          npm run build
+          npm run compile:real-stack-caller
+          npm run typecheck:real-stack
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+          target: wasm32-unknown-unknown
+
+      - name: Install system OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Use system OpenSSL
+        run: echo "OPENSSL_NO_VENDOR=1" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-real-stack
+          cache-targets: true
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/cargo-near-installer.sh https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh
+            sh /tmp/cargo-near-installer.sh
+          fi
+
+      - name: Build integration artifacts
+        run: ./setup.sh
+
+      - name: Build integration tests
+        run: cargo build -p integration-tests --tests
+
+      # nextest fails on an empty selection, so a renamed test cannot turn this
+      # step into a silent no-op.
+      - name: Test Midnight end-to-end stream
+        run: cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+      - name: Upload Midnight service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: midnight-real-stack-logs
+          path: target/tmp_*/midnight
+          if-no-files-found: warn

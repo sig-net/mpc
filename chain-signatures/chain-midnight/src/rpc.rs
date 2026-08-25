@@ -16,7 +16,7 @@ use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
-use crate::config::MidnightConfig;
+use crate::config::{MidnightConfig, RpcConfig};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -124,10 +124,14 @@ fn parse_block_hash(at_block_hash_0x: &str) -> anyhow::Result<H256> {
 }
 
 fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
+    connect_http_endpoint(&config.node_url, &config.rpc)
+}
+
+fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
     let client = HttpClientBuilder::default()
-        .max_response_size(config.rpc.max_response_size)
-        .request_timeout(config.rpc.request_timeout)
-        .build(&config.node_url)
+        .max_response_size(config.max_response_size)
+        .request_timeout(config.request_timeout)
+        .build(node_url)
         .context("failed to build the midnight HTTP RPC client")?;
     Ok(RpcClient::new(HttpRpcClient(client)))
 }
@@ -289,6 +293,23 @@ async fn network_id(legacy: &LegacyRpcMethods<SubstrateConfig>) -> anyhow::Resul
 fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
     let mut payload = answer;
     String::decode_all(&mut payload).context("midnight runtime returned a malformed network id")
+}
+
+/// The network id of the node at `node_http_url` once it has imported block 1, or `None`
+/// while it has not. Dials afresh on every call, so a sandbox that is still booting
+/// answers with a connection error and the caller keeps polling.
+#[cfg(feature = "sandbox")]
+pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<String>> {
+    let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default())?;
+    let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc);
+    let block_one = legacy
+        .chain_get_block_hash(Some(NumberOrHex::Number(1)))
+        .await
+        .context("fetching the hash of midnight block 1")?;
+    if block_one.is_none() {
+        return Ok(None);
+    }
+    network_id(&legacy).await.map(Some)
 }
 
 async fn publisher_contract_state(

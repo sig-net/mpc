@@ -13,10 +13,6 @@ use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
 
-fn midnight_args(cfg: &NodeConfig) -> MidnightArgs {
-    MidnightArgs::from_config(cfg.midnight.clone())
-}
-
 pub struct Node {
     pub address: String,
     pub account: Account,
@@ -75,6 +71,7 @@ impl Node {
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
         let canton = CantonArgs::from_config(cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(cfg.midnight.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = Cli::Start {
@@ -89,7 +86,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: midnight_args(cfg),
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -178,6 +175,7 @@ impl Node {
         let sol = SolArgs::from_config(config.cfg.sol.clone());
         let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
         let canton = CantonArgs::from_config(config.cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
         let cli = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -190,7 +188,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: midnight_args(&config.cfg),
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -250,48 +248,5 @@ impl Drop for Node {
         // during teardown when nodes are trying to write to Redis.
         std::thread::sleep(std::time::Duration::from_millis(100));
         self.process.kill().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
-
-    #[test]
-    fn midnight_args_preserve_complete_responder_config() {
-        let config = MidnightConfig {
-            node_url: "http://127.0.0.1:19944".into(),
-            central_address: "ab".repeat(32),
-            publisher: PublisherConfig {
-                intent_gen_command: vec!["node".into(), "/fixture/midnight-publisher.js".into()],
-                funding_seed: "0f".repeat(32),
-                proof_server_url: "http://127.0.0.1:16300".into(),
-                indexer_url: "http://127.0.0.1:18088/api/v3/graphql".into(),
-                indexer_ws_url: "ws://127.0.0.1:18088/api/v3/graphql/ws".into(),
-                ..Default::default()
-            },
-            rpc: Default::default(),
-            indexer: Default::default(),
-        };
-        let cfg = NodeConfig {
-            midnight: Some(config),
-            ..Default::default()
-        };
-
-        let args = midnight_args(&cfg).into_str_args();
-
-        for expected in [
-            "--midnight-node-url",
-            "http://127.0.0.1:19944",
-            "--midnight-central-address",
-            "--midnight-funding-seed",
-            "--midnight-intent-gen-command",
-            "--midnight-proof-server-url",
-            "--midnight-indexer-url",
-            "--midnight-indexer-ws-url",
-        ] {
-            assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
-        }
     }
 }

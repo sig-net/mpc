@@ -22,6 +22,7 @@ import {
   parseRequestIdHex,
   parseSecp256k1PublicKey,
   pureCircuits as signetCircuits,
+  requestIdBytes,
   SignetRequestResponseReader,
   type RequestIdHex,
   type Secp256k1Point,
@@ -126,7 +127,7 @@ async function waitFor<T>(description: string, read: () => Promise<T | undefined
 async function callerHasRequest(active: Session, requestId: RequestIdHex): Promise<boolean> {
   const state = await active.publicDataProvider.queryContractState(active.callerAddress);
   if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
-  return ledger(state.data).requests.member(bytes(requestId, 32));
+  return ledger(state.data).requests.member(requestIdBytes(requestId));
 }
 
 function deployEnv(config: MidnightNodeConfig, seed: string): Record<string, string> {
@@ -283,7 +284,11 @@ async function dispatch(request: Request): Promise<unknown> {
     const response = await waitFor("a verified respondBidirectional entry", () =>
       active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
     );
-    await active.caller.callTx.verifyResponse(bytes(requestId, 32), response, serializedOutput);
+    await active.caller.callTx.verifyResponse(
+      requestIdBytes(requestId),
+      response,
+      serializedOutput,
+    );
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );
