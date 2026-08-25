@@ -12,8 +12,9 @@ use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureRespo
 use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
-use mpc_primitives::{Chain, ChainConfig as _, Checkpoint, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ChainConfig as _, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
 
@@ -316,7 +317,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.sign_id.request_id == expected_request_bytes);
+        .any(|entry| entry.sign_id().request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,

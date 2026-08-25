@@ -82,12 +82,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = sign_request.id;
-        ctx.rpc.publish_signature(
-            public_key,
-            sign_request,
-            publish.signature,
-            publish.participants,
-        );
+        ctx.rpc
+            .publish_with_state(public_key, sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }
@@ -183,7 +179,7 @@ async fn advance_bidirectional_to_execution(
 
     let tx_id = BidirectionalTxId(signed_tx_hash);
 
-    let bidirectional_tx = BidirectionalTx {
+    let bidirectional_tx = Arc::new(BidirectionalTx {
         id: tx_id,
         sender: event.sender,
         serialized_transaction: event.serialized_transaction.clone(),
@@ -201,7 +197,7 @@ async fn advance_bidirectional_to_execution(
         request_id: respond_event.request_id,
         from_address: **from_address,
         nonce,
-    };
+    });
 
     tracing::info!(
         ?sign_id,
@@ -307,7 +303,7 @@ pub async fn process_execution_confirmed(
             _ => None,
         });
 
-    let completed_tx = CompletedTx::new(pending_tx.clone());
+    let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
