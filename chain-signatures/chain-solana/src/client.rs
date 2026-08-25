@@ -20,9 +20,7 @@ use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use solana_transaction_status::{
-    TransactionDetails, UiConfirmedBlock, UiTransactionEncoding,
-};
+use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;

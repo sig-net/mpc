@@ -15,9 +15,7 @@ use mpc_primitives::{Chain, ChainEvent};
 use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
-use solana_transaction_status::{
-    EncodedTransactionWithStatusMeta, UiConfirmedBlock,
-};
+use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
