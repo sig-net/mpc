@@ -43,7 +43,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
 ## 2\. System model
 
 * On-chain information
-  * Entities: n nodes; membership, threshold t, and epoch are fixed by the NEAR governance contract. 
+  * Entities: n nodes; membership, threshold t, and epoch are fixed by the governance contract. 
     * Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
     * Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
   * Request and response (per supported chain): 
@@ -58,7 +58,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
     * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5 and thus works for every f up to n − t; a threshold vote can only raise t further, since the contract clamps a proposed threshold to \[⌊2n/3⌋ \+ 1, n − 1\], and both conditions get easier as t grows, so that floor is what keeps the model intact. Below n \= 5 it falls back to a simple majority (⌊n/2⌋ \+ 1), which does not: at n \= 3 that gives 2t − n \= 1, so only f \= 0 is inside the model. The floor is applied on resharing and by threshold votes, not to the value passed at contract initialization, which is checked only against n, so a network can also be deployed outside the model.  
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
-    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling, which amounts to assuming a whole round fits inside that ceiling: a Propose, Accept and Start exchange, the generation protocol, and the indexing skew between two nodes. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (more details in L1)  
+    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
   * Channels are authenticated and encrypted. 
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
@@ -80,7 +80,7 @@ Progress is guaranteed during a sufficiently long synchronous interval, never at
 
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
-* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).  
+* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.  
 * **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
 
 ## 5\. Efficiency targets
@@ -91,7 +91,7 @@ E2. ≈ 1 generation instance per request at a time.
 
 Mechanisms striving towards these targets are deterministic proposer rotation, the posit round, and a backoff that pauses proposing when so many peers reject with "already generating" that no threshold set is left to work with.
 
-Duplicate instances, duplicate on-chain responses, and wasted rounds are correct but wasteful. On NEAR the contract settles a request on the first valid response and later ones simply fail; on chains whose contract keeps no request state, every response emits another event and the downstream consumer is the one that has to deduplicate (§1). Consequently, any mechanism that serves only E-properties may be lossy, heuristic, or deleted; it must be judged on cost, not correctness.
+Duplicate instances, duplicate on-chain responses, and wasted rounds are correct but wasteful. The contract keeps no request state, so every response emits another event and the downstream consumer is the one that has to deduplicate (§1). Consequently, any mechanism that serves only E-properties may be lossy, heuristic, or deleted; it must be judged on cost, not correctness.
 
 ## 6\. Design Invariants
 
@@ -108,7 +108,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 ### S1. One-shot artifacts are consumed at most once
 
-*Property.* No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
+*Property.* No presignature is used in signature shares for more than one signature generation, and no triple pair for more than one presignature.
 
 *Rationale.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization does not change that, since the delta is public and both signatures share the same underlying k; it only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as different.
 
@@ -158,7 +158,7 @@ The proposer starts as soon as every invitee has answered (Accept or Reject) and
 
 Proposer election is a pure function of shared inputs (`proposer_per_round` over round, membership, entropy) and the deadline `round_timeout(r)` depends only on the round `r`. Therefore peers in the same round agree on the proposer and the deadline (D2). A round advance is only ever triggered locally (deadline, enough rejects, abort), but the round it advances to is the highest a peer has shown us, so a node that falls behind catches up in one bump by learning the rejector's current round rather than climbing one round per attempt. 
 
-Three caveats remain: (i) organizing waits for the local active set to reach t (this node included) with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) the timeout is capped at a ceiling of 10 minutes; since two nodes can only transact while both are inside the same round, that ceiling less the messages a round has to fit is what caps the combined δ and indexing skew the schedule can absorb, though for NEAR-originated requests it is out of reach because L3's deadline expires first; (iii) a node proposes for at most 4 requests at a time, and a proposer that cannot get a slot inside its round budget burns the round, so a burst of requests this node is elected for costs rounds even with a perfectly healthy network.
+Three caveats remain: (i) organizing waits for the local active set to reach t (this node included) with no timeout of its own, so a wrongly short failure-detector view stalls the request while it lasts; (ii) the timeout is capped at a ceiling of 10 minutes; since two nodes can only transact while both are inside the same round, that ceiling less the messages a round has to fit is what caps the combined δ and indexing skew the schedule can absorb; (iii) a node proposes for at most 4 requests at a time, and a proposer that cannot get a slot inside its round budget burns the round, so a burst of requests this node is elected for costs rounds even with a perfectly healthy network.
 
 ### L2. Artifact supply.
 
@@ -174,16 +174,12 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 
 ### L3. Settlement
 
-*Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain (on NEAR this must happen before the request's yield deadline).
+*Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain.
 
 *Rationale.* A signature that never reaches the chain is worth no more to the user than no signature at all, while the presignature spent producing it is gone either way.
 
-For NEAR-originated requests this requires settling before the yielded promise's bounded lifetime expires (a hard deadline of 200 blocks \~= 200s)  
-
-L1 and L3 draw on that one deadline, and the rounds spend it first: round 0 costs 20 s and later rounds start at 2 s and grow by 1.15, so about 19 further rounds fit inside 200 s. A NEAR request that needs more rounds than that cannot settle at all, however the settlement path is built, which is the constraint any republish or failover schedule has to fit into.
-
 *Enforcement*: The owner republishes on a timer, retrying indefinitely with backoff capped at 60 s.
-Currently not guaranteed, for two reasons. Only the successful instance's proposer publishes, and no other participant takes over, even though every participant holds the finished signature. And the retry itself lives in the publishing process, so what survives a restart is only what reached a confirmed checkpoint: on the checkpointed chains that includes the pending publish and its signature, while NEAR and Bitcoin produce no checkpoints at all and keep it in memory alone. On NEAR the 200 s yield deadline can also expire while the publisher is still backing off.
+Currently not guaranteed, for two reasons. Only the successful instance's proposer publishes, and no other participant takes over, even though every participant holds the finished signature. And the retry itself lives in the publishing process, so what survives a restart is only what reached a confirmed checkpoint: on the checkpointed chains that includes the pending publish and its signature.
 
 ### L4. Mesh convergence
 
