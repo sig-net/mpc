@@ -67,7 +67,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
 
 ## 3\. Safety properties
 
-* **S1. One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one sign request, and no triple pair for more than one presignature.
+* **S1. One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one signature generation, and no triple pair for more than one presignature.
 * **S2. Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
 * **S3. Membership and epochs change only on-chain:** No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state. 
 * **S4. Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
