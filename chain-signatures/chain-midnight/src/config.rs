@@ -38,7 +38,8 @@ impl Default for RpcConfig {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexerConfig {
-    pub live_block_buffer: usize,
+    /// Delay between finalized-head samples after each completed live iteration.
+    pub poll_interval: Duration,
     /// Silence budget before `run()` returns for a restart: ~10 missed blocks at
     /// Midnight's ~6s cadence.
     pub stall_timeout: Duration,
@@ -47,7 +48,7 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            live_block_buffer: 16384,
+            poll_interval: Duration::from_secs(2),
             stall_timeout: Duration::from_secs(60),
         }
     }
@@ -116,7 +117,7 @@ impl fmt::Debug for PublisherConfig {
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
-    pub node_ws_url: String,
+    pub node_url: String,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
     pub central_address: String,
     pub publisher: PublisherConfig,
@@ -126,7 +127,11 @@ pub struct MidnightConfig {
 
 impl MidnightConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        validate_url("node_ws_url", &self.node_ws_url, &["ws", "wss"])?;
+        anyhow::ensure!(
+            self.node_url.starts_with("http://") || self.node_url.starts_with("https://"),
+            "midnight config: node_url must use a lowercase http or https scheme"
+        );
+        validate_url("node_url", &self.node_url, &["http", "https"])?;
         anyhow::ensure!(
             self.central_address.len() == 64
                 && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -140,6 +145,10 @@ impl MidnightConfig {
             !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
             "midnight config: central_address must be lowercase hex, the canonical form \
              every comparison site assumes"
+        );
+        anyhow::ensure!(
+            !self.indexer.poll_interval.is_zero(),
+            "midnight config: indexer.poll_interval must be greater than zero"
         );
         self.publisher.validate()
     }
@@ -227,7 +236,7 @@ mod tests {
 
     fn valid_config() -> MidnightConfig {
         MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:9944".to_string(),
+            node_url: "http://127.0.0.1:9944".to_string(),
             central_address: "ab".repeat(32),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
@@ -273,6 +282,16 @@ mod tests {
     }
 
     #[test]
+    fn node_url_rejects_the_uppercase_scheme_the_wallet_cannot_convert() {
+        let mut config = valid_config();
+        config.node_url = "HTTP://127.0.0.1:9944".to_string();
+        let error = config
+            .validate()
+            .expect_err("the wallet's HTTP-to-WS conversion is case-sensitive");
+        assert!(error.to_string().contains("lowercase"), "{error:#}");
+    }
+
+    #[test]
     fn publisher_command_is_a_bare_name_or_an_absolute_path() {
         for program in ["midnight-publisher", "/opt/midnight-publisher"] {
             let mut config = valid_config();
@@ -295,12 +314,10 @@ mod tests {
 
     #[test]
     fn validate_names_offending_field() {
-        for invalid in ["", "http://127.0.0.1:9944"] {
-            let mut bad_ws = valid_config();
-            bad_ws.node_ws_url = invalid.to_string();
-            let err = bad_ws.validate().unwrap_err().to_string();
-            assert!(err.contains("node_ws_url"), "unexpected error: {err}");
-        }
+        let mut zero_poll = valid_config();
+        zero_poll.indexer.poll_interval = Duration::ZERO;
+        let err = zero_poll.validate().unwrap_err().to_string();
+        assert!(err.contains("poll_interval"), "unexpected error: {err}");
 
         let mut short_address = valid_config();
         short_address.central_address = "ab".repeat(31);

@@ -35,7 +35,6 @@ const SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e";
 
 struct MidnightEndpoints {
-    node_ws_url: String,
     node_http_url: String,
     indexer_url: String,
     indexer_ws_url: String,
@@ -48,7 +47,6 @@ fn host_endpoints(
     proof_host_port: u16,
 ) -> MidnightEndpoints {
     MidnightEndpoints {
-        node_ws_url: format!("ws://127.0.0.1:{node_host_port}"),
         node_http_url: format!("http://127.0.0.1:{node_host_port}"),
         indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
         indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
@@ -236,7 +234,7 @@ fn responder_config(
     publisher_entrypoint: PathBuf,
 ) -> MidnightConfig {
     MidnightConfig {
-        node_ws_url: endpoints.node_ws_url.clone(),
+        node_url: endpoints.node_http_url.clone(),
         central_address: bootstrap.central_address.clone(),
         publisher: PublisherConfig {
             intent_gen_command: vec![
@@ -436,7 +434,7 @@ impl MidnightStack {
             .context("resolving Midnight proof-server host port")?;
 
         let endpoints = host_endpoints(node_host_port, indexer_host_port, proof_host_port);
-        let network_id = wait_for_node(&endpoints.node_ws_url).await?;
+        let network_id = wait_for_node(&endpoints.node_http_url).await?;
         wait_for_indexer(&endpoints.indexer_url).await?;
         wait_for_http("proof server", &endpoints.proof_server_url).await?;
 
@@ -463,9 +461,9 @@ fn log_consumer(path: &Path) -> impl Fn(&LogFrame) + Clone + Send + Sync + 'stat
     }
 }
 
-async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
+async fn wait_for_node(node_http_url: &str) -> anyhow::Result<String> {
     let config = MidnightConfig {
-        node_ws_url: node_ws_url.to_string(),
+        node_url: node_http_url.to_string(),
         central_address: "00".repeat(32),
         publisher: Default::default(),
         rpc: Default::default(),
@@ -480,7 +478,7 @@ async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!(
-        "Midnight node at {node_ws_url} did not become ready: {}",
+        "Midnight node at {node_http_url} did not become ready: {}",
         last_error.unwrap_or_else(|| "no response".into())
     )
 }

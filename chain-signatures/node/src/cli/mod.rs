@@ -583,7 +583,7 @@ fn log_startup(
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_ws_url = %chains.midnight.as_ref().map(|c| c.node_ws_url.as_str()).unwrap_or("None"),
+        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -939,6 +939,7 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1134,7 +1135,7 @@ mod tests {
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
-            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
             "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
@@ -1177,8 +1178,8 @@ mod tests {
             "project",
             "--redis-url",
             "redis://127.0.0.1:6379",
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:9944",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
             "--midnight-funding-seed",
@@ -1195,8 +1196,8 @@ mod tests {
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
         for expected in [
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:9944",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
             "--midnight-funding-seed",
@@ -1276,7 +1277,7 @@ mod tests {
         let address = listener.local_addr().expect("read the endpoint address");
 
         let mut midnight = MidnightConfig {
-            node_ws_url: format!("ws://{address}"),
+            node_url: format!("http://{address}"),
             central_address: "ab".repeat(32),
             publisher: Default::default(),
             rpc: Default::default(),

@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn midnight_args_preserve_complete_responder_config() {
         let config = MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:19944".into(),
+            node_url: "http://127.0.0.1:19944".into(),
             central_address: "ab".repeat(32),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["node".into(), "/fixture/midnight-publisher.js".into()],

@@ -59,9 +59,8 @@ pub fn signet_field_node_by_path<'a>(root: &'a Node, path: &[u8]) -> anyhow::Res
 }
 
 /// The central singleton's map at ledger field `field`, after checking the root is the
-/// deployed contract's six-field array. Both shapes are fixed by the singleton's
-/// circuits, so a failure here is schema drift or a chain this build does not
-/// understand, never caller data.
+/// deployed contract's six-field array; both shapes are circuit-fixed, so failure here
+/// is schema drift or an upgraded chain, never caller data.
 pub(crate) fn central_map<'a>(
     root: &'a Node,
     field: u8,
