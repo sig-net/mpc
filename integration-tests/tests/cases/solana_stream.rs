@@ -32,6 +32,9 @@ use tokio::time::Instant;
 
 use std::time::Duration;
 
+/// Timeout for waiting for a finalized event (SignRequest or Block)
+const FINALIZED_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
+
 async fn solana_sandbox() -> Result<Solana> {
     let solana = Solana::run().await;
     solana.deploy_contract().await?;
@@ -64,7 +67,7 @@ async fn wait_for_sign_request(
     indexer: &mut ChainIndexerStream,
 ) -> Result<Arc<IndexedSignRequest>> {
     loop {
-        match timeout(Duration::from_secs(6), indexer.next_event()).await {
+        match timeout(FINALIZED_EVENT_TIMEOUT, indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(ChainEvent::CatchupCompleted)) => {
@@ -83,7 +86,7 @@ async fn next_sign_command(
     sign_rx: &mut mpsc::Receiver<SignCommand>,
 ) -> Result<Arc<IndexedSignRequest>> {
     loop {
-        match timeout(Duration::from_secs(20), sign_rx.recv()).await {
+        match timeout(FINALIZED_EVENT_TIMEOUT, sign_rx.recv()).await {
             Ok(Some(SignCommand::Request(request))) => return Ok(request),
             Ok(Some(other)) => {
                 tracing::debug!(?other, "ignoring non-request sign command")
@@ -201,9 +204,13 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
         .await?;
 
     // Collect events and verify we get block markers
+    // Collect events until a block marker arrives; heartbeats only start
+    // flowing once the finalized anchor leaves 0 (fresh-validator warmup), so
+    // budget for the finality lag.
     let mut found_block = false;
-    for _ in 0..5 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(3), indexer.next_event()).await {
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer.next_event()).await {
             if matches!(event, ChainEvent::Block(_)) {
                 found_block = true;
                 break;
@@ -233,13 +240,20 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
             .await?;
     }
 
-    // Collect some events from first client
+    // Collect events from the first client until it has seen both requests
+    // (they surface only after finalization; heartbeats stream meanwhile).
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
-    for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), indexer1.next_event()).await {
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer1.next_event()).await {
             match event {
-                ChainEvent::SignRequest { .. } => seen_by_client1 += 1,
+                ChainEvent::SignRequest { .. } => {
+                    seen_by_client1 += 1;
+                    if seen_by_client1 >= 2 {
+                        break;
+                    }
+                }
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
                 _ => {}
             }
@@ -265,7 +279,8 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     // Client should process new events
     let mut sign_events = Vec::new();
     let mut caught_up = false;
-    for _ in 0..20 {
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
+    while Instant::now() < deadline {
         if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer2.next_event()).await {
             match event {
                 ChainEvent::SignRequest { request, .. } => {
@@ -354,7 +369,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     // Collect all sign request events
     let mut sign_events = Vec::new();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + FINALIZED_EVENT_TIMEOUT;
     while sign_events.len() < num_requests {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -407,7 +422,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         )
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     let mut checkpoint_block = None;
     while Instant::now() < deadline {
         match timeout(Duration::from_secs(1), indexer1.next_event()).await {
@@ -455,7 +470,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         .await?;
 
     // New client should pick up new events
-    timeout(Duration::from_secs(5), async {
+    timeout(FINALIZED_EVENT_TIMEOUT, async {
         loop {
             match indexer2.next_event().await {
                 Some(ChainEvent::SignRequest { request, .. }) => break Ok(request),
@@ -581,7 +596,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         )
         .await?;
 
-    let action = timeout(Duration::from_secs(15), rpc_rx.recv())
+    let action = timeout(FINALIZED_EVENT_TIMEOUT, rpc_rx.recv())
         .await
         .context("timeout waiting for recovered publish action")?
         .context("rpc channel closed before publish action")?;
@@ -653,7 +668,7 @@ async fn test_solana_respond_round_trip() -> Result<()> {
     let event = indexer
         .wait_for(
             |event| matches!(event, ChainEvent::Respond(_)),
-            Duration::from_secs(30),
+            FINALIZED_EVENT_TIMEOUT,
         )
         .await
         .context("indexer never emitted the on-chain respond event")?;
@@ -684,7 +699,7 @@ async fn test_solana_stream_failed_tx_skipped() -> Result<()> {
 
     // Wait for the failed transaction's slot to be emitted as a Block event, and verify that no SignRequest events from the failed transaction leak into the stream.
     loop {
-        match timeout(Duration::from_secs(30), indexer.next_event()).await {
+        match timeout(FINALIZED_EVENT_TIMEOUT, indexer.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { .. })) => {
                 anyhow::bail!("sign CPI event from the failed tx leaked into the stream")
             }
@@ -746,7 +761,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     );
 
     // Wait for the processed block to advance past the snapshot
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     loop {
         let processed = backlog.get_processed_block(Chain::Solana).await;
         if processed.is_some_and(|slot| processed_before.is_none_or(|prev| slot > prev)) {
@@ -862,7 +877,7 @@ async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Resul
 
     // Wait for the processed block to advance past the snapshot,
     // ensuring that the indexer has processed request A
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     loop {
         let processed = backlog.get_processed_block(Chain::Solana).await;
         if processed.is_some_and(|slot| processed_before.is_none_or(|prev| slot > prev)) {
