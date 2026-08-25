@@ -200,6 +200,8 @@ impl MidnightPublisher {
 
 #[async_trait]
 impl ChainPublisher for MidnightPublisher {
+    // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
+    // Retries currently operate per request.
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         self.publish_inner(action).await.inspect_err(|e| {
             tracing::error!(

@@ -20,7 +20,7 @@ pub enum SignCommand {
 }
 
 /// All relevant info pertaining to an indexed sign request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,

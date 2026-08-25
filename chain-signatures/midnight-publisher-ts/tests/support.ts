@@ -28,7 +28,7 @@ export function managedDir(): string {
 export const testConfig = (overrides: Partial<Config> = {}): Config => ({
   networkId: "undeployed",
   endpoints: {
-    nodeUrl: "ws://127.0.0.1:9944/",
+    nodeUrl: "http://127.0.0.1:9944/",
     proofServerUrl: "http://127.0.0.1:6300/",
     indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
     indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",

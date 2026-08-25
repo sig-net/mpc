@@ -465,7 +465,7 @@ fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Resu
         .env("PATH", CHILD_PATH)
         .env("MIDNIGHT_PUB_FUNDING_SEED", &config.publisher.funding_seed)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
-        .env("MIDNIGHT_PUB_NODE_URL", &config.node_ws_url)
+        .env("MIDNIGHT_PUB_NODE_URL", &config.node_url)
         .env(
             "MIDNIGHT_PUB_PROOF_SERVER_URL",
             &config.publisher.proof_server_url,
@@ -651,7 +651,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const NETWORK_ID: &str = "undeployed";
-    const NODE_WS_URL: &str = "ws://127.0.0.1:9944";
+    const NODE_URL: &str = "https://node.example.com/rpc?network=preprod";
 
     /// A shell stub in place of the real Node child; a test reading an unpinned field
     /// must pin its own, or it silently tests the default.
@@ -660,7 +660,7 @@ mod tests {
             r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
         MidnightConfig {
-            node_ws_url: NODE_WS_URL.to_string(),
+            node_url: NODE_URL.to_string(),
             central_address: "ab".repeat(32),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
@@ -1243,10 +1243,7 @@ mod tests {
                     "MIDNIGHT_PUB_NETWORK_ID".to_string(),
                     NETWORK_ID.to_string(),
                 ),
-                (
-                    "MIDNIGHT_PUB_NODE_URL".to_string(),
-                    config.node_ws_url.clone(),
-                ),
+                ("MIDNIGHT_PUB_NODE_URL".to_string(), config.node_url.clone()),
                 (
                     "MIDNIGHT_PUB_PROOF_SERVER_URL".to_string(),
                     config.publisher.proof_server_url.clone(),
@@ -1302,56 +1299,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_requires_the_ready_discriminator() {
-        for (case, reply) in [
+    async fn readiness_rejects_every_invalid_handshake() {
+        let invalid_replies = [
             (
-                "missing",
+                "missing ready field",
                 r#"{"id":0,"ok":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
-                "false",
+                "false ready field",
                 r#"{"id":0,"ok":true,"ready":false,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
-        ] {
-            let result = IntentGen::spawn(&ready_reply_config(reply), NETWORK_ID).await;
-            assert!(
-                result.is_err(),
-                "a {case} ready field must not start a session"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_every_non_exact_protocol_version() {
-        let invalid_replies = [
             (
-                "missing",
+                "missing protocol version",
                 r#"{"id":0,"ok":true,"ready":true,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
-                "older",
+                "older protocol version",
                 r#"{"id":0,"ok":true,"ready":true,"protocolVersion":0,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
-                "newer",
+                "newer protocol version",
                 r#"{"id":0,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
-                "wrongly typed",
+                "wrongly typed protocol version",
                 r#"{"id":0,"ok":true,"ready":true,"protocolVersion":"1","submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
-                "null",
+                "null protocol version",
                 r#"{"id":0,"ok":true,"ready":true,"protocolVersion":null,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
         ];
 
         for (case, reply) in invalid_replies {
             let result = IntentGen::spawn(&ready_reply_config(reply), NETWORK_ID).await;
-            assert!(
-                result.is_err(),
-                "a {case} protocol version must not start a session"
-            );
+            assert!(result.is_err(), "{case} must not start a session");
         }
     }
 

@@ -11,7 +11,7 @@ use crate::reader::{
     signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
-use crate::rpc::{BlockRef, ReadFailure};
+use crate::rpc::{is_oversized_contract_state, BlockRef};
 use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
 
 use std::sync::Arc;
@@ -23,7 +23,10 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use mpc_utils::time::current_unix_timestamp;
+use mpc_utils::{
+    task::{retry_until_some, CancellationTokenExt as _},
+    time::current_unix_timestamp,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -104,98 +107,11 @@ fn drop_entry<T>(
     None
 }
 
-/// Names the one failure a retry never clears. The supervised restart resumes from
-/// the retained watermark and arrives back here, so the node holds at this height
-/// until its rpc node can serve the state.
-fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
-    tracing::error!(
-        reason = "state-unservable-hold",
-        height,
-        "midnight node cannot serve state at this height; holding until it can. If \
-         this persists, switch to an archive node"
-    );
-    err
-}
-
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
 /// mid-flight, which every caller answers by returning `Ok(())`.
 enum Indexed {
     Done,
     Cancelled,
-}
-
-/// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
-///
-/// The per-item retry the other chains' indexers apply around their own block
-/// processing: a node hiccup costs one retry here, not a supervised
-/// restart that re-runs backlog recovery, re-anchors and
-/// re-queues the pending backlog. The pruning signature escapes as `Err` — retrying
-/// cannot serve a pruned node. Cancellation is `Ok(None)`.
-async fn retry_until_cancelled<T, F, Fut>(
-    what: &'static str,
-    height: u64,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) => match ReadFailure::of(&err) {
-                Some(ReadFailure::Unservable) => return Err(note_unservable(err, height)),
-                Some(ReadFailure::ClientClosed) => return Err(err),
-                _ => tracing::warn!(
-                    reason = "retrying",
-                    height,
-                    "midnight {what} failed: {err:#}; retrying"
-                ),
-            },
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
-}
-
-/// Retries a startup step every [`RETRY_DELAY`] until it succeeds or `cancel` fires
-/// (`Ok(None)`). No unservable escape, unlike [`retry_until_cancelled`]: at startup a
-/// restart would only re-run backlog recovery to arrive back at the same step. The
-/// dead-client class does escape (`Err`), since no in-place retry can revive a
-/// closed client and only the supervised restart rebuilds the connection.
-async fn retry_startup<T, F, Fut>(
-    what: &'static str,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) if ReadFailure::of(&err) == Some(ReadFailure::ClientClosed) => {
-                return Err(err);
-            }
-            Err(err) => tracing::warn!("midnight {what} failed: {err:#}; retrying"),
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
@@ -367,45 +283,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &format!("{caller_hex}: {err:#}"),
                 ));
             }
-            Err(err) => match ReadFailure::of(&err) {
-                // Ours to fix, not this entry's: a closed client fails every read
-                // until the supervisor's restart rebuilds the connection.
-                Some(ReadFailure::ClientClosed) => return Err(err),
-                Some(ReadFailure::Unservable) => {
-                    return Err(Hold {
-                        reason: "state-unservable-hold",
-                        height,
-                        cause: err,
-                    }
-                    .into());
-                }
-                // An oversized state is the contract's own property (retrying
-                // cannot shrink it), and pruning the request index is the
-                // integrator's job.
-                Some(ReadFailure::TooLarge) => {
-                    return Ok(drop_entry(
-                        "caller-state-too-large",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-                None => {
-                    if let Err(probe_err) = source.finalized_head().await {
-                        return Err(err.context(format!(
-                            "caller state read failed and the head probe failed too \
-                             ({probe_err:#}): the fault is ambient, holding the block"
-                        )));
-                    }
-                    tracing::error!(
-                        reason = "caller-state-unreadable",
-                        height,
-                        request_id = %hex::encode(rid),
-                        "midnight entry dropped: {caller_hex}: {err:#}"
-                    );
-                    return Ok(None);
-                }
-            },
+            Err(err) if is_oversized_contract_state(&err) => {
+                return Ok(drop_entry(
+                    "caller-state-too-large",
+                    height,
+                    Some(rid),
+                    &format!("{caller_hex}: {err:#}"),
+                ));
+            }
+            Err(err) => {
+                return Err(err.context(format!("failed to read caller state {caller_hex}")));
+            }
         };
         let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
             Ok(field) => field,
@@ -453,7 +341,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
+    /// [`process_block`](Self::process_block) under the per-block retry policy.
     /// Permanent scanner failures escape immediately; transport failures retry here.
     async fn process_block_retrying<C: ChainSource>(
         &self,
@@ -478,22 +366,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         );
                         return Err(err);
                     }
-                    match ReadFailure::of(&err) {
-                        Some(ReadFailure::Unservable) => {
-                            return Err(note_unservable(err, block.number));
-                        }
-                        Some(ReadFailure::ClientClosed) => return Err(err),
-                        _ => tracing::warn!(
-                            reason = "retrying",
-                            height = block.number,
-                            "midnight block processing failed: {err:#}; retrying"
-                        ),
-                    }
+                    tracing::warn!(
+                        reason = "retrying",
+                        height = block.number,
+                        "midnight block processing failed: {err:#}; retrying"
+                    );
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(None),
-                _ = tokio::time::sleep(RETRY_DELAY) => {}
+            if cancel.cancelled_within(RETRY_DELAY).await {
+                return Ok(None);
             }
         }
     }
@@ -508,8 +389,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
         let Some(block) =
-            retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
-                .await?
+            retry_until_some(cancel, RETRY_DELAY, "midnight block lookup", || async {
+                source.block_at(number).await.map(Some)
+            })
+            .await
         else {
             return Ok(Indexed::Cancelled);
         };
@@ -572,7 +455,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let Some(anchor) =
-            retry_startup("anchor sampling", &cancel, || source.finalized_head()).await?
+            retry_until_some(&cancel, RETRY_DELAY, "midnight anchor sampling", || async {
+                source.finalized_head().await.map(Some)
+            })
+            .await
         else {
             return Ok(());
         };
@@ -587,12 +473,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             );
             last_processed = anchor.number;
         } else {
-            for number in (checkpoint + 1)..=anchor.number {
+            for number in checkpoint.saturating_add(1)..anchor.number {
                 match self
                     .index_height(source, &events_tx, number, &cancel)
                     .await?
                 {
                     Indexed::Done => last_processed = number,
+                    Indexed::Cancelled => return Ok(()),
+                }
+            }
+            if anchor.number > checkpoint {
+                match self
+                    .index_block(source, &events_tx, &anchor, &cancel)
+                    .await?
+                {
+                    Indexed::Done => last_processed = anchor.number,
                     Indexed::Cancelled => return Ok(()),
                 }
             }
@@ -602,27 +497,31 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .context("failed to send midnight catchup completed event")?;
 
-        let (blocks_tx, mut blocks_rx) = mpsc::channel(self.config.indexer.live_block_buffer);
-        let _producer = source.spawn_block_producer(blocks_tx).await?;
+        let mut last_progress = tokio::time::Instant::now();
         loop {
+            if cancel
+                .cancelled_within(self.config.indexer.poll_interval)
+                .await
+            {
+                return Ok(());
+            }
+
             let block = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                block = blocks_rx.recv() => match block {
-                    Some(block) => block,
-                    // To run_supervised, Ok(()) is permanent shutdown and Err is a
-                    // restart, so an ended producer must be Err and let the restart
-                    // re-anchor.
-                    None => anyhow::bail!("midnight finalized block producer terminated"),
-                },
+                result = source.finalized_head() => result
+                    .context("failed to poll the midnight finalized head")?,
             };
+
             if block.number <= last_processed {
+                if last_progress.elapsed() >= self.config.indexer.stall_timeout {
+                    anyhow::bail!(
+                        "midnight finalized head made no progress for {:?}",
+                        self.config.indexer.stall_timeout
+                    );
+                }
                 continue;
             }
-            // Close any finality gap so a lagging subscription cannot skip
-            // notifications; each height processes exactly like catchup.
-            // `last_processed` stays put mid-walk: every continuation overwrites it
-            // below before any read, so a per-height assignment is a dead store.
-            for number in (last_processed + 1)..block.number {
+            for number in last_processed.saturating_add(1)..block.number {
                 match self
                     .index_height(source, &events_tx, number, &cancel)
                     .await?
@@ -635,7 +534,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 .index_block(source, &events_tx, &block, &cancel)
                 .await?
             {
-                Indexed::Done => last_processed = block.number,
+                Indexed::Done => {
+                    last_processed = block.number;
+                    last_progress = tokio::time::Instant::now();
+                }
                 Indexed::Cancelled => return Ok(()),
             }
         }
@@ -651,14 +553,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        // A failed dial is the same transient class as a failed anchor read.
-        let Some(source) = retry_startup("node connect", &cancel, || {
-            LiveSource::connect(&self.config)
-        })
-        .await?
-        else {
-            return Ok(());
-        };
+        let source = LiveSource::connect(&self.config).await?;
         self.run_with_source(&source, events_tx, cancel).await
     }
 }

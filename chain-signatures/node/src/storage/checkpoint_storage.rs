@@ -1,8 +1,8 @@
 use crate::protocol::Chain;
 
+use crate::backlog::Checkpoint;
 use anyhow::Context;
 use deadpool_redis::Pool;
-use mpc_primitives::Checkpoint;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
@@ -91,10 +91,10 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let value = serde_json::to_string(checkpoint)
+                let value = encode_checkpoint(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
 
-                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), &value)
+                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), value)
                     .await
                     .context("failed to persist checkpoint to redis")?;
             }
@@ -115,7 +115,7 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let value = serde_json::to_string(checkpoint)
+                let value = encode_checkpoint(checkpoint)
                     .context("failed to serialize pending checkpoint")?;
                 let digest = hex::encode(checkpoint.digest());
                 const PERSIST: &str = r#"
@@ -166,14 +166,14 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let values: HashMap<String, String> = conn
+                let values: HashMap<String, Vec<u8>> = conn
                     .hgetall(self.pending_checkpoint_key(chain))
                     .await
                     .context("failed to load pending checkpoints from redis")?;
                 let mut checkpoints = values
                     .into_values()
                     .map(|value| {
-                        serde_json::from_str(&value)
+                        decode_checkpoint(&value)
                             .context("failed to deserialize pending checkpoint")
                     })
                     .collect::<anyhow::Result<Vec<Checkpoint>>>()?;
@@ -211,7 +211,7 @@ impl CheckpointStorage {
                     end
                     return redis.call('HGET', KEYS[2], height)
                 "#;
-                let body: Option<String> = redis::Script::new(FIND)
+                let body: Option<Vec<u8>> = redis::Script::new(FIND)
                     .key(self.pending_digest_key(chain))
                     .key(self.pending_checkpoint_key(chain))
                     .arg(hex::encode(digest))
@@ -220,7 +220,7 @@ impl CheckpointStorage {
                     .context("failed to find pending checkpoint")?;
                 match body {
                     Some(body) => {
-                        let checkpoint: Checkpoint = serde_json::from_str(&body)
+                        let checkpoint: Checkpoint = decode_checkpoint(&body)
                             .context("failed to deserialize pending checkpoint")?;
                         Ok(Some(checkpoint))
                     }
@@ -303,8 +303,8 @@ impl CheckpointStorage {
 
     /// Replace the confirmed checkpoint and discard obsolete pending checkpoints.
     pub async fn reset_to_latest(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        let value = serde_json::to_string(checkpoint)
-            .context("failed to serialize checkpoint persistence")?;
+        let value =
+            encode_checkpoint(checkpoint).context("failed to serialize checkpoint persistence")?;
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -341,14 +341,14 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let value: Option<String> = conn
+                let value: Option<Vec<u8>> = conn
                     .get(self.checkpoint_key(chain))
                     .await
                     .context("failed to get checkpoint from redis")?;
                 match value {
                     Some(v) => {
                         let checkpoint: Checkpoint =
-                            serde_json::from_str(&v).context("failed to deserialize checkpoint")?;
+                            decode_checkpoint(&v).context("failed to deserialize checkpoint")?;
                         Ok(Some(checkpoint))
                     }
                     None => Ok(None),
@@ -361,6 +361,16 @@ impl CheckpointStorage {
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
+}
+
+fn encode_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(checkpoint, &mut bytes).context("failed to encode checkpoint CBOR")?;
+    Ok(bytes)
+}
+
+fn decode_checkpoint(bytes: &[u8]) -> anyhow::Result<Checkpoint> {
+    ciborium::from_reader(bytes).context("failed to decode checkpoint CBOR")
 }
 
 #[cfg(test)]
@@ -457,5 +467,18 @@ mod tests {
         );
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_cbor_encoding_roundtrip() {
+        let checkpoint = Checkpoint {
+            chain: Chain::Ethereum,
+            block_height: 100,
+            pending_requests: vec![],
+            cumulative_digest: [42u8; 32],
+        };
+        let encoded = encode_checkpoint(&checkpoint).unwrap();
+        let decoded = decode_checkpoint(&encoded).unwrap();
+        assert_eq!(checkpoint, decoded);
     }
 }

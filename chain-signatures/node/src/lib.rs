@@ -4,7 +4,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// Version of the checkpoint data that the node can work with.
 pub const CHECKPOINT_VERSION: u64 = 0;
 /// Redis namespace version for persisted checkpoints.
-pub(crate) const CHECKPOINT_STORAGE_VERSION: &str = "v13";
+pub(crate) const CHECKPOINT_STORAGE_VERSION: &str = "v14";
 
 pub mod backlog;
 pub mod cli;

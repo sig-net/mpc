@@ -10,8 +10,7 @@ use midnight_onchain_state::state::StateValue;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_primitives::SignId;
-use mpc_utils::task::AbortOnDrop;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
@@ -36,7 +35,7 @@ fn hex_32(value: &str) -> [u8; 32] {
 
 fn test_config() -> MidnightConfig {
     MidnightConfig {
-        node_ws_url: "ws://127.0.0.1:1".to_string(),
+        node_url: "http://127.0.0.1:1".to_string(),
         central_address: hex::encode(SINGLETON),
         publisher: crate::PublisherConfig {
             funding_seed: "ab".repeat(32),
@@ -115,17 +114,24 @@ fn caller_state(
     ])
 }
 
+enum HeadSample {
+    Block(BlockRef),
+    Park,
+}
+
 #[derive(Default)]
 struct FixtureSource {
     head: u64,
+    sampled_heads: Mutex<VecDeque<HeadSample>>,
+    successful_head_calls: std::sync::atomic::AtomicUsize,
     emissions: HashMap<u64, Option<BlockEmissions>>,
     emission_errors: Mutex<HashMap<u64, (String, usize)>>,
     emission_holds: HashMap<u64, &'static str>,
     states: HashMap<(String, String), crate::reader::Node>,
     state_errors: HashMap<(String, String), String>,
+    oversized_states: HashSet<(String, String)>,
     undecodable_states: HashMap<(String, String), String>,
     transient_head_errors: Mutex<usize>,
-    sticky_head_error: Option<String>,
     live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
     park_at: Option<u64>,
     reached: Option<mpsc::Sender<String>>,
@@ -146,6 +152,11 @@ impl FixtureSource {
             .insert((hex::encode(address), hash_of(height)), message.to_string());
     }
 
+    fn set_oversized_state(&mut self, address: [u8; 32], height: u64) {
+        self.oversized_states
+            .insert((hex::encode(address), hash_of(height)));
+    }
+
     fn set_transient_emission_error(&mut self, height: u64, times: usize, message: &str) {
         self.emission_errors
             .lock()
@@ -164,13 +175,32 @@ impl FixtureSource {
 #[async_trait]
 impl ChainSource for FixtureSource {
     async fn finalized_head(&self) -> anyhow::Result<BlockRef> {
-        if let Some(message) = &self.sticky_head_error {
-            anyhow::bail!("{message}");
+        {
+            let mut owed = self.transient_head_errors.lock().expect("head errors");
+            if *owed > 0 {
+                *owed -= 1;
+                anyhow::bail!("finalized head fetch failed: connection reset by peer");
+            }
         }
-        let mut owed = self.transient_head_errors.lock().expect("head errors");
-        if *owed > 0 {
-            *owed -= 1;
-            anyhow::bail!("finalized head fetch failed: connection reset by peer");
+        let successful_call = self
+            .successful_head_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let sample = self
+            .sampled_heads
+            .lock()
+            .expect("sampled heads")
+            .pop_front();
+        match sample {
+            Some(HeadSample::Block(block)) => return Ok(block),
+            Some(HeadSample::Park) => self.park("finalized_head".to_string()).await,
+            None => {}
+        }
+        if successful_call > 0 {
+            if let Some(rx) = self.live.lock().await.as_mut() {
+                if let Ok(block) = rx.try_recv() {
+                    return Ok(block);
+                }
+            }
         }
         Ok(block_ref(self.head))
     }
@@ -216,6 +246,13 @@ impl ChainSource for FixtureSource {
         at_hash: &str,
     ) -> anyhow::Result<ContractState> {
         let key = (address_64hex.to_string(), at_hash.to_string());
+        if self.oversized_states.contains(&key) {
+            return Err(crate::rpc::oversized_contract_state(
+                subxt::ext::subxt_rpcs::Error::Client(Box::new(std::io::Error::other(
+                    "fixture oversized contract state",
+                ))),
+            ));
+        }
         if let Some(message) = self.state_errors.get(&key) {
             anyhow::bail!("{message}");
         }
@@ -227,20 +264,6 @@ impl ChainSource for FixtureSource {
             .get(&key)
             .cloned()
             .map_or(ContractState::Absent, ContractState::Tree))
-    }
-
-    async fn spawn_block_producer(
-        &self,
-        tx: mpsc::Sender<BlockRef>,
-    ) -> anyhow::Result<AbortOnDrop> {
-        let mut rx = self.live.lock().await.take().expect("one producer per run");
-        Ok(AbortOnDrop(tokio::spawn(async move {
-            while let Some(block) = rx.recv().await {
-                if tx.send(block).await.is_err() {
-                    return;
-                }
-            }
-        })))
     }
 }
 
@@ -267,7 +290,15 @@ impl RunFixture {
     }
 
     async fn spawn_with_state(source: FixtureSource, state: MockStateManager) -> Self {
-        let indexer = MidnightIndexer::new(test_config(), state.clone(), NoopChainTelemetry)
+        Self::spawn_with_config(source, state, test_config()).await
+    }
+
+    async fn spawn_with_config(
+        source: FixtureSource,
+        state: MockStateManager,
+        config: MidnightConfig,
+    ) -> Self {
+        let indexer = MidnightIndexer::new(config, state.clone(), NoopChainTelemetry)
             .await
             .expect("indexer constructs");
         let (events_tx, events_rx) = chain_event_channel();
@@ -330,6 +361,107 @@ fn assert_request(event: ChainEvent, rid: [u8; 32]) {
     };
     assert_eq!(request.id, SignId::new(rid));
     assert_eq!(block_timestamp, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn polling_ignores_nonadvancing_samples_then_closes_the_gap_in_order() {
+    let mut divergent = block_ref(8);
+    divergent.hash = hash_of(800);
+    let source = FixtureSource {
+        head: 11,
+        sampled_heads: Mutex::new(VecDeque::from([
+            HeadSample::Block(block_ref(8)),
+            HeadSample::Block(divergent),
+            HeadSample::Block(block_ref(7)),
+            HeadSample::Block(block_ref(11)),
+        ])),
+        ..Default::default()
+    };
+    let mut config = test_config();
+    config.indexer.poll_interval = Duration::from_secs(1);
+    let state = MockStateManager::new();
+    state.set_processed_block(Chain::Midnight, 8).await;
+    let mut harness = RunFixture::spawn_with_config(source, state, config).await;
+
+    assert!(matches!(
+        harness.next_event().await,
+        ChainEvent::CatchupCompleted
+    ));
+    assert!(harness.events_rx.try_recv().is_err());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(!harness.handle.is_finished());
+    assert!(harness.events_rx.try_recv().is_err());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(!harness.handle.is_finished());
+    assert!(harness.events_rx.try_recv().is_err());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for number in 9..=11 {
+        assert_block(harness.next_event().await, number);
+    }
+    assert!(harness.events_rx.try_recv().is_err());
+    harness.cancel_and_join().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn nonadvancing_heads_share_one_stall_budget() {
+    let mut config = test_config();
+    config.indexer.poll_interval = Duration::from_secs(1);
+    config.indexer.stall_timeout = Duration::from_secs(2);
+    let source = FixtureSource {
+        head: 8,
+        sampled_heads: Mutex::new(VecDeque::from([
+            HeadSample::Block(block_ref(8)),
+            HeadSample::Block(block_ref(7)),
+        ])),
+        ..Default::default()
+    };
+    let mut harness = RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
+    assert!(matches!(
+        harness.next_event().await,
+        ChainEvent::CatchupCompleted
+    ));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(harness.events_rx.try_recv().is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let err = harness
+        .handle
+        .await
+        .expect("run task")
+        .expect_err("regressed and equal samples share the stall budget");
+    assert!(err.to_string().contains("no progress"), "{err:#}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_is_prompt_during_a_finalized_head_read() {
+    let (reached_tx, mut reached_rx) = mpsc::channel(1);
+    let source = FixtureSource {
+        head: 8,
+        sampled_heads: Mutex::new(VecDeque::from([
+            HeadSample::Block(block_ref(8)),
+            HeadSample::Park,
+        ])),
+        reached: Some(reached_tx),
+        ..Default::default()
+    };
+    let mut config = test_config();
+    config.indexer.poll_interval = Duration::from_secs(1);
+    let mut harness = RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
+    assert!(matches!(
+        harness.next_event().await,
+        ChainEvent::CatchupCompleted
+    ));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(reached_rx.recv().await.as_deref(), Some("finalized_head"));
+    harness.cancel_and_join().await;
 }
 
 #[tokio::test]
@@ -559,23 +691,24 @@ async fn a_hold_from_the_block_reader_halts_without_events() {
 }
 
 #[tokio::test]
-async fn an_unservable_caller_read_holds_the_block() {
+async fn a_caller_read_error_holds_the_block() {
     let (_record, rid) = named_record_and_rid(7);
     let mut source = FixtureSource::default();
     source.set_emissions(
         9,
         one_call(EmissionKind::SignBidirectional, notification(rid)),
     );
-    source.set_state_error(CALLER, 9, ReadFailure::Unservable.marker());
+    source.set_state_error(CALLER, 9, "state is unavailable at the requested block");
 
     let err = direct_indexer()
         .await
         .process_block(&source, &block_ref(9))
         .await
-        .expect_err("unservable caller state holds");
-    let hold = err.downcast_ref::<Hold>().expect("typed Hold");
-    assert_eq!(hold.reason, "state-unservable-hold");
-    assert_eq!(hold.height, 9);
+        .expect_err("an unreadable caller state holds the block");
+    assert!(
+        format!("{err:#}").contains("state is unavailable at the requested block"),
+        "{err:#}"
+    );
 }
 
 #[tokio::test]
@@ -631,7 +764,7 @@ async fn caller_state_too_large_and_undecodable_are_per_entry_drops() {
             one_call(EmissionKind::SignBidirectional, notification(rid)),
         );
         if failure == "too-large" {
-            source.set_state_error(CALLER, 9, ReadFailure::TooLarge.marker());
+            source.set_oversized_state(CALLER, 9);
         } else {
             source.undecodable_states.insert(
                 (hex::encode(CALLER), hash_of(9)),
@@ -722,25 +855,6 @@ async fn catchup_retries_a_transient_block_emission_read() {
 }
 
 #[tokio::test]
-async fn run_surfaces_a_dead_client_from_the_live_loop() {
-    let (mut source, live_tx) = with_live(8);
-    source.set_transient_emission_error(9, usize::MAX, ReadFailure::ClientClosed.marker());
-    let mut harness = RunFixture::spawn(source, 8).await;
-    assert!(matches!(
-        harness.next_event().await,
-        ChainEvent::CatchupCompleted
-    ));
-    live_tx.send(block_ref(9)).await.expect("send live block");
-
-    let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-        .await
-        .expect("dead client surfaces")
-        .expect("run task")
-        .expect_err("run must request reconnect");
-    assert_eq!(ReadFailure::of(&err), Some(ReadFailure::ClientClosed));
-}
-
-#[tokio::test]
 async fn run_returns_ok_on_cancel_mid_catchup() {
     let (reached_tx, mut reached_rx) = mpsc::channel(1);
     let (live_tx, live_rx) = mpsc::channel(8);
@@ -761,23 +875,6 @@ async fn run_returns_ok_on_cancel_mid_catchup() {
     assert!(harness.events_rx.try_recv().is_err());
     harness.cancel_and_join().await;
     drop(live_tx);
-}
-
-#[tokio::test]
-async fn run_bails_when_block_producer_terminates() {
-    let (source, live_tx) = with_live(8);
-    let mut harness = RunFixture::spawn(source, 8).await;
-    assert!(matches!(
-        harness.next_event().await,
-        ChainEvent::CatchupCompleted
-    ));
-    drop(live_tx);
-    let err = harness
-        .handle
-        .await
-        .expect("run task")
-        .expect_err("ended producer is restartable error");
-    assert!(err.to_string().contains("producer terminated"));
 }
 
 #[tokio::test]
@@ -825,21 +922,6 @@ async fn run_retries_a_transient_anchor_read() {
     ));
     harness.cancel_and_join().await;
     drop(live_tx);
-}
-
-#[tokio::test]
-async fn run_surfaces_a_dead_client_from_the_anchor_read() {
-    let source = FixtureSource {
-        sticky_head_error: Some(ReadFailure::ClientClosed.marker().to_string()),
-        ..Default::default()
-    };
-    let harness = RunFixture::spawn(source, 8).await;
-    let err = harness
-        .handle
-        .await
-        .expect("run task")
-        .expect_err("dead anchor asks supervisor to reconnect");
-    assert_eq!(ReadFailure::of(&err), Some(ReadFailure::ClientClosed));
 }
 
 #[tokio::test]
@@ -894,70 +976,22 @@ async fn run_recatches_from_the_persisted_checkpoint_after_restart() {
 }
 
 #[tokio::test]
-async fn caller_contract_absent_and_unclassified_healthy_reads_are_dropped() {
-    let (_record, rid) = named_record_and_rid(7);
-    for failure in ["absent", "unclassified"] {
-        let mut source = FixtureSource {
-            head: 9,
-            ..Default::default()
-        };
-        source.set_emissions(
-            9,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
-        );
-        if failure == "unclassified" {
-            source.set_state_error(CALLER, 9, "connection reset by peer");
-        }
-        let events = direct_indexer()
-            .await
-            .process_block(&source, &block_ref(9))
-            .await
-            .expect("healthy head makes this a per-entry drop");
-        assert!(events.is_empty(), "{failure}");
-    }
-}
-
-#[tokio::test]
-async fn an_unclassified_caller_read_with_a_failed_probe_holds() {
+async fn caller_contract_absent_is_a_per_entry_drop() {
     let (_record, rid) = named_record_and_rid(7);
     let mut source = FixtureSource {
         head: 9,
-        sticky_head_error: Some("head transport is unavailable".to_string()),
         ..Default::default()
     };
     source.set_emissions(
         9,
         one_call(EmissionKind::SignBidirectional, notification(rid)),
     );
-    source.set_state_error(CALLER, 9, "caller state transport is unavailable");
-
-    let err = direct_indexer()
+    let events = direct_indexer()
         .await
         .process_block(&source, &block_ref(9))
         .await
-        .expect_err("an ambient node fault must not drop the request");
-    assert!(
-        format!("{err:#}").contains("head probe failed"),
-        "unexpected error: {err:#}"
-    );
-}
-
-#[tokio::test]
-async fn a_dead_client_from_the_caller_read_propagates() {
-    let (_record, rid) = named_record_and_rid(7);
-    let mut source = FixtureSource::default();
-    source.set_emissions(
-        9,
-        one_call(EmissionKind::SignBidirectional, notification(rid)),
-    );
-    source.set_state_error(CALLER, 9, ReadFailure::ClientClosed.marker());
-
-    let err = direct_indexer()
-        .await
-        .process_block(&source, &block_ref(9))
-        .await
-        .expect_err("dead client asks the supervisor to reconnect");
-    assert_eq!(ReadFailure::of(&err), Some(ReadFailure::ClientClosed));
+        .expect("an absent caller contract is not a read failure");
+    assert!(events.is_empty());
 }
 
 #[tokio::test]

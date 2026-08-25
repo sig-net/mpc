@@ -19,7 +19,7 @@ const BUILD = await respondInput();
 
 const STARTUP_ENV: NodeJS.ProcessEnv = {
   MIDNIGHT_PUB_NETWORK_ID: "undeployed",
-  MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
+  MIDNIGHT_PUB_NODE_URL: "http://127.0.0.1:9944",
   MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
   MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
   MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
@@ -30,7 +30,7 @@ const ready = (): string => JSON.stringify({ id: 0, op: "ready", protocolVersion
 
 const envFor = (port: number): NodeJS.ProcessEnv => ({
   ...STARTUP_ENV,
-  MIDNIGHT_PUB_NODE_URL: `ws://127.0.0.1:${port}`,
+  MIDNIGHT_PUB_NODE_URL: `http://127.0.0.1:${port}`,
   MIDNIGHT_PUB_PROOF_SERVER_URL: `http://127.0.0.1:${port}`,
   MIDNIGHT_PUB_INDEXER_URL: `http://127.0.0.1:${port}/api/v3/graphql`,
   MIDNIGHT_PUB_INDEXER_WS_URL: `ws://127.0.0.1:${port}/api/v3/graphql/ws`,
@@ -160,7 +160,7 @@ describe("dist/main.js over a pipe", () => {
 
       expect(run.timedOut).toBe(false);
       expect(run.code).toBe(0);
-      expect(run.stderr).toContain(`node=ws://127.0.0.1:${blackHole.port}`);
+      expect(run.stderr).toContain(`node=http://127.0.0.1:${blackHole.port}`);
     },
     CHILD_PROCESS_TIMEOUT_MS + 5_000,
   );
@@ -182,7 +182,7 @@ describe("dist/main.js over a pipe", () => {
           ],
           {
             ...STARTUP_ENV,
-            MIDNIGHT_PUB_NODE_URL: wsUrl,
+            MIDNIGHT_PUB_NODE_URL: httpUrl,
             MIDNIGHT_PUB_PROOF_SERVER_URL: httpUrl,
             MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,
             MIDNIGHT_PUB_INDEXER_WS_URL: `${wsUrl}/api/v3/graphql/ws`,

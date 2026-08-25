@@ -4,7 +4,7 @@ use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::SignStatus;
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -133,7 +133,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -216,7 +216,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -290,7 +290,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -356,7 +356,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         ))
         .await;
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
@@ -882,8 +882,8 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .set_status(
             Chain::Ethereum,
             &sign_id,
-            crate::sign_bidirectional::SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
                     signature: Signature::new(
                         ProjectivePoint::GENERATOR.to_affine(),
                         Scalar::ONE,
@@ -891,7 +891,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                     ),
                     participants: vec![],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
@@ -961,7 +961,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1060,7 +1060,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1109,7 +1109,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await;
 
     backlog
-        .watch_execution(tx.target_chain, sign_id, tx.clone())
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);

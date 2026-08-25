@@ -1,12 +1,75 @@
-use super::{PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
-use mpc_primitives::{Chain, Checkpoint, PendingTx};
+use mpc_primitives::Chain;
 use sha3::Digest;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// A checkpoint represents the backlog state at a specific block height.
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub chain: Chain,
+    pub block_height: u64,
+    pub pending_requests: Vec<BacklogEntry>,
+    /// Commitment to each pending request's checkpoint-consensus phase.
+    #[serde(default, with = "serde_bytes")]
+    pub cumulative_digest: [u8; 32],
+}
+
+impl fmt::Debug for Checkpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct DebugPendingRequests<'a>(&'a [BacklogEntry]);
+        impl<'a> fmt::Debug for DebugPendingRequests<'a> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let mut list = f.debug_list();
+                for entry in self.0 {
+                    list.entry(&entry.sign_id());
+                }
+                list.finish()
+            }
+        }
+
+        f.debug_struct("Checkpoint")
+            .field("chain", &self.chain)
+            .field("block_height", &self.block_height)
+            .field(
+                "pending_requests",
+                &DebugPendingRequests(&self.pending_requests),
+            )
+            .field("cumulative_digest", &self.cumulative_digest)
+            .finish()
+    }
+}
+
+impl Checkpoint {
+    pub fn empty(chain: Chain) -> Self {
+        Self {
+            chain,
+            block_height: 0,
+            pending_requests: Vec::new(),
+            cumulative_digest: Self::empty_cumulative_digest(),
+        }
+    }
+
+    pub fn empty_cumulative_digest() -> [u8; 32] {
+        sha3::Sha3_256::new().finalize().into()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.block_height.to_le_bytes());
+        for entry in &self.pending_requests {
+            hasher.update(entry.sign_id().request_id);
+        }
+        hasher.update(self.cumulative_digest);
+        hasher.finalize().into()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct Checkpoints {
@@ -102,34 +165,18 @@ impl Checkpoints {
 
     /// Captures the current request state as a deterministic checkpoint.
     pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
-        let mut encoded = requests
-            .requests
-            .iter()
-            .map(|(&sign_id, entry)| {
-                let mut transaction = Vec::new();
-                ciborium::ser::into_writer(entry, &mut transaction)
-                    .expect("serialize backlog entry for checkpoint");
-                let consensus_tag = entry.status().consensus_tag();
-                (
-                    PendingTx {
-                        sign_id,
-                        transaction,
-                    },
-                    consensus_tag,
-                )
-            })
-            .collect::<Vec<_>>();
-        encoded.sort_by_key(|(pending, _)| pending.sign_id);
+        let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
+        pending_requests.sort_by_key(|entry| entry.sign_id());
 
         let mut cumulative = sha3::Sha3_256::new();
-        for (_, consensus_tag) in &encoded {
-            cumulative.update([*consensus_tag]);
+        for entry in &pending_requests {
+            cumulative.update([entry.status().consensus_tag()]);
         }
 
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
-            pending_requests: encoded.into_iter().map(|(pending, _)| pending).collect(),
+            pending_requests,
             cumulative_digest: cumulative.finalize().into(),
         }
     }
@@ -631,5 +678,20 @@ mod tests {
                 .unwrap(),
             Some(checkpoint)
         );
+    }
+
+    #[test]
+    fn test_checkpoint_debug_formatting() {
+        let cp = checkpoint(3);
+        let debug_str = format!("{cp:?}");
+        assert!(debug_str.starts_with("Checkpoint {"));
+        assert!(debug_str.contains("pending_requests: ["));
+        assert!(!debug_str.contains("PendingRequest"));
+        assert!(!debug_str.contains("PendingTx"));
+        assert!(!debug_str.contains("IndexedSignRequest"));
+        assert!(!debug_str.contains("payload"));
+        for entry in &cp.pending_requests {
+            assert!(debug_str.contains(&hex::encode(entry.sign_id().request_id)));
+        }
     }
 }
