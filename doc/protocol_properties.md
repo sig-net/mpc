@@ -19,7 +19,7 @@ Not all of the below is implemented. Where a property or invariant is only partl
   2. indexed by each node's own indexer; the request\_id is a deterministic function of the request, so every node derives the same one  
   3. a per-node task organizes rounds (attempts) until one generation instance produces a signature  
   4. the signature is submitted on-chain
-  5. settlement is chain-specific: NEAR verifies the signature and resumes the yielded promise, emitting no event of its own; the EVM contract keeps no request state and emits an event for any submitter without checking anything  
+  5. the contract emits an event for the submission without checking anything  
   6. downstream process is responsible for event verification and exactly once semantics 
 
 Both artifacts below have a single owner, the node that coordinated their generation, which simplifies statesync and coordination, and a set of holders, the nodes storing their shares.
