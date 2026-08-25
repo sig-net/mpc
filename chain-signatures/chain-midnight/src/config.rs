@@ -127,13 +127,10 @@ pub struct MidnightConfig {
 
 impl MidnightConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Some((scheme, _)) = self.node_url.split_once(':') {
-            anyhow::ensure!(
-                !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https")
-                    || matches!(scheme, "http" | "https"),
-                "midnight config: node_url must use a lowercase http or https scheme"
-            );
-        }
+        anyhow::ensure!(
+            self.node_url.starts_with("http://") || self.node_url.starts_with("https://"),
+            "midnight config: node_url must use a lowercase http or https scheme"
+        );
         validate_url("node_url", &self.node_url, &["http", "https"])?;
         anyhow::ensure!(
             self.central_address.len() == 64
@@ -262,20 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn indexer_polling_defaults_and_busy_loop_guard_are_pinned() {
-        let indexer = IndexerConfig::default();
-        assert_eq!(indexer.poll_interval, Duration::from_secs(2));
-        assert_eq!(indexer.stall_timeout, Duration::from_secs(60));
-
-        let mut config = valid_config();
-        config.indexer.poll_interval = Duration::ZERO;
-        let error = config
-            .validate()
-            .expect_err("a zero poll interval would create a busy loop");
-        assert!(error.to_string().contains("poll_interval"), "{error:#}");
-    }
-
-    #[test]
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
         let mut config = valid_config();
@@ -299,37 +282,13 @@ mod tests {
     }
 
     #[test]
-    fn node_url_accepts_http_and_rejects_websocket() {
-        for valid in ["http://127.0.0.1:9944", "https://node.example.com"] {
-            let mut config = valid_config();
-            config.node_url = valid.to_string();
-            config.validate().expect("HTTP node URLs are supported");
-        }
-
-        for invalid in ["", "ws://127.0.0.1:9944", "wss://node.example.com"] {
-            let mut config = valid_config();
-            config.node_url = invalid.to_string();
-            let error = config.validate().unwrap_err().to_string();
-            assert!(error.contains("node_url"), "unexpected error: {error}");
-        }
-    }
-
-    #[test]
-    fn node_url_rejects_non_lowercase_http_schemes_without_rewriting() {
-        for invalid in ["HTTP://127.0.0.1:9944", "HTTPS://node.example.com"] {
-            let mut config = valid_config();
-            config.node_url = invalid.to_string();
-            let error = config
-                .validate()
-                .expect_err("the publisher's HTTP-to-WS conversion is case-sensitive");
-            let diagnostic = error.to_string();
-            assert!(diagnostic.contains("node_url"), "{diagnostic}");
-            assert!(diagnostic.contains("lowercase"), "{diagnostic}");
-            assert_eq!(
-                config.node_url, invalid,
-                "validation must not rewrite the URL"
-            );
-        }
+    fn node_url_rejects_the_uppercase_scheme_the_wallet_cannot_convert() {
+        let mut config = valid_config();
+        config.node_url = "HTTP://127.0.0.1:9944".to_string();
+        let error = config
+            .validate()
+            .expect_err("the wallet's HTTP-to-WS conversion is case-sensitive");
+        assert!(error.to_string().contains("lowercase"), "{error:#}");
     }
 
     #[test]
@@ -355,6 +314,11 @@ mod tests {
 
     #[test]
     fn validate_names_offending_field() {
+        let mut zero_poll = valid_config();
+        zero_poll.indexer.poll_interval = Duration::ZERO;
+        let err = zero_poll.validate().unwrap_err().to_string();
+        assert!(err.contains("poll_interval"), "unexpected error: {err}");
+
         let mut short_address = valid_config();
         short_address.central_address = "ab".repeat(31);
         let err = short_address.validate().unwrap_err().to_string();

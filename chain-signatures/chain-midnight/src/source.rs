@@ -29,23 +29,14 @@ pub(crate) trait ChainSource: Send + Sync {
     ) -> anyhow::Result<ContractState>;
 }
 
-/// Bytes that do not deserialize are charged to the contract that owns them, never to
-/// the read: the decode is in-process, so there is no transport that could have failed.
-fn classify_decode(decoded: anyhow::Result<Node>) -> ContractState {
-    match decoded {
-        Ok(tree) => ContractState::Tree(tree),
-        Err(err) => ContractState::Undecodable(err),
-    }
-}
-
 pub(crate) struct LiveSource {
     rpc: MidnightRpc,
 }
 
 impl LiveSource {
-    pub(crate) async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
+    pub(crate) fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         Ok(Self {
-            rpc: MidnightRpc::connect(config).await?,
+            rpc: MidnightRpc::connect(config)?,
         })
     }
 }
@@ -67,9 +58,10 @@ impl ChainSource for LiveSource {
     ) -> anyhow::Result<ContractState> {
         match self.rpc.contract_state(address_64hex, at_hash).await? {
             None => Ok(ContractState::Absent),
-            // Decoded in-process by the ledger's own deserializer: the state path makes
-            // no network call beyond the node read above.
-            Some(state) => Ok(classify_decode(decode_contract_state(&state))),
+            Some(state) => Ok(match decode_contract_state(&state) {
+                Ok(tree) => ContractState::Tree(tree),
+                Err(err) => ContractState::Undecodable(err),
+            }),
         }
     }
 }

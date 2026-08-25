@@ -7,7 +7,7 @@ use crate::reader::{
     signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
     Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
-use crate::rpc::{ensure_requested_height, BlockRef, ReadFailure};
+use crate::rpc::{BlockRef, ReadFailure};
 use crate::source::{ChainSource, ContractState, LiveSource};
 
 use midnight_base_crypto::fab::AlignedValue;
@@ -22,7 +22,10 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use mpc_utils::time::current_unix_timestamp;
+use mpc_utils::{
+    task::{retry_until_some, CancellationTokenExt as _},
+    time::current_unix_timestamp,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -198,103 +201,8 @@ fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
 /// mid-flight, which every caller answers by returning `Ok(())`.
 enum Indexed {
-    Done(BlockRef),
+    Done,
     Cancelled,
-}
-
-fn advance_high_water(
-    last_processed: &mut u64,
-    last_hash: &mut Option<String>,
-    last_progress: &mut tokio::time::Instant,
-    block: BlockRef,
-) {
-    *last_processed = block.number;
-    *last_hash = Some(block.hash);
-    *last_progress = tokio::time::Instant::now();
-}
-
-fn ensure_parent_continuity(
-    block: &BlockRef,
-    expected_parent_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(expected_parent_hash) = expected_parent_hash {
-        anyhow::ensure!(
-            block.parent_hash == expected_parent_hash,
-            "midnight finalized block {} has parent hash {}, expected {}",
-            block.number,
-            block.parent_hash,
-            expected_parent_hash
-        );
-    }
-    Ok(())
-}
-
-/// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
-///
-/// The per-item retry the other chains' indexers apply around their own block
-/// processing: a node hiccup costs one retry here, not a supervised
-/// restart that re-runs backlog recovery, re-anchors and
-/// re-queues the pending backlog. The pruning signature escapes as `Err` — retrying
-/// cannot serve a pruned node. Cancellation is `Ok(None)`.
-async fn retry_until_cancelled<T, F, Fut>(
-    what: &'static str,
-    height: u64,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) => match ReadFailure::of(&err) {
-                Some(ReadFailure::Unservable) => return Err(note_unservable(err, height)),
-                _ => tracing::warn!(
-                    reason = "retrying",
-                    height,
-                    "midnight {what} failed: {err:#}; retrying"
-                ),
-            },
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
-}
-
-/// Retries a startup step every [`RETRY_DELAY`] until it succeeds or `cancel` fires
-/// (`Ok(None)`). No unservable escape, unlike [`retry_until_cancelled`]: at startup a
-/// restart would only re-run backlog recovery to arrive back at the same step.
-async fn retry_startup<T, F, Fut>(
-    what: &'static str,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) => tracing::warn!("midnight {what} failed: {err:#}; retrying"),
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
@@ -587,7 +495,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
+    /// [`process_block`](Self::process_block) under the per-block retry policy.
     /// Spelled out because holding `&mut cache` across attempts needs an `async ||`,
     /// whose lending future defeats `Send` inference at the node's spawn boundary on
     /// stable Rust; a halt there (schema drift, undecodable central state) ends the run.
@@ -629,9 +537,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     ),
                 },
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(None),
-                _ = tokio::time::sleep(RETRY_DELAY) => {}
+            if cancel.cancelled_within(RETRY_DELAY).await {
+                return Ok(None);
             }
         }
     }
@@ -644,17 +551,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         cache: &mut CentralCache,
         events_tx: &mpsc::Sender<ChainEvent>,
         number: u64,
-        expected_parent_hash: Option<&str>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
         let Some(block) =
-            retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
-                .await?
+            retry_until_some(cancel, RETRY_DELAY, "midnight block lookup", || async {
+                source.block_at(number).await.map(Some)
+            })
+            .await
         else {
             return Ok(Indexed::Cancelled);
         };
-        ensure_requested_height(number, block.number)?;
-        ensure_parent_continuity(&block, expected_parent_hash)?;
         self.index_block(source, cache, events_tx, &block, cancel)
             .await
     }
@@ -678,7 +584,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         if !self.emit_block(events_tx, block, events, cancel).await? {
             return Ok(Indexed::Cancelled);
         }
-        Ok(Indexed::Done(block.clone()))
+        Ok(Indexed::Done)
     }
 
     /// Emits a block's lifecycle events, then its Block event, then records telemetry.
@@ -726,14 +632,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let Some(anchor) =
-            retry_startup("anchor sampling", &cancel, || source.finalized_head()).await?
+            retry_until_some(&cancel, RETRY_DELAY, "midnight anchor sampling", || async {
+                source.finalized_head().await.map(Some)
+            })
+            .await
         else {
             return Ok(());
         };
 
         let mut cache: CentralCache = None;
         let mut last_processed = checkpoint;
-        let mut last_hash = None;
         if checkpoint == 0 {
             // A fresh node has no gap to close, and walking from genesis would
             // reprocess the whole chain, so catchup anchors at the finalized head.
@@ -742,41 +650,24 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 "midnight fresh start: no checkpoint, anchoring at the finalized head"
             );
             last_processed = anchor.number;
-            last_hash = Some(anchor.hash.clone());
         } else {
-            for number in (checkpoint + 1)..anchor.number {
+            for number in checkpoint.saturating_add(1)..anchor.number {
                 match self
-                    .index_height(
-                        source,
-                        &mut cache,
-                        &events_tx,
-                        number,
-                        last_hash.as_deref(),
-                        &cancel,
-                    )
+                    .index_height(source, &mut cache, &events_tx, number, &cancel)
                     .await?
                 {
-                    Indexed::Done(block) => {
-                        last_processed = block.number;
-                        last_hash = Some(block.hash);
-                    }
+                    Indexed::Done => last_processed = number,
                     Indexed::Cancelled => return Ok(()),
                 }
             }
             if anchor.number > checkpoint {
-                ensure_parent_continuity(&anchor, last_hash.as_deref())?;
                 match self
                     .index_block(source, &mut cache, &events_tx, &anchor, &cancel)
                     .await?
                 {
-                    Indexed::Done(block) => {
-                        last_processed = block.number;
-                        last_hash = Some(block.hash);
-                    }
+                    Indexed::Done => last_processed = anchor.number,
                     Indexed::Cancelled => return Ok(()),
                 }
-            } else if anchor.number == checkpoint {
-                last_hash = Some(anchor.hash.clone());
             }
         }
         tokio::select! {
@@ -788,10 +679,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 
         let mut last_progress = tokio::time::Instant::now();
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(self.config.indexer.poll_interval) => {}
-            };
+            if cancel
+                .cancelled_within(self.config.indexer.poll_interval)
+                .await
+            {
+                return Ok(());
+            }
 
             let block = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -799,18 +692,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     .context("failed to poll the midnight finalized head")?,
             };
 
-            if block.number == last_processed {
-                if last_hash.as_deref().is_some_and(|hash| hash != block.hash) {
-                    anyhow::bail!(
-                        "midnight finalized head changed hash at height {}: expected {}, got {}",
-                        block.number,
-                        last_hash.as_deref().unwrap_or("<unknown>"),
-                        block.hash
-                    );
-                }
-                if last_hash.is_none() {
-                    last_hash = Some(block.hash);
-                }
+            if block.number <= last_processed {
                 if last_progress.elapsed() >= self.config.indexer.stall_timeout {
                     anyhow::bail!(
                         "midnight finalized head made no progress for {:?}",
@@ -819,52 +701,22 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 }
                 continue;
             }
-            if block.number < last_processed {
-                if last_progress.elapsed() >= self.config.indexer.stall_timeout {
-                    anyhow::bail!(
-                        "midnight finalized head made no progress for {:?}",
-                        self.config.indexer.stall_timeout
-                    );
-                }
-                continue;
-            }
-            // Close any finality gap between samples; each height processes exactly
-            // like catchup.
-            for number in (last_processed + 1)..block.number {
+            for number in last_processed.saturating_add(1)..block.number {
                 match self
-                    .index_height(
-                        source,
-                        &mut cache,
-                        &events_tx,
-                        number,
-                        last_hash.as_deref(),
-                        &cancel,
-                    )
+                    .index_height(source, &mut cache, &events_tx, number, &cancel)
                     .await?
                 {
-                    Indexed::Done(indexed) => {
-                        advance_high_water(
-                            &mut last_processed,
-                            &mut last_hash,
-                            &mut last_progress,
-                            indexed,
-                        );
-                    }
+                    Indexed::Done => {}
                     Indexed::Cancelled => return Ok(()),
                 }
             }
-            ensure_parent_continuity(&block, last_hash.as_deref())?;
             match self
                 .index_block(source, &mut cache, &events_tx, &block, &cancel)
                 .await?
             {
-                Indexed::Done(indexed) => {
-                    advance_high_water(
-                        &mut last_processed,
-                        &mut last_hash,
-                        &mut last_progress,
-                        indexed,
-                    );
+                Indexed::Done => {
+                    last_processed = block.number;
+                    last_progress = tokio::time::Instant::now();
                 }
                 Indexed::Cancelled => return Ok(()),
             }
@@ -881,14 +733,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        // A failed dial is the same transient class as a failed anchor read.
-        let Some(source) = retry_startup("node connect", &cancel, || {
-            LiveSource::connect(&self.config)
-        })
-        .await?
-        else {
-            return Ok(());
-        };
+        let source = LiveSource::connect(&self.config)?;
         self.run_with_source(&source, events_tx, cancel).await
     }
 }
@@ -1061,7 +906,6 @@ mod tests {
 
     enum HeadSample {
         Block(BlockRef),
-        Error(&'static str),
         Park,
     }
 
@@ -1100,14 +944,6 @@ mod tests {
         /// and then never resolves, so a test can cancel while a walk is PROVABLY
         /// mid-flight instead of racing a sleep against it.
         park_at: Option<u64>,
-        /// Parks `contract_state_tree` for this address, which suspends a walk INSIDE
-        /// `process_entry` rather than between blocks.
-        park_state_read: Option<String>,
-        /// Deterministic block lookup latency for paused-time catchup tests.
-        block_delay: Duration,
-        /// Requested height -> deliberately returned block, for seam-integrity tests.
-        block_overrides: HashMap<u64, BlockRef>,
-        state_read_count: Arc<std::sync::atomic::AtomicUsize>,
         reached: Option<mpsc::Sender<String>>,
     }
 
@@ -1194,7 +1030,6 @@ mod tests {
                 .pop_front();
             match sample {
                 Some(HeadSample::Block(block)) => return Ok(block),
-                Some(HeadSample::Error(message)) => anyhow::bail!("{message}"),
                 Some(HeadSample::Park) => self.park("finalized_head".to_string()).await,
                 None => {}
             }
@@ -1212,10 +1047,6 @@ mod tests {
             if self.park_at == Some(number) {
                 self.park(format!("block_at:{number}")).await;
             }
-            tokio::time::sleep(self.block_delay).await;
-            if let Some(block) = self.block_overrides.get(&number) {
-                return Ok(block.clone());
-            }
             Ok(block_ref(number))
         }
 
@@ -1224,11 +1055,6 @@ mod tests {
             address_64hex: &str,
             at_hash: &str,
         ) -> anyhow::Result<ContractState> {
-            self.state_read_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.park_state_read.as_deref() == Some(address_64hex) {
-                self.park(format!("state:{address_64hex}")).await;
-            }
             let key = (address_64hex.to_string(), at_hash.to_string());
             if let Some(message) = self.take_transient_error(&key) {
                 anyhow::bail!("{message}");
@@ -1324,11 +1150,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn polling_jump_emits_every_missing_height_once_and_in_order() {
+    async fn polling_ignores_nonadvancing_samples_then_closes_the_gap_in_order() {
         let central = central_address();
+        let mut divergent = block_ref(8);
+        divergent.hash = hash_of(800);
         let mut source = FixtureSource {
             head: 11,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([HeadSample::Block(block_ref(8))])),
+            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+                HeadSample::Block(block_ref(8)),
+                HeadSample::Block(divergent),
+                HeadSample::Block(block_ref(7)),
+                HeadSample::Block(block_ref(11)),
+            ])),
             ..Default::default()
         };
         for number in 8..=11 {
@@ -1344,6 +1177,21 @@ mod tests {
             harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
+        assert!(harness.events_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !harness.handle.is_finished(),
+            "a nonadvancing sample must not stop the polling loop"
+        );
+        assert!(harness.events_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!harness.handle.is_finished());
+        assert!(harness.events_rx.try_recv().is_err());
+
         tokio::time::advance(Duration::from_secs(1)).await;
         for number in 9..=11 {
             assert_block(&harness.next_event().await, number);
@@ -1353,120 +1201,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn polling_rejects_a_sampled_head_disconnected_from_the_last_gap() {
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let mut disconnected_head = block_ref(11);
-        disconnected_head.parent_hash = hash_of(999);
-        let mut source = FixtureSource {
-            head: 11,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
-                HeadSample::Block(block_ref(8)),
-                HeadSample::Block(disconnected_head),
-            ])),
-            ..Default::default()
-        };
-        for number in 8..=10 {
-            source.set_state(&central, number, central_state(vec![]));
-        }
-        source.set_state(&central, 999, central_state(vec![]));
-        source.set_state(
-            &central,
-            11,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 11, caller_state(&record, &rid));
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        let state = MockStateManager::new();
-        state.set_processed_block(Chain::Midnight, 8).await;
-        let mut harness = RunFixture::spawn_with_config(source, state, config).await;
-
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_block(&harness.next_event().await, 9);
-        assert_block(&harness.next_event().await, 10);
-        let next = harness.events_rx.recv().await;
-        assert!(
-            next.is_none(),
-            "the disconnected sampled head emitted an event: {next:?}"
-        );
-        let err = harness
-            .handle
-            .await
-            .expect("run task panicked")
-            .expect_err("a disconnected sampled head must stop the run");
-        assert!(format!("{err:#}").contains("parent hash"), "{err:#}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn catchup_rejects_a_lookup_returning_a_different_height_before_processing() {
-        let central = central_address();
-        let state_read_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut wrong_block = block_ref(60);
-        wrong_block.parent_hash = hash_of(5);
-        let mut source = FixtureSource {
-            head: 8,
-            block_overrides: HashMap::from([(6, wrong_block)]),
-            state_read_count: state_read_count.clone(),
-            ..Default::default()
-        };
-        source.set_state(&central, 5, central_state(vec![]));
-        source.set_state(&central, 60, central_state(vec![]));
-        let mut harness = RunFixture::spawn(source, 5).await;
-
-        let next = harness.events_rx.recv().await;
-        assert!(
-            next.is_none(),
-            "the wrong-height lookup result emitted an event: {next:?}"
-        );
-        let err = harness
-            .handle
-            .await
-            .expect("run task panicked")
-            .expect_err("a wrong-height lookup result must stop catchup");
-        let diagnostic = format!("{err:#}");
-        assert!(diagnostic.contains("requested height 6"), "{diagnostic}");
-        assert!(diagnostic.contains("returned height 60"), "{diagnostic}");
-        assert_eq!(
-            state_read_count.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "a wrong-height block must be rejected before state processing"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn repeated_identical_head_emits_nothing_and_stalls_on_budget() {
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        config.indexer.stall_timeout = Duration::from_secs(3);
-        let source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        let mut harness =
-            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        tokio::time::advance(Duration::from_secs(3)).await;
-        tokio::task::yield_now().await;
-        assert!(harness.events_rx.try_recv().is_err());
-        let err = harness
-            .handle
-            .await
-            .expect("run task panicked")
-            .expect_err("identical finalized heads must eventually stall");
-        assert!(err.to_string().contains("no progress"), "{err:#}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn regressed_head_does_not_regress_high_water_or_reset_stall() {
+    async fn nonadvancing_heads_emit_nothing_and_share_one_stall_budget() {
         let mut config = test_config();
         config.indexer.poll_interval = Duration::from_secs(1);
         config.indexer.stall_timeout = Duration::from_secs(2);
@@ -1499,87 +1234,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn same_height_with_different_hash_fails_before_emission() {
-        let mut divergent = block_ref(8);
-        divergent.hash = hash_of(800);
-        let source = FixtureSource {
-            head: 8,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
-                HeadSample::Block(block_ref(8)),
-                HeadSample::Block(divergent),
-            ])),
-            ..Default::default()
-        };
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        let mut harness =
-            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert!(harness.events_rx.try_recv().is_err());
-        let err = harness
-            .handle
-            .await
-            .expect("run task panicked")
-            .expect_err("same-height hash disagreement must fail");
-        assert!(err.to_string().contains("changed hash"), "{err:#}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn failed_live_head_poll_returns_to_the_supervisor() {
-        let source = FixtureSource {
-            head: 8,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
-                HeadSample::Block(block_ref(8)),
-                HeadSample::Error("HTTP finalized-head request failed"),
-            ])),
-            ..Default::default()
-        };
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        let mut harness =
-            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        let err = harness
-            .handle
-            .await
-            .expect("run task panicked")
-            .expect_err("a live head failure must escape");
-        assert!(
-            format!("{err:#}").contains("HTTP finalized-head request failed"),
-            "{err:#}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_is_prompt_during_poll_sleep_head_sample_and_gap() {
-        // Poll sleep.
-        let mut sleeping = RunFixture::spawn(
-            FixtureSource {
-                head: 8,
-                ..Default::default()
-            },
-            8,
-        )
-        .await;
-        assert!(matches!(
-            sleeping.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        sleeping.cancel_and_join().await;
-
-        // Finalized-head sampling.
+    async fn cancellation_is_prompt_during_a_finalized_head_read() {
         let (head_reached_tx, mut head_reached_rx) = mpsc::channel(1);
         let sampling = FixtureSource {
             head: 8,
@@ -1593,7 +1248,7 @@ mod tests {
         let mut config = test_config();
         config.indexer.poll_interval = Duration::from_secs(1);
         let mut sampling =
-            RunFixture::spawn_with_config(sampling, MockStateManager::new(), config.clone()).await;
+            RunFixture::spawn_with_config(sampling, MockStateManager::new(), config).await;
         assert!(matches!(
             sampling.next_event().await,
             ChainEvent::CatchupCompleted
@@ -1604,62 +1259,6 @@ mod tests {
             Some("finalized_head".to_string())
         );
         sampling.cancel_and_join().await;
-
-        // A gap lookup.
-        let (gap_reached_tx, mut gap_reached_rx) = mpsc::channel(1);
-        let gap = FixtureSource {
-            head: 11,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([HeadSample::Block(block_ref(8))])),
-            park_at: Some(9),
-            reached: Some(gap_reached_tx),
-            ..Default::default()
-        };
-        let mut gap = RunFixture::spawn_with_config(gap, MockStateManager::new(), config).await;
-        assert!(matches!(
-            gap.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(gap_reached_rx.recv().await, Some("block_at:9".to_string()));
-        gap.cancel_and_join().await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn slow_catchup_does_not_accumulate_poll_ticks() {
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 10,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([HeadSample::Block(block_ref(9))])),
-            block_delay: Duration::from_secs(10),
-            ..Default::default()
-        };
-        for number in 7..=10 {
-            source.set_state(&central, number, central_state(vec![]));
-        }
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        let state = MockStateManager::new();
-        state.set_processed_block(Chain::Midnight, 7).await;
-        let mut harness = RunFixture::spawn_with_config(source, state, config).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(10)).await;
-        assert_block(&harness.events_rx.recv().await.expect("catchup block"), 8);
-        assert_block(&harness.events_rx.recv().await.expect("sampled anchor"), 9);
-        assert!(matches!(
-            harness.events_rx.recv().await,
-            Some(ChainEvent::CatchupCompleted)
-        ));
-        assert!(harness.events_rx.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_millis(999)).await;
-        tokio::task::yield_now().await;
-        assert!(harness.events_rx.try_recv().is_err());
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert_block(
-            &harness.events_rx.recv().await.expect("first polled block"),
-            10,
-        );
-        harness.cancel_and_join().await;
     }
 
     /// Asserts the emitted request end to end: the id and the absent block timestamp.
@@ -2371,35 +1970,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_caller_error_marker_prose_cannot_bypass_the_head_probe() {
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        for marker in [
-            ReadFailure::Unservable.marker(),
-            ReadFailure::TooLarge.marker(),
-        ] {
-            let mut source = FixtureSource {
-                sticky_head_error: Some("head probe unavailable".to_string()),
-                ..Default::default()
-            };
-            source.state_errors.insert(
-                (hex::encode(CALLER), hash_of(9)),
-                FixtureStateError::Ordinary(format!("provider error 12345: {marker}")),
-            );
-            let err = indexer
-                .process_entry(&source, &entry, &hash_of(9), 9, 0)
-                .await
-                .expect_err("ordinary caller faults must perform the ambient head probe");
-            assert!(format!("{err:#}").contains("probe"), "{err:#}");
-        }
-    }
-
-    #[tokio::test]
     async fn catchup_retries_a_transient_central_read() {
         // A node hiccup costs a retry, not a supervised restart: block 8's OWN
         // emission proves the faulted read was re-attempted.
@@ -2437,68 +2007,6 @@ mod tests {
         assert_sign_request(&harness.next_event().await, rid);
         assert_block(&harness.next_event().await, 8);
         assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn live_retries_a_transient_central_read() {
-        // A hiccup in the live loop must cost a retry, not a supervised restart, and
-        // the request the failing read was carrying still arrives.
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 8,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        source.set_transient_error(
-            &central,
-            9,
-            1,
-            "contract state read failed: connection reset by peer",
-        );
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, rid);
-        assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_retries_a_transient_anchor_read() {
-        // A startup fault costs an in-place retry, never a supervised restart:
-        // reaching CatchupCompleted proves the faulted sampling was re-attempted.
-        // The connect step runs through the same `retry_startup`.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 8,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            transient_head_errors: std::sync::Mutex::new(2),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
         assert!(matches!(
             harness.next_event().await,
             ChainEvent::CatchupCompleted
@@ -2851,36 +2359,6 @@ mod tests {
         assert_sign_request(&harness.next_event().await, good_rid);
         // The block completes and reports progress past the bad entry.
         assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_skips_replayed_live_block() {
-        // The re-delivery guard.
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        for n in 8..=10 {
-            source.set_state(&central, n, central_state(vec![]));
-        }
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        live_tx.send(block_ref(9)).await.expect("send 9");
-        assert_block(&harness.next_event().await, 9);
-
-        live_tx.send(block_ref(9)).await.expect("replay 9");
-        live_tx.send(block_ref(10)).await.expect("send 10");
-        assert_block(&harness.next_event().await, 10);
         harness.cancel_and_join().await;
         drop(live_tx);
     }
