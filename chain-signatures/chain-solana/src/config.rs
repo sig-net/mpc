@@ -1,10 +1,10 @@
 use std::fmt;
 use std::time::Duration;
 
-/// Live polling tunables for the Solana indexer.
+/// Configuration for the Solana indexer.
 #[derive(Clone, Copy, Debug)]
 pub struct SolIndexerConfig {
-    /// Delay between polling iterations once caught up.
+    /// Delay between polling iterations
     pub poll_interval: Duration,
     /// Maximum time to wait for the anchor slot to advance before bailing. This is a safety check against frozen RPC nodes.
     /// Supervisor watchdog is not enough because it only sees the last block event, which can be a heartbeat from a lagging replica.
@@ -14,9 +14,8 @@ pub struct SolIndexerConfig {
 impl Default for SolIndexerConfig {
     fn default() -> Self {
         Self {
-            // The finalized frontier advances ~every 400ms; polling much
-            // faster than that can never observe a new anchor, and detection
-            // latency is dominated by ~13s finality, not the interval
+            // The finalized frontier advances ~every 400ms,
+            // polling faster than that can never observe a new anchor
             poll_interval: Duration::from_secs(1),
             slot_stall_timeout: Duration::from_secs(60),
         }

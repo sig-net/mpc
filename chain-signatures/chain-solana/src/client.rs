@@ -201,10 +201,8 @@ impl SolanaClient {
         )
     }
 
-    // Get the latest finalized slot from the Solana RPC. This is used to determine the upper bound for catchup.
-    // The whole indexing pipeline (this anchor, `block_fetch_config`, signature
-    // pagination) runs Finalized, matching the Ethereum indexer: no reliance on
-    // optimistic confirmation, at the cost of ~13s extra detection latency.
+    /// Get the latest finalized slot from the Solana RPC.
+    /// This is used to determine the upper bound for catchup.
     pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
         retry_rpc_gated!(
             SOL_RPC_TIMEOUT,

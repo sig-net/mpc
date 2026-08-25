@@ -696,18 +696,14 @@ mod tests {
             Self::spawn_with_server(server, slots, processed, config).await
         }
 
-        /// Variant taking a pre-built mockito server (additional RPC mocks
-        /// may already be mounted on it).
+        /// Variant taking a pre-built mockito server
         async fn spawn_with_server(
             mut server: mockito::ServerGuard,
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
         ) -> Self {
-            // Scripted getSlot responses served in order; once the script
-            // runs dry, the last body repeats forever (frozen-node
-            // semantics). `with_body_from_request` takes an `Fn`, so state
-            // must live behind a mutex.
+            // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
                 slots
                     .iter()
@@ -1120,8 +1116,6 @@ mod tests {
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(8))));
     }
 
-    /// Failed transactions must not contribute events: their state changes
-    /// never landed on chain. Regression for #1158's catchup/live parity fix.
     #[tokio::test]
     async fn catchup_skips_failed_transactions_like_live() {
         let indexer = test_indexer("http://localhost:1", MockStateManager::new());
@@ -1500,9 +1494,6 @@ mod tests {
         assert!(err.to_string().contains("frozen"));
     }
 
-    /// Anchor advances mid-run: the newly covered range is drained exactly
-    /// once, `CatchupCompleted` is not re-emitted, and later ticks do not
-    /// re-paginate the drained range.
     #[tokio::test]
     async fn run_drains_new_range_once_when_anchor_advances() {
         let mut server = mockito::Server::new_async().await;
