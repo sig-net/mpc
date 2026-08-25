@@ -11,6 +11,7 @@ use crate::NodeConfig;
 use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
+use backon::{ExponentialBuilder, Retryable};
 use bollard::container::LogsOptions;
 use bollard::errors::Error as DockerError;
 use bollard::network::CreateNetworkOptions;
@@ -59,6 +60,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::runtime::Builder;
 use tokio::time::sleep;
 use tracing;
+
+// Backoff configuration for Redis host-port readiness checks
+const REDIS_PING_MIN_DELAY_MS: u64 = 200;
+const REDIS_PING_MAX_DELAY_SECS: u64 = 2;
+const REDIS_PING_MAX_TIMES: usize = 15;
 
 pub type Container = ContainerAsync<GenericImage>;
 
@@ -463,6 +469,8 @@ impl Redis {
             .unwrap();
         let internal_address = format!("redis://127.0.0.1:{host_port}");
 
+        Self::wait_for_host_port_readiness(&internal_address).await;
+
         tracing::info!(
             external_address,
             internal_address,
@@ -473,6 +481,42 @@ impl Redis {
             container,
             internal_address,
             external_address,
+        }
+    }
+
+    /// Wait for the Redis container to be reachable via the host port.
+    async fn wait_for_host_port_readiness(internal_address: &str) {
+        let cfg = deadpool_redis::Config::from_url(
+            url::Url::parse(internal_address).expect("valid redis url"),
+        );
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("valid redis pool config");
+
+        let ping = || async {
+            let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
+            deadpool_redis::redis::cmd("PING")
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(anyhow::Error::from)
+        };
+
+        let strategy = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(REDIS_PING_MIN_DELAY_MS))
+            .with_max_delay(Duration::from_secs(REDIS_PING_MAX_DELAY_SECS))
+            .with_max_times(REDIS_PING_MAX_TIMES);
+        if ping
+            .retry(&strategy)
+            .notify(|err, sleep| {
+                tracing::warn!(?err, retry_in = ?sleep, "redis not reachable via host port yet");
+            })
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                internal_address,
+                "redis never became reachable via host port"
+            );
         }
     }
 
