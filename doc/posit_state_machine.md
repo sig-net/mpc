@@ -26,10 +26,13 @@ stateDiagram-v2
     Done --> [*]
 ```
 
-A task enters `Organizing` when `SignatureSpawner` spawns it for a newly indexed
-request, at round 0. If governance is not `Running`, the request is retained and
-`spawn_tasks` starts it once governance is; a respawn on a governance change
-re-enters `Organizing` at the round carried in `SignEntry.round`, not 0.
+A task enters `Organizing` when `SignatureSpawner` spawns it for a request, at
+round 0. That is usually a newly indexed request, but not always: on restart or
+after catchup, `requeue_pending_sign_requests` re-sends every backlog entry
+still in `PendingGeneration` and each is spawned the same way. If governance is
+not `Running`, the request is retained and `spawn_tasks` starts it once
+governance is; a respawn on a governance change re-enters `Organizing` at the
+round carried in `SignEntry.round`, not 0.
 
 Every recoverable failure calls `state.reorganize()`: bump the round, reset the
 round timeout, release the proposer's permit if held, re-enter `Organizing`.
@@ -61,8 +64,9 @@ empty again. The proposer's ACCEPT/REJECT tally is transient, rebuilt inside eac
 Not per request: the mesh's active set (a shared `watch`) and the governance
 membership and threshold; the third election input, entropy, comes with the
 request itself. Per node across requests:
-an LRU of finished `sign_id`s, so a late posit for a done request is dropped
-instead of starting a fresh machine.
+`dead_ids`, an LRU of retired `sign_id`s bounded at `MAX_DEAD_IDS` (4096). A
+late posit message for a retired request is dropped by it. Without this check,
+it would allocate an inbox that nothing ever drains.
 
 ## 2. Inside Organizing
 
@@ -195,6 +199,15 @@ wait for a `START` that never comes. And the excluded member still cannot tell
 "round `r` succeeded without me" from "round `r` still running", which is what it
 needs. The narrow addressing is a symptom; the missing round-outcome signal is
 the cause.
+
+What the excluded member would do with that signal is stop. The cost of not
+stopping is three things, not one. It burns the round for every peer still
+waiting; in the rounds where it is elected proposer it takes one of the
+`MAX_CONCURRENT_PROPOSERS` (4) permits, which is proposer-only, so a
+deliberator holds none; and in those same rounds it reserves a presignature
+that it returns to the pool on timeout. So the permit is held intermittently
+rather than for the whole wait, and the steady cost is the wasted rounds and
+the repeated reservations.
 
 Open question: whether to send every message to every member, rejects included.
 Doing so needs the one-slot-per-sender buffers (§5) revisited first, since more
@@ -421,8 +434,9 @@ Not so great
   on testnet (§8.1);** on testnet each node logs the same delayed request, so
   the per-node uniform count is one request counted nine times.
 - **No proposer.** Analysis 2: 71.8% of rotations are "deliberator timeout
-  waiting for Propose". Nodes differ widely in how many requests they are live
-  on, so election keeps picking nodes that are not working on the request:
+  waiting for Propose". Nodes differ widely in how many requests they hold a
+  running task for, the count `sign_queue_size` reports, so election keeps
+  picking nodes with no task for the request:
   `sign_queue_size` ranges from 1 to 20 across the 12 devnet pods against an
   identical 19-entry Ethereum backlog, stable across repeated sampling. That
   reading is from metrics rather than logs, so per-pod log ingestion gaps do
@@ -444,7 +458,24 @@ by design, so the rotation has to be ended by information, not time.
    be seen before moving on. One new reject reason, no new message type. It is
    the minimal form of the round-outcome signal (§3). It covers the subset of
    "no proposer" where the elected node already completed and retired the
-   request.
+   request. Three preconditions, none of them satisfied today:
+   - `dead_ids` cannot be the trigger as it stands. `retire_task` writes it
+     on four paths (completion, task exit, interruption, `AbortChain`), so an
+     aborted request is indistinguishable from a finished one. Replying
+     Completed for an abort would stop peers on a request nobody has signed.
+     The retire reason has to be carried into the entry.
+   - Local completion is not publication. `Complete(Ok)` fires after
+     `rpc.publish` and before any on-chain confirmation (§8.5), and publishing
+     has no failover ([#1063](https://github.com/sig-net/mpc/issues/1063)).
+     If the publish then fails, every peer that stopped on this signal is
+     unable to rejoin and generation is left with fewer participants than
+     before. Failover plausibly has to land first.
+   - The stop has to be revocable. A node can finish generation, send
+     Completed, and then regress on a checkpoint divergence; `respond()` is
+     never observed, so it must generate again, but its peers are already
+     holding f+1 Completed and will not join. `add_request` clears the local
+     tag on re-admission, which handles the node itself and not its peers, so
+     the peer-side stop needs its own way back.
 2. **Prune the pool.** Record `MissingArtifact` in the holder set. A `REJECT
    MissingArtifact` is a peer stating it does not hold that share. Feed it to
    `remove_holder_and_prune`, which sync already uses, so the holder set in
@@ -461,4 +492,3 @@ by design, so the rotation has to be ended by information, not time.
    which 1 covers; SKIP covers the rest and sharpens the diagnosis, since a
    round that stays silent after SKIP has an absent proposer, not an unwilling
    one.
-
