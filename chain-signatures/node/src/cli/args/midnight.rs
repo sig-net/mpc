@@ -7,10 +7,10 @@ use secrecy::{ExposeSecret as _, SecretString};
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_midnight_options")]
 pub struct MidnightArgs {
-    /// Midnight node WebSocket RPC URL.
+    /// Midnight node HTTP RPC URL.
     #[arg(
         long,
-        env("MPC_MIDNIGHT_NODE_WS_URL"),
+        env("MPC_MIDNIGHT_NODE_URL"),
         requires_all = [
             "midnight_central_address",
             "midnight_funding_seed",
@@ -19,20 +19,16 @@ pub struct MidnightArgs {
             "midnight_indexer_ws_url",
         ]
     )]
-    pub midnight_node_ws_url: Option<String>,
+    pub midnight_node_url: Option<String>,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
-        requires = "midnight_node_ws_url"
+        requires = "midnight_node_url"
     )]
     pub midnight_central_address: Option<String>,
     /// Hex seed of the wallet that funds respond transactions.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_FUNDING_SEED"),
-        requires = "midnight_node_ws_url"
-    )]
+    #[arg(long, env("MPC_MIDNIGHT_FUNDING_SEED"), requires = "midnight_node_url")]
     pub midnight_funding_seed: Option<SecretString>,
     /// argv of the intent builder child process, JSON-encoded:
     /// `["node","dist/main.js"]`. One clap value rather than a multi-value
@@ -41,7 +37,7 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_INTENT_GEN_COMMAND"),
-        requires = "midnight_node_ws_url"
+        requires = "midnight_node_url"
     )]
     pub midnight_intent_gen_command: Option<String>,
     /// Proof server URL. Required to respond: these contracts are zkir-v3 and
@@ -49,23 +45,19 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_PROOF_SERVER_URL"),
-        requires = "midnight_node_ws_url"
+        requires = "midnight_node_url"
     )]
     pub midnight_proof_server_url: Option<String>,
     /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
     /// DUST is only derivable from the ledger events the indexer serves.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_INDEXER_URL"),
-        requires = "midnight_node_ws_url"
-    )]
+    #[arg(long, env("MPC_MIDNIGHT_INDEXER_URL"), requires = "midnight_node_url")]
     pub midnight_indexer_url: Option<String>,
     /// Indexer GraphQL subscription URL: the wallet catches up over the URL
     /// above and follows over this one.
     #[arg(
         long,
         env("MPC_MIDNIGHT_INDEXER_WS_URL"),
-        requires = "midnight_node_ws_url"
+        requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<String>,
 }
@@ -73,8 +65,8 @@ pub struct MidnightArgs {
 impl MidnightArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(14);
-        if let Some(v) = self.midnight_node_ws_url {
-            args.extend(["--midnight-node-ws-url".to_string(), v]);
+        if let Some(v) = self.midnight_node_url {
+            args.extend(["--midnight-node-url".to_string(), v]);
         }
         if let Some(v) = self.midnight_central_address {
             args.extend(["--midnight-central-address".to_string(), v]);
@@ -104,14 +96,14 @@ impl MidnightArgs {
     /// on the node url makes the flags all-or-nothing before this runs.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
         let (
-            Some(node_ws_url),
+            Some(node_url),
             Some(central_address),
             Some(funding_seed),
             Some(proof_server_url),
             Some(indexer_url),
             Some(indexer_ws_url),
         ) = (
-            self.midnight_node_ws_url,
+            self.midnight_node_url,
             self.midnight_central_address,
             self.midnight_funding_seed,
             self.midnight_proof_server_url,
@@ -134,7 +126,7 @@ impl MidnightArgs {
             })?;
         }
         let config = MidnightConfig {
-            node_ws_url,
+            node_url,
             central_address,
             publisher,
             rpc: Default::default(),
@@ -150,7 +142,7 @@ impl MidnightArgs {
                 // No flags for the tuning fields. Destructured in full so a new
                 // field fails to compile here rather than silently miss the round trip.
                 let MidnightConfig {
-                    node_ws_url,
+                    node_url,
                     central_address,
                     publisher:
                         PublisherConfig {
@@ -167,7 +159,7 @@ impl MidnightArgs {
                     indexer: _,
                 } = c;
                 MidnightArgs {
-                    midnight_node_ws_url: Some(node_ws_url),
+                    midnight_node_url: Some(node_url),
                     midnight_central_address: Some(central_address),
                     midnight_funding_seed: Some(funding_seed.into()),
                     midnight_intent_gen_command: Some(
@@ -180,7 +172,7 @@ impl MidnightArgs {
                 }
             }
             None => MidnightArgs {
-                midnight_node_ws_url: None,
+                midnight_node_url: None,
                 midnight_central_address: None,
                 midnight_funding_seed: None,
                 midnight_intent_gen_command: None,
@@ -203,7 +195,7 @@ mod tests {
     /// assertion cannot pass on a dropped flag.
     fn configured() -> MidnightConfig {
         MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:9944".into(),
+            node_url: "http://127.0.0.1:9944".into(),
             central_address: "ab".repeat(32),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
@@ -246,7 +238,7 @@ mod tests {
         crate::cli::tests::assert_midnight_env_unset();
 
         let mut cfg = configured();
-        cfg.indexer.live_block_buffer = 77;
+        cfg.indexer.poll_interval = Duration::from_millis(77);
         cfg.indexer.stall_timeout = Duration::from_secs(7);
         cfg.publisher.submit_timeout = Duration::from_secs(7);
         assert_ne!(
@@ -264,7 +256,7 @@ mod tests {
         .expect("a valid config passes the boundary check")
         .expect("all the gating fields are set");
 
-        assert_eq!(reparsed.node_ws_url, cfg.node_ws_url);
+        assert_eq!(reparsed.node_url, cfg.node_url);
         assert_eq!(reparsed.central_address, cfg.central_address);
         assert_eq!(
             reparsed.indexer,
@@ -309,16 +301,16 @@ mod tests {
             let err = MidnightArgs::try_parse_from(["test", flag, "x"])
                 .expect_err("clap must reject a publisher flag supplied on its own");
             assert!(
-                err.to_string().contains("midnight-node-ws-url"),
-                "{flag} is not gated on the node ws url: {err}"
+                err.to_string().contains("midnight-node-url"),
+                "{flag} is not gated on the node url: {err}"
             );
         }
 
         let central_address = "ab".repeat(32);
         let err = MidnightArgs::try_parse_from([
             "test",
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:9944",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
         ])
