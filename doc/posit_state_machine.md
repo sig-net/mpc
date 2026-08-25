@@ -191,7 +191,7 @@ flag exists to limit after the fact.
 Sending `PROPOSE` to every member would help, cheaply: the tally is keyed
 on `SinglePositCounter::participants` and `process_action` drops senders outside
 that set, so extra replies cannot move `enough_rejects` or `meets_totality`. It
-would be a notification, not a vote.
+would be a notification, not a vote. See also open questions on "active" checks below.
 
 It only half-solves the problem, though. A member holding the presignature but
 absent from the active set at reservation time would `ACCEPT`, go uncounted, and
