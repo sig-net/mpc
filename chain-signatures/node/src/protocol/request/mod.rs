@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
+mod delay_monitor;
 mod limiter;
 mod mailbox;
 mod metrics;
@@ -39,6 +40,7 @@ mod posit;
 mod state;
 mod task;
 
+use delay_monitor::DelayMonitor;
 use limiter::SignLimiter;
 use task::SignTask;
 
@@ -134,8 +136,8 @@ pub struct SignatureSpawner {
     /// Per-sign posit mailboxes; also buffer messages that arrive before their
     /// task spawns.
     posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
-    /// Watchers that increment the delayed metric when response time exceeds expected.
-    delayed_watchers: HashMap<SignId, JoinHandle<()>>,
+    /// Monitor alerting when signature requests exceed their expected response time.
+    delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
@@ -184,27 +186,13 @@ impl SignatureSpawner {
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        let is_proposer = Arc::clone(&is_proposer);
-        if remaining_time > Duration::from_secs(0) {
-            let watcher = tokio::spawn(async move {
-                tokio::time::sleep(remaining_time).await;
-                let elapsed = unix_elapsed(unix_timestamp_indexed);
-                tracing::warn!(
-                    ?sign_id,
-                    ?chain,
-                    elapsed_secs = elapsed.as_secs(),
-                    expected_secs = expected_response_time_secs,
-                    "signature request delayed beyond expected response time"
-                );
-
-                if is_proposer.load(Ordering::Relaxed) {
-                    crate::metrics::requests::SIGN_REQUEST_DELAYED
-                        .with_label_values(&[chain.as_str()])
-                        .inc();
-                }
-            });
-            self.delayed_watchers.insert(sign_id, watcher);
-        }
+        self.delay_monitor.watch(
+            sign_id,
+            chain,
+            unix_timestamp_indexed,
+            remaining_time,
+            Arc::clone(&is_proposer),
+        );
 
         if !governance.is_running {
             tracing::info!(?sign_id, "holding sign request until governance is running");
@@ -340,23 +328,13 @@ impl SignatureSpawner {
         self.dead_ids.put(sign_id, ());
     }
 
-    /// Cancel the delayed-response watcher for a task that ended in time.
-    fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
-        if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
-            tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
-            watcher.abort();
-        } else {
-            tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
-        }
-    }
-
     /// Common teardown when a sign task ends: forget the id, drop its mailbox and
-    /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
-    fn retire_task(&mut self, sign_id: SignId, reason: &str) {
+    /// unwatch its delay monitoring. Does not touch `tasks` (aborting varies per caller).
+    fn retire_task(&mut self, sign_id: SignId, reason: &'static str) {
         self.mark_dead(sign_id);
         self.requests.remove(&sign_id);
         self.posit_mailboxes.remove(&sign_id);
-        self.abort_delayed_watcher(sign_id, reason);
+        self.delay_monitor.unwatch(sign_id, reason);
     }
 
     fn handle_sign(
@@ -507,11 +485,12 @@ impl SignatureSpawnerTask {
         rpc_channel: RpcChannel,
         backlog: Backlog,
     ) -> Self {
+        let delay_monitor = DelayMonitor::spawn();
         let spawner = SignatureSpawner {
             contract,
             tasks: JoinMap::new(),
             posit_mailboxes: HashMap::new(),
-            delayed_watchers: HashMap::new(),
+            delay_monitor,
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
@@ -586,12 +565,13 @@ mod tests {
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
+        let delay_monitor = DelayMonitor::spawn();
         let mut spawner = SignatureSpawner {
             contract,
             presignatures,
             tasks: JoinMap::new(),
             posit_mailboxes: HashMap::new(),
-            delayed_watchers: HashMap::new(),
+            delay_monitor,
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state: mesh_rx,
