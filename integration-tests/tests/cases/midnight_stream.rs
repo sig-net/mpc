@@ -31,7 +31,7 @@ async fn wait_for_completed_checkpoint(
                             && checkpoint
                                 .pending_requests
                                 .iter()
-                                .all(|pending| pending.sign_id.request_id != request_id);
+                                .all(|pending| pending.sign_id().request_id != request_id);
                     }
                     Err(_) => complete = false,
                 }

@@ -9,8 +9,8 @@ alloy.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-futures-util.workspace = true
 hex.workspace = true
+jsonrpsee = { version = "0.24.10", features = ["http-client"] }
 k256.workspace = true
 midnight-base-crypto.workspace = true
 midnight-onchain-state.workspace = true
@@ -24,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 # Cargo unifies features across this crate and `node` in a workspace build, so
 # nothing here may rely on `unstable-light-client` (node's addition) being absent.
-subxt = { workspace = true, features = ["jsonrpsee", "native", "reconnecting-rpc-client"] }
+subxt = { workspace = true, features = ["native"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -38,4 +38,4 @@ sandbox = []
 jsonrpsee = { version = "0.24.10", features = ["server"] }
 midnight-ledger-v9 = { version = "1.0.0", default-features = false }
 midnight-transient-crypto = "3.0.0"
-tokio-tungstenite = "0.29"
+tokio = { workspace = true, features = ["test-util"] }

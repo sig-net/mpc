@@ -5,25 +5,26 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
 use rlp::{Rlp, RlpStream};
+use serde::{Deserialize, Serialize};
 
-pub type RequestId = [u8; 32];
+use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishState {
     pub signature: Signature,
     pub participants: Vec<Participant>,
     pub is_proposer: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish { publish: PublishState },
-    PendingExecution { tx: BidirectionalTx },
+    PendingPublish { publish: Arc<PublishState> },
+    PendingExecution { tx: Arc<BidirectionalTx> },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
+    PendingPublishBidirectional { publish: Arc<PublishState> },
 }
 
 impl SignStatus {
@@ -65,13 +66,15 @@ impl SignStatus {
         }
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),
             _ => None,
         }
     }
 }
+
+pub type RequestId = [u8; 32];
 
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
@@ -381,6 +384,7 @@ mod tests {
     use alloy::consensus::{SignableTransaction, TxEip1559};
     use alloy::eips::eip2718::Encodable2718;
     use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+    use std::sync::Arc;
 
     #[test]
     fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
@@ -426,7 +430,7 @@ mod tests {
             s: k256::Scalar::ONE,
             recovery_id: 0,
         };
-        let dummy_tx = BidirectionalTx {
+        let dummy_tx = Arc::new(BidirectionalTx {
             id: BidirectionalTxId([1u8; 32]),
             sender: [0u8; 32],
             serialized_transaction: vec![],
@@ -444,11 +448,13 @@ mod tests {
             request_id: [1u8; 32],
             from_address: [0u8; 20],
             nonce: 0,
-        };
-        let publish = || PublishState {
-            signature: dummy_sig,
-            participants: vec![],
-            is_proposer: true,
+        });
+        let publish = || {
+            Arc::new(PublishState {
+                signature: dummy_sig,
+                participants: vec![],
+                is_proposer: true,
+            })
         };
 
         let generation_tag = SignStatus::PendingGeneration.consensus_tag();

@@ -149,8 +149,6 @@ impl MpcFixture {
             // the threshold.
             threshold: resharing.new_threshold,
             public_key: resharing.public_key,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold_votes: Default::default(),
         };
@@ -313,7 +311,7 @@ impl MpcFixtureNode {
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: cait_sith::protocol::Participant,
+        from: Participant,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
@@ -368,7 +366,7 @@ impl MpcFixtureNode {
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
         &self,
-        peer: cait_sith::protocol::Participant,
+        peer: Participant,
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {

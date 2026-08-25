@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
-use mpc_contract::{ProtocolContractState, RunningContractState};
+use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
+use mpc_node::backlog::Checkpoint;
 use mpc_node::web::StateView;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
@@ -54,11 +55,11 @@ impl<'a> WaitAction<'a, ()> {
 }
 
 impl<'a, R> WaitAction<'a, R> {
-    pub fn running(self) -> WaitAction<'a, RunningContractState> {
+    pub fn running(self) -> WaitAction<'a, RunningContractStateView> {
         self.running_on_epoch(0)
     }
 
-    pub fn running_on_epoch(mut self, epoch: Epoch) -> WaitAction<'a, RunningContractState> {
+    pub fn running_on_epoch(mut self, epoch: Epoch) -> WaitAction<'a, RunningContractStateView> {
         self.actions.push(WaitActions::Running(epoch));
         WaitAction {
             nodes: self.nodes,
@@ -225,8 +226,8 @@ impl<'a> IntoFuture for WaitAction<'a, ()> {
     }
 }
 
-impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
-    type Output = anyhow::Result<RunningContractState>;
+impl<'a> IntoFuture for WaitAction<'a, RunningContractStateView> {
+    type Output = anyhow::Result<RunningContractStateView>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -274,7 +275,13 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 
         match &state {
             ContractState::Candidate(candidate, present) => {
-                if *present != current_state.candidates.contains_key(candidate) {
+                let info: Option<mpc_contract::primitives::CandidateEntry> = nodes
+                    .contract()
+                    .view("candidate_info")
+                    .args_json(serde_json::json!({ "account_id": candidate }))
+                    .await?
+                    .json()?;
+                if *present != info.is_some() {
                     anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
                 }
             }
@@ -303,10 +310,10 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 pub async fn running_mpc(
     nodes: &Cluster,
     epoch: Option<u64>,
-) -> anyhow::Result<RunningContractState> {
+) -> anyhow::Result<RunningContractStateView> {
     let is_running = || async {
         match nodes.contract_state().await? {
-            ProtocolContractState::Running(running) => match epoch {
+            ProtocolContractStateView::Running(running) => match epoch {
                 None => Ok(running),
                 Some(expected_epoch) if running.epoch >= expected_epoch => Ok(running),
                 Some(_) => {

@@ -123,46 +123,32 @@ fn pushed_call_args(call: &ContractCall<ProofPreimageMarker, DefaultDB>) -> Stri
 
 #[tokio::test]
 #[ignore = "needs npm ci and npm run build in chain-signatures/midnight-publisher-ts"]
-async fn the_rust_client_and_the_ts_builder_agree_on_a_respond_intent() {
+async fn the_rust_client_and_the_ts_builder_agree_on_respond_intents() {
     let builder = IntentGen::spawn(&common::base_live_config(), NETWORK_ID)
         .await
         .expect("spawn the builder");
 
-    let bytes = builder
-        .build(&respond_request())
-        .await
-        .expect("the builder answers");
+    for circuit in ["respond", "respondBidirectional"] {
+        let bytes = builder
+            .build(&IntentRequest {
+                circuit,
+                ..respond_request()
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the builder refused {circuit}: {error:#}"));
 
-    let call = sole_call(&bytes);
-    assert_eq!(call.entry_point.0.as_slice(), b"respond");
-    assert_eq!(
-        pushed_call_args(&call),
-        format!("pushs <[{BIG_R_X}, {BIG_R_Y}, {S}, {RECOVERY_ID_ZERO}]: b32b32b32b1>")
-    );
-}
-
-#[tokio::test]
-#[ignore = "needs npm ci and npm run build in chain-signatures/midnight-publisher-ts"]
-async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
-    // A separate deployed operation: the unidirectional case says nothing about it.
-    let builder = IntentGen::spawn(&common::base_live_config(), NETWORK_ID)
-        .await
-        .expect("spawn the builder");
-
-    let bytes = builder
-        .build(&IntentRequest {
-            circuit: "respondBidirectional",
-            ..respond_request()
-        })
-        .await
-        .expect("the builder answers");
-
-    let call = sole_call(&bytes);
-    assert_eq!(call.entry_point.0.as_slice(), b"respondBidirectional");
-    assert_eq!(
-        pushed_call_args(&call),
-        format!("pushs <[{BIG_R_X}, {BIG_R_Y}, {S}, {RECOVERY_ID_ZERO}]: b32b32b32b1>")
-    );
+        let call = sole_call(&bytes);
+        assert_eq!(
+            call.entry_point.0.as_slice(),
+            circuit.as_bytes(),
+            "{circuit}"
+        );
+        assert_eq!(
+            pushed_call_args(&call),
+            format!("pushs <[{BIG_R_X}, {BIG_R_Y}, {S}, {RECOVERY_ID_ZERO}]: b32b32b32b1>"),
+            "{circuit}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use crate::reader::{
     signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
     Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
 };
-use crate::rpc::{BlockRef, ReadFailure};
+use crate::rpc::{is_oversized_contract_state, BlockRef, STATE_TOO_LARGE};
 use crate::source::{ChainSource, ContractState, LiveSource};
 
 use midnight_base_crypto::fab::AlignedValue;
@@ -22,7 +22,10 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use mpc_utils::time::current_unix_timestamp;
+use mpc_utils::{
+    task::{retry_until_some, CancellationTokenExt as _},
+    time::current_unix_timestamp,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -125,22 +128,6 @@ fn drop_entry<T>(
     None
 }
 
-/// [`drop_entry`] at ERROR: the failure may be node-local, not the caller's.
-fn drop_entry_unattributed<T>(
-    reason: &'static str,
-    height: u64,
-    request_id: Option<[u8; 32]>,
-    detail: &str,
-) -> Option<T> {
-    tracing::error!(
-        reason,
-        height,
-        request_id = request_id.map(hex::encode),
-        "midnight entry dropped: {detail}"
-    );
-    None
-}
-
 fn response_event(
     entry: &MapEntry,
     response_map: &'static str,
@@ -182,98 +169,11 @@ fn response_event(
     }
 }
 
-/// Names the one failure a retry never clears. The supervised restart resumes from
-/// the retained watermark and arrives back here, so the node holds at this height
-/// until its rpc node can serve the state.
-fn note_unservable(err: anyhow::Error, height: u64) -> anyhow::Error {
-    tracing::error!(
-        reason = "state-unservable-hold",
-        height,
-        "midnight node cannot serve state at this height; holding until it can. If \
-         this persists, switch to an archive node"
-    );
-    err
-}
-
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
 /// mid-flight, which every caller answers by returning `Ok(())`.
 enum Indexed {
     Done,
     Cancelled,
-}
-
-/// Retries `attempt` every [`RETRY_DELAY`] until it succeeds or `cancel` fires.
-///
-/// The per-item retry the other chains' indexers apply around their own block
-/// processing: a node hiccup costs one retry here, not a supervised
-/// restart that re-runs backlog recovery, re-anchors and
-/// re-queues the pending backlog. The pruning signature escapes as `Err` — retrying
-/// cannot serve a pruned node. Cancellation is `Ok(None)`.
-async fn retry_until_cancelled<T, F, Fut>(
-    what: &'static str,
-    height: u64,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) => match ReadFailure::of(&err) {
-                Some(ReadFailure::Unservable) => return Err(note_unservable(err, height)),
-                Some(ReadFailure::ClientClosed) => return Err(err),
-                _ => tracing::warn!(
-                    reason = "retrying",
-                    height,
-                    "midnight {what} failed: {err:#}; retrying"
-                ),
-            },
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
-}
-
-/// Retries a startup step every [`RETRY_DELAY`] until it succeeds or `cancel` fires
-/// (`Ok(None)`). No unservable escape, unlike [`retry_until_cancelled`]: at startup a
-/// restart would only re-run backlog recovery to arrive back at the same step. The
-/// dead-client class does escape (`Err`), since no in-place retry can revive a
-/// closed client and only the supervised restart rebuilds the connection.
-async fn retry_startup<T, F, Fut>(
-    what: &'static str,
-    cancel: &CancellationToken,
-    mut attempt: F,
-) -> anyhow::Result<Option<T>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            result = attempt() => result,
-        };
-        match result {
-            Ok(value) => return Ok(Some(value)),
-            Err(err) if ReadFailure::of(&err) == Some(ReadFailure::ClientClosed) => {
-                return Err(err);
-            }
-            Err(err) => tracing::warn!("midnight {what} failed: {err:#}; retrying"),
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(None),
-            _ = tokio::time::sleep(RETRY_DELAY) => {}
-        }
-    }
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
@@ -417,12 +317,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// One notification entry: decode and unpack it, read the caller's ledger at
     /// `at_hash`, gate through `resolve_verified_record`, convert.
     ///
-    /// `Err` is reserved for our own schema drift: the singleton's circuits fix the
-    /// map-key shape and the notification's shape and version, so callers cannot
-    /// produce those failures, and dropping them would silently lose every request
-    /// while the checkpoint advances. Everything caller-attributable is a counted drop,
-    /// classified purely by which stage failed: `decode_notification` covers the
-    /// circuit-enforced half, `unpack_notification_v1` the caller-supplied payload.
+    /// An unreadable dependency returns `Err` so the block cannot be checkpointed.
+    /// Decoded caller-owned invalid data is a counted `Ok(None)` drop.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -485,43 +381,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     &format!("{caller_hex}: {err:#}"),
                 ));
             }
-            Err(err) => match ReadFailure::of(&err) {
-                // Ours to fix, not this entry's: a closed client fails every read
-                // until the supervisor's restart rebuilds the connection.
-                Some(ReadFailure::ClientClosed) => return Err(err),
-                // An oversized state is the contract's own property (retrying
-                // cannot shrink it), and pruning the request index is the
-                // integrator's job.
-                Some(ReadFailure::TooLarge) => {
-                    return Ok(drop_entry(
-                        "caller-state-too-large",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-                // The transport already spent its retry budget, and block-level
-                // retries cannot be bounded per entry, so escalating would let one
-                // caller whose state cannot be served (`caller_address` is
-                // producer-supplied) halt the chain. Charged to the entry instead,
-                // the unservable answer included, but only once a head probe
-                // proves the node healthy: the node collapses transient faults
-                // into the same answer, and an ambient fault must hold, not drop.
-                Some(ReadFailure::Unservable) | None => {
-                    if let Err(probe_err) = source.finalized_head().await {
-                        return Err(err.context(format!(
-                            "caller state read failed and the head probe failed too \
-                             ({probe_err:#}): the fault is ambient, holding the block"
-                        )));
-                    }
-                    return Ok(drop_entry_unattributed(
-                        "caller-state-unreadable",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-            },
+            Err(err) if is_oversized_contract_state(&err) => {
+                return Ok(drop_entry(
+                    "caller-state-too-large",
+                    height,
+                    Some(rid),
+                    &format!("{caller_hex}: {err:#}"),
+                ));
+            }
+            Err(err) => {
+                return Err(err.context(format!("failed to read caller state {caller_hex}")));
+            }
         };
         let field = match signet_field_node_by_path(&caller_tree, &unpacked.requests_path) {
             Ok(field) => field,
@@ -569,7 +439,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         }
     }
 
-    /// [`process_block`](Self::process_block) under [`retry_until_cancelled`]'s policy.
+    /// [`process_block`](Self::process_block) under the per-block retry policy.
     /// Spelled out because holding `&mut cache` across attempts needs an `async ||`,
     /// whose lending future defeats `Send` inference at the node's spawn boundary on
     /// stable Rust; a halt there (schema drift, undecodable central state) ends the run.
@@ -587,15 +457,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             };
             match result {
                 Ok(requests) => return Ok(Some(requests)),
-                Err(err) => match ReadFailure::of(&err) {
-                    Some(ReadFailure::Unservable) => {
-                        return Err(note_unservable(err, block.number));
+                Err(err) => {
+                    if is_oversized_contract_state(&err) {
+                        return Err(err.context(format!(
+                            "{STATE_TOO_LARGE} for central contract at height {}",
+                            block.number
+                        )));
                     }
-                    Some(ReadFailure::ClientClosed) => return Err(err),
-                    None if err.downcast_ref::<ResponseSchemaDrift>().is_some() => {
+                    if err.downcast_ref::<ResponseSchemaDrift>().is_some() {
                         return Err(err);
                     }
-                    None if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) => {
+                    if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) {
                         tracing::error!(
                             reason = "central-state-undecodable-hold",
                             height = block.number,
@@ -605,16 +477,15 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         );
                         return Err(err);
                     }
-                    _ => tracing::warn!(
+                    tracing::warn!(
                         reason = "retrying",
                         height = block.number,
                         "midnight block processing failed: {err:#}; retrying"
-                    ),
-                },
+                    );
+                }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(None),
-                _ = tokio::time::sleep(RETRY_DELAY) => {}
+            if cancel.cancelled_within(RETRY_DELAY).await {
+                return Ok(None);
             }
         }
     }
@@ -630,8 +501,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
         let Some(block) =
-            retry_until_cancelled("block lookup", number, cancel, || source.block_at(number))
-                .await?
+            retry_until_some(cancel, RETRY_DELAY, "midnight block lookup", || async {
+                source.block_at(number).await.map(Some)
+            })
+            .await
         else {
             return Ok(Indexed::Cancelled);
         };
@@ -699,7 +572,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let Some(anchor) =
-            retry_startup("anchor sampling", &cancel, || source.finalized_head()).await?
+            retry_until_some(&cancel, RETRY_DELAY, "midnight anchor sampling", || async {
+                source.finalized_head().await.map(Some)
+            })
+            .await
         else {
             return Ok(());
         };
@@ -715,12 +591,21 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             );
             last_processed = anchor.number;
         } else {
-            for number in (checkpoint + 1)..=anchor.number {
+            for number in checkpoint.saturating_add(1)..anchor.number {
                 match self
                     .index_height(source, &mut cache, &events_tx, number, &cancel)
                     .await?
                 {
                     Indexed::Done => last_processed = number,
+                    Indexed::Cancelled => return Ok(()),
+                }
+            }
+            if anchor.number > checkpoint {
+                match self
+                    .index_block(source, &mut cache, &events_tx, &anchor, &cancel)
+                    .await?
+                {
+                    Indexed::Done => last_processed = anchor.number,
                     Indexed::Cancelled => return Ok(()),
                 }
             }
@@ -730,27 +615,31 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .context("failed to send midnight catchup completed event")?;
 
-        let (blocks_tx, mut blocks_rx) = mpsc::channel(self.config.indexer.live_block_buffer);
-        let _producer = source.spawn_block_producer(blocks_tx).await?;
+        let mut last_progress = tokio::time::Instant::now();
         loop {
+            if cancel
+                .cancelled_within(self.config.indexer.poll_interval)
+                .await
+            {
+                return Ok(());
+            }
+
             let block = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                block = blocks_rx.recv() => match block {
-                    Some(block) => block,
-                    // To run_supervised, Ok(()) is permanent shutdown and Err is a
-                    // restart, so an ended producer must be Err and let the restart
-                    // re-anchor.
-                    None => anyhow::bail!("midnight finalized block producer terminated"),
-                },
+                result = source.finalized_head() => result
+                    .context("failed to poll the midnight finalized head")?,
             };
+
             if block.number <= last_processed {
+                if last_progress.elapsed() >= self.config.indexer.stall_timeout {
+                    anyhow::bail!(
+                        "midnight finalized head made no progress for {:?}",
+                        self.config.indexer.stall_timeout
+                    );
+                }
                 continue;
             }
-            // Close any finality gap so a lagging subscription cannot skip
-            // notifications; each height processes exactly like catchup.
-            // `last_processed` stays put mid-walk: every continuation overwrites it
-            // below before any read, so a per-height assignment is a dead store.
-            for number in (last_processed + 1)..block.number {
+            for number in last_processed.saturating_add(1)..block.number {
                 match self
                     .index_height(source, &mut cache, &events_tx, number, &cancel)
                     .await?
@@ -763,7 +652,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 .index_block(source, &mut cache, &events_tx, &block, &cancel)
                 .await?
             {
-                Indexed::Done => last_processed = block.number,
+                Indexed::Done => {
+                    last_processed = block.number;
+                    last_progress = tokio::time::Instant::now();
+                }
                 Indexed::Cancelled => return Ok(()),
             }
         }
@@ -779,14 +671,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        // A failed dial is the same transient class as a failed anchor read.
-        let Some(source) = retry_startup("node connect", &cancel, || {
-            LiveSource::connect(&self.config)
-        })
-        .await?
-        else {
-            return Ok(());
-        };
+        let source = LiveSource::connect(&self.config)?;
         self.run_with_source(&source, events_tx, cancel).await
     }
 }
@@ -812,8 +697,7 @@ mod tests {
     use crate::PublisherConfig;
     use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
     use mpc_primitives::SignId;
-    use mpc_utils::task::AbortOnDrop;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     /// A record with a distinguishing nonce, and the id it files itself under.
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
@@ -839,7 +723,7 @@ mod tests {
     /// The config every fixture indexer runs on: a never-dialed URL and the fixture central.
     fn test_config() -> MidnightConfig {
         MidnightConfig {
-            node_ws_url: "ws://127.0.0.1:1".to_string(),
+            node_url: "http://127.0.0.1:1".to_string(),
             central_address: central_address(),
             publisher: PublisherConfig {
                 funding_seed: "ab".repeat(32),
@@ -958,15 +842,22 @@ mod tests {
         ])
     }
 
+    enum HeadSample {
+        Block(BlockRef),
+        Park,
+    }
+
     #[derive(Default)]
     struct FixtureSource {
         head: u64,
+        /// Finalized-head samples consumed in order before falling back to `head`.
+        sampled_heads: std::sync::Mutex<VecDeque<HeadSample>>,
+        successful_head_calls: std::sync::atomic::AtomicUsize,
         /// (address, at_hash) -> tree; absent means Ok(None), contract not present at
         /// that block.
         states: HashMap<(String, String), Node>,
-        /// (address, at_hash) -> error message; checked BEFORE `states`, so a read can
-        /// fail with e.g.
-        state_errors: HashMap<(String, String), String>,
+        /// Contract states that exceed the response cap; checked before `states`.
+        oversized_states: HashSet<(String, String)>,
         /// (address, at_hash) -> (error message, failures still owed). Counts down per
         /// read and then lets the read succeed, which is how a test distinguishes a
         /// retry from a restart: a restarting indexer never reaches the success.
@@ -977,17 +868,13 @@ mod tests {
         /// `finalized_head` failures still owed before the read succeeds, the
         /// startup twin of `transient_state_errors`.
         transient_head_errors: std::sync::Mutex<usize>,
-        /// A permanent `finalized_head` failure (e.g. the dead-client marker),
-        /// checked before the transient debt.
+        /// A permanent `finalized_head` failure, checked before the transient debt.
         sticky_head_error: Option<String>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         /// Deterministic suspension: the read named here announces itself on `reached`
         /// and then never resolves, so a test can cancel while a walk is PROVABLY
         /// mid-flight instead of racing a sleep against it.
         park_at: Option<u64>,
-        /// Parks `contract_state_tree` for this address, which suspends a walk INSIDE
-        /// `process_entry` rather than between blocks.
-        park_state_read: Option<String>,
         reached: Option<mpsc::Sender<String>>,
     }
 
@@ -1029,12 +916,9 @@ mod tests {
             Some(message.clone())
         }
 
-        /// Injects the pruning signature for one (address, height) read.
-        fn set_unservable(&mut self, address: &str, at: u64) {
-            self.state_errors.insert(
-                (address.to_string(), hash_of(at)),
-                ReadFailure::Unservable.marker().to_string(),
-            );
+        fn set_oversized(&mut self, address: &str, at: u64) {
+            self.oversized_states
+                .insert((address.to_string(), hash_of(at)));
         }
 
         /// Injects a real decode failure for one (address, height): the ledger's own
@@ -1064,6 +948,26 @@ mod tests {
                     anyhow::bail!("finalized head fetch failed: connection reset by peer");
                 }
             }
+            let successful_call = self
+                .successful_head_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let sample = self
+                .sampled_heads
+                .lock()
+                .expect("fixture sampled heads")
+                .pop_front();
+            match sample {
+                Some(HeadSample::Block(block)) => return Ok(block),
+                Some(HeadSample::Park) => self.park("finalized_head".to_string()).await,
+                None => {}
+            }
+            if successful_call > 0 {
+                if let Some(rx) = self.live.lock().await.as_mut() {
+                    if let Ok(block) = rx.try_recv() {
+                        return Ok(block);
+                    }
+                }
+            }
             Ok(block_ref(self.head))
         }
 
@@ -1079,15 +983,16 @@ mod tests {
             address_64hex: &str,
             at_hash: &str,
         ) -> anyhow::Result<ContractState> {
-            if self.park_state_read.as_deref() == Some(address_64hex) {
-                self.park(format!("state:{address_64hex}")).await;
-            }
             let key = (address_64hex.to_string(), at_hash.to_string());
             if let Some(message) = self.take_transient_error(&key) {
                 anyhow::bail!("{message}");
             }
-            if let Some(message) = self.state_errors.get(&key) {
-                anyhow::bail!("{message}");
+            if self.oversized_states.contains(&key) {
+                return Err(crate::rpc::oversized_contract_state(
+                    subxt::ext::subxt_rpcs::Error::Client(Box::new(std::io::Error::other(
+                        "fixture oversized contract state",
+                    ))),
+                ));
             }
             if let Some(message) = self.undecodable_states.get(&key) {
                 return Ok(ContractState::Undecodable(anyhow::anyhow!("{message}")));
@@ -1097,20 +1002,6 @@ mod tests {
                 .get(&key)
                 .cloned()
                 .map_or(ContractState::Absent, ContractState::Tree))
-        }
-
-        async fn spawn_block_producer(
-            &self,
-            tx: mpsc::Sender<BlockRef>,
-        ) -> anyhow::Result<AbortOnDrop> {
-            let mut rx = self.live.lock().await.take().expect("one producer per run");
-            Ok(AbortOnDrop(tokio::spawn(async move {
-                while let Some(block) = rx.recv().await {
-                    if tx.send(block).await.is_err() {
-                        return;
-                    }
-                }
-            })))
         }
     }
 
@@ -1133,7 +1024,15 @@ mod tests {
         /// Spawns over an EXISTING state manager: the restart tests' seam, so a second
         /// run provably resumes from what the first persisted.
         async fn spawn_with_state(source: FixtureSource, state: MockStateManager) -> Self {
-            let indexer = MidnightIndexer::new(test_config(), state.clone(), NoopChainTelemetry)
+            Self::spawn_with_config(source, state, test_config()).await
+        }
+
+        async fn spawn_with_config(
+            source: FixtureSource,
+            state: MockStateManager,
+            config: MidnightConfig,
+        ) -> Self {
+            let indexer = MidnightIndexer::new(config, state.clone(), NoopChainTelemetry)
                 .await
                 .expect("indexer constructs");
 
@@ -1173,6 +1072,118 @@ mod tests {
             matches!(event, ChainEvent::Block(n) if *n == number),
             "expected Block({number}), got {event:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polling_ignores_nonadvancing_samples_then_closes_the_gap_in_order() {
+        let central = central_address();
+        let mut divergent = block_ref(8);
+        divergent.hash = hash_of(800);
+        let mut source = FixtureSource {
+            head: 11,
+            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+                HeadSample::Block(block_ref(8)),
+                HeadSample::Block(divergent),
+                HeadSample::Block(block_ref(7)),
+                HeadSample::Block(block_ref(11)),
+            ])),
+            ..Default::default()
+        };
+        for number in 8..=11 {
+            source.set_state(&central, number, central_state(vec![]));
+        }
+        let mut config = test_config();
+        config.indexer.poll_interval = Duration::from_secs(1);
+        let state = MockStateManager::new();
+        state.set_processed_block(Chain::Midnight, 8).await;
+        let mut harness = RunFixture::spawn_with_config(source, state, config).await;
+
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        assert!(harness.events_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !harness.handle.is_finished(),
+            "a nonadvancing sample must not stop the polling loop"
+        );
+        assert!(harness.events_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!harness.handle.is_finished());
+        assert!(harness.events_rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for number in 9..=11 {
+            assert_block(&harness.next_event().await, number);
+        }
+        assert!(harness.events_rx.try_recv().is_err());
+        harness.cancel_and_join().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonadvancing_heads_emit_nothing_and_share_one_stall_budget() {
+        let mut config = test_config();
+        config.indexer.poll_interval = Duration::from_secs(1);
+        config.indexer.stall_timeout = Duration::from_secs(2);
+        let source = FixtureSource {
+            head: 8,
+            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+                HeadSample::Block(block_ref(8)),
+                HeadSample::Block(block_ref(7)),
+            ])),
+            ..Default::default()
+        };
+        let mut harness =
+            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(harness.events_rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let err = harness
+            .handle
+            .await
+            .expect("run task panicked")
+            .expect_err("regressed and equal samples must share the original stall budget");
+        assert!(err.to_string().contains("no progress"), "{err:#}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_is_prompt_during_a_finalized_head_read() {
+        let (head_reached_tx, mut head_reached_rx) = mpsc::channel(1);
+        let sampling = FixtureSource {
+            head: 8,
+            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+                HeadSample::Block(block_ref(8)),
+                HeadSample::Park,
+            ])),
+            reached: Some(head_reached_tx),
+            ..Default::default()
+        };
+        let mut config = test_config();
+        config.indexer.poll_interval = Duration::from_secs(1);
+        let mut sampling =
+            RunFixture::spawn_with_config(sampling, MockStateManager::new(), config).await;
+        assert!(matches!(
+            sampling.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            head_reached_rx.recv().await,
+            Some("finalized_head".to_string())
+        );
+        sampling.cancel_and_join().await;
     }
 
     /// Asserts the emitted request end to end: the id and the absent block timestamp.
@@ -1494,37 +1505,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn process_entry_drops_undecodable_caller_state() {
-        let (_record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        // The caller contract IS present; its state does not deserialize.
-        source.set_undecodable(&hex::encode(CALLER), 9);
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        // The block still reports progress past the poisoned entry, or the restart
-        // re-walks it forever.
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
     /// An indexer plus a `cache` slot for driving `process_block`/`process_entry`
     /// directly: the drift classification is about return values, not event flows.
     async fn direct_indexer() -> TestIndexer {
@@ -1789,10 +1769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_entry_drops_a_caller_read_that_exhausts_retries() {
-        // The transport budget is the only retry a caller read gets: `caller_address`
-        // is producer-supplied, so escalating to block-level retries would let one
-        // unservable caller halt the chain. Both persistent-error shapes drop.
+    async fn process_entry_drops_unreadable_caller_state() {
         let (_record, rid) = caller_record_and_rid();
         let indexer = direct_indexer().await;
         let entry = MapEntry {
@@ -1800,146 +1777,29 @@ mod tests {
             value: notification_entry(1, &rid).1,
         };
 
-        let mut source = FixtureSource::default();
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            "contract state read failed: connection reset by peer".to_string(),
-        );
-        let dropped = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect("a dead caller read is charged to the entry");
-        assert!(dropped.is_none());
-
-        let mut source = FixtureSource::default();
-        source.set_unservable(&hex::encode(CALLER), 9);
-        let dropped = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect("an unservable caller read drops rather than restarting the run");
-        assert!(dropped.is_none());
-    }
-
-    #[tokio::test]
-    async fn process_entry_drops_too_large_caller_state_but_propagates_a_dead_client() {
-        // Only one of these is about the caller: an oversized state is the
-        // contract's own property (drop), while a closed client is our
-        // transport's death and must not be charged to the entry observing it.
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        let mut source = FixtureSource::default();
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            ReadFailure::TooLarge.marker().to_string(),
-        );
-        let dropped = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect("an oversized caller state is charged to the entry");
-        assert!(dropped.is_none());
-
-        let mut source = FixtureSource::default();
-        source.state_errors.insert(
-            (hex::encode(CALLER), hash_of(9)),
-            ReadFailure::ClientClosed.marker().to_string(),
-        );
-        let err = indexer
-            .process_entry(&source, &entry, &hash_of(9), 9, 0)
-            .await
-            .expect_err("a dead client is never the caller's fault: propagate for the reconnect");
-        assert_eq!(
-            ReadFailure::of(&err),
-            Some(ReadFailure::ClientClosed),
-            "err: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_entry_holds_when_caller_read_and_node_probe_both_fail() {
-        // Charging `caller-state-unreadable` to an entry is only sound while the
-        // node is provably healthy: when even the head probe fails, the fault is
-        // ambient (node or transport), so the entry must abort the block into the
-        // lossless retry path rather than be destroyed.
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        // Both persistent caller-read shapes that drop when the node is healthy:
-        // a generic fault and the unservable answer.
-        for unservable in [false, true] {
+        for (failure, inject) in [
+            (
+                "undecodable",
+                FixtureSource::set_undecodable as fn(&mut FixtureSource, &str, u64),
+            ),
+            ("oversized", FixtureSource::set_oversized),
+        ] {
             let mut source = FixtureSource::default();
-            if unservable {
-                source.set_unservable(&hex::encode(CALLER), 9);
-            } else {
-                source.state_errors.insert(
-                    (hex::encode(CALLER), hash_of(9)),
-                    "contract state read failed: connection reset by peer".to_string(),
-                );
-            }
-            source.transient_head_errors = std::sync::Mutex::new(usize::MAX);
-            let err = indexer
+            inject(&mut source, &hex::encode(CALLER), 9);
+            let dropped = indexer
                 .process_entry(&source, &entry, &hash_of(9), 9, 0)
                 .await
-                .expect_err("an ambient fault must hold the block, never destroy the entry");
-            assert!(
-                format!("{err:#}").contains("probe"),
-                "the hold must name the failed probe: {err:#}"
-            );
+                .unwrap_or_else(|error| {
+                    panic!("{failure} caller state was not dropped: {error:#}")
+                });
+            assert!(dropped.is_none(), "{failure} caller state emitted an event");
         }
     }
 
     #[tokio::test]
-    async fn run_surfaces_a_dead_client_from_the_live_loop() {
-        // A closed client fails every read until `run()` is rebuilt, so the
-        // block-level retry must not spin on it: the error ends the run and the
-        // supervisor's restart reconnects.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, central_state(vec![]));
-        source.state_errors.insert(
-            (central.clone(), hash_of(10)),
-            ReadFailure::ClientClosed.marker().to_string(),
-        );
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(10)).await.expect("send live block");
-
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() returns promptly instead of retrying a dead client")
-            .expect("run task panicked")
-            .expect_err("a dead client must surface for the supervised reconnect");
-        assert_eq!(
-            ReadFailure::of(&err),
-            Some(ReadFailure::ClientClosed),
-            "err: {err}"
-        );
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn catchup_retries_a_transient_central_read() {
-        // A node hiccup costs a retry, not a supervised restart: block 8's OWN
-        // emission proves the faulted read was re-attempted.
+    async fn catchup_retries_a_transient_caller_read() {
+        // The request before block 8 proves a caller read must recover before the
+        // watermark can advance past it.
         let (record, rid) = caller_record_and_rid();
         let central = central_address();
         let (live_tx, live_rx) = mpsc::channel(8);
@@ -1961,9 +1821,8 @@ mod tests {
             central_state(vec![notification_entry(1, &rid)]),
         );
         source.set_state(&hex::encode(CALLER), 8, caller_state(&record, &rid));
-        // A transport fault on the central read, not the pruning signature.
         source.set_transient_error(
-            &central,
+            &hex::encode(CALLER),
             8,
             1,
             "contract state read failed: connection reset by peer",
@@ -1983,159 +1842,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_retries_a_transient_central_read() {
-        // A hiccup in the live loop must cost a retry, not a supervised restart, and
-        // the request the failing read was carrying still arrives.
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 8,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        source.set_transient_error(
-            &central,
-            9,
-            1,
-            "contract state read failed: connection reset by peer",
-        );
+    async fn permanent_central_state_failures_stop_the_live_loop() {
+        for (failure, inject, diagnostic) in [
+            (
+                "oversized",
+                FixtureSource::set_oversized as fn(&mut FixtureSource, &str, u64),
+                STATE_TOO_LARGE,
+            ),
+            (
+                "undecodable",
+                FixtureSource::set_undecodable,
+                "did not decode",
+            ),
+        ] {
+            let central = central_address();
+            let (live_tx, live_rx) = mpsc::channel(8);
+            let mut source = FixtureSource {
+                head: 9,
+                live: tokio::sync::Mutex::new(Some(live_rx)),
+                ..Default::default()
+            };
+            source.set_state(&central, 8, central_state(vec![]));
+            source.set_state(&central, 9, central_state(vec![]));
+            inject(&mut source, &central, 10);
 
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, rid);
-        assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
+            let mut harness = RunFixture::spawn(source, 8).await;
+            assert_block(&harness.next_event().await, 9);
+            assert!(matches!(
+                harness.next_event().await,
+                ChainEvent::CatchupCompleted
+            ));
+            live_tx.send(block_ref(10)).await.expect("send live block");
 
-    #[tokio::test]
-    async fn run_surfaces_a_dead_client_from_the_anchor_read() {
-        // `retry_startup` must not spin against a client that can never answer
-        // again: the dead-client class escapes so the supervised restart
-        // reconnects instead of the watchdog rescuing it minutes later.
-        let source = FixtureSource {
-            sticky_head_error: Some(ReadFailure::ClientClosed.marker().to_string()),
-            ..Default::default()
-        };
-        let harness = RunFixture::spawn(source, 8).await;
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() returns promptly instead of retrying a dead client at startup")
-            .expect("run task panicked")
-            .expect_err("a dead client at the anchor read must surface for the reconnect");
-        assert_eq!(
-            ReadFailure::of(&err),
-            Some(ReadFailure::ClientClosed),
-            "err: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_retries_a_transient_anchor_read() {
-        // A startup fault costs an in-place retry, never a supervised restart:
-        // reaching CatchupCompleted proves the faulted sampling was re-attempted.
-        // The connect step runs through the same `retry_startup`.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 8,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            transient_head_errors: std::sync::Mutex::new(2),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_surfaces_the_pruning_signature_from_the_live_loop() {
-        // The one failure the retry must NOT swallow: no number of retries makes a
-        // pruned node serve the state, so it ends `run()` and the restart re-anchors
-        // and re-anchors.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, central_state(vec![]));
-        source.set_unservable(&central, 10);
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(10)).await.expect("send live block");
-
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() returns promptly")
-            .expect("run task panicked")
-            .expect_err("a pruned node must surface for the supervised restart");
-        assert!(
-            err.to_string().contains("cannot serve contract state"),
-            "err: {err}"
-        );
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_surfaces_central_undecodable_from_the_live_loop() {
-        // Bytes the ledger deserializer refuses on the CENTRAL contract mean this
-        // build can no longer read the chain (ledger drift): retrying cannot fix
-        // it, so the run must end with one loud error instead of a retry storm.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, central_state(vec![]));
-        source.set_undecodable(&central, 10);
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert_block(&harness.next_event().await, 9);
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(10)).await.expect("send live block");
-
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() returns promptly instead of retrying an undecodable state")
-            .expect("run task panicked")
-            .expect_err("an undecodable central state must surface for the supervised hold");
-        assert!(
-            err.to_string().contains("did not decode"),
-            "the hold must name the decode failure: {err:#}"
-        );
-        drop(live_tx);
+            let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
+                .await
+                .unwrap_or_else(|_| panic!("{failure} central state did not stop run()"))
+                .expect("run task panicked")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(diagnostic),
+                "{failure} central state lost its diagnostic: {err:#}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2245,37 +1993,6 @@ mod tests {
         );
         harness.cancel_and_join().await;
         drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_bails_when_block_producer_terminates() {
-        // Ok(()) is shutdown to run_supervised, so an ended producer must surface as
-        // Err; only cancel may return Ok.
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        drop(live_tx);
-        let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-            .await
-            .expect("run() should return promptly when the producer ends")
-            .expect("run task panicked")
-            .expect_err("an ended producer must be Err, never Ok: Ok is permanent shutdown");
-        assert!(
-            err.to_string().contains("producer terminated"),
-            "err: {err}"
-        );
     }
 
     #[tokio::test]
@@ -2446,44 +2163,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_skips_replayed_live_block() {
-        // The re-delivery guard.
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        for n in 8..=10 {
-            source.set_state(&central, n, central_state(vec![]));
-        }
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        live_tx.send(block_ref(9)).await.expect("send 9");
-        assert_block(&harness.next_event().await, 9);
-
-        live_tx.send(block_ref(9)).await.expect("replay 9");
-        live_tx.send(block_ref(10)).await.expect("send 10");
-        assert_block(&harness.next_event().await, 10);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
     async fn midnight_indexer_new_rejects_unusable_config() {
         let mut config = test_config();
-        config.node_ws_url = String::new();
+        config.node_url = String::new();
         let Err(err) = TestIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await
         else {
-            panic!("an empty node_ws_url must fail at construction, not forever at runtime")
+            panic!("an empty node_url must fail at construction, not forever at runtime")
         };
         let err = err.to_string();
-        assert!(err.contains("node_ws_url"), "unexpected error: {err}");
+        assert!(err.contains("node_url"), "unexpected error: {err}");
     }
 }

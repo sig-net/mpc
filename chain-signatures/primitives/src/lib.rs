@@ -15,7 +15,7 @@ mod requests;
 
 pub use signet_primitives::*;
 
-pub use backlog::{Checkpoint, CheckpointDigest, ConsensusCheckpointDigest, PendingTx};
+pub use backlog::{CheckpointDigest, ConsensusCheckpointDigest};
 pub use bidirectional::{
     BidirectionalTx, RespondBidirectionalEvent, RespondBidirectionalTx, SignBidirectionalEvent,
 };

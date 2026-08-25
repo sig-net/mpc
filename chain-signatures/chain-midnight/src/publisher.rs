@@ -153,8 +153,13 @@ impl MidnightPublisher {
             ledger_parameters,
         })
     }
+}
 
-    async fn publish_inner(&self, action: &PublishAction) -> anyhow::Result<()> {
+#[async_trait]
+impl ChainPublisher for MidnightPublisher {
+    // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
+    // Retries and finalized-state reconciliation currently operate per request.
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
         let _flow = self.flow.lock().await;
         let sign_id = action.request.id;
@@ -231,19 +236,6 @@ impl MidnightPublisher {
     }
 }
 
-#[async_trait]
-impl ChainPublisher for MidnightPublisher {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        self.publish_inner(action).await.inspect_err(|e| {
-            tracing::error!(
-                sign_id = ?action.request.id,
-                ?e,
-                "midnight: failed to publish signature"
-            );
-        })
-    }
-}
-
 /// The action as one respond call, or a refusal: every gate is here, ahead of the
 /// first read, so a refused action costs nothing.
 fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
@@ -313,12 +305,11 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
     let entries = central_map(&root, call.circuit.map_field(), call.circuit.map_name())?;
     for entry in entries.iter() {
         let (key, value) = &*entry;
-        match decode_response_entry(key, value).and_then(|decoded| {
-            decoded
-                .signature
-                .map(|signature| (decoded.request_id, signature))
-        }) {
-            Ok((stored_request_id, stored_signature))
+        let decoded = decode_response_entry(key, value)
+            .context("midnight finalized response schema drift")?;
+        let stored_request_id = decoded.request_id;
+        match decoded.signature {
+            Ok(stored_signature)
                 if stored_request_id == call.request_id
                     && stored_signature == call.stored_signature =>
             {
@@ -328,7 +319,7 @@ fn response_present(state: &[u8], call: &RespondCall) -> anyhow::Result<bool> {
             Err(err) => tracing::warn!(
                 circuit = call.circuit.wire_name(),
                 request_id = %hex::encode(call.request_id),
-                "midnight finalized response entry ignored: {err:#}"
+                "midnight finalized response signature ignored: {err:#}"
             ),
         }
     }
@@ -532,12 +523,15 @@ mod tests {
     struct LandingWithoutReply {
         reads: Arc<StubReads>,
         landed_state: Vec<u8>,
+        builds: std::sync::atomic::AtomicUsize,
         attempts: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
     impl IntentClient for LandingWithoutReply {
         async fn build(&self, _request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+            self.builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(GRANTED_INTENT.to_vec())
         }
 
@@ -685,7 +679,7 @@ mod tests {
         let (key, _) = &*entries.iter().next().expect("one response entry");
         fields[field] = map_of(vec![(
             (**key).clone(),
-            cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
+            cell_from_atoms(&[vec![1], vec![2], vec![3]], &[400, 1, 1]),
         )]);
         contract.data = ChargedState::new(array_of(fields));
 
@@ -771,39 +765,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_signature_reads_contract_and_ledger_state_at_one_finalized_hash() {
-        // The stub serves a different head on every ask, so a per-read taker would
-        // spread the two reads across blocks.
-        let reads = StubReads::new();
-        let client = StubClient::new();
-        let publisher = publisher(reads.clone(), client.clone());
+    async fn publish_signature_pins_and_marshals_both_circuits() {
+        for (action, circuit) in [
+            (respond_action(), RESPOND),
+            (bidirectional_action(vec![0xab; 32]), RESPOND_BIDIRECTIONAL),
+        ] {
+            // The stub serves a different head on every ask, so a per-read taker
+            // would spread the two reads across blocks.
+            let reads = StubReads::new();
+            let client = StubClient::new();
+            let publisher = publisher(reads.clone(), client.clone());
+            let before = current_unix_timestamp();
 
-        publisher
-            .publish_signature(&respond_action())
-            .await
-            .expect("the stub client grants and accepts");
+            publisher
+                .publish_signature(&action)
+                .await
+                .expect("the stub client grants and accepts");
+            let after = current_unix_timestamp();
 
-        let at_hashes: Vec<String> = reads
-            .reads()
-            .into_iter()
-            .filter(|read| read.method != "finalized_head")
-            .map(|read| read.at_hash)
-            .collect();
-        assert_eq!(
-            at_hashes,
-            vec![HEAD_ONE.to_string(); 2],
-            "both reads must pin the first head, and there must be exactly two"
-        );
-        assert_eq!(
-            reads
-                .reads()
+            let reads = reads.reads();
+            let at_hashes: Vec<_> = reads
                 .iter()
-                .filter(|read| read.method == "finalized_head")
-                .count(),
-            1,
-            "the head is taken once per publish"
-        );
-        assert_eq!(client.submissions(), 1);
+                .filter(|read| read.method != "finalized_head")
+                .map(|read| read.at_hash.as_str())
+                .collect();
+            assert_eq!(at_hashes, vec![HEAD_ONE; 2], "{circuit} pinned reads");
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|read| read.method == "finalized_head")
+                    .count(),
+                1,
+                "{circuit} finalized-head reads"
+            );
+
+            let [request] = client.built().try_into().expect("one build per publish");
+            assert_eq!(request.circuit, circuit);
+            assert_eq!(request.contract_address, CENTRAL);
+            assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+            assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
+            assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
+
+            let encoded = action.signature.big_r.to_encoded_point(false);
+            assert_eq!(
+                request.signature,
+                WireSignature {
+                    big_r: WirePoint {
+                        x: hex::encode(encoded.x().unwrap()),
+                        y: hex::encode(encoded.y().unwrap()),
+                    },
+                    s: hex::encode(action.signature.s.to_bytes()),
+                    recovery_id: action.signature.recovery_id,
+                },
+                "{circuit} signature"
+            );
+
+            let budget = config().request_timeout.as_secs() + config().submit_timeout.as_secs();
+            assert!(
+                (before.saturating_add(budget)..=after.saturating_add(budget))
+                    .contains(&request.ttl_seconds),
+                "{circuit} ttl"
+            );
+            assert_eq!(client.submissions(), 1, "{circuit} submissions");
+        }
     }
 
     #[tokio::test]
@@ -827,51 +851,57 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_exact_finalized_response_is_not_posted_again() {
-        let action = respond_action();
-        let reads = StubReads::with_state(state_with_response(&action));
-        let client = StubClient::new();
-        let publisher = publisher(reads.clone(), client.clone());
-
-        publisher
-            .publish_signature(&action)
-            .await
-            .expect("a finalized exact response makes the retry complete");
-        assert!(
-            client.built().is_empty(),
-            "a finalized response needs no intent"
-        );
-        assert_eq!(client.submissions(), 0);
-    }
-
     #[test]
-    fn invalid_response_entries_do_not_poison_the_pre_check() {
+    fn response_schema_drift_preserves_its_cause_and_is_retryable() {
         for action in [respond_action(), bidirectional_action(vec![0xab; 32])] {
             let call = respond_call(&action).expect("the action maps to a response");
-            for state in [
-                state_with_malformed_response(&action),
-                state_with_invalid_signature_response(&action),
-            ] {
-                assert!(!response_present(&state, &call).expect("invalid entries are skipped"));
-            }
+            let err = response_present(&state_with_malformed_response(&action), &call)
+                .expect_err("a malformed response entry is contract-schema drift");
+            assert!(
+                format!("{err:#}").contains("response bigR.x"),
+                "the structural cause must reach the caller: {err:#}"
+            );
+            assert!(
+                mpc_chain_integration_core::utils::retry::is_retryable(&err),
+                "schema drift must remain at the shared retry boundary: {err:#}"
+            );
         }
     }
 
     #[tokio::test]
-    async fn a_different_signature_under_the_same_request_id_is_still_posted() {
-        let action = respond_action();
-        let mut other = action.clone();
+    async fn nonmatching_finalized_responses_do_not_suppress_publish() {
+        let respond = respond_action();
+        let mut other = respond.clone();
         other.signature.recovery_id ^= 1;
-        let reads = StubReads::with_state(state_with_response(&other));
-        let client = StubClient::new();
-        let publisher = publisher(reads, client.clone());
+        let bidirectional = bidirectional_action(vec![0xab; 32]);
+        let cases = [
+            (
+                "different signature",
+                respond.clone(),
+                state_with_response(&other),
+            ),
+            (
+                "invalid respond signature",
+                respond.clone(),
+                state_with_invalid_signature_response(&respond),
+            ),
+            (
+                "invalid bidirectional signature",
+                bidirectional.clone(),
+                state_with_invalid_signature_response(&bidirectional),
+            ),
+        ];
 
-        publisher
-            .publish_signature(&action)
-            .await
-            .expect("only the exact signature makes a retry complete");
-        assert_eq!(client.submissions(), 1);
+        for (case, action, state) in cases {
+            let client = StubClient::new();
+            let publisher = publisher(StubReads::with_state(state), client.clone());
+
+            publisher
+                .publish_signature(&action)
+                .await
+                .unwrap_or_else(|error| panic!("{case} blocked publishing: {error:#}"));
+            assert_eq!(client.submissions(), 1, "{case}");
+        }
     }
 
     #[tokio::test]
@@ -881,6 +911,7 @@ mod tests {
             let client = Arc::new(LandingWithoutReply {
                 reads: reads.clone(),
                 landed_state: state_with_response(&action),
+                builds: std::sync::atomic::AtomicUsize::new(0),
                 attempts: std::sync::atomic::AtomicUsize::new(0),
             });
             let publisher = publisher(reads, client.clone());
@@ -904,6 +935,11 @@ mod tests {
                 1,
                 "an ambiguous landed submit must not be posted twice within one attempt"
             );
+            assert_eq!(
+                client.builds.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the initial attempt must build exactly one intent"
+            );
 
             // The retry attempt's pinned read finds the exact response and settles
             // without building or posting anything.
@@ -915,6 +951,11 @@ mod tests {
                 client.attempts.load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "the settled retry must not repost"
+            );
+            assert_eq!(
+                client.builds.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the settled retry must not rebuild"
             );
         }
     }
@@ -987,65 +1028,5 @@ mod tests {
             .await
             .expect_err("an absent contract has no respond operation");
         assert!(format!("{err:#}").contains("not present"), "got: {err:#}");
-    }
-
-    #[tokio::test]
-    async fn the_build_request_is_marshalled_from_the_pinned_reads_and_the_action() {
-        // The publisher package pins the same wire from its own TypeScript input, so
-        // only this side can see a field filled from the wrong read or a transposed
-        // coordinate. The JSON encoding of the request is pinned in `intent_gen`.
-        let client = StubClient::new();
-        let publisher = publisher(StubReads::new(), client.clone());
-
-        let action = respond_action();
-        let before = current_unix_timestamp();
-        publisher.publish_signature(&action).await.expect("granted");
-        let after = current_unix_timestamp();
-
-        let [request] = client.built().try_into().expect("one build per publish");
-        assert_eq!(request.circuit, RESPOND);
-        assert_eq!(request.contract_address, CENTRAL);
-        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
-        assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
-        assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
-
-        // Against the action's own signature, so a swapped x and y is caught.
-        let encoded = action.signature.big_r.to_encoded_point(false);
-        assert_eq!(
-            request.signature,
-            WireSignature {
-                big_r: WirePoint {
-                    x: hex::encode(encoded.x().unwrap()),
-                    y: hex::encode(encoded.y().unwrap()),
-                },
-                s: hex::encode(action.signature.s.to_bytes()),
-                recovery_id: action.signature.recovery_id,
-            }
-        );
-
-        let ttl = request.ttl_seconds;
-        let budget = config().request_timeout.as_secs() + config().submit_timeout.as_secs();
-        assert!(
-            (before.saturating_add(budget)..=after.saturating_add(budget)).contains(&ttl),
-            "the ttl {ttl} is the two-budget sum {budget} from a time in {before}..={after}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
-        // The contract's RespondBidirectionalEvent is a bare Signature: the output never
-        // travels, so the two circuits differ in the request by name alone.
-        let client = StubClient::new();
-        let publisher = publisher(StubReads::new(), client.clone());
-
-        publisher
-            .publish_signature(&bidirectional_action(vec![0xab; 32]))
-            .await
-            .expect("granted");
-
-        let [request] = client.built().try_into().expect("one build per publish");
-        assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
-        assert_eq!(request.contract_address, CENTRAL);
-        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
     }
 }

@@ -3,12 +3,14 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
     test_rpc_channel, test_sign_args,
 };
 use async_trait::async_trait;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
@@ -271,8 +273,6 @@ async fn test_bidirectional_sign_request_enqueues_command() {
 /// the target chain.
 #[tokio::test]
 async fn test_respond_event_advances_to_pending_execution() {
-    use crate::sign_bidirectional::{PublishState, SignStatus};
-
     let backlog = Backlog::new();
     let (request, args, root_sk) = build_solana_to_ethereum_bidirectional_request(7);
     let sign_id = request.id;
@@ -287,11 +287,11 @@ async fn test_respond_event_advances_to_pending_execution() {
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
+                publish: Arc::new(PublishState {
                     signature: mpc_sig,
                     participants: vec![],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
@@ -371,7 +371,9 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     // Register an execution watcher for the derived bidirectional tx on the target chain (Ethereum)
     let tx = test_bidirectional_tx(seed, Chain::Solana, Chain::Ethereum);
     let tx_id = tx.id;
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+    backlog
+        .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+        .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
     let ctx = crate::stream::test_utils::make_test_stream_context_with_generator_pk(
@@ -556,11 +558,11 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+                publish: Arc::new(PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![Participant::from(0u32)],
                     is_proposer: true,
-                },
+                }),
             },
         )
         .await;
@@ -623,8 +625,6 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 
 #[tokio::test]
 async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
-    use crate::sign_bidirectional::SignStatus;
-
     let backlog = Backlog::new();
     let sign_id = SignId::new([78u8; 32]);
     let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
@@ -642,11 +642,11 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+                publish: Arc::new(PublishState {
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                    participants: vec![Participant::from(0u32)],
                     is_proposer: false,
-                },
+                }),
             },
         )
         .await;

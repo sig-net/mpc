@@ -36,7 +36,6 @@ const SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e";
 
 struct MidnightEndpoints {
-    node_ws_url: String,
     node_http_url: String,
     indexer_url: String,
     indexer_ws_url: String,
@@ -223,7 +222,7 @@ fn responder_config(
     publisher_entrypoint: PathBuf,
 ) -> MidnightConfig {
     MidnightConfig {
-        node_ws_url: endpoints.node_ws_url.clone(),
+        node_url: endpoints.node_http_url.clone(),
         central_address: bootstrap.central_address.clone(),
         publisher: PublisherConfig {
             intent_gen_command: vec![
@@ -376,11 +375,11 @@ impl MidnightStack {
             .get_host_port_ipv4(NODE_PORT)
             .await
             .context("resolving Midnight node host port")?;
-        let node_ws_url = format!("ws://127.0.0.1:{node_host_port}");
+        let node_http_url = format!("http://127.0.0.1:{node_host_port}");
         // The indexer's SPO sub-indexer opens a client at block 1 as soon as it
         // connects and exits for good if the node has not imported that block yet,
         // so the indexer starts only once the node is producing blocks.
-        let network_id = wait_for_node(&node_ws_url).await?;
+        let network_id = wait_for_node(&node_http_url).await?;
 
         let node_internal_ws = format!("ws://{node_ip}:{NODE_PORT}");
         let indexer_log = log_consumer(&artifact_dir.join("indexer.log"));
@@ -428,8 +427,7 @@ impl MidnightStack {
             .context("resolving Midnight proof-server host port")?;
 
         let endpoints = MidnightEndpoints {
-            node_ws_url,
-            node_http_url: format!("http://127.0.0.1:{node_host_port}"),
+            node_http_url,
             indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
             indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
             proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
@@ -486,9 +484,9 @@ where
 }
 
 /// The node's network id, once its RPC answers and it has imported block 1.
-async fn wait_for_node(node_ws_url: &str) -> anyhow::Result<String> {
-    wait_until_ready("node", node_ws_url, 120, || async {
-        probe_network_id(node_ws_url)
+async fn wait_for_node(node_http_url: &str) -> anyhow::Result<String> {
+    wait_until_ready("node", node_http_url, 120, || async {
+        probe_network_id(node_http_url)
             .await?
             .context("block 1 is not imported yet")
     })
