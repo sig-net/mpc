@@ -68,7 +68,7 @@ const REDIS_PING_MAX_TIMES: usize = 15;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-async fn start_container_with_network_retry<I, R, F>(
+pub(crate) async fn start_container_with_network_retry<I, R, F>(
     mut build: F,
     network: &str,
 ) -> Result<ContainerAsync<I>, TestcontainersError>

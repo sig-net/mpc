@@ -40,6 +40,7 @@ pub struct Cluster {
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
+    pub midnight: Option<crate::midnight::MidnightContext>,
 }
 
 impl Cluster {

@@ -30,6 +30,10 @@ tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 
+[features]
+# Gate for the node-readiness probe integration-tests use to bring up a sandbox.
+sandbox = []
+
 [dev-dependencies]
 jsonrpsee = { version = "0.24.10", features = ["server"] }
 midnight-ledger-v9 = { version = "1.0.0", default-features = false }

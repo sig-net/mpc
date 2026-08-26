@@ -6754,6 +6754,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-midnight",
  "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",

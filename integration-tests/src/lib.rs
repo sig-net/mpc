@@ -6,6 +6,7 @@ pub mod containers;
 pub mod eth;
 pub mod execute;
 pub mod local;
+pub mod midnight;
 pub mod mpc_fixture;
 pub mod utils;
 
@@ -23,6 +24,7 @@ use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::EthConfig;
+use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
@@ -69,6 +71,7 @@ pub struct NodeConfig {
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
     pub canton: Option<CantonConfig>,
+    pub midnight: Option<MidnightConfig>,
 }
 
 impl Default for NodeConfig {
@@ -95,6 +98,7 @@ impl Default for NodeConfig {
             sol: None,
             hydration: None,
             canton: None,
+            midnight: None,
         }
     }
 }

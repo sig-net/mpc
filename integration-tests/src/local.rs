@@ -71,6 +71,7 @@ impl Node {
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
         let canton = CantonArgs::from_config(cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(cfg.midnight.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = Cli::Start {
@@ -85,7 +86,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: MidnightArgs::from_config(None),
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -174,6 +175,7 @@ impl Node {
         let sol = SolArgs::from_config(config.cfg.sol.clone());
         let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
         let canton = CantonArgs::from_config(config.cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
         let cli = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -186,7 +188,7 @@ impl Node {
             sol,
             hydration,
             canton,
-            midnight: MidnightArgs::from_config(None),
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),

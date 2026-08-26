@@ -20,3 +20,5 @@ pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;
+#[cfg(feature = "sandbox")]
+pub use rpc::probe_network_id;
