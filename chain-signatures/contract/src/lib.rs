@@ -1252,14 +1252,14 @@ impl VersionedMpcContract {
     }
 
     /// Settle each chain's *canonical reset checkpoint*: the one asserting an
-    /// empty backlog at `resume_after`.
+    /// empty backlog just before `height`.
     ///
-    /// Its digest is derived from `(chain, resume_after)` alone, so every node
+    /// Its digest is derived from `(chain, height - 1)` alone, so every node
     /// can rebuild it locally and regress onto it through the ordinary
     /// divergence path. Votes for the chain are dropped, since they describe
     /// the abandoned history.
     ///
-    /// `resume_after` is exclusive: indexing resumes at `resume_after + 1`.
+    /// `height` is inclusive: indexing resumes at `height` itself.
     ///
     /// The resulting checkpoint is deliberately indistinguishable from one the
     /// network settled with an empty backlog at the same height, because it
@@ -1270,11 +1270,8 @@ impl VersionedMpcContract {
     #[private]
     pub fn reset_checkpoints(&mut self, resets: Vec<CheckpointReset>) {
         let mut chains = HashSet::new();
-        for CheckpointReset {
-            chain,
-            resume_after,
-        } in resets
-        {
+        for CheckpointReset { chain, height } in resets {
+            let resume_after = height.saturating_sub(1);
             chains.insert(chain);
             self.insert_checkpoint(
                 chain,
@@ -1288,6 +1285,7 @@ impl VersionedMpcContract {
                 &serde_json::json!({
                     "event": "checkpoint_reset",
                     "chain": chain,
+                    "height": height,
                     "resume_after": resume_after,
                 })
                 .to_string(),
@@ -1522,9 +1520,11 @@ mod tests {
 
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            resume_after: 5,
+            height: 6,
         }]);
 
+        // `height` is inclusive: indexing resumes at 6 itself, whose empty
+        // checkpoint lives at 5.
         // The reset is an ordinary settled checkpoint whose digest is derived
         // from the pair, which is what every node re-derives locally.
         assert_eq!(
@@ -1544,7 +1544,7 @@ mod tests {
         let mut contract = running_contract(1);
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            resume_after: 100,
+            height: 101,
         }]);
 
         // Below the reset height the ordinary "behind" rule already rejects.
@@ -1589,7 +1589,7 @@ mod tests {
         let mut contract = running_contract(1);
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            resume_after: 100,
+            height: 101,
         }]);
 
         // The settled checkpoint is deliberately indistinguishable from an
@@ -1603,6 +1603,7 @@ mod tests {
         let event: serde_json::Value = serde_json::from_str(event).expect("event must be JSON");
         assert_eq!(event["event"], "checkpoint_reset");
         assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
+        assert_eq!(event["height"], 101);
         assert_eq!(event["resume_after"], 100);
     }
 
@@ -1611,13 +1612,13 @@ mod tests {
         let mut contract = running_contract(1);
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            resume_after: 100,
+            height: 101,
         }]);
         // Correcting an operator mistake: a second reset simply settles a
         // different checkpoint, including backwards.
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            resume_after: 30,
+            height: 31,
         }]);
 
         assert_eq!(
