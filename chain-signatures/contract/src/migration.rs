@@ -8,7 +8,7 @@ use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
 };
 use crate::update::ProposedUpdates;
-use crate::{MpcContract, VersionedMpcContract};
+use crate::MpcContract;
 
 use borsh::BorshDeserialize;
 use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
@@ -214,25 +214,39 @@ enum VersionedPreviousTestnet {
     V0(PreviousTestnet),
 }
 
-pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error> {
-    if let Ok(current) = VersionedMpcContract::try_from_slice(state_bytes) {
+/// The previously deployed state shape: a single-variant version enum
+/// wrapping the contract state. Kept only so old state bytes remain
+/// migratable.
+#[derive(BorshDeserialize)]
+enum VersionedPreviousState {
+    V0(MpcContract),
+}
+
+pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
+    if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
         return Ok(current);
+    }
+
+    if let Ok(VersionedPreviousState::V0(previous)) =
+        VersionedPreviousState::try_from_slice(state_bytes)
+    {
+        return Ok(previous);
     }
 
     if let Ok(VersionedPreviousDevnet::V0(previous)) =
         VersionedPreviousDevnet::try_from_slice(state_bytes)
     {
-        return Ok(VersionedMpcContract::V0(previous.upgrade()));
+        return Ok(previous.upgrade());
     }
 
     if let Ok(VersionedPreviousTestnet::V0(previous)) =
         VersionedPreviousTestnet::try_from_slice(state_bytes)
     {
-        return Ok(VersionedMpcContract::V0(previous.upgrade()));
+        return Ok(previous.upgrade());
     }
 
     if let Ok(previous) = PreviousMainnet::try_from_slice(state_bytes) {
-        return Ok(VersionedMpcContract::V0(previous.upgrade()));
+        return Ok(previous.upgrade());
     }
 
     Err(InvalidState::ContractStateIsMissing.message("Failed to deserialize contract state"))

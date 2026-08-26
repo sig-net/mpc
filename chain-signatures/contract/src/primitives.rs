@@ -27,10 +27,6 @@ pub enum StorageKey {
 
 /// One chain's entry in a checkpoint reset.
 ///
-/// `resume_after` is exclusive, naming the last block treated as processed:
-/// indexing resumes at `resume_after + 1`. To re-process block `b`, pass
-/// One chain's entry in a checkpoint reset.
-///
 /// `height` is inclusive: indexing resumes at `height` itself.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]
