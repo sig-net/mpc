@@ -294,7 +294,7 @@ One slot per sender means a second message from the same sender for the same
 round overwrites the first, in arrival order. Two layers do this: the ingress
 `PositMailbox`, which overwrites whenever the new round is `>=` the buffered
 one, and the per-round buffer above. The design argument for why one slot
-suffices is that a sender never has two live messages for one round: to a
+suffices is that a sender never has two active messages for one round: to a
 proposer a peer sends only ACCEPT or REJECT, and to a deliberator the proposer
 sends PROPOSE and then START, where START is only ever sent to a node whose
 ACCEPT it already received.
@@ -427,7 +427,7 @@ proposer from the full membership and never asks whether that node is actually
 working on the request, and often it is not because it has completed the
 request already, but only participating nodes are informed.
 Scraped from all 12 pods on 2026-08-26, every node reported the same
-19-entry Ethereum backlog, while their live sign-task counts were
+19-entry Ethereum backlog, while their active sign-task counts were
 1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10.
 The backlog is identical everywhere because it comes from the chain,
 but a task ends as soon as that node finishes its own part, while the backlog
