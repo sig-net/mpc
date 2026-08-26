@@ -1537,6 +1537,20 @@ mod tests {
         );
         assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
         assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+
+        // Reissuable, including backwards — it's just another settled checkpoint.
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: 31,
+        }]);
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&ConsensusCheckpointDigest::new(
+                Chain::Solana,
+                30,
+                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 30),
+            ))
+        );
     }
 
     #[test]
@@ -1605,29 +1619,5 @@ mod tests {
         assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
         assert_eq!(event["height"], 101);
         assert_eq!(event["resume_after"], 100);
-    }
-
-    #[test]
-    fn reset_can_be_reissued_at_a_different_height() {
-        let mut contract = running_contract(1);
-        contract.reset_checkpoints(vec![CheckpointReset {
-            chain: Chain::Solana,
-            height: 101,
-        }]);
-        // Correcting an operator mistake: a second reset simply settles a
-        // different checkpoint, including backwards.
-        contract.reset_checkpoints(vec![CheckpointReset {
-            chain: Chain::Solana,
-            height: 31,
-        }]);
-
-        assert_eq!(
-            contract.latest_checkpoint(Chain::Solana),
-            Some(&ConsensusCheckpointDigest::new(
-                Chain::Solana,
-                30,
-                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 30),
-            ))
-        );
     }
 }
