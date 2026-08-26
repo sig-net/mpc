@@ -47,27 +47,34 @@ impl fmt::Debug for Checkpoint {
 
 impl Checkpoint {
     pub fn empty(chain: Chain) -> Self {
+        Self::reset(chain, 0)
+    }
+
+    /// The canonical *reset* checkpoint for `(chain, block_height)`: an empty
+    /// backlog at that height, digesting to
+    /// [`mpc_primitives::reset_checkpoint_digest`].
+    pub fn reset(chain: Chain, block_height: u64) -> Self {
         Self {
             chain,
-            block_height: 0,
+            block_height,
             pending_requests: Vec::new(),
             cumulative_digest: Self::empty_cumulative_digest(),
         }
     }
 
     pub fn empty_cumulative_digest() -> [u8; 32] {
-        sha3::Sha3_256::new().finalize().into()
+        mpc_primitives::empty_cumulative_digest()
     }
 
     pub fn digest(&self) -> [u8; 32] {
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(self.chain.caip2_chain_id().as_bytes());
-        hasher.update(self.block_height.to_le_bytes());
-        for entry in &self.pending_requests {
-            hasher.update(entry.sign_id().request_id);
-        }
-        hasher.update(self.cumulative_digest);
-        hasher.finalize().into()
+        mpc_primitives::checkpoint_digest(
+            self.chain,
+            self.block_height,
+            self.pending_requests
+                .iter()
+                .map(|entry| entry.sign_id().request_id),
+            self.cumulative_digest,
+        )
     }
 }
 
@@ -583,6 +590,20 @@ mod tests {
                 .unwrap(),
             Some(consensus)
         );
+    }
+
+    #[test]
+    fn reset_checkpoint_digest_is_the_shared_derivation() {
+        // The contract settles this digest without holding the checkpoint, so
+        // the two must agree exactly or a reset would look like a divergence
+        // that no peer can resolve.
+        let reset = Checkpoint::reset(Chain::Solana, 42);
+        assert_eq!(
+            reset.digest(),
+            mpc_primitives::reset_checkpoint_digest(Chain::Solana, 42)
+        );
+        assert!(reset.pending_requests.is_empty());
+        assert_eq!(reset.block_height, 42);
     }
 
     #[tokio::test]
