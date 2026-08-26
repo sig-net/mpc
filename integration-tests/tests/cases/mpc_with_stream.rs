@@ -381,21 +381,19 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             }
         }
 
-        // If we dropped the respond event for the bad request, wait for node 2 to send a posit for it before continuing.
-        if drop_respond_event
-            && seed == bad_request_seed
-            && !wait_for_delivered_posit(
-                &tracker_counts,
-                &posit_delivered,
-                node_2,
-                bad_sign_id,
-                stale_posit_timeout,
-            )
-            .await
-        {
-            tracing::warn!(
-                seed,
-                "stale posit from node 2 not observed in time, continuing"
+        // If we dropped the respond event and this is the bad request, wait for node 2 to propose a stale posit.
+        if drop_respond_event && seed == bad_request_seed {
+            assert!(
+                wait_for_delivered_posit(
+                    &tracker_counts,
+                    &posit_delivered,
+                    node_2,
+                    bad_sign_id,
+                    stale_posit_timeout,
+                )
+                .await,
+                "node 2's stale task never proposed for {bad_sign_id:?} \
+                 within {stale_posit_timeout:?}"
             );
         }
     }
