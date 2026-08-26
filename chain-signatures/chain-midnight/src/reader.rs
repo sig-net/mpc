@@ -1,7 +1,9 @@
 //! Ledger-tree path walk and record decode over the ledger's own `StateValue`.
 
+use anyhow::Context as _;
 use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, ValueAtom};
 use midnight_onchain_state::state::StateValue;
+use midnight_storage::storage::HashMap;
 use midnight_storage::DefaultDB;
 
 use crate::records::{
@@ -54,6 +56,30 @@ pub fn signet_field_node_by_path<'a>(root: &'a Node, path: &[u8]) -> anyhow::Res
         })?;
     }
     Ok(node)
+}
+
+/// The central singleton's map at ledger field `field`, after checking the root is the
+/// deployed contract's six-field array; both shapes are circuit-fixed, so failure here
+/// is schema drift or an upgraded chain, never caller data.
+pub(crate) fn central_map<'a>(
+    root: &'a Node,
+    field: u8,
+    field_name: &'static str,
+) -> anyhow::Result<&'a HashMap<AlignedValue, Node, DefaultDB>> {
+    let StateValue::Array(fields) = root else {
+        anyhow::bail!("central singleton state root is not an array");
+    };
+    anyhow::ensure!(
+        fields.len() == CENTRAL_LEDGER_FIELDS,
+        "central singleton state has {} ledger fields, expected {CENTRAL_LEDGER_FIELDS}",
+        fields.len()
+    );
+    let node = signet_field_node_by_path(root, &[field])
+        .with_context(|| format!("central {field_name} field"))?;
+    let StateValue::Map(entries) = node else {
+        anyhow::bail!("central field {field} ({field_name}) is not a map");
+    };
+    Ok(entries)
 }
 
 /// The declared width of each atom. Signet declares only `Bytes` atoms, so a widthless

@@ -36,7 +36,7 @@ Four errors have especially important retry semantics:
 Rust is the single source of publisher configuration and performs all semantic validation. On every initial spawn and respawn, it clears the inherited child environment, installs the fixed launcher path `/usr/local/bin:/usr/bin:/bin`, and explicitly sets these six process values from its stored configuration:
 
 - `MIDNIGHT_PUB_NETWORK_ID`
-- `MIDNIGHT_PUB_NODE_URL`
+- `MIDNIGHT_PUB_NODE_URL` (HTTP(S) node endpoint)
 - `MIDNIGHT_PUB_PROOF_SERVER_URL`
 - `MIDNIGHT_PUB_INDEXER_URL`
 - `MIDNIGHT_PUB_INDEXER_WS_URL`

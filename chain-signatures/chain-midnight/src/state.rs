@@ -7,7 +7,7 @@ use midnight_storage::DefaultDB;
 /// Decode the bytes `midnight_contractState` returns, down to the ledger root. The
 /// ledger's tag is checked by `tagged_deserialize`, so a chain that moved past this
 /// build fails here by name rather than as a parse error on good bytes.
-pub fn decode_contract_state(bytes: &[u8]) -> anyhow::Result<StateValue<DefaultDB>> {
+pub(crate) fn decode_contract_state(bytes: &[u8]) -> anyhow::Result<StateValue<DefaultDB>> {
     let contract: ContractState<DefaultDB> =
         midnight_serialize::tagged_deserialize(&mut &bytes[..])
             .context("contract state did not deserialize")?;
