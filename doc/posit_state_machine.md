@@ -61,12 +61,7 @@ is why it exists — it waits for the node to reach `highest_seen_round`), and
 empty again. The proposer's ACCEPT/REJECT tally is transient, rebuilt inside each
 `Propose sent`.
 
-Not per request: the mesh's active set (a shared `watch`) and the governance
-membership and threshold; the third election input, entropy, comes with the
-request itself. Per node across requests:
-`dead_ids`, an LRU of retired `sign_id`s bounded at `MAX_DEAD_IDS` (4096). A
-late posit message for a retired request is dropped by it. Without this check,
-it would allocate an inbox that nothing ever drains.
+Two things are held per node rather than kept per request: (i) the mesh's active set, used to select pre-signatures with shares held by reachable and up-to-date nodes, and (ii) dead_ids, a bounded record of the 4096 most recently retired requests. A posit arriving for a dead id is dropped. Without it, a late message would create an inbox that no task will ever read.
 
 ## 2. Inside Organizing
 
