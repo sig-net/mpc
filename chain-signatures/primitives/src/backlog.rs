@@ -74,8 +74,52 @@ impl ConsensusCheckpointDigest {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointDigest {
     pub height: u64,
     pub digest: [u8; 32],
+}
+
+/// The contract's checkpoint directive for a chain.
+///
+/// Absence (no entry) means the contract holds no directive: chains fall back
+/// to their own anchoring behavior. A [`CheckpointDirective::Restart`] marker
+/// is written by a checkpoint reset and instructs indexers to restart from
+/// the given height.
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+pub enum CheckpointDirective {
+    /// Checkpoints were reset; indexers should restart from this height.
+    Restart(u64),
+    /// The latest consensus-settled checkpoint digest.
+    Consensus(ConsensusCheckpointDigest),
+}
+
+impl CheckpointDirective {
+    /// The settled checkpoint digest, if this is a consensus directive.
+    pub fn consensus_digest(&self) -> Option<&ConsensusCheckpointDigest> {
+        match self {
+            CheckpointDirective::Restart(_) => None,
+            CheckpointDirective::Consensus(digest) => Some(digest),
+        }
+    }
+
+    pub fn height(&self) -> u64 {
+        match self {
+            CheckpointDirective::Restart(height) => *height,
+            CheckpointDirective::Consensus(digest) => digest.height,
+        }
+    }
 }

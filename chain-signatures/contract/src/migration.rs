@@ -11,7 +11,7 @@ use crate::update::ProposedUpdates;
 use crate::{MpcContract, VersionedMpcContract};
 
 use borsh::BorshDeserialize;
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDirective, ConsensusCheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 use std::collections::BTreeMap;
@@ -85,51 +85,17 @@ fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractStat
     }
 }
 
-#[derive(BorshDeserialize)]
-struct DevnetRunningContractState {
-    pub epoch: u64,
-    pub participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
-    pub candidates: LegacyCandidates,
-    pub join_votes: Votes,
-    pub leave_votes: Votes,
-    pub threshold_votes: ThresholdVotes,
-}
-
-#[derive(BorshDeserialize)]
-enum DevnetProtocolContractState {
-    NotInitialized,
-    Initializing(LegacyInitializingContractState),
-    Running(DevnetRunningContractState),
-    Resharing(ResharingContractState),
-}
-
-fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolContractState {
-    match old {
-        DevnetProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-        DevnetProtocolContractState::Initializing(state) => {
-            ProtocolContractState::Initializing(migrate_initializing(state))
-        }
-        DevnetProtocolContractState::Running(state) => {
-            ProtocolContractState::Running(RunningContractState {
-                epoch: state.epoch,
-                participants: state.participants,
-                threshold: state.threshold,
-                public_key: state.public_key,
-                candidates: migrate_candidates(state.candidates),
-                join_votes: state.join_votes,
-                leave_votes: state.leave_votes,
-                threshold_votes: state.threshold_votes,
-            })
-        }
-        DevnetProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
-    }
-}
-
+/// The contract state shape currently deployed on devnet: identical to
+/// [`MpcContract`] except that `latest_checkpoints` stores bare
+/// [`ConsensusCheckpointDigest`] values.
+///
+/// Its blob layout is byte-identical to the current shape (store collections
+/// serialize only their prefixes and never their entries or value types), so
+/// it is never selected by borsh rejection — `migrate` routes to it via
+/// [`detect_checkpoint_layout`].
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousDevnet {
-    protocol_state: DevnetProtocolContractState,
+    protocol_state: ProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
@@ -140,11 +106,11 @@ pub(crate) struct PreviousDevnet {
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
         MpcContract {
-            protocol_state: upgrade_devnet_protocol_state(self.protocol_state),
+            protocol_state: self.protocol_state,
             pending_requests: self.pending_requests,
             proposed_updates: self.proposed_updates,
             config: self.config,
-            latest_checkpoints: self.latest_checkpoints,
+            latest_checkpoints: wrap_digest_checkpoints(self.latest_checkpoints),
             checkpoint_votes: self.checkpoint_votes,
         }
     }
@@ -171,7 +137,7 @@ impl PreviousTestnet {
             pending_requests,
             proposed_updates,
             config,
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            latest_checkpoints: IterableMap::new(StorageKey::CheckpointDirectives),
             checkpoint_votes: CheckpointVotes::new(),
         }
     }
@@ -198,15 +164,104 @@ impl PreviousMainnet {
             pending_requests,
             proposed_updates,
             config,
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            latest_checkpoints: IterableMap::new(StorageKey::CheckpointDirectives),
             checkpoint_votes: CheckpointVotes::new(),
         }
     }
 }
 
+fn wrap_digest_checkpoints(
+    mut old: IterableMap<Chain, ConsensusCheckpointDigest>,
+) -> IterableMap<Chain, CheckpointDirective> {
+    // Snapshot the legacy entries before writing anything: `migrated` uses a
+    // different storage prefix, but reading through the old map after any
+    // new-format write would be unsafe if they shared one.
+    let mut entries = Vec::new();
+    for (chain, checkpoint) in old.iter() {
+        entries.push((*chain, *checkpoint));
+    }
+
+    let mut migrated = IterableMap::new(StorageKey::CheckpointDirectives);
+    for (chain, checkpoint) in &entries {
+        migrated.insert(*chain, CheckpointDirective::Consensus(*checkpoint));
+    }
+
+    // Reclaim the trie keys holding legacy-encoded values.
+    for (chain, _) in &entries {
+        old.remove(chain);
+    }
+    migrated
+}
+
 #[derive(BorshDeserialize)]
 enum VersionedPreviousDevnet {
     V0(PreviousDevnet),
+}
+
+/// A blob interpreted as either already-migrated current state or as
+/// pre-marker devnet state awaiting upgrade.
+enum DevnetState {
+    Current(VersionedMpcContract),
+    Legacy(VersionedPreviousDevnet),
+}
+
+impl VersionedPreviousDevnet {
+    /// The serialized tail of an empty `IterableMap`: everything after the
+    /// element count, i.e. exactly the keys-vector and lookup-map storage
+    /// prefixes. Maps with different fingerprints can never alias each
+    /// other's trie keys.
+    fn checkpoint_prefix_fingerprint<V>(prefix: StorageKey) -> Vec<u8>
+    where
+        V: borsh::BorshSerialize,
+    {
+        let empty = IterableMap::<Chain, V>::new(prefix);
+        let bytes = borsh::to_vec(&empty).expect("empty map serialization cannot fail");
+        bytes[std::mem::size_of::<u32>()..].to_vec()
+    }
+
+    /// Interprets a blob whose layout matches both this devnet shape and the
+    /// current contract shape. The two are byte-identical — store collections
+    /// serialize only their prefixes and never their entries or value types,
+    /// so borsh alone accepts either reading — but they store checkpoints
+    /// under different prefixes (`CheckpointDirectiveDigests` vs
+    /// `CheckpointDirectives`). The prefix fingerprint distinguishes them
+    /// without touching (and potentially mis-decoding) any entry.
+    ///
+    /// Returns `Ok(None)` when the bytes describe an older generation; those
+    /// fall through to their own probes in [`migrate`].
+    fn interpret(state_bytes: &[u8]) -> Result<Option<DevnetState>, Error> {
+        let Ok(current) = VersionedMpcContract::try_from_slice(state_bytes) else {
+            return Ok(None);
+        };
+
+        let actual = match &current {
+            VersionedMpcContract::V0(contract) => borsh::to_vec(&contract.latest_checkpoints)
+                .expect("map metadata serialization cannot fail")[std::mem::size_of::<u32>()..]
+                .to_vec(),
+        };
+        if actual
+            == Self::checkpoint_prefix_fingerprint::<CheckpointDirective>(
+                StorageKey::CheckpointDirectives,
+            )
+        {
+            return Ok(Some(DevnetState::Current(current)));
+        }
+        if actual
+            == Self::checkpoint_prefix_fingerprint::<ConsensusCheckpointDigest>(
+                StorageKey::CheckpointDirectiveDigests,
+            )
+        {
+            // Layout equality with the current shape was already proven
+            // above, so this parse cannot fail.
+            let legacy = Self::try_from_slice(state_bytes).map_err(|_| {
+                InvalidState::ContractStateIsMissing
+                    .message("digest-checkpoint state failed to re-parse")
+            })?;
+            return Ok(Some(DevnetState::Legacy(legacy)));
+        }
+        Err(InvalidState::ContractStateIsMissing
+            .message("unrecognized latest_checkpoints storage prefix"))
+    }
 }
 
 #[derive(BorshDeserialize)]
@@ -215,14 +270,17 @@ enum VersionedPreviousTestnet {
 }
 
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error> {
-    if let Ok(current) = VersionedMpcContract::try_from_slice(state_bytes) {
-        return Ok(current);
-    }
-
-    if let Ok(VersionedPreviousDevnet::V0(previous)) =
-        VersionedPreviousDevnet::try_from_slice(state_bytes)
-    {
-        return Ok(VersionedMpcContract::V0(previous.upgrade()));
+    // The deployed devnet shape and the current shape share one blob layout,
+    // so a single probe covers both; `interpret` decides between returning
+    // the state unchanged and running the digest-to-enum upgrade. Older
+    // generations differ in bytes and fall through to their own probes.
+    if let Some(state) = VersionedPreviousDevnet::interpret(state_bytes)? {
+        return Ok(match state {
+            DevnetState::Current(versioned) => versioned,
+            DevnetState::Legacy(VersionedPreviousDevnet::V0(previous)) => {
+                VersionedMpcContract::V0(previous.upgrade())
+            }
+        });
     }
 
     if let Ok(VersionedPreviousTestnet::V0(previous)) =
@@ -241,90 +299,86 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<VersionedMpcContract, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use near_sdk::borsh::BorshSerialize;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
-    use std::str::FromStr;
 
-    #[test]
-    fn migrating_devnet_initializing_state_preserves_candidates_and_pk_votes() {
-        testing_env!(VMContextBuilder::new().build());
+    // Mirrors the pre-upgrade contract shape: identical to `MpcContract` but
+    // with bare digests in `latest_checkpoints`.
+    #[derive(BorshSerialize)]
+    struct DigestCheckpointsContract {
+        protocol_state: ProtocolContractState,
+        pending_requests: IterableMap<SignId, PendingRequest>,
+        proposed_updates: ProposedUpdates,
+        config: Config,
+        latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+        checkpoint_votes: CheckpointVotes,
+    }
 
-        let candidate_id: AccountId = "candidate.near".parse().unwrap();
-        let candidate = CandidateInfo {
-            account_id: candidate_id.clone(),
-            url: "https://candidate.example".to_owned(),
-            cipher_pk: [7; 32],
-            sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
-                .unwrap(),
-        };
-        let mut pk_votes = PkVotes::new();
-        pk_votes
-            .entry(candidate.sign_pk.clone())
-            .insert(candidate_id.clone());
-
-        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Initializing(
-            LegacyInitializingContractState {
-                candidates: LegacyCandidates {
-                    candidates: [(candidate_id.clone(), candidate.clone())].into(),
-                },
-                threshold: 2,
-                pk_votes,
-            },
-        ));
-
-        let ProtocolContractState::Initializing(initializing) = migrated else {
-            panic!("expected initializing state");
-        };
-        assert_eq!(initializing.candidates.get(&candidate_id), Some(&candidate));
-        assert!(initializing
-            .pk_votes
-            .votes
-            .get(&candidate.sign_pk)
-            .is_some_and(|votes| votes.contains(&candidate_id)));
+    #[derive(BorshSerialize)]
+    enum VersionedDigestCheckpointsContract {
+        V0(DigestCheckpointsContract),
     }
 
     #[test]
-    fn migrating_devnet_running_state_preserves_candidates_and_join_votes() {
-        testing_env!(VMContextBuilder::new().build());
+    fn migrating_digest_checkpoint_state_wraps_into_consensus() {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build());
 
-        let candidate_id: AccountId = "candidate.near".parse().unwrap();
-        let voter_id: AccountId = "voter.near".parse().unwrap();
-        let candidate = CandidateInfo {
-            account_id: candidate_id.clone(),
-            url: "https://candidate.example".to_owned(),
-            cipher_pk: [7; 32],
-            sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
-                .unwrap(),
-        };
-        let candidates = LegacyCandidates {
-            candidates: [(candidate_id.clone(), candidate.clone())].into(),
-        };
-        let mut join_votes = Votes::new();
-        join_votes
-            .entry(candidate_id.clone())
-            .insert(voter_id.clone());
+        let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+        let mut latest_checkpoints = IterableMap::new(StorageKey::CheckpointDirectiveDigests);
+        latest_checkpoints.insert(Chain::Solana, checkpoint);
 
-        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Running(
-            DevnetRunningContractState {
-                epoch: 3,
-                participants: Participants::new(),
-                threshold: 2,
-                public_key: candidate.sign_pk.clone(),
-                candidates,
-                join_votes,
-                leave_votes: Votes::new(),
-                threshold_votes: ThresholdVotes::new(),
+        let old_bytes = borsh::to_vec(&VersionedDigestCheckpointsContract::V0(
+            DigestCheckpointsContract {
+                protocol_state: ProtocolContractState::NotInitialized,
+                pending_requests: IterableMap::new(StorageKey::PendingRequests),
+                proposed_updates: ProposedUpdates::default(),
+                config: Config::default(),
+                latest_checkpoints,
+                checkpoint_votes: CheckpointVotes::new(),
             },
-        ));
+        ))
+        .unwrap();
 
-        let ProtocolContractState::Running(running) = migrated else {
-            panic!("expected running state");
-        };
-        assert_eq!(running.candidates.get(&candidate_id), Some(&candidate));
-        assert!(running
-            .join_votes
-            .votes
-            .get(&candidate_id)
-            .is_some_and(|votes| votes.contains(&voter_id)));
+        let migrated = migrate(&old_bytes).expect("digest-checkpoint state should migrate");
+
+        let VersionedMpcContract::V0(contract) = migrated;
+        assert_eq!(
+            contract.latest_checkpoints.get(&Chain::Solana),
+            Some(&CheckpointDirective::Consensus(checkpoint))
+        );
+    }
+
+    #[test]
+    fn migrating_current_state_preserves_restart_markers() {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build());
+
+        // Current-shape state carrying a restart marker. Store collections
+        // serialize only prefixes into the blob, so this is byte-identical to
+        // the legacy devnet shape: only the storage-prefix fingerprint tells
+        // them apart.
+        let mut current = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
+        current.reset_checkpoints(vec![(Chain::Solana, 42)]);
+        let bytes = borsh::to_vec(&current).unwrap();
+
+        // Store collections buffer writes in memory until flush; dropping
+        // mirrors the on-chain flow where the previous transaction committed
+        // state to the trie before `migrate` ever runs.
+        drop(current);
+
+        // Re-running migrate on already-migrated state must be a no-op, not a
+        // wipe of the marker.
+        let migrated = migrate(&bytes).expect("current state should migrate");
+
+        let VersionedMpcContract::V0(contract) = migrated;
+        assert_eq!(
+            contract.latest_checkpoints.get(&Chain::Solana),
+            Some(&CheckpointDirective::Restart(42)),
+            "re-migration must preserve restart markers"
+        );
     }
 }

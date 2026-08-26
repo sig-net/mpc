@@ -2,7 +2,6 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-use mpc_primitives::CheckpointDigest;
 use tokio::sync::watch;
 
 use crate::protocol::contract::ResharingContractState;
@@ -22,7 +21,9 @@ pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>>
 
 pub type Epoch = u64;
 
-pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
+pub use mpc_primitives::CheckpointDirective;
+
+pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDirective>>;
 
 pub struct KeygenProtocol {
     me: Participant,
@@ -99,5 +100,27 @@ impl ReshareProtocol {
 
     pub fn message(&mut self, from: Participant, data: MessageData) {
         self.protocol.message(from, data);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mpc_primitives::{Chain, ConsensusCheckpointDigest};
+
+    #[test]
+    fn only_consensus_directives_expose_a_digest() {
+        assert!(CheckpointDirective::Restart(42)
+            .consensus_digest()
+            .is_none());
+
+        let digest = ConsensusCheckpointDigest::new(Chain::Ethereum, 100, [7u8; 32]);
+        assert_eq!(
+            CheckpointDirective::Consensus(digest)
+                .consensus_digest()
+                .unwrap()
+                .height,
+            100
+        );
     }
 }

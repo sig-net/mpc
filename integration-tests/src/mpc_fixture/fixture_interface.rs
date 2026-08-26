@@ -15,7 +15,8 @@ use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
+use mpc_node::types::CheckpointDirective;
+use mpc_primitives::{Chain, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -43,7 +44,7 @@ pub struct MpcFixtureNode {
     pub mock_streams: HashMap<Chain, MockStream>,
 
     /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
-    pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
+    pub checkpoint_tx: watch::Sender<Option<CheckpointDirective>>,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,

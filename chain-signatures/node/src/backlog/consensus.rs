@@ -2,7 +2,7 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
-use crate::types::CheckpointWatcher;
+use crate::types::{CheckpointDirective, CheckpointWatcher};
 
 use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
@@ -22,12 +22,27 @@ pub async fn align_backlog_with_consensus(
     node_client: &NodeClient,
     my_account_id: &AccountId,
 ) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+    let directive = checkpoints_rx.borrow_and_update().as_ref().cloned()?;
 
-    match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
-        .await
-    {
+    let target_digest = match directive {
+        CheckpointDirective::Consensus(digest) => digest.digest,
+        CheckpointDirective::Restart(height) => {
+            tracing::warn!(
+                ?chain,
+                height,
+                "consensus checkpoints were reset; clearing local checkpoint state"
+            );
+            return match backlog.apply_reset(chain, height).await {
+                Ok(()) => None,
+                Err(err) => {
+                    tracing::error!(?err, %chain, "failed to apply contract checkpoint reset");
+                    Some(height)
+                }
+            };
+        }
+    };
+
+    match backlog.confirm_consensus(chain, target_digest).await {
         Ok(found) => {
             if found {
                 return None;
@@ -45,14 +60,14 @@ pub async fn align_backlog_with_consensus(
 
     tracing::warn!(
         ?chain,
-        ?checkpoint_digest.digest,
+        ?target_digest,
         "Consensus checkpoint mismatch/divergence detected: triggering regression"
     );
     let fetched_checkpoint = find_consensus_checkpoint(
         mesh_state,
         node_client,
         chain,
-        checkpoint_digest.digest,
+        target_digest,
         checkpoints_rx,
         my_account_id,
     )
@@ -147,13 +162,16 @@ pub(crate) async fn find_consensus_checkpoint(
                 if changed.is_err() {
                     return None;
                 }
-                let checkpoint_digest = consensus_rx.borrow_and_update();
-                match &*checkpoint_digest {
+                match consensus_rx.borrow_and_update().as_ref() {
                     None => {
                         tracing::info!(?chain, "consensus digest is empty, aborting...");
                         return None;
                     }
-                    Some(cp) => {
+                    Some(CheckpointDirective::Restart(_)) => {
+                        tracing::info!(?chain, "consensus checkpoints were reset during wait, aborting...");
+                        return None;
+                    }
+                    Some(CheckpointDirective::Consensus(cp)) => {
                         if cp.digest != target_digest {
                             tracing::info!(?chain, "consensus digest changed during wait, aborting...");
                             return None;
@@ -200,15 +218,16 @@ mod tests {
     use crate::node_client::Options as NodeClientOptions;
 
     use crate::backlog::BacklogEntry;
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
+    use crate::types::CheckpointDirective;
+    use mpc_primitives::{ConsensusCheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 
     struct AlignFixture {
         chain: Chain,
         backlog: Backlog,
-        checkpoints_tx: watch::Sender<Option<CheckpointDigest>>,
-        checkpoints_rx: watch::Receiver<Option<CheckpointDigest>>,
+        checkpoints_tx: watch::Sender<Option<CheckpointDirective>>,
+        checkpoints_rx: watch::Receiver<Option<CheckpointDirective>>,
         mesh_tx: watch::Sender<MeshState>,
         mesh_rx: watch::Receiver<MeshState>,
         node_client: NodeClient,
@@ -216,10 +235,10 @@ mod tests {
     }
 
     impl AlignFixture {
-        fn new(digest: Option<CheckpointDigest>) -> Self {
+        fn new(directive: Option<CheckpointDirective>) -> Self {
             let chain = Chain::Ethereum;
             let backlog = Backlog::new();
-            let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
+            let (checkpoints_tx, checkpoints_rx) = watch::channel(directive);
             let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
             let node_client = NodeClient::new(&NodeClientOptions::default());
             let my_account_id: AccountId = "test.near".parse().unwrap();
@@ -453,9 +472,12 @@ mod tests {
                 remote_digest = Some(peer_digest);
             }
 
-            let msg = remote_digest.map(|digest| CheckpointDigest {
-                height: case.remote_height,
-                digest,
+            let msg = remote_digest.map(|digest| {
+                CheckpointDirective::Consensus(ConsensusCheckpointDigest::new(
+                    Chain::Ethereum,
+                    case.remote_height,
+                    digest,
+                ))
             });
 
             fixture.checkpoints_tx.send(msg).unwrap();
@@ -591,10 +613,9 @@ mod tests {
     #[tokio::test]
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
-        let fixture = AlignFixture::new(Some(CheckpointDigest {
-            height: 100,
-            digest: [0xabu8; 32],
-        }));
+        let fixture = AlignFixture::new(Some(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, 100, [0xabu8; 32]),
+        )));
 
         // Create a local checkpoint at 100
         fixture
@@ -628,5 +649,58 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_none(), "aborted align should return None");
+    }
+
+    #[tokio::test]
+    async fn test_align_applies_contract_reset() {
+        let chain = Chain::Ethereum;
+        // Local state has a pre-reset checkpoint at height 100.
+        let mut fixture = AlignFixture::new(None);
+        fixture
+            .backlog
+            .set_processed_block(chain, 100)
+            .await
+            .unwrap();
+        let stale = fixture.backlog.checkpoint(chain).await.unwrap();
+        assert!(
+            fixture
+                .backlog
+                .confirm_consensus(chain, stale.digest())
+                .await
+                .unwrap(),
+            "local checkpoint should confirm"
+        );
+
+        // The contract was reset: indexers must restart from height 42.
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDirective::Restart(42)))
+            .unwrap();
+
+        let result = fixture.run().await;
+
+        assert_eq!(result, None, "applied reset is aligned, not a regression");
+        assert_eq!(
+            fixture
+                .backlog
+                .checkpoint_storage()
+                .load_latest(chain)
+                .await
+                .unwrap(),
+            None,
+            "durable latest checkpoint should be cleared"
+        );
+        assert_eq!(
+            fixture.backlog.latest_checkpoint(chain).await,
+            None,
+            "local checkpoint should be cleared"
+        );
+
+        use mpc_chain_integration_core::StateManager as _;
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "processed block should be re-anchored at the restart height"
+        );
     }
 }

@@ -361,6 +361,32 @@ impl CheckpointStorage {
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
+
+    /// Remove all durable checkpoint state (latest and pending) for `chain`.
+    ///
+    /// Used when the contract's checkpoints are reset: local state must not
+    /// outlive the chain-wide consensus it was derived from.
+    pub async fn clear(&self, chain: Chain) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                redis::pipe()
+                    .del(self.checkpoint_key(chain))
+                    .del(self.pending_checkpoint_key(chain))
+                    .del(self.pending_digest_key(chain))
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .context("failed to clear checkpoint state from redis")?;
+            }
+            CheckpointStorage::InMemory { latest, pending } => {
+                latest.write().await.remove(&chain);
+                pending.write().await.remove(&chain);
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
 }
 
 fn encode_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Vec<u8>> {
@@ -466,6 +492,30 @@ mod tests {
                 .await?
         );
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_removes_all_checkpoint_state_for_chain() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let chain = Chain::Solana;
+        let checkpoint = |block_height| Checkpoint {
+            chain,
+            block_height,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        };
+
+        storage.persist(&checkpoint(10)).await?;
+        storage.persist_pending(&checkpoint(20)).await?;
+
+        storage.clear(chain).await?;
+
+        assert_eq!(storage.load_latest(chain).await?, None);
+        assert!(storage.load_pending(chain).await?.is_empty());
+
+        // Other chains are untouched.
+        assert!(storage.load_latest(Chain::Ethereum).await?.is_none());
         Ok(())
     }
 

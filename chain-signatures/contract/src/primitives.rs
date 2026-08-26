@@ -1,4 +1,4 @@
-pub use mpc_primitives::ConsensusCheckpointDigest;
+pub use mpc_primitives::{CheckpointDirective, ConsensusCheckpointDigest};
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
@@ -20,8 +20,8 @@ pub mod hpke {
 pub enum StorageKey {
     PendingRequests,
     ProposedUpdatesEntries,
-    LatestCheckpoints,
-    LatestCheckpointDigests,
+    CheckpointDirectives,
+    CheckpointDirectiveDigests,
     Candidates,
 }
 
@@ -51,7 +51,7 @@ pub enum Read {
 pub enum View {
     State(ProtocolContractStateView),
     Config(Config),
-    Checkpoints(HashMap<Chain, ConsensusCheckpointDigest>),
+    Checkpoints(HashMap<Chain, CheckpointDirective>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume

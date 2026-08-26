@@ -14,9 +14,9 @@ use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest,
-    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind,
-    Signature, SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalEvent,
+    SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -140,7 +140,7 @@ pub fn make_test_stream_context(
     threshold: usize,
 ) -> (
     StreamContext,
-    watch::Sender<Option<CheckpointDigest>>,
+    watch::Sender<Option<crate::types::CheckpointDirective>>,
     watch::Sender<MeshState>,
     mpsc::Receiver<RpcAction>,
 ) {

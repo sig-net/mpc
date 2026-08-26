@@ -16,7 +16,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::{CheckpointDirective, ConsensusCheckpointDigest};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -85,7 +85,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    latest_checkpoints: IterableMap<Chain, CheckpointDirective>,
     checkpoint_votes: CheckpointVotes,
 }
 
@@ -131,7 +131,7 @@ impl MpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            latest_checkpoints: IterableMap::new(StorageKey::CheckpointDirectives),
             checkpoint_votes: CheckpointVotes::new(),
         }
     }
@@ -809,10 +809,10 @@ impl VersionedMpcContract {
             return Err(InitError::ThresholdTooHigh.into());
         }
 
-        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
+        let mut latest_checkpoints = IterableMap::new(StorageKey::CheckpointDirectives);
         if let Some(checkpoints) = checkpoints {
             for (chain, checkpoint) in checkpoints {
-                latest_checkpoints.insert(chain, checkpoint);
+                latest_checkpoints.insert(chain, CheckpointDirective::Consensus(checkpoint));
             }
         }
 
@@ -871,7 +871,7 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&CheckpointDirective> {
         self.latest_checkpoints().get(&chain)
     }
 
@@ -921,6 +921,11 @@ impl VersionedMpcContract {
     ///
     /// The submitted checkpoint is handled as follows:
     ///
+    /// - If the chain was reset (a [`CheckpointDirective::Restart`] marker is
+    ///   stored), the request is rejected with
+    ///   [`CheckpointError::CheckpointBehind`] when its height is below the
+    ///   restart height. Otherwise voting proceeds as if no checkpoint
+    ///   existed.
     /// - If the contract already has a checkpoint at a greater height, the
     ///   request is rejected with [`CheckpointError::CheckpointBehind`]. No
     ///   vote is recorded or removed.
@@ -960,16 +965,25 @@ impl VersionedMpcContract {
         };
 
         if let Some(existing) = self.latest_checkpoint(checkpoint.chain) {
-            if existing.height > checkpoint.height {
-                // checkpoint is behind, reject.
-                return Err(CheckpointError::CheckpointBehind.into());
-            }
-            if existing.height == checkpoint.height {
-                if existing.digest == checkpoint.digest {
-                    // checkpoint is already settled, no-op.
-                    return Ok(true);
+            match existing {
+                CheckpointDirective::Consensus(existing) => {
+                    if existing.height > checkpoint.height {
+                        // checkpoint is behind, reject.
+                        return Err(CheckpointError::CheckpointBehind.into());
+                    }
+                    if existing.height == checkpoint.height {
+                        if existing.digest == checkpoint.digest {
+                            // checkpoint is already settled, no-op.
+                            return Ok(true);
+                        }
+                        return Err(CheckpointError::ConflictingCheckpoint.into());
+                    }
                 }
-                return Err(CheckpointError::ConflictingCheckpoint.into());
+                CheckpointDirective::Restart(reset_height) => {
+                    if checkpoint.height < *reset_height {
+                        return Err(CheckpointError::CheckpointBehind.into());
+                    }
+                }
             }
         }
 
@@ -1230,13 +1244,13 @@ impl VersionedMpcContract {
         Ok(voter)
     }
 
-    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, CheckpointDirective> {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
         }
     }
 
-    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, CheckpointDirective> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
         }
@@ -1245,7 +1259,9 @@ impl VersionedMpcContract {
     fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.latest_checkpoints.insert(chain, checkpoint);
+                mpc_contract
+                    .latest_checkpoints
+                    .insert(chain, CheckpointDirective::Consensus(checkpoint));
             }
         }
     }
@@ -1256,11 +1272,20 @@ impl VersionedMpcContract {
         }
     }
 
+    /// Reset checkpoints for the given chains and mark each with a restart
+    /// height.
+    ///
+    /// Removes any settled checkpoint for each `(chain, height)` pair, stores
+    /// a [`CheckpointDirective::Restart`] marker so indexers restart from
+    /// `height`, and drops all recorded checkpoint votes for the chain.
+    /// Callable only by the contract account itself.
     #[private]
-    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
-        let chains: HashSet<Chain> = chains.into_iter().collect();
-        for chain in &chains {
-            self.latest_checkpoints_mut().remove(chain);
+    pub fn reset_checkpoints(&mut self, resets: Vec<(Chain, u64)>) {
+        let mut chains = HashSet::new();
+        for (chain, height) in resets {
+            chains.insert(chain);
+            self.latest_checkpoints_mut()
+                .insert(chain, CheckpointDirective::Restart(height));
         }
         self.checkpoint_votes_mut()
             .votes
@@ -1274,6 +1299,9 @@ mod tests {
     use near_sdk::borsh::BorshSerialize;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
+    use std::str::FromStr;
+
+    use primitives::ParticipantInfo;
 
     #[derive(BorshSerialize)]
     struct OldMpcContract {
@@ -1295,11 +1323,11 @@ mod tests {
     }
 
     // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
-    // `LatestCheckpointDigests` is split into a vector of iterable keys under
+    // `CheckpointDirectives` is split into a vector of iterable keys under
     // `<prefix>v` and a lookup map under `<prefix>m`.
     fn latest_checkpoints_map_prefix() -> Vec<u8> {
         let mut prefix = Vec::new();
-        StorageKey::LatestCheckpointDigests
+        StorageKey::CheckpointDirectives
             .serialize(&mut prefix)
             .unwrap();
         [prefix.as_slice(), b"m"].concat()
@@ -1318,7 +1346,7 @@ mod tests {
         let storage_key = env::sha256_array(&key_bytes);
 
         let value = IterableMapValueAndIndexForTest {
-            value: checkpoint,
+            value: CheckpointDirective::Consensus(checkpoint),
             key_index: 0,
         };
         let value_bytes = borsh::to_vec(&value).unwrap();
@@ -1397,7 +1425,7 @@ mod tests {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            latest_checkpoints: IterableMap::new(StorageKey::CheckpointDirectives),
             checkpoint_votes: CheckpointVotes::new(),
         });
 
@@ -1426,12 +1454,15 @@ mod tests {
         let stored = checkpoints
             .get(&Chain::Solana)
             .expect("read(Checkpoints) should not rely on IterableMap::iter()");
+        let CheckpointDirective::Consensus(stored) = stored else {
+            panic!("expected consensus checkpoint");
+        };
         assert_eq!(stored.height, checkpoint.height);
         assert_eq!(stored.digest, checkpoint.digest);
     }
 
     #[test]
-    fn reset_checkpoint_clears_votes_for_selected_chains() {
+    fn reset_checkpoints_writes_restart_markers_and_clears_votes() {
         let mut contract = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
         let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
@@ -1446,10 +1477,108 @@ mod tests {
             .entry(ethereum_checkpoint)
             .insert("voter.near".parse().unwrap());
 
-        contract.reset_checkpoint(vec![Chain::Solana]);
+        contract.reset_checkpoints(vec![(Chain::Solana, 5)]);
 
-        assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&CheckpointDirective::Restart(5))
+        );
         assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
         assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+    }
+
+    // Builds a Running-state contract with `alice.near` as the sole
+    // participant so that `vote_checkpoint` passes the voter check.
+    fn running_contract(threshold: usize) -> VersionedMpcContract {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id("alice.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let alice: AccountId = "alice.near".parse().unwrap();
+        let mut participants = Participants::new();
+        participants.insert(
+            alice.clone(),
+            ParticipantInfo {
+                account_id: alice,
+                url: "https://alice.example".to_owned(),
+                cipher_pk: [7; 32],
+                sign_pk: PublicKey::from_str(
+                    "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+                )
+                .unwrap(),
+            },
+        );
+
+        VersionedMpcContract::V0(MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 0,
+                participants,
+                threshold,
+                public_key: PublicKey::from_str(
+                    "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
+                )
+                .unwrap(),
+                candidates: Candidates::new(),
+                join_votes: Votes::new(),
+                leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::CheckpointDirectives),
+            checkpoint_votes: CheckpointVotes::new(),
+        })
+    }
+
+    #[test]
+    fn vote_checkpoint_rejects_heights_below_restart_marker() {
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![(Chain::Solana, 100)]);
+
+        let behind = ConsensusCheckpointDigest::new(Chain::Solana, 99, [1u8; 32]);
+        assert!(contract.vote_checkpoint(behind).is_err());
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+
+        // At or above the restart height voting proceeds normally.
+        let at_height = ConsensusCheckpointDigest::new(Chain::Solana, 100, [2u8; 32]);
+        assert!(contract.vote_checkpoint(at_height).is_ok());
+        let above = ConsensusCheckpointDigest::new(Chain::Solana, 101, [3u8; 32]);
+        assert!(contract.vote_checkpoint(above).is_ok());
+
+        // A settled consensus checkpoint replaces the restart marker.
+        let CheckpointDirective::Consensus(settled) =
+            contract.latest_checkpoint(Chain::Solana).unwrap()
+        else {
+            panic!("expected consensus checkpoint after settling");
+        };
+        assert_eq!(settled.height, 101);
+    }
+
+    #[test]
+    fn vote_checkpoint_conflicts_at_restart_height_after_settling() {
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![(Chain::Solana, 100)]);
+
+        // Two competing digests at the restart height: the first to reach the
+        // threshold settles, the second is conflicting — the marker does not
+        // weaken settled-checkpoint semantics.
+        let first = ConsensusCheckpointDigest::new(Chain::Solana, 100, [1u8; 32]);
+        assert!(matches!(contract.vote_checkpoint(first), Ok(true)));
+
+        let conflicting = ConsensusCheckpointDigest::new(Chain::Solana, 100, [2u8; 32]);
+        let conflict_err = contract.vote_checkpoint(conflicting).unwrap_err();
+        assert!(conflict_err
+            .to_string()
+            .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
+
+        // And below the now-settled height is simply behind again.
+        let behind = ConsensusCheckpointDigest::new(Chain::Solana, 99, [3u8; 32]);
+        let behind_err = contract.vote_checkpoint(behind).unwrap_err();
+        assert!(behind_err
+            .to_string()
+            .contains(&CheckpointError::CheckpointBehind.to_string()));
     }
 }

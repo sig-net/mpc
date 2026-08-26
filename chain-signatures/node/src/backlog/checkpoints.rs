@@ -295,6 +295,18 @@ impl Checkpoints {
         Ok(())
     }
 
+    /// Removes all local checkpoint state for `chain` (durable latest, durable
+    /// pending, and the in-memory pending mirror).
+    ///
+    /// Used when the contract's checkpoints are reset; indexers re-anchor at
+    /// the reset height afterwards.
+    pub(super) async fn clear(&self, chain: Chain) -> anyhow::Result<()> {
+        self.storage.clear(chain).await?;
+        self.pending(chain).write().await.clear();
+        self.observe(chain, 0);
+        Ok(())
+    }
+
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
     pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
         if let Some(checkpoint) = self
@@ -583,6 +595,22 @@ mod tests {
                 .unwrap(),
             Some(consensus)
         );
+    }
+
+    #[tokio::test]
+    async fn clear_wipes_local_and_durable_checkpoint_state() {
+        let storage = CheckpointStorage::in_memory();
+        let confirmed = checkpoint(1);
+        let pending = checkpoint(2);
+        let checkpoints = Checkpoints::new(storage.clone());
+        storage.persist(&confirmed).await.unwrap();
+        checkpoints.persist_pending(&pending).await.unwrap();
+
+        checkpoints.clear(confirmed.chain).await.unwrap();
+
+        assert_eq!(checkpoints.count(confirmed.chain).await, 0);
+        assert_eq!(checkpoints.latest(confirmed.chain).await, None);
+        assert_eq!(storage.load_latest(confirmed.chain).await.unwrap(), None);
     }
 
     #[tokio::test]

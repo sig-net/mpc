@@ -605,6 +605,18 @@ impl Backlog {
         Ok(())
     }
 
+    /// Apply a contract-side checkpoint reset: wipe local checkpoint state and
+    /// re-anchor the processed-block height so indexers resume at `height + 1`.
+    ///
+    /// The height is anchored without triggering interval-checkpoint creation;
+    /// a fresh checkpoint forms naturally once indexing resumes.
+    pub async fn apply_reset(&self, chain: Chain, height: u64) -> anyhow::Result<()> {
+        self.checkpoints.clear(chain).await?;
+        self.set_processed_block_interval(chain, height, 0).await;
+        tracing::info!(?chain, height, "applied contract checkpoint reset");
+        Ok(())
+    }
+
     /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
         self.checkpoints.latest(chain).await

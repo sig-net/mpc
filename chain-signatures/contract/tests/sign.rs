@@ -3,7 +3,7 @@ use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::{CheckpointDirective, ConsensusCheckpointDigest};
 use near_workspaces::types::{AccountId, NearToken};
 use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
@@ -388,21 +388,24 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
         .await?
         .json()?;
-    let checkpoints: HashMap<Chain, ConsensusCheckpointDigest> = views
+    let checkpoints: HashMap<Chain, CheckpointDirective> = views
         .into_iter()
         .find_map(|view| match view {
             View::Checkpoints(checkpoints) => Some(checkpoints),
             _ => None,
         })
         .expect("read should return a Checkpoints view");
-    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
+    assert_eq!(
+        checkpoints.get(&Chain::Solana),
+        Some(&CheckpointDirective::Consensus(checkpoint))
+    );
 
-    let latest: Option<ConsensusCheckpointDigest> = contract
+    let latest: Option<CheckpointDirective> = contract
         .view("latest_checkpoint")
         .args_json(serde_json::json!({ "chain": Chain::Solana }))
         .await?
         .json()?;
-    assert_eq!(latest, Some(checkpoint));
+    assert_eq!(latest, Some(CheckpointDirective::Consensus(checkpoint)));
 
     let competing_a = ConsensusCheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
     let competing_b = ConsensusCheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
@@ -465,6 +468,75 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .transact()
         .await?;
     assert!(unauthorized.is_failure());
+
+    // Reset the chain's checkpoints via a call signed by the contract account
+    // itself (satisfying #[private]), then verify the restart marker governs
+    // subsequent voting.
+    let reset = contract
+        .call("reset_checkpoints")
+        .args_json(serde_json::json!({ "resets": [[Chain::Solana, 100]] }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(reset.is_success(), "reset_checkpoints failed: {reset:#?}");
+
+    let latest: Option<CheckpointDirective> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    assert_eq!(latest, Some(CheckpointDirective::Restart(100)));
+
+    let votes_after_reset = contract
+        .view("checkpoint_votes")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json::<Vec<(ConsensusCheckpointDigest, usize)>>()?;
+    assert!(votes_after_reset.is_empty());
+
+    let below_restart = ConsensusCheckpointDigest::new(Chain::Solana, 99, [9u8; 32]);
+    let rejected = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": below_restart }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(rejected.is_failure());
+    assert!(rejected
+        .into_result()
+        .expect_err("below-restart vote should be rejected")
+        .to_string()
+        .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
+
+    let post_reset = ConsensusCheckpointDigest::new(Chain::Solana, 100, [4u8; 32]);
+    let first_post_reset_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": post_reset }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(first_post_reset_vote.is_success());
+    assert!(!first_post_reset_vote.json::<bool>()?);
+
+    let second_post_reset_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": post_reset }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_post_reset_vote.is_success());
+    assert!(second_post_reset_vote.json::<bool>()?);
+
+    let latest: Option<CheckpointDirective> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    assert_eq!(
+        latest,
+        Some(CheckpointDirective::Consensus(post_reset)),
+        "settled consensus checkpoint should replace the restart marker"
+    );
 
     Ok(())
 }

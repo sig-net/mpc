@@ -23,7 +23,9 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
+use mpc_primitives::{ConsensusCheckpointDigest, SignId, Signature};
+
+use crate::types::CheckpointDirective;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -425,7 +427,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+        checkpoints: EnumMap<Chain, watch::Sender<Option<crate::types::CheckpointDirective>>>,
     ) {
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
@@ -543,7 +545,7 @@ async fn update_contract_data(
     near: NearGovernanceClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
-    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDirective>>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -589,18 +591,14 @@ async fn update_contract_data(
             }
         }
     }
-
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
-            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.height,
-                digest: sc.digest,
-            });
+            let new_directive = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
-                if *old == new_digest {
+                if *old == new_directive {
                     return false;
                 }
-                *old = new_digest;
+                *old = new_directive;
                 true
             });
         }

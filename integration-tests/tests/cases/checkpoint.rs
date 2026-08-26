@@ -8,7 +8,8 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest};
+use mpc_node::types::CheckpointDirective;
+use mpc_primitives::{Chain, ChainConfig as _, ConsensusCheckpointDigest};
 use near_sdk::AccountId;
 use std::time::Duration;
 use test_log::test;
@@ -149,10 +150,10 @@ async fn test_consensus_alignment_peer_fetch() {
         info,
     );
 
-    let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
-        height: expected_height,
-        digest,
-    }));
+    let (_cp_tx, mut checkpoints_rx) =
+        tokio::sync::watch::channel(Some(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, expected_height, digest),
+        )));
     let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     // Fresh persisted backlog (simulates a node that just started)
@@ -232,10 +233,10 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     );
 
     // Start with a non-matching digest; we'll change it to zero to abort the fetch loop.
-    let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
-        height: 9999,
-        digest: [0xabu8; 32],
-    }));
+    let (cp_tx, mut checkpoints_rx) =
+        tokio::sync::watch::channel(Some(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, 9999, [0xabu8; 32]),
+        )));
     let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     let fresh_storage = CheckpointStorage::in_memory();

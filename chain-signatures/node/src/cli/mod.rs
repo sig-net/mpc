@@ -28,6 +28,7 @@ pub use args::{
     solana::SolArgs,
 };
 
+use crate::types::CheckpointDirective;
 use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -41,7 +42,7 @@ use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+use mpc_primitives::{Chain, SignCommand};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -464,8 +465,8 @@ fn calculate_digest(
 
 #[allow(clippy::type_complexity)]
 fn checkpoint_watchers() -> (
-    EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
-    EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+    EnumMap<Chain, watch::Sender<Option<CheckpointDirective>>>,
+    EnumMap<Chain, watch::Receiver<Option<CheckpointDirective>>>,
 ) {
     let channels = EnumMap::from_fn(|_| watch::channel(None));
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
@@ -716,8 +717,8 @@ struct ProtocolHandles {
     node: Node,
     node_watcher: NodeStateWatcher,
     config_tx: watch::Sender<Config>,
-    checkpoints_tx: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
-    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+    checkpoints_tx: EnumMap<Chain, watch::Sender<Option<CheckpointDirective>>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDirective>>>,
 }
 
 impl ProtocolHandles {
@@ -797,7 +798,7 @@ async fn spawn_indexers(
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDirective>>>,
 ) {
     let ChainConfigs {
         eth,
