@@ -534,11 +534,14 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
         }
-        // MidnightPublisher is a unit struct: there is no publish path yet, and
-        // its publish_signature bails so a request keeps retrying rather than
-        // settling as published.
-        if self.midnight.is_some() {
-            publishers.insert(Chain::Midnight, Arc::new(MidnightPublisher));
+        if let Some(midnight) = &self.midnight {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
+            match MidnightPublisher::connect(midnight, telemetry).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Midnight, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
+            }
         }
 
         publishers
@@ -580,7 +583,7 @@ fn log_startup(
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_ws_url = %chains.midnight.as_ref().map(|c| c.node_ws_url.as_str()).unwrap_or("None"),
+        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -1131,7 +1134,7 @@ mod tests {
     /// which makes that the likely case rather than a remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
-            "MPC_MIDNIGHT_NODE_WS_URL",
+            "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
             "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
@@ -1174,8 +1177,8 @@ mod tests {
             "project",
             "--redis-url",
             "redis://127.0.0.1:6379",
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:9944",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
             "--midnight-central-address",
             &central_address,
             "--midnight-funding-seed",
@@ -1192,8 +1195,8 @@ mod tests {
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
         for expected in [
-            "--midnight-node-ws-url",
-            "ws://127.0.0.1:9944",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
             "--midnight-central-address",
             central_address.as_str(),
             "--midnight-funding-seed",
