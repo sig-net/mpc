@@ -373,12 +373,8 @@ because the round timeout ran out.
 3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
 4. **One slot per sender assumes an ordering which is not guaranteed.** Both
    buffers overwrite on arrival, including for an equal round, so if a sender's
-   `PROPOSE` and `START` for one round arrive out of order the later arrival
-   wins and the other is dropped silently, costing that node the round.
-   Causality makes it unlikely, not impossible: `START` follows the node's own
-   `ACCEPT`, which follows `PROPOSE`, so it takes a `PROPOSE` delayed past a
-   full round trip. This is the constraint to revisit before sending more
-   messages per sender per round (§3).
+   messages for one round arrive out of order the later arrival wins and the other is dropped silently, costing that node the round.
+   Currently, causality makes this impossible (`START` follows the node's own  `ACCEPT`, which follows `PROPOSE`), it is a constraint to revisit before sending more messages per sender per round though(§3).
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
