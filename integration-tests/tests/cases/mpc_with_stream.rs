@@ -172,11 +172,9 @@ async fn test_divergent_active_views_still_converge() {
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
 
-    // The request is settled once a non-checkpoint publish action appears.
+    // The request is settled once a publish action appears.
     network
-        .assert_actions_matching(1, Duration::from_secs(90), |action| {
-            !action.contains("kind: Checkpoint") && action.contains("RpcAction::Publish")
-        })
+        .assert_publish_actions(1, Duration::from_secs(90))
         .await;
 }
 

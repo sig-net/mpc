@@ -264,10 +264,10 @@ impl MpcFixture {
         result.unwrap_or_else(|_| panic!("should produce {threshold} matching actions"))
     }
 
-    /// Wait for `threshold` actions, ignoring checkpoint-related ones.
+    /// Wait for `threshold` `RpcAction::Publish` actions.
     pub async fn assert_publish_actions(&self, threshold: usize, timeout: Duration) -> Vec<String> {
         self.assert_actions_matching(threshold, timeout, |action| {
-            !action.contains("kind: Checkpoint")
+            action.contains("RpcAction::Publish")
         })
         .await
     }
