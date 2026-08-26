@@ -427,7 +427,7 @@ proposer from the full membership and never asks whether that node is actually
 working on the request, and often it is not because it has completed the
 request already, but only participating nodes are informed.
 Scraped from all 12 pods on 2026-08-26, every node reported the same
-19-entry Ethereum backlog, while their active sign-task counts were
+19-entry Ethereum backlog, while their running sign-task counts were
 1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10.
 The backlog is identical everywhere because it comes from the chain,
 but a task ends as soon as that node finishes its own part, while the backlog
