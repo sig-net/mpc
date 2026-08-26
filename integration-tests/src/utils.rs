@@ -244,8 +244,8 @@ fn reserve_port_block(start: u16, len: usize) -> bool {
 /// This ensures that each process gets a unique subset of the port range, preventing conflicts between parallel test processes.
 fn process_port_slice() -> std::ops::RangeInclusive<u16> {
     const SLICE_LEN: u16 = 160;
-    const NUM_SLICES: u32 = 200;
-    const BASE: u16 = 30_000;
+    const NUM_SLICES: u32 = 100;
+    const BASE: u16 = 16_000;
 
     // Use the process ID and the NEXTEST_RUN_ID environment variable to determine a unique slice for this process.
     let pid = std::process::id() as u32;
