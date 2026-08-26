@@ -45,7 +45,7 @@ pub fn base_live_config() -> MidnightConfig {
         package.display()
     );
     MidnightConfig {
-        node_ws_url: "ws://127.0.0.1:9944".to_string(),
+        node_url: "http://127.0.0.1:9944".to_string(),
         central_address: "ab".repeat(32),
         publisher: PublisherConfig {
             intent_gen_command: vec![node_executable(), path_arg(&entry)],

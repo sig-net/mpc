@@ -4,7 +4,7 @@ import { configFromEnv } from "../src/config.js";
 
 const SUBMITTER: NodeJS.ProcessEnv = {
   MIDNIGHT_PUB_NETWORK_ID: "undeployed",
-  MIDNIGHT_PUB_NODE_URL: "ws://127.0.0.1:9944",
+  MIDNIGHT_PUB_NODE_URL: "http://127.0.0.1:9944",
   MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
   MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
   MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
@@ -15,7 +15,7 @@ describe("configFromEnv", () => {
   it("turns the parent-set process values into the SDK config", () => {
     const config = configFromEnv(SUBMITTER);
     expect(config.endpoints).toEqual({
-      nodeUrl: "ws://127.0.0.1:9944",
+      nodeUrl: "http://127.0.0.1:9944",
       proofServerUrl: "http://127.0.0.1:6300",
       indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
       indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
