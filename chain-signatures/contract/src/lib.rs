@@ -17,7 +17,6 @@ use mpc_crypto::{
     ScalarExt as _,
 };
 use mpc_primitives::ConsensusCheckpointDigest;
-use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
@@ -69,17 +68,6 @@ pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
 #[near(contract_state)]
 #[derive(Debug)]
-pub enum VersionedMpcContract {
-    V0(MpcContract),
-}
-
-impl Default for VersionedMpcContract {
-    fn default() -> Self {
-        env::panic_str("Calling default not allowed.");
-    }
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
@@ -89,57 +77,15 @@ pub struct MpcContract {
     checkpoint_votes: CheckpointVotes,
 }
 
-impl MpcContract {
-    fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
-        self.pending_requests.insert(
-            sign_id,
-            PendingRequest {
-                payload,
-                epsilon,
-                index: None,
-            },
-        );
-    }
-
-    fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
-        if let Some(request) = self.pending_requests.get_mut(sign_id) {
-            request.index = Some(YieldIndex { data_id });
-        }
-    }
-
-    fn remove_request(&mut self, sign_id: &SignId) -> Result<PendingRequest, Error> {
-        self.pending_requests
-            .remove(sign_id)
-            .ok_or(InvalidParameters::RequestNotFound.into())
-    }
-
-    pub fn init(
-        threshold: usize,
-        candidates: BTreeMap<AccountId, CandidateInfo>,
-        config: Option<Config>,
-    ) -> Self {
-        let mut stored_candidates = Candidates::new();
-        for (account_id, info) in candidates {
-            stored_candidates.insert(account_id, info);
-        }
-        MpcContract {
-            protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: stored_candidates,
-                threshold,
-                pk_votes: PkVotes::new(),
-            }),
-            pending_requests: IterableMap::new(StorageKey::PendingRequests),
-            proposed_updates: ProposedUpdates::default(),
-            config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
-        }
+impl Default for MpcContract {
+    fn default() -> Self {
+        env::panic_str("Calling default not allowed.");
     }
 }
 
 // User contract API
 #[near]
-impl VersionedMpcContract {
+impl MpcContract {
     /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
     /// we ask for a small deposit for each signature request.
@@ -265,7 +211,7 @@ impl VersionedMpcContract {
 
 // Node API
 #[near]
-impl VersionedMpcContract {
+impl MpcContract {
     #[handle_result]
     pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
@@ -759,7 +705,7 @@ impl VersionedMpcContract {
 
 // Contract developer helper API
 #[near]
-impl VersionedMpcContract {
+impl MpcContract {
     #[handle_result]
     #[init]
     pub fn init(
@@ -779,7 +725,23 @@ impl VersionedMpcContract {
             return Err(InitError::ThresholdTooHigh.into());
         }
 
-        Ok(Self::V0(MpcContract::init(threshold, candidates, config)))
+        let mut stored_candidates = Candidates::new();
+        for (account_id, info) in candidates {
+            stored_candidates.insert(account_id, info);
+        }
+
+        Ok(Self {
+            protocol_state: ProtocolContractState::Initializing(InitializingContractState {
+                candidates: stored_candidates,
+                threshold,
+                pk_votes: PkVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: config.unwrap_or_default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        })
     }
 
     // This function can be used to transfer the MPC network to a new contract.
@@ -816,7 +778,7 @@ impl VersionedMpcContract {
             }
         }
 
-        Ok(Self::V0(MpcContract {
+        Ok(Self {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
                 participants,
@@ -832,7 +794,7 @@ impl VersionedMpcContract {
             config: config.unwrap_or_default(),
             latest_checkpoints,
             checkpoint_votes: CheckpointVotes::new(),
-        }))
+        })
     }
 
     /// This will be called internally by the contract to migrate the state when a new contract
@@ -866,9 +828,7 @@ impl VersionedMpcContract {
     }
 
     pub fn config(&self) -> &Config {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.config,
-        }
+        &self.config
     }
 
     pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
@@ -994,9 +954,7 @@ impl VersionedMpcContract {
     }
 
     pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
-        let votes = match self {
-            Self::V0(mpc_contract) => &mpc_contract.checkpoint_votes,
-        };
+        let votes = &self.checkpoint_votes;
 
         votes
             .votes
@@ -1014,15 +972,11 @@ impl VersionedMpcContract {
     }
 
     pub fn pending_requests(&self) -> u32 {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.len(),
-        }
+        self.pending_requests.len()
     }
 
     pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().collect(),
-        }
+        self.pending_requests.iter().collect()
     }
 
     // contract version
@@ -1131,81 +1085,71 @@ impl VersionedMpcContract {
 
     #[private]
     pub fn update_config(&mut self, config: Config) {
-        match self {
-            Self::V0(mpc_contract) => {
-                mpc_contract.config = config;
-            }
-        }
+        self.config = config;
     }
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
-        match self {
-            Self::V0(mpc_contract) => &mut mpc_contract.protocol_state,
-        }
+        &mut self.protocol_state
     }
 
     fn state_ref(&self) -> &ProtocolContractState {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.protocol_state,
-        }
+        &self.protocol_state
     }
 
     fn contains_request(&self, id: &SignId) -> bool {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.contains_key(id),
-        }
+        self.pending_requests.contains_key(id)
     }
 
-    fn lock_request(&mut self, id: SignId, payload: Scalar, epsilon: Scalar) {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
-        }
+    fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
+        self.pending_requests.insert(
+            sign_id,
+            PendingRequest {
+                payload,
+                epsilon,
+                index: None,
+            },
+        );
     }
 
     fn get_request(&self, id: &SignId) -> Option<&PendingRequest> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.get(id),
-        }
+        self.pending_requests.get(id)
     }
 
     fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.set_request_yield(sign_id, data_id),
+        if let Some(request) = self.pending_requests.get_mut(sign_id) {
+            request.index = Some(YieldIndex { data_id });
         }
     }
 
-    fn remove_request(&mut self, id: &SignId) -> Result<PendingRequest, Error> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.remove_request(id),
-        }
+    fn remove_request(&mut self, sign_id: &SignId) -> Result<PendingRequest, Error> {
+        self.pending_requests
+            .remove(sign_id)
+            .ok_or(InvalidParameters::RequestNotFound.into())
     }
 
     fn threshold(&self) -> Result<usize, Error> {
-        match self {
-            Self::V0(contract) => match &contract.protocol_state {
+        {
+            match &self.protocol_state {
                 ProtocolContractState::Initializing(state) => Ok(state.threshold),
                 ProtocolContractState::Running(state) => Ok(state.threshold),
                 ProtocolContractState::Resharing(state) => Ok(state.threshold),
                 ProtocolContractState::NotInitialized => {
-                    Err(InvalidState::UnexpectedProtocolState
-                        .message(contract.protocol_state.name()))
+                    Err(InvalidState::UnexpectedProtocolState.message(self.protocol_state.name()))
                 }
-            },
+            }
         }
     }
 
     fn proposed_updates(&mut self) -> &mut ProposedUpdates {
-        match self {
-            Self::V0(contract) => &mut contract.proposed_updates,
-        }
+        &mut self.proposed_updates
     }
 
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
     /// If we are not a participant, return an error.
     fn voter(&self) -> Result<AccountId, Error> {
         let voter = env::signer_account_id();
-        match self {
-            Self::V0(contract) => match &contract.protocol_state {
+        {
+            match &self.protocol_state {
                 ProtocolContractState::Initializing(state) => {
                     if !state.candidates.contains_key(&voter) {
                         return Err(VoteError::VoterNotParticipant.into());
@@ -1222,38 +1166,29 @@ impl VersionedMpcContract {
                     }
                 }
                 ProtocolContractState::NotInitialized => {
-                    return Err(InvalidState::UnexpectedProtocolState
-                        .message(contract.protocol_state.name()));
+                    return Err(
+                        InvalidState::UnexpectedProtocolState.message(self.protocol_state.name())
+                    );
                 }
-            },
+            }
         }
         Ok(voter)
     }
 
     fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
-        }
+        &self.latest_checkpoints
     }
 
     fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
-        match self {
-            Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
-        }
+        &mut self.latest_checkpoints
     }
 
     fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
-        match self {
-            Self::V0(mpc_contract) => {
-                mpc_contract.latest_checkpoints.insert(chain, checkpoint);
-            }
-        }
+        self.latest_checkpoints.insert(chain, checkpoint);
     }
 
     fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
-        match self {
-            Self::V0(mpc_contract) => &mut mpc_contract.checkpoint_votes,
-        }
+        &mut self.checkpoint_votes
     }
 
     #[private]
@@ -1271,7 +1206,7 @@ impl VersionedMpcContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::borsh::BorshSerialize;
+    use near_sdk::borsh::{self, BorshSerialize};
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
 
@@ -1344,7 +1279,7 @@ mod tests {
         env::storage_write(b"STATE", &old_bytes);
 
         // 2. Call migrate for the first time
-        let migrated_res = VersionedMpcContract::migrate();
+        let migrated_res = MpcContract::migrate();
         assert!(
             migrated_res.is_ok(),
             "First migrate failed: {:?}",
@@ -1357,14 +1292,10 @@ mod tests {
         env::storage_write(b"STATE", &migrated_bytes);
 
         // Verify the migrated state has latest_checkpoints initialized
-        match &migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-            }
-        }
+        assert!(migrated.latest_checkpoints.is_empty());
 
         // 3. Call migrate for the second time (idempotent check)
-        let second_migrated_res = VersionedMpcContract::migrate();
+        let second_migrated_res = MpcContract::migrate();
         assert!(
             second_migrated_res.is_ok(),
             "Second migrate (idempotent) failed: {:?}",
@@ -1373,11 +1304,7 @@ mod tests {
         let second_migrated = second_migrated_res.unwrap();
 
         // Verify the second migrated state matches
-        match &second_migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-            }
-        }
+        assert!(second_migrated.latest_checkpoints.is_empty());
     }
 
     #[test]
@@ -1392,14 +1319,14 @@ mod tests {
 
         // Construct a contract whose `latest_checkpoints` map points at the
         // seeded storage. The map itself has an empty iterable key vector.
-        let contract = VersionedMpcContract::V0(MpcContract {
+        let contract = MpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
-        });
+        };
 
         // Prove the test setup matches production: direct lookup sees the
         // checkpoint, but iteration over the same map does not.
@@ -1432,7 +1359,14 @@ mod tests {
 
     #[test]
     fn reset_checkpoint_clears_votes_for_selected_chains() {
-        let mut contract = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
+        let mut contract = MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
         let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
