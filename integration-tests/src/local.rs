@@ -202,7 +202,7 @@ impl Node {
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_node_with_binary(
+        let mut process = execute::spawn_node_with_binary(
             config.binary_path.clone(),
             ctx.release,
             &mpc_node_id,
@@ -210,7 +210,7 @@ impl Node {
         )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
-        utils::ping_until_ok(&address, 120).await?;
+        utils::ping_until_ok(&mut process, &address, 120).await?;
         tracing::info!(node_account_id = %config.account.id(), ?address, "node started");
 
         Ok(Self {
