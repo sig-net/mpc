@@ -53,13 +53,20 @@ Running these machines needs little memory. Per in-flight request a node holds:
 - optionally **`pause_proposing_until`**, a deadline until which it declines to
   propose.
 
-A round bump resets only the timeout clock and releases the permit. Everything
-else in the list carries across it: `r`, `highest_seen_round`, the buffer (which
-is why it exists — it waits for the node to reach `highest_seen_round`), and
-`pause_proposing_until`. A respawn keeps less: only `r` survives, via
-`SignEntry.round`; `highest_seen_round`, the buffer, and the pause all start
-empty again. The proposer's ACCEPT/REJECT tally is transient, rebuilt inside each
-`Propose sent`.
+Three things reset this state.
+
+A **new round** starts when a recoverable failure sends the task back to the
+organizing phase while it keeps running. It resets the timeout clock and
+releases the permit; `r`, `highest_seen_round`, the proposing pause and the
+buffer all carry across.
+
+A **respawn** is a governance change: the committee this node signs with
+changed in membership, threshold, epoch, or by leaving the running state.
+Every in-flight task is aborted and rebuilt, but `r` survives.
+
+A **node restart** loses everything: the state lives only in memory and the
+request re-enters from the backlog at 0, so a node that restarts alone is
+behind its peers.
 
 Two things are held per node rather than kept per request: (i) the mesh's active set, used to select pre-signatures with shares held by reachable and up-to-date nodes, and (ii) dead_ids, a bounded record of the 4096 most recently retired requests. A posit arriving for a dead id is dropped. Without it, a late message would create an inbox that no task will ever read.
 
