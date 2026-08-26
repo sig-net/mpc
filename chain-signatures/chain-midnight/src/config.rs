@@ -114,12 +114,38 @@ impl fmt::Debug for PublisherConfig {
     }
 }
 
+/// A Midnight contract address in its native 32-byte representation.
+///
+/// Text input is normalized to 64 lowercase hex characters without a `0x` prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MidnightAddress([u8; 32]);
+
+impl MidnightAddress {
+    pub fn from_hex(value: &str) -> Result<Self, hex::FromHexError> {
+        let mut bytes = [0; 32];
+        hex::decode_to_slice(value, &mut bytes)?;
+        Ok(Self(bytes))
+    }
+
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
     pub node_url: String,
-    /// Address of the central singleton contract: 64 hex characters, no `0x` prefix
-    pub central_address: String,
+    /// Address of the central singleton contract.
+    pub central_address: MidnightAddress,
     pub publisher: PublisherConfig,
     pub rpc: RpcConfig,
     pub indexer: IndexerConfig,
@@ -132,20 +158,6 @@ impl MidnightConfig {
             "midnight config: node_url must use a lowercase http or https scheme"
         );
         validate_url("node_url", &self.node_url, &["http", "https"])?;
-        anyhow::ensure!(
-            self.central_address.len() == 64
-                && self.central_address.bytes().all(|b| b.is_ascii_hexdigit()),
-            "midnight config: central_address must be 64 hex characters with no 0x prefix, \
-             got {} characters",
-            self.central_address.len()
-        );
-        // Required rather than normalised: attribution compares this against the
-        // decoder's lowercase addresses, so uppercase would silently never match.
-        anyhow::ensure!(
-            !self.central_address.bytes().any(|b| b.is_ascii_uppercase()),
-            "midnight config: central_address must be lowercase hex, the canonical form \
-             every comparison site assumes"
-        );
         anyhow::ensure!(
             !self.indexer.poll_interval.is_zero(),
             "midnight config: indexer.poll_interval must be greater than zero"
@@ -234,10 +246,45 @@ fn validate_url(field: &str, value: &str, schemes: &[&str]) -> anyhow::Result<()
 mod tests {
     use super::*;
 
+    #[test]
+    fn midnight_address_round_trips_bytes_and_canonical_hex() {
+        let bytes = [
+            0x00, 0x0f, 0x10, 0xab, 0xcd, 0xef, 0x80, 0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xaa,
+            0xbb, 0xcc, 0xdd, 0xee, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x09, 0x08,
+            0x07, 0x06, 0x05, 0x04,
+        ];
+        let expected = "000f10abcdef80ff0123456789aabbccddeefedcba9876543210090807060504";
+
+        let address = MidnightAddress::from_bytes(bytes);
+
+        assert_eq!(address.as_bytes(), &bytes);
+        assert_eq!(address.to_hex(), expected);
+        assert_eq!(MidnightAddress::from_hex(expected).unwrap(), address);
+        assert_eq!(
+            MidnightAddress::from_hex(&expected.to_ascii_uppercase()).unwrap(),
+            address
+        );
+    }
+
+    #[test]
+    fn midnight_address_rejects_invalid_hex() {
+        for input in [
+            "ab".repeat(31),
+            "ab".repeat(33),
+            format!("0x{}", "ab".repeat(31)),
+            "zz".repeat(32),
+        ] {
+            assert!(
+                MidnightAddress::from_hex(&input).is_err(),
+                "unexpectedly accepted {input}"
+            );
+        }
+    }
+
     fn valid_config() -> MidnightConfig {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944".to_string(),
-            central_address: "ab".repeat(32),
+            central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
                 proof_server_url: "http://127.0.0.1:6300".to_string(),
@@ -313,27 +360,6 @@ mod tests {
         zero_poll.indexer.poll_interval = Duration::ZERO;
         let err = zero_poll.validate().unwrap_err().to_string();
         assert!(err.contains("poll_interval"), "unexpected error: {err}");
-
-        let mut short_address = valid_config();
-        short_address.central_address = "ab".repeat(31);
-        let err = short_address.validate().unwrap_err().to_string();
-        assert!(err.contains("central_address"), "unexpected error: {err}");
-
-        let mut non_hex = valid_config();
-        non_hex.central_address = "zz".repeat(32);
-        let err = non_hex.validate().unwrap_err().to_string();
-        assert!(err.contains("central_address"), "unexpected error: {err}");
-
-        let mut prefixed = valid_config();
-        prefixed.central_address = format!("0x{}", "ab".repeat(31));
-        let err = prefixed.validate().unwrap_err().to_string();
-        assert!(err.contains("central_address"), "unexpected error: {err}");
-
-        // Lowercase is canonical: attribution compares against decoder-returned lowercase hex.
-        let mut uppercase = valid_config();
-        uppercase.central_address = "AB".repeat(32);
-        let err = uppercase.validate().unwrap_err().to_string();
-        assert!(err.contains("lowercase"), "unexpected error: {err}");
 
         let mut empty_command = valid_config();
         empty_command.publisher.intent_gen_command.clear();

@@ -33,13 +33,23 @@ use tokio_util::sync::CancellationToken;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
-pub(crate) struct Hold {
+pub(crate) struct BlockHold {
     pub reason: &'static str,
     pub height: u64,
     pub cause: anyhow::Error,
 }
 
-impl std::fmt::Display for Hold {
+impl BlockHold {
+    pub(crate) fn new(reason: &'static str, height: u64, cause: impl Into<anyhow::Error>) -> Self {
+        Self {
+            reason,
+            height,
+            cause: cause.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for BlockHold {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
@@ -49,7 +59,7 @@ impl std::fmt::Display for Hold {
     }
 }
 
-impl std::error::Error for Hold {
+impl std::error::Error for BlockHold {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.cause.as_ref())
     }
@@ -58,7 +68,6 @@ impl std::error::Error for Hold {
 /// Midnight indexer: `run()` owns the whole read path.
 pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
-    central_address: [u8; 32],
     state_manager: S,
     telemetry: T,
 }
@@ -69,22 +78,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         state_manager: S,
         telemetry: T,
     ) -> anyhow::Result<Self> {
-        // `MidnightConfig` is publicly constructible with `String` fields, so a non-CLI
-        // caller reaches here without passing the CLI's own check.
         config.validate()?;
-        let central_address = hex::decode(&config.central_address)
-            .context("midnight central address is not hex")?
-            .try_into()
-            .map_err(|bytes: Vec<u8>| {
-                anyhow::anyhow!(
-                    "midnight central address is {} bytes, expected 32",
-                    bytes.len()
-                )
-            })?;
-        // Network-free beyond that.
         Ok(Self {
             config,
-            central_address,
             state_manager,
             telemetry,
         })
@@ -125,7 +121,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let Some(BlockEmissions {
             proof_seed,
             candidates,
-        }) = source.block_emissions(block, &self.central_address).await?
+        }) = source
+            .block_emissions(block, self.config.central_address.as_bytes())
+            .await?
         else {
             return Ok(Vec::new());
         };
@@ -357,11 +355,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             match result {
                 Ok(requests) => return Ok(Some(requests)),
                 Err(err) => {
-                    if let Some(hold) = err.downcast_ref::<Hold>() {
+                    if let Some(block_hold) = err.downcast_ref::<BlockHold>() {
                         tracing::error!(
-                            reason = hold.reason,
-                            height = hold.height,
-                            error = %format_args!("{:#}", hold.cause),
+                            reason = block_hold.reason,
+                            height = block_hold.height,
+                            error = %format_args!("{:#}", block_hold.cause),
                             "midnight block processing held"
                         );
                         return Err(err);

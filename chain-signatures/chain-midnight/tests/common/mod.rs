@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
 
 fn publisher_package() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../midnight-publisher-ts")
@@ -46,7 +46,7 @@ pub fn base_live_config() -> MidnightConfig {
     );
     MidnightConfig {
         node_url: "http://127.0.0.1:9944".to_string(),
-        central_address: "ab".repeat(32),
+        central_address: MidnightAddress::from_bytes([0xab; 32]),
         publisher: PublisherConfig {
             intent_gen_command: vec![node_executable(), path_arg(&entry)],
             funding_seed: "ab".repeat(32),

@@ -21,7 +21,7 @@ use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, DecodedTransaction};
-use crate::indexer::Hold;
+use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
@@ -146,15 +146,6 @@ enum SegmentStatus {
 
 const fn fallible_allowed(status: SegmentStatus) -> bool {
     matches!(status, SegmentStatus::Applied)
-}
-
-fn hold(reason: &'static str, height: u64, cause: impl Into<anyhow::Error>) -> anyhow::Error {
-    Hold {
-        reason,
-        height,
-        cause: cause.into(),
-    }
-    .into()
 }
 
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
@@ -308,7 +299,7 @@ impl MidnightRpc {
         let mut candidates = Vec::new();
         for found in extrinsics.find::<SendMnTransaction>() {
             let found = found.map_err(|err| {
-                hold(
+                BlockHold::new(
                     "emission-schema-hold",
                     u64::from(block.number()),
                     anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
@@ -344,7 +335,7 @@ impl MidnightRpc {
                 .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
 
             let applied = events.find_first::<TxApplied>().map_err(|err| {
-                hold(
+                BlockHold::new(
                     "emission-schema-hold",
                     height,
                     anyhow::Error::new(err).context("TxApplied did not match metadata"),
@@ -354,7 +345,7 @@ impl MidnightRpc {
                 (SegmentStatus::Applied, details.tx_hash)
             } else {
                 match events.find_first::<TxPartialSuccess>().map_err(|err| {
-                    hold(
+                    BlockHold::new(
                         "emission-schema-hold",
                         height,
                         anyhow::Error::new(err).context("TxPartialSuccess did not match metadata"),
@@ -364,14 +355,15 @@ impl MidnightRpc {
                         (SegmentStatus::GuaranteedOnly, details.tx_hash)
                     }
                     None => {
-                        return Err(hold(
+                        return Err(BlockHold::new(
                             "singleton-tx-without-status",
                             height,
                             anyhow::anyhow!(
                                 "candidate extrinsic {} has no Midnight status event",
                                 found.details.index()
                             ),
-                        ));
+                        )
+                        .into());
                     }
                 }
             };
@@ -380,7 +372,7 @@ impl MidnightRpc {
                 &mut &found.value.midnight_tx[..],
             )
             .map_err(|err| {
-                hold(
+                BlockHold::new(
                     "singleton-tx-undecodable",
                     height,
                     anyhow::Error::new(err).context(format!(
@@ -390,7 +382,7 @@ impl MidnightRpc {
                 )
             })?;
             let calls = emissions_in(&tx, singleton, fallible_allowed(status)).map_err(|err| {
-                hold(
+                BlockHold::new(
                     "emission-schema-hold",
                     height,
                     err.context(format!(
@@ -909,7 +901,7 @@ mod tests {
 
         let config = crate::config::MidnightConfig {
             node_url,
-            central_address: singleton_hex.clone(),
+            central_address: crate::config::MidnightAddress::from_bytes(singleton),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -1000,21 +992,12 @@ mod tests {
                 .expect("caller contract must exist at capture block");
             let caller_path = output_dir.join(format!("caller-post-state-{height}.mn"));
 
-            let singleton_state = rpc
-                .contract_state(&singleton_hex, &block_ref.hash)
-                .await
-                .expect("read singleton state at capture block")
-                .expect("singleton contract must exist at capture block");
-            let singleton_path = output_dir.join(format!("singleton-state-{height}.mn"));
             write_new_capture(&caller_path, &caller_state)
                 .expect("create new caller state fixture without replacing an existing capture");
-            write_new_capture(&singleton_path, &singleton_state)
-                .expect("create new singleton state fixture without replacing an existing capture");
 
             println!(
-                "capture block={height} caller_state={} singleton_state={}",
-                caller_path.display(),
-                singleton_path.display()
+                "capture block={height} caller_state={}",
+                caller_path.display()
             );
         }
     }
@@ -1022,7 +1005,7 @@ mod tests {
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
-            central_address: "ab".repeat(32),
+            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -1254,7 +1237,7 @@ mod tests {
         });
         let mut config = crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
-            central_address: "ab".repeat(32),
+            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),

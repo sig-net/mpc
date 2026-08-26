@@ -36,7 +36,7 @@ fn hex_32(value: &str) -> [u8; 32] {
 fn test_config() -> MidnightConfig {
     MidnightConfig {
         node_url: "http://127.0.0.1:1".to_string(),
-        central_address: hex::encode(SINGLETON),
+        central_address: crate::MidnightAddress::from_bytes(SINGLETON),
         publisher: crate::PublisherConfig {
             funding_seed: "ab".repeat(32),
             proof_server_url: "http://127.0.0.1:1".to_string(),
@@ -219,11 +219,11 @@ impl ChainSource for FixtureSource {
     ) -> anyhow::Result<Option<BlockEmissions>> {
         assert_eq!(singleton, &SINGLETON, "configured singleton bytes");
         if let Some(reason) = self.emission_holds.get(&block.number) {
-            return Err(Hold {
+            return Err(BlockHold::new(
                 reason,
-                height: block.number,
-                cause: anyhow::anyhow!("fixture scanner rejected the block"),
-            }
+                block.number,
+                anyhow::anyhow!("fixture scanner rejected the block"),
+            )
             .into());
         }
         if let Some((message, remaining)) = self
@@ -665,7 +665,7 @@ async fn an_invalid_response_is_dropped_without_hiding_the_next_emission() {
 }
 
 #[tokio::test]
-async fn a_hold_from_the_block_reader_halts_without_events() {
+async fn a_block_hold_from_the_block_reader_halts_without_events() {
     let mut source = FixtureSource::default();
     source.emission_holds.insert(9, "singleton-tx-undecodable");
     let indexer = direct_indexer().await;
@@ -680,13 +680,15 @@ async fn a_hold_from_the_block_reader_halts_without_events() {
         ),
     )
     .await
-    .expect("a Hold surfaces without retrying");
+    .expect("a BlockHold surfaces without retrying");
     let result = match result {
         Ok(_) => panic!("held block must fail"),
         Err(err) => err,
     };
-    let hold = result.downcast_ref::<Hold>().expect("typed Hold preserved");
-    assert_eq!(hold.reason, "singleton-tx-undecodable");
+    let block_hold = result
+        .downcast_ref::<BlockHold>()
+        .expect("typed BlockHold preserved");
+    assert_eq!(block_hold.reason, "singleton-tx-undecodable");
     assert!(events_rx.try_recv().is_err());
 }
 
@@ -1102,13 +1104,13 @@ async fn emit_block_does_not_double_count_requests() {
 }
 
 #[tokio::test]
-async fn midnight_indexer_new_rejects_unusable_config() {
+async fn midnight_indexer_new_rejects_zero_poll_interval() {
     let mut config = test_config();
-    config.central_address = "not-hex".to_string();
+    config.indexer.poll_interval = std::time::Duration::ZERO;
     let err = match MidnightIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await
     {
         Ok(_) => panic!("invalid config must fail"),
         Err(err) => err,
     };
-    assert!(err.to_string().contains("central"));
+    assert!(err.to_string().contains("poll_interval"));
 }

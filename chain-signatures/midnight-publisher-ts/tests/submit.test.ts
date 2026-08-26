@@ -359,7 +359,9 @@ describe("handleSubmit: the busy gate", () => {
     const failure = await refused(1);
     expect(failure.code).toBe("ambiguous_submit");
     expect(failure.message).toMatch(/may still land/);
-    expect(failure.message).toContain("request 1");
+    expect(failure.message).toMatch(/MPC retries automatically/);
+    expect(failure.message).toMatch(/duplicate response posts are safe/);
+    expect(failure.message).not.toContain("request 1");
 
     primeStub();
     await expect(handleSubmit(CONFIG, 2, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
@@ -373,7 +375,9 @@ describe("handleSubmit: the busy gate", () => {
     const timedOut = await pending;
     expect(timedOut.code).toBe("ambiguous_submit");
     expect(timedOut.message).toMatch(/may still land/);
-    expect(timedOut.message).toContain("request 1");
+    expect(timedOut.message).toMatch(/MPC retries automatically/);
+    expect(timedOut.message).toMatch(/duplicate response posts are safe/);
+    expect(timedOut.message).not.toContain("request 1");
 
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");

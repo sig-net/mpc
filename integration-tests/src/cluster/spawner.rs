@@ -165,7 +165,6 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
-    pub midnight: Option<crate::midnight::MidnightContext>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -208,7 +207,6 @@ impl Default for ClusterSpawner {
             worker: None,
             solana: None,
             canton: None,
-            midnight: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -499,7 +497,7 @@ impl IntoFuture for ClusterSpawner {
                 self.canton = Some(sandbox);
             }
 
-            if self.use_midnight && self.midnight.is_none() {
+            let midnight = if self.use_midnight {
                 let root_public_key = self
                     .pregenerated_keys
                     .public_key()
@@ -509,8 +507,10 @@ impl IntoFuture for ClusterSpawner {
                 let midnight =
                     crate::midnight::MidnightContext::run(&self, root_public_key).await?;
                 self.cfg.midnight = Some(midnight.config.clone());
-                self.midnight = Some(midnight);
-            }
+                Some(midnight)
+            } else {
+                None
+            };
 
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
@@ -525,7 +525,7 @@ impl IntoFuture for ClusterSpawner {
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),
-                midnight: self.midnight.take(),
+                midnight,
                 nodes,
             };
 

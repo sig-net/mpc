@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{probe_network_id, MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{probe_network_id, MidnightAddress, MidnightConfig, PublisherConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -131,7 +131,7 @@ impl MidnightContext {
             &bootstrap,
             node_executable()?,
             publisher_entrypoint,
-        );
+        )?;
         config.validate()?;
         Ok(Self {
             _stack: stack,
@@ -220,10 +220,11 @@ fn responder_config(
     bootstrap: &BootstrapResult,
     node_executable: String,
     publisher_entrypoint: PathBuf,
-) -> MidnightConfig {
-    MidnightConfig {
+) -> anyhow::Result<MidnightConfig> {
+    Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
-        central_address: bootstrap.central_address.clone(),
+        central_address: MidnightAddress::from_hex(&bootstrap.central_address)
+            .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
             intent_gen_command: vec![
                 node_executable,
@@ -237,7 +238,7 @@ fn responder_config(
         },
         rpc: Default::default(),
         indexer: Default::default(),
-    }
+    })
 }
 
 fn node_executable() -> anyhow::Result<String> {

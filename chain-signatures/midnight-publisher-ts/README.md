@@ -29,7 +29,7 @@ Four errors have especially important retry semantics:
 - `wallet_unsynced`: wallet startup or DUST readiness exhausted the submit deadline. Nothing was posted, so retrying is safe; the background startup launched by `ready` continues.
 - `proving_timeout`: base proving exhausted the remaining submit deadline. No wallet operation started, so retrying is safe.
 - `state_conflict`: the node refused the transaction as invalid, which is how a stale contract read, an expired TTL, or any other pool rejection surfaces; the node does not report which. Nothing was posted. Rebuild the intent against fresh contract state before retrying.
-- `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background; check the chain for the request before retrying to avoid paying or posting twice.
+- `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background, and the MPC retries automatically, so it may publish the response more than once. Duplicate response events are acceptable and require no operator reconciliation.
 
 ## Configuration
 

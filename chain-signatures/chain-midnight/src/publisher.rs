@@ -10,7 +10,7 @@ use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemet
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
-use crate::config::{MidnightConfig, PublisherConfig};
+use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{is_ambiguous_submit, IntentGen, IntentRequest, WirePoint, WireSignature};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
@@ -75,7 +75,7 @@ pub struct MidnightPublisher {
     config: PublisherConfig,
     reads: Arc<dyn PinnedReads>,
     client: Arc<dyn IntentClient>,
-    central_address: String,
+    central_address: MidnightAddress,
     telemetry: Arc<dyn PublisherTelemetry>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
     flow: tokio::sync::Mutex<()>,
@@ -92,7 +92,7 @@ impl MidnightPublisher {
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
         Ok(Self::new(
             &config.publisher,
-            config.central_address.clone(),
+            config.central_address,
             rpc,
             intent_gen,
             telemetry,
@@ -101,7 +101,7 @@ impl MidnightPublisher {
 
     fn new(
         config: &PublisherConfig,
-        central_address: String,
+        central_address: MidnightAddress,
         reads: Arc<dyn PinnedReads>,
         client: Arc<dyn IntentClient>,
         telemetry: Arc<dyn PublisherTelemetry>,
@@ -132,15 +132,21 @@ impl MidnightPublisher {
             ledger_parameters,
         })
     }
+}
 
-    async fn publish_inner(&self, action: &PublishAction) -> anyhow::Result<()> {
+#[async_trait]
+impl ChainPublisher for MidnightPublisher {
+    // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
+    // Retries currently operate per request.
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
         let _flow = self.flow.lock().await;
+        let central_address = self.central_address.to_hex();
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
             circuit = call.circuit.wire_name(),
-            central = %self.central_address,
+            central = %central_address,
             request_id = %hex::encode(call.request_id),
             elapsed = ?action.timestamp.elapsed(),
             "midnight: publishing signature"
@@ -148,10 +154,10 @@ impl MidnightPublisher {
 
         // One head for every read below it.
         let at_hash = self.reads.finalized_head().await?;
-        let chain = self.pin(&self.central_address, at_hash).await?;
+        let chain = self.pin(&central_address, at_hash).await?;
         let request = IntentRequest {
             circuit: call.circuit.wire_name(),
-            contract_address: self.central_address.clone(),
+            contract_address: central_address,
             request_id: hex::encode(call.request_id),
             signature: call.signature.clone(),
             contract_state: hex::encode(&chain.contract_state),
@@ -195,21 +201,6 @@ impl MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
-    }
-}
-
-#[async_trait]
-impl ChainPublisher for MidnightPublisher {
-    // TODO: Batch responses if one-response-per-transaction publication becomes a bottleneck.
-    // Retries currently operate per request.
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        self.publish_inner(action).await.inspect_err(|e| {
-            tracing::error!(
-                sign_id = ?action.request.id,
-                ?e,
-                "midnight: failed to publish signature"
-            );
-        })
     }
 }
 
@@ -318,6 +309,7 @@ mod tests {
     #[derive(Default)]
     struct StubReads {
         calls: Mutex<Vec<Read>>,
+        contract_addresses: Mutex<Vec<String>>,
         heads_served: Mutex<usize>,
         /// `false` makes `contract_state` answer "no contract here".
         contract_present: bool,
@@ -339,6 +331,10 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
 
+        fn contract_addresses(&self) -> Vec<String> {
+            self.contract_addresses.lock().unwrap().clone()
+        }
+
         fn record(&self, method: &'static str, at_hash: &str) {
             self.calls.lock().unwrap().push(Read {
                 method,
@@ -358,9 +354,13 @@ mod tests {
 
         async fn contract_state(
             &self,
-            _address: &str,
+            address: &str,
             at_hash: &str,
         ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.contract_addresses
+                .lock()
+                .unwrap()
+                .push(address.to_string());
             self.record("contract_state", at_hash);
             Ok(self.contract_present.then(|| CONTRACT_STATE.to_vec()))
         }
@@ -499,7 +499,7 @@ mod tests {
     fn publisher(reads: Arc<dyn PinnedReads>, client: Arc<dyn IntentClient>) -> MidnightPublisher {
         MidnightPublisher::new(
             &config(),
-            CENTRAL.to_string(),
+            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
             reads,
             client,
             Arc::new(NoopPublisherTelemetry),
@@ -762,7 +762,8 @@ mod tests {
         // only this side can see a field filled from the wrong read or a transposed
         // coordinate. The JSON encoding of the request is pinned in `intent_gen`.
         let client = StubClient::new();
-        let publisher = publisher(StubReads::new(), client.clone());
+        let reads = StubReads::new();
+        let publisher = publisher(reads.clone(), client.clone());
 
         let action = respond_action();
         let before = current_unix_timestamp();
@@ -772,6 +773,7 @@ mod tests {
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RESPOND);
         assert_eq!(request.contract_address, CENTRAL);
+        assert_eq!(reads.contract_addresses(), [CENTRAL]);
         assert_eq!(request.request_id, hex::encode(REQUEST_ID));
         assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
         assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
