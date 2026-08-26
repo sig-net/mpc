@@ -12,10 +12,6 @@ use tokio::sync::watch;
 /// then aligns the backlog with the consensus checkpoint feed. Mesh availability
 /// is handled inside `align_backlog_with_consensus` when it needs to fetch a
 /// checkpoint from peers.
-///
-/// Returns `Some(height)` when a contract checkpoint reset was applied at
-/// `height`, so the supervisor can suppress re-triggering on the unchanged
-/// directive. `None` covers every other outcome.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     chain: Chain,
@@ -25,7 +21,7 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
-) -> Option<u64> {
+) {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
     // Hydrate the local checkpoint before aligning: the web server (spawned
@@ -62,14 +58,12 @@ pub(crate) async fn recover_backlog(
     )
     .await
     {
-        consensus::Alignment::Aligned => None,
+        consensus::Alignment::Aligned => {}
         consensus::Alignment::Regressed(height) => {
             tracing::warn!(%chain, height, "backlog regressed via consensus checkpoint");
-            None
         }
         consensus::Alignment::ResetApplied(height) => {
             tracing::warn!(%chain, height, "contract checkpoint reset applied");
-            Some(height)
         }
         consensus::Alignment::ResetFailed(height) => {
             tracing::error!(
@@ -77,7 +71,6 @@ pub(crate) async fn recover_backlog(
                 height,
                 "failed to apply contract checkpoint reset; will retry"
             );
-            None
         }
     }
 }

@@ -307,6 +307,15 @@ impl Checkpoints {
         Ok(())
     }
 
+    /// Returns the confirmed checkpoint, ignoring any newer pending ones.
+    ///
+    /// Unlike [`Self::latest`], this only reflects what the contract itself
+    /// has settled (promoted on consensus), so it is the right signal for
+    /// deciding whether pre-reset state is still present.
+    pub(super) async fn durable_latest(&self, chain: Chain) -> Option<Checkpoint> {
+        self.storage.load_latest(chain).await.ok().flatten()
+    }
+
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
     pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
         if let Some(checkpoint) = self

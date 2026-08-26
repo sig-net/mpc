@@ -628,6 +628,15 @@ impl Backlog {
         self.checkpoints.latest(chain).await
     }
 
+    /// Get the confirmed checkpoint for a chain, ignoring newer pending ones.
+    ///
+    /// Only contract-settled checkpoints are promoted to confirmed, so during
+    /// a reset window (directive is `Restart`) this stays `None` from the wipe
+    /// until the network settles a fresh checkpoint.
+    pub async fn confirmed_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
+        self.checkpoints.durable_latest(chain).await
+    }
+
     /// Check if the chain backlog has an available checkpoint slot.
     pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
         self.checkpoints.has_slot(chain).await

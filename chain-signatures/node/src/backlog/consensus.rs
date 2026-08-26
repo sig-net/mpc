@@ -681,7 +681,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_align_reports_reset_failure_when_storage_unavailable() {
-        let chain = Chain::Ethereum;
         let mut fixture = AlignFixture::new(None);
         // Swap in a storage that fails every operation.
         fixture.backlog = Backlog::persisted(CheckpointStorage::failing());

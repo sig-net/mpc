@@ -1,7 +1,7 @@
 //! Tests checkpoint consensus alignment via peer-to-peer HTTP fetch.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
-use mpc_node::backlog::consensus::align_backlog_with_consensus;
+use mpc_node::backlog::consensus::{align_backlog_with_consensus, Alignment};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
@@ -179,12 +179,11 @@ async fn test_consensus_alignment_peer_fetch() {
 
     let result = result.expect("align_backlog_with_consensus should not hang");
 
-    assert!(
-        result.is_some(),
-        "should have recovered to height {} from peer",
-        expected_height
+    assert_eq!(
+        result,
+        Alignment::Regressed(expected_height),
+        "should have recovered to height {expected_height} from peer"
     );
-    assert_eq!(result.unwrap(), expected_height);
 
     // Verify fresh backlog has the checkpoint
     let latest = fresh_backlog.latest_checkpoint(chain).await;
@@ -269,9 +268,10 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
         .expect("align should complete within timeout")
         .expect("spawned task should not panic");
 
-    assert!(
-        result.is_none(),
-        "should return None when consensus digest changes to None"
+    assert_eq!(
+        result,
+        Alignment::Aligned,
+        "should report aligned when consensus digest changes to None"
     );
 
     assert!(fresh_backlog.latest_checkpoint(chain).await.is_none());
