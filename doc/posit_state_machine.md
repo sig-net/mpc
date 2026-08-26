@@ -539,11 +539,7 @@ settled separately.
    candidates, not exclusive: sync all artifacts rather than keying on a
    liveness edge, and treat the reject itself as a trigger. Overlaps proposal
    2 above, which uses the same signal for a different purpose.
-6. **Is one buffering layer enough?** §5 describes two, the ingress
-   `PositMailbox` and the per-round buffer, both keeping one slot per sender
-   and both overwriting on arrival. Filtering rather than overwriting at
-   ingress may remove the need for the second. §8.4 is the constraint:
-   whatever remains has to survive PROPOSE and START arriving out of order.
+6. **Is one buffering layer enough?** §5 describes two, both keeping one slot per sender and both overwriting on arrival, but they do different jobs. The ingress mailbox exists before any task does, which is how a posit that arrives before the request is spawned is not lost, and it survives a respawn on purpose. The per-round buffer lives inside the task's state and holds a message whose round is ahead of this node's. Collapsing them means the survivor has to do both: exist without a task, and know the node's current round. §8.4 is the other constraint, that whatever remains has to survive PROPOSE and START arriving out of order.
 7. **Is the ordering problem in §8.4 real?** `r` is a nonce and two messages
    can carry the same one, but an honest proposer cannot send START without
    first receiving an ACCEPT, which itself follows PROPOSE. The out-of-order
