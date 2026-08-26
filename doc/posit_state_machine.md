@@ -199,6 +199,7 @@ wait for a `START` that never comes. And the excluded member still cannot tell
 "round `r` succeeded without me" from "round `r` still running", which is what it
 needs. The narrow addressing is a symptom; the missing round-outcome signal is
 the cause.
+When the excluded member receives that signal it could stop. Not stopping costs three things. It burns the round for every peer still waiting. In the rounds where it is the elected proposer it takes one of the four concurrency permits, and reserves a presignature that it returns to the pool when the round times out. Since only a proposer takes a permit, the slot is held intermittently rather than for the whole wait, so the cost is the wasted rounds and the repeated reservations.
 
 What the excluded member would do with that signal is stop. The cost of not
 stopping is three things, not one. It burns the round for every peer still
