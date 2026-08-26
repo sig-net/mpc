@@ -5,7 +5,7 @@ use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
 use crate::backlog::Backlog;
-use crate::types::CheckpointWatcher;
+use crate::types::{CheckpointDirective, CheckpointWatcher};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
@@ -30,7 +30,10 @@ pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegressionOutcome {
-    /// Consensus digest mismatches local backlog — transition to Recovery.
+    /// Consensus digest mismatches local backlog, or the contract reset its
+    /// checkpoints — either way, transition to Recovery. A reset follows the
+    /// exact same path: abort in-flight work and rerun recovery, which wipes
+    /// local state and re-anchors indexing at the restart height.
     Recovery,
     /// Local backlog is aligned with consensus, continue current state.
     Aligned,
@@ -38,66 +41,90 @@ pub(crate) enum RegressionOutcome {
     Shutdown,
 }
 
-/// Waits for a consensus checkpoint digest change, then checks for regression.
+/// Waits for a consensus checkpoint directive change, then checks for regression.
+///
+/// An unchanged `Restart(height)` directive stops re-triggering once recovery
+/// has applied it: `applied_restart` records the height whose reset recovery
+/// reported as applied (see `recover_backlog`). The tracker is cleared
+/// whenever a non-reset directive is observed, so a later reset to the same
+/// height still triggers.
 pub(crate) async fn wait_detected_regression(
     checkpoints_rx: &mut CheckpointWatcher,
     backlog: &Backlog,
     chain: Chain,
+    applied_restart: &mut Option<u64>,
 ) -> RegressionOutcome {
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
+    let outcome = detect_regression(checkpoints_rx, backlog, chain, applied_restart).await;
+    if !matches!(outcome, RegressionOutcome::Aligned) {
+        return outcome;
     }
     if checkpoints_rx.changed().await.is_err() {
         return RegressionOutcome::Shutdown;
     }
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
-    }
-    RegressionOutcome::Aligned
+    detect_regression(checkpoints_rx, backlog, chain, applied_restart).await
 }
 
-/// Returns `true` if a regression is detected. When the consensus digest matches
-/// a local checkpoint (latest or historical), the checkpoint is confirmed via
-/// `confirm_consensus`. A transient storage error is treated as aligned so it is
-/// retried on the next checkpoint change. Returns `false` when the backlog is
-/// aligned (no regression).
+/// Classifies the current directive against local state without waiting for
+/// changes.
+///
+/// - No directive: aligned. Chains without one fall back to their own
+///   anchoring, leaving nothing to check.
+/// - `Restart(height)`: regression unless recovery has already applied this
+///   height's reset. Not yet applied keeps reporting so a failed application
+///   is retried via another restart cycle.
+/// - `Consensus(digest)`: a digest matching a local checkpoint (latest or a
+///   retained pending one) confirms and is aligned. A transient storage error
+///   is treated as aligned so it is retried on the next directive change;
+///   anything else is a regression.
 async fn detect_regression(
-    chain: Chain,
-    backlog: &Backlog,
     checkpoints_rx: &mut CheckpointWatcher,
-) -> bool {
-    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
-        return false;
-    };
-
-    if backlog.latest_checkpoint(chain).await.is_none() {
-        tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
-    }
-
-    // A consensus digest can match either the latest checkpoint or a retained
-    // pending checkpoint while this node is ahead of consensus.
-    match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
-        .await
-    {
-        Ok(found) => {
-            if found {
-                return false;
+    backlog: &Backlog,
+    chain: Chain,
+    applied_restart: &mut Option<u64>,
+) -> RegressionOutcome {
+    let directive = *checkpoints_rx.borrow_and_update();
+    match directive.as_ref() {
+        None => RegressionOutcome::Aligned,
+        Some(CheckpointDirective::Restart(height)) => {
+            if *applied_restart == Some(*height) {
+                RegressionOutcome::Aligned
+            } else {
+                RegressionOutcome::Recovery
             }
         }
-        Err(err) => {
-            tracing::warn!(
-                ?chain,
-                %err,
-                "transient storage error confirming checkpoint; retrying on next change"
-            );
-            return false;
+        Some(CheckpointDirective::Consensus(digest)) => {
+            *applied_restart = None;
+
+            if backlog.latest_checkpoint(chain).await.is_none() {
+                tracing::info!(?chain, "no local checkpoint; skipping regression check");
+                return RegressionOutcome::Aligned;
+            }
+
+            // A consensus digest can match either the latest checkpoint or a
+            // retained pending checkpoint while this node is ahead of
+            // consensus.
+            match backlog.confirm_consensus(chain, digest.digest).await {
+                Ok(true) => RegressionOutcome::Aligned,
+                Ok(false) => {
+                    tracing::warn!(
+                        ?chain,
+                        height = digest.height,
+                        ?digest.digest,
+                        "consensus checkpoint mismatch/divergence detected"
+                    );
+                    RegressionOutcome::Recovery
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?chain,
+                        %err,
+                        "transient storage error confirming checkpoint; retrying on next change"
+                    );
+                    RegressionOutcome::Aligned
+                }
+            }
         }
     }
-
-    // No match → regression detected.
-    true
 }
 
 /// Delay before respawning a `run()` that returned an error.
@@ -135,8 +162,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     }
 
     let mut load_local = true;
+    // The restart height whose reset recovery reported as applied; prevents an
+    // unchanged `Restart` directive from looping the supervisor. Cleared when
+    // a non-reset directive is observed, so a later reset to the same height
+    // still triggers.
+    let mut applied_restart: Option<u64> = None;
     loop {
-        recover_backlog(
+        if let Some(height) = recover_backlog(
             chain,
             load_local,
             &ctx.backlog,
@@ -145,7 +177,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &ctx.node_client,
             &my_account_id,
         )
-        .await;
+        .await
+        {
+            applied_restart = Some(height);
+        }
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -189,7 +224,12 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(?err, %chain, "failed to process chain event");
                     }
                 }
-                result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
+                result = wait_detected_regression(
+                    &mut ctx.checkpoints_rx,
+                    &ctx.backlog,
+                    chain,
+                    &mut applied_restart,
+                ) => {
                     match result {
                         RegressionOutcome::Recovery => {
                             ctx.rpc.abort_checkpoints(chain).await;
@@ -241,10 +281,11 @@ mod tests {
     use crate::mesh::MeshState;
     use crate::rpc::RpcAction;
     use crate::stream::test_utils::make_test_stream_context;
+    use crate::types::CheckpointDirective;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-    use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+    use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignCommand};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -254,7 +295,7 @@ mod tests {
         sign_tx: mpsc::Sender<SignCommand>,
     ) -> (
         StreamContext,
-        watch::Sender<Option<CheckpointDigest>>,
+        watch::Sender<Option<CheckpointDirective>>,
         watch::Sender<MeshState>,
         mpsc::Receiver<RpcAction>,
     ) {
@@ -268,28 +309,39 @@ mod tests {
         )
     }
 
+    fn make_directive(
+        directive: CheckpointDirective,
+    ) -> (
+        watch::Sender<Option<CheckpointDirective>>,
+        watch::Receiver<Option<CheckpointDirective>>,
+    ) {
+        watch::channel(Some(directive))
+    }
+
     fn make_digest(
         height: u64,
         digest: [u8; 32],
     ) -> (
-        watch::Sender<Option<CheckpointDigest>>,
-        watch::Receiver<Option<CheckpointDigest>>,
+        watch::Sender<Option<CheckpointDirective>>,
+        watch::Receiver<Option<CheckpointDirective>>,
     ) {
-        watch::channel(Some(CheckpointDigest { height, digest }))
+        make_directive(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, height, digest),
+        ))
     }
 
     #[tokio::test]
-    async fn test_empty_digest_returns_false() {
+    async fn test_no_directive_is_aligned() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
         let (_tx, mut rx) = watch::channel(None);
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "empty digest should not trigger regression");
+        let result = detect_regression(&mut rx, &backlog, chain, &mut None).await;
+        assert_eq!(result, RegressionOutcome::Aligned);
     }
 
     #[tokio::test]
-    async fn test_matching_consensus_confirms_and_returns_false() {
+    async fn test_matching_consensus_confirms_and_is_aligned() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
@@ -299,8 +351,8 @@ mod tests {
 
         let (_tx, mut rx) = make_digest(100, digest);
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "matching digest should not trigger regression");
+        let result = detect_regression(&mut rx, &backlog, chain, &mut None).await;
+        assert_eq!(result, RegressionOutcome::Aligned);
 
         let persisted = backlog
             .checkpoint_storage()
@@ -327,8 +379,8 @@ mod tests {
         let digest1 = cp1.digest();
         let (_tx, mut rx) = make_digest(100, digest1);
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "ahead with match should not trigger regression");
+        let result = detect_regression(&mut rx, &backlog, chain, &mut None).await;
+        assert_eq!(result, RegressionOutcome::Aligned);
 
         let persisted = backlog
             .checkpoint_storage()
@@ -340,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mismatch_triggers_regression() {
+    async fn test_mismatch_triggers_regression_outcome() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
@@ -350,20 +402,20 @@ mod tests {
         let different_digest = [0xabu8; 32];
         let (_tx, mut rx) = make_digest(200, different_digest);
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result, "mismatched digest should trigger regression");
+        let result = detect_regression(&mut rx, &backlog, chain, &mut None).await;
+        assert_eq!(result, RegressionOutcome::Recovery);
     }
 
     #[tokio::test]
-    async fn test_no_local_returns_false() {
+    async fn test_no_local_is_aligned() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
         let digest = [0x42u8; 32];
         let (_tx, mut rx) = make_digest(100, digest);
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "no local checkpoint should not trigger regression");
+        let result = detect_regression(&mut rx, &backlog, chain, &mut None).await;
+        assert_eq!(result, RegressionOutcome::Aligned);
     }
 
     #[tokio::test]
@@ -377,9 +429,10 @@ mod tests {
         let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
         let _ = rx.borrow_and_update();
 
+        let mut applied_restart = None;
         let result = tokio::time::timeout(
             Duration::from_millis(500),
-            wait_detected_regression(&mut rx, &backlog, chain),
+            wait_detected_regression(&mut rx, &backlog, chain, &mut applied_restart),
         )
         .await
         .expect("should not hang — upfront check catches mismatch");
@@ -387,6 +440,77 @@ mod tests {
             result,
             RegressionOutcome::Recovery,
             "should detect regression even when receiver state was consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_directive_reports_until_applied() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let (_tx, mut rx) = make_directive(CheckpointDirective::Restart(42));
+        let mut applied_restart: Option<u64> = None;
+
+        // A restart is plain Recovery: identical handling to a regression. It
+        // keeps being reported until recovery reports the reset as applied,
+        // so a transient apply failure is retried instead of swallowed.
+        for _ in 0..2 {
+            let outcome = detect_regression(&mut rx, &backlog, chain, &mut applied_restart).await;
+            assert_eq!(outcome, RegressionOutcome::Recovery);
+            let _ = rx.borrow_and_update();
+        }
+        assert_eq!(applied_restart, None);
+
+        // Once recovery reports the reset applied (recorded by the supervisor
+        // loop), the unchanged directive classifies as aligned so the
+        // supervisor does not hot-restart.
+        applied_restart = Some(42);
+        let outcome = detect_regression(&mut rx, &backlog, chain, &mut applied_restart).await;
+        assert_eq!(outcome, RegressionOutcome::Aligned);
+
+        // A different restart height triggers again.
+        _tx.send(Some(CheckpointDirective::Restart(43))).unwrap();
+        let outcome = detect_regression(&mut rx, &backlog, chain, &mut applied_restart).await;
+        assert_eq!(outcome, RegressionOutcome::Recovery);
+
+        // Observing a non-reset directive clears the tracker so a later
+        // reset to a previously seen height still triggers.
+        _tx.send(Some(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, 50, [0x11u8; 32]),
+        )))
+        .unwrap();
+        let outcome = detect_regression(&mut rx, &backlog, chain, &mut applied_restart).await;
+        assert_eq!(outcome, RegressionOutcome::Aligned);
+        assert_eq!(applied_restart, None);
+
+        _tx.send(Some(CheckpointDirective::Restart(42))).unwrap();
+        let outcome = detect_regression(&mut rx, &backlog, chain, &mut applied_restart).await;
+        assert_eq!(outcome, RegressionOutcome::Recovery);
+    }
+
+    #[tokio::test]
+    async fn test_wait_treats_reset_transition_as_regression() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        let digest = [0x42u8; 32];
+        let (tx, mut rx) = make_digest(100, digest);
+
+        let handle = tokio::spawn(async move {
+            let mut applied_restart = None;
+            wait_detected_regression(&mut rx, &backlog, chain, &mut applied_restart).await
+        });
+
+        tx.send(Some(CheckpointDirective::Restart(7))).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("timeout")
+            .expect("task should not panic");
+
+        assert_eq!(
+            result,
+            RegressionOutcome::Recovery,
+            "a live transition into a restart directive must be treated as a regression"
         );
     }
 
@@ -401,13 +525,14 @@ mod tests {
 
         let (tx, mut rx) = make_digest(100, matching_digest);
 
-        let handle =
-            tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
+        let handle = tokio::spawn(async move {
+            let mut applied_restart = None;
+            wait_detected_regression(&mut rx, &backlog, chain, &mut applied_restart).await
+        });
 
-        tx.send(Some(CheckpointDigest {
-            height: 200,
-            digest: [0xabu8; 32],
-        }))
+        tx.send(Some(CheckpointDirective::Consensus(
+            ConsensusCheckpointDigest::new(Chain::Ethereum, 200, [0xabu8; 32]),
+        )))
         .unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(1), handle)
@@ -541,10 +666,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         cp_tx
-            .send(Some(CheckpointDigest {
-                height: 200,
-                digest: [0xab; 32],
-            }))
+            .send(Some(CheckpointDirective::Consensus(
+                ConsensusCheckpointDigest::new(Chain::Ethereum, 200, [0xab; 32]),
+            )))
             .unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
@@ -566,6 +690,88 @@ mod tests {
             .await
             .expect("supervisor should shut down after second run() exits")
             .expect("supervisor task should not panic");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// A live transition into a `Restart` directive must abort in-flight
+    /// checkpoint work, wipe local checkpoint state, re-anchor the processed
+    /// block at the restart height during recovery, and settle into the
+    /// restarted run instead of looping on the unchanged directive.
+    #[tokio::test]
+    async fn reset_directive_restarts_anchors_and_settles() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        // Pre-reset state: local checkpoint at height 100.
+        backlog.set_processed_block(chain, 100).await.unwrap();
+        backlog.checkpoint(chain).await.unwrap();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_cancel = Arc::new(Notify::new());
+        let indexer = StalledRunIndexer {
+            attempts: attempts.clone(),
+            first_cancel: first_cancel.clone(),
+        };
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cp_tx.send(Some(CheckpointDirective::Restart(42))).unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
+                .await
+                .expect("reset should abort RPC work immediately"),
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), sign_rx.recv())
+                .await
+                .expect("reset should abort sign tasks immediately"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
+        ));
+        first_cancel.notified().await;
+
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("supervisor should shut down after restarted run() exits")
+            .expect("supervisor task should not panic");
+
+        use mpc_chain_integration_core::StateManager as _;
+        // Exclusive cursor parked one below the inclusive restart height:
+        // block 42 itself will be re-processed.
+        assert_eq!(
+            backlog.get_processed_block(chain).await,
+            Some(41),
+            "recovery must park the cursor below the restart height"
+        );
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await,
+            None,
+            "local checkpoint state must be wiped by the reset"
+        );
+        assert_eq!(
+            backlog
+                .checkpoint_storage()
+                .load_latest(chain)
+                .await
+                .unwrap(),
+            None,
+            "durable checkpoint state must be wiped by the reset"
+        );
+
+        // Exactly two runs: the stalled original and the post-reset rerun. A
+        // third attempt would mean the unchanged Restart directive is
+        // re-triggering restarts instead of being suppressed after
+        // confirmation.
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 

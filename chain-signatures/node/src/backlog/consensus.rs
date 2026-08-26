@@ -13,7 +13,25 @@ use rand::thread_rng;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// Returns None if we are aligned, Some(<new_height>) if we have regressed.
+/// Outcome of aligning the backlog with the contract's checkpoint directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alignment {
+    /// Local state already matches the directive (or nothing could be done
+    /// this pass; the next directive change or restart retries).
+    Aligned,
+    /// Local state diverged from the settled consensus digest and was
+    /// regressed to the checkpoint fetched from peers at the given height.
+    Regressed(u64),
+    /// The contract reset its checkpoints; local state was wiped and the
+    /// processed-block cursor parked below the given inclusive restart
+    /// height.
+    ResetApplied(u64),
+    /// The contract reset its checkpoints but wiping local state failed; the
+    /// caller should retry via another recovery pass.
+    ResetFailed(u64),
+}
+
+/// Aligns the local backlog with the contract's checkpoint directive.
 pub async fn align_backlog_with_consensus(
     chain: Chain,
     backlog: &Backlog,
@@ -21,8 +39,10 @@ pub async fn align_backlog_with_consensus(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
-) -> Option<u64> {
-    let directive = checkpoints_rx.borrow_and_update().as_ref().cloned()?;
+) -> Alignment {
+    let Some(directive) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
+        return Alignment::Aligned;
+    };
 
     let target_digest = match directive {
         CheckpointDirective::Consensus(digest) => digest.digest,
@@ -33,10 +53,10 @@ pub async fn align_backlog_with_consensus(
                 "consensus checkpoints were reset; clearing local checkpoint state"
             );
             return match backlog.apply_reset(chain, height).await {
-                Ok(()) => None,
+                Ok(()) => Alignment::ResetApplied(height),
                 Err(err) => {
                     tracing::error!(?err, %chain, "failed to apply contract checkpoint reset");
-                    Some(height)
+                    Alignment::ResetFailed(height)
                 }
             };
         }
@@ -45,7 +65,7 @@ pub async fn align_backlog_with_consensus(
     match backlog.confirm_consensus(chain, target_digest).await {
         Ok(found) => {
             if found {
-                return None;
+                return Alignment::Aligned;
             }
         }
         Err(err) => {
@@ -54,7 +74,7 @@ pub async fn align_backlog_with_consensus(
                 %err,
                 "transient storage error confirming consensus checkpoint; retrying later"
             );
-            return None;
+            return Alignment::Aligned;
         }
     }
 
@@ -63,7 +83,7 @@ pub async fn align_backlog_with_consensus(
         ?target_digest,
         "Consensus checkpoint mismatch/divergence detected: triggering regression"
     );
-    let fetched_checkpoint = find_consensus_checkpoint(
+    let Some(fetched_checkpoint) = find_consensus_checkpoint(
         mesh_state,
         node_client,
         chain,
@@ -71,16 +91,19 @@ pub async fn align_backlog_with_consensus(
         checkpoints_rx,
         my_account_id,
     )
-    .await?;
+    .await
+    else {
+        return Alignment::Aligned;
+    };
 
     let height = fetched_checkpoint.block_height;
 
     if let Err(err) = backlog.regress(fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
-        return None;
+        return Alignment::Aligned;
     }
 
-    Some(height)
+    Alignment::Regressed(height)
 }
 
 async fn fetch_peer_checkpoint(
@@ -218,6 +241,7 @@ mod tests {
     use crate::node_client::Options as NodeClientOptions;
 
     use crate::backlog::BacklogEntry;
+    use crate::storage::CheckpointStorage;
     use crate::types::CheckpointDirective;
     use mpc_primitives::{ConsensusCheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
@@ -254,7 +278,7 @@ mod tests {
             }
         }
 
-        async fn run(&mut self) -> Option<u64> {
+        async fn run(&mut self) -> Alignment {
             align_backlog_with_consensus(
                 self.chain,
                 &self.backlog,
@@ -281,7 +305,7 @@ mod tests {
         peer_checkpoint_height: u64,
         peer_checkpoint_has_pending_tx: bool,
         // Expected results
-        expected_result: Option<u64>,
+        expected_result: Alignment,
         expected_persisted_height: Option<u64>,
     }
 
@@ -298,7 +322,7 @@ mod tests {
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: Some(100),
+                expected_result: Alignment::Regressed(100),
                 expected_persisted_height: Some(100),
             },
             TestCase {
@@ -311,7 +335,7 @@ mod tests {
                 peer_has_checkpoint: false,
                 peer_checkpoint_height: 0,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: None,
+                expected_result: Alignment::Aligned,
                 expected_persisted_height: None,
             },
             TestCase {
@@ -324,7 +348,7 @@ mod tests {
                 peer_has_checkpoint: false,
                 peer_checkpoint_height: 0,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: None,
+                expected_result: Alignment::Aligned,
                 expected_persisted_height: None,
             },
             TestCase {
@@ -337,7 +361,7 @@ mod tests {
                 peer_has_checkpoint: false,
                 peer_checkpoint_height: 0,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: None,
+                expected_result: Alignment::Aligned,
                 expected_persisted_height: Some(100),
             },
             TestCase {
@@ -350,7 +374,7 @@ mod tests {
                 peer_has_checkpoint: false,
                 peer_checkpoint_height: 0,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: None,
+                expected_result: Alignment::Aligned,
                 expected_persisted_height: Some(100),
             },
             TestCase {
@@ -363,7 +387,7 @@ mod tests {
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
                 peer_checkpoint_has_pending_tx: false,
-                expected_result: Some(100),
+                expected_result: Alignment::Regressed(100),
                 expected_persisted_height: Some(100),
             },
         ];
@@ -648,7 +672,32 @@ mod tests {
         fixture.checkpoints_tx.send(None).unwrap();
 
         let result = handle.await.unwrap();
-        assert!(result.is_none(), "aborted align should return None");
+        assert_eq!(
+            result,
+            Alignment::Aligned,
+            "aborted align should report aligned (nothing done this pass)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_align_reports_reset_failure_when_storage_unavailable() {
+        let chain = Chain::Ethereum;
+        let mut fixture = AlignFixture::new(None);
+        // Swap in a storage that fails every operation.
+        fixture.backlog = Backlog::persisted(CheckpointStorage::failing());
+
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDirective::Restart(42)))
+            .unwrap();
+
+        let result = fixture.run().await;
+
+        assert_eq!(
+            result,
+            Alignment::ResetFailed(42),
+            "a failed reset must be reported so the supervisor retries"
+        );
     }
 
     #[tokio::test]
@@ -679,7 +728,11 @@ mod tests {
 
         let result = fixture.run().await;
 
-        assert_eq!(result, None, "applied reset is aligned, not a regression");
+        assert_eq!(
+            result,
+            Alignment::ResetApplied(42),
+            "applied reset should be reported so the supervisor suppresses it"
+        );
         assert_eq!(
             fixture
                 .backlog
