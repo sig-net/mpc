@@ -6,8 +6,11 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
-use std::collections::HashSet;
 use std::sync::{Mutex, Once};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use tracing_subscriber::EnvFilter;
 
 /// Tracks ports already handed out by `pick_unused_port` within this process
@@ -332,17 +335,40 @@ pub async fn pick_preferred_or_unused_port(preferred: u16) -> u16 {
     pick_preferred_or_unused_port_block(preferred, 1).await
 }
 
-pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
-        loop {
-            match get(addr).await {
-                Ok(status) if status == StatusCode::OK => break,
-                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+/// Wait until the node's web server answers `GET /` with 200.
+pub async fn ping_until_ok(
+    process: &mut async_process::Child,
+    addr: &str,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        match process.try_status() {
+            Ok(Some(status)) => {
+                anyhow::bail!(
+                    "node process exited with {status} while waiting for its web server on {addr}"
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                anyhow::bail!("failed to check node process status while pinging {addr}: {err}");
             }
         }
-    })
-    .await?;
-    Ok(())
+
+        if let Ok(status) = get(addr).await {
+            if status == StatusCode::OK {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "node web server on {addr} did not respond within {timeout}s \
+                 (process still running; likely failed to bind its web port)"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 // Account with short name for testing
