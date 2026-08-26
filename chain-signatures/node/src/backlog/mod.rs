@@ -605,14 +605,20 @@ impl Backlog {
         Ok(())
     }
 
-    /// Apply a contract-side checkpoint reset: wipe local checkpoint state and
-    /// re-anchor the processed-block height so indexers resume at `height + 1`.
+    /// Apply a contract-side checkpoint reset: wipe local checkpoint state
+    /// and re-anchor indexing at `height`.
     ///
-    /// The height is anchored without triggering interval-checkpoint creation;
-    /// a fresh checkpoint forms naturally once indexing resumes.
+    /// The restart height is inclusive — block `height` itself is
+    /// (re-)processed — while the processed-block cursor is exclusive
+    /// (indexers resume one past it), so the cursor is parked at
+    /// `height - 1`. Leaving it unset instead would make indexers ignore the
+    /// height and fall back to their own anchoring. The write uses a zero
+    /// checkpoint interval so no checkpoint is created for the parked cursor;
+    /// a fresh one forms naturally once indexing resumes.
     pub async fn apply_reset(&self, chain: Chain, height: u64) -> anyhow::Result<()> {
         self.checkpoints.clear(chain).await?;
-        self.set_processed_block_interval(chain, height, 0).await;
+        self.set_processed_block_interval(chain, height.saturating_sub(1), 0)
+            .await;
         tracing::info!(?chain, height, "applied contract checkpoint reset");
         Ok(())
     }

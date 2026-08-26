@@ -697,10 +697,12 @@ mod tests {
         );
 
         use mpc_chain_integration_core::StateManager as _;
+        // The cursor is exclusive while the restart height is inclusive, so
+        // it is parked one below and indexers resume at 42 itself.
         assert_eq!(
             fixture.backlog.get_processed_block(chain).await,
-            Some(42),
-            "processed block should be re-anchored at the restart height"
+            Some(41),
+            "cursor should be parked just below the inclusive restart height"
         );
     }
 }
