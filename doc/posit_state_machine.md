@@ -371,10 +371,10 @@ because the round timeout ran out.
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
 3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
-4. **One slot per sender assumes an ordering which is not guaranteed.** Both
-   buffers overwrite on arrival, including for an equal round, so if a sender's
-   messages for one round arrive out of order the later arrival wins and the other is dropped silently, costing that node the round.
-   Currently, causality makes this impossible (`START` follows the node's own  `ACCEPT`, which follows `PROPOSE`), it is a constraint to revisit before sending more messages per sender per round though(§3).
+4. **One slot per sender assumes an ordering which is not guaranteed.**
+   Buffers are overwritten on arrival, so the later of two messages for one round
+   wins and the other is dropped silently. Causality rules this out while a node stays up,
+   but not across a restart. Revisit before sending more messages per sender per round (§3).
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
@@ -410,23 +410,24 @@ of testnet's, are "deliberator timeout waiting for Propose", rounds ending
 because no PROPOSE arrived. An earlier draft reported zero on testnet; that
 was a query matching a line only the newer build emits.
 
-_Testnet_: 
+_Testnet_:
 On testnet it is sent and then thrown away on arrival: sign posit messages are handed to
 a bounded inbox through a lossy send whose result is ignored, so a full inbox
 drops the message and logs a warning. Testnet drops 737 an hour. The
 surrounding numbers agree, since proposers obtain a presignature 476 times an
 hour and return it to the pool on timeout 466 times an hour, against 24
 presignatures generated: proposers are working and deliberators are not
-hearing them. 
+hearing them.
 
 _Devnet_: On devnet nothing is dropped across six hours, yet the churn is
 heavy. There the PROPOSE is never sent in the first place. Election picks the
 proposer from the full membership and never asks whether that node is actually
-working on the request, and often it is not. Scraped from all 12 pods on
-2026-08-26, every node reported the same 19-entry Ethereum backlog, while
-their live sign-task counts were 1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10:
-85 tasks against a possible 228, so 37% coverage and 4.5 nodes per request on
-average. The backlog is identical everywhere because it comes from the chain,
+working on the request, and often it is not because it has completed the
+request already, but only participating nodes are informed.
+Scraped from all 12 pods on 2026-08-26, every node reported the same
+19-entry Ethereum backlog, while their live sign-task counts were
+1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10.
+The backlog is identical everywhere because it comes from the chain,
 but a task ends as soon as that node finishes its own part, while the backlog
 entry survives until the respond event is indexed.
 Until then the remaining nodes keep rotating rounds against nodes that will never propose.
