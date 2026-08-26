@@ -312,7 +312,7 @@ impl Checkpoints {
     /// Unlike [`Self::latest`], this only reflects what the contract itself
     /// has settled (promoted on consensus), so it is the right signal for
     /// deciding whether pre-reset state is still present.
-    pub(super) async fn durable_latest(&self, chain: Chain) -> Option<Checkpoint> {
+    pub(super) async fn latest_consensus(&self, chain: Chain) -> Option<Checkpoint> {
         self.storage.load_latest(chain).await.ok().flatten()
     }
 

@@ -634,7 +634,7 @@ impl Backlog {
     /// a reset window (directive is `Restart`) this stays `None` from the wipe
     /// until the network settles a fresh checkpoint.
     pub async fn confirmed_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        self.checkpoints.durable_latest(chain).await
+        self.checkpoints.latest_consensus(chain).await
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
