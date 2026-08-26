@@ -209,6 +209,7 @@ deliberator holds none; and in those same rounds it reserves a presignature
 that it returns to the pool on timeout. So the permit is held intermittently
 rather than for the whole wait, and the steady cost is the wasted rounds and
 the repeated reservations.
+When the excluded member receives that signal it could stop. Not stopping costs three things. It burns the round for every peer still waiting. In the rounds where it is the elected proposer it takes one of the four concurrency permits, and reserves a presignature that it returns to the pool when the round times out. Since only a proposer takes a permit, the slot is held intermittently rather than for the whole wait, so the cost is the wasted rounds and the repeated reservations.
 
 Open question: whether to send every message to every member, rejects included.
 Doing so needs the one-slot-per-sender buffers (§5) revisited first, since more
