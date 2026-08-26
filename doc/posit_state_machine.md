@@ -169,7 +169,7 @@ the round is not bumped. A deliberator that lacks the presignature sends
 `REJECT MissingArtifact` and resumes waiting for a `PROPOSE` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
 
-Shrinking the holder set on `REJECT MissingArtifact` is proposal 2 in §9.
+Shrinking the holder set on `REJECT MissingArtifact` is proposal 2 in §10.
 
 ### Who each message goes to
 
@@ -392,63 +392,77 @@ because the round timeout ran out.
 
 ## 9. What the logs show
 
-Analysis 1: 48h Cloud Logging sweep, 2026-08-17 to 2026-08-19, all three networks: devnet
-(12 nodes), testnet (9 nodes), mainnet (1 of the 7 participant nodes runs in
-our cluster).
-Analysis 2: Devnet, full day 2026-08-20
+Read the numbers below with three caveats. Devnet runs the build this document
+describes; **testnet runs an older one**, whose posit code lives in a file that
+no longer exists here and whose log lines are worded differently. A testnet
+number therefore describes a different implementation, and a query written for
+one build silently returns zero against the other. Devnet has 12 nodes;
+testnet has 10 pods, 8 participants and a threshold of 5. Counts marked capped
+hit a query limit and are lower bounds.
 
-Good news
-- **Presignature pipeline is healthy.** Analysis 1: ~964 completions
-  per hour on devnet, start:completed exactly 1:1 on both networks, and the two
-  proposer-side starvation signals ("skipping presignature due to inactive
-  participants", "proposer timeout waiting for presignature") are zero in
-  steady state. Both fire only in a burst coinciding with the shared devnet
-  Redis master being replaced (each cluster runs one shared Redis, so a node
-  cannot lose its storage alone). Steady-state churn is therefore not pool
-  starvation.
-  Analysis 2: 3 presignature timeouts in a day, against 7470 generations
-  started and 7008 completed. `MissingArtifact` is rare on the sign path and
-  bursty rather than steady. Counted apart over the analysis-1 window, the
-  sign-path reject ("deliberator does not have access to proposed
-  presignature") fired 298 times against >=5000 for the presignature
-  protocol's separate missing-triples reject; over a recent 6h window the two
-  were 0 and 2.
-- **No reconstruction failures (§8.5).** The
-  silent-success branch has never been observed firing; fixing it is insurance
-  against a latent path, not an active leak.
-- **Round desync within expectations.** Across 179 `(sign_id, round)`
-  pairs on all 12 pods, pods enter the same round within ~200 ms and
-  `received Propose from non-proposer` is 0 all day. The correction traffic is
-  trivial next to ~3250 rotations/hour: 1153 StaleRound rejects (median gap 3)
-  and 4919 future-round buffers (median gap 1, 89% of them gap 1).
+Sources: a 48h sweep over 2026-08-17 to 2026-08-19, a full day on devnet
+2026-08-20, and spot checks on 2026-08-26.
 
-Not so great
-- **Frequent reorganization on devnet.** ~100k reorganizes in 48h on
-  devnet against exactly zero on testnet; the midday baseline hour had 3815
-  reorganizes across only 79 distinct sign_ids. ~83% of reorganize reasons are
-  "deliberator timeout waiting for Propose": rounds ending because no PROPOSE
-  ever arrived.
-- **The delayed watcher fired for ~3.1k distinct requests on devnet and ~0.7k
-  on testnet (§8.1);** on testnet each node logs the same delayed request, so
-  the per-node uniform count is one request counted nine times.
-- **No proposer.** Analysis 2: 71.8% of rotations are "deliberator timeout
-  waiting for Propose". Nodes differ widely in how many requests they hold a
-  running task for, the count `sign_queue_size` reports, so election keeps
-  picking nodes with no task for the request:
-  `sign_queue_size` ranges from 1 to 20 across the 12 devnet pods against an
-  identical 19-entry Ethereum backlog, stable across repeated sampling. That
-  reading is from metrics rather than logs, so per-pod log ingestion gaps do
-  not affect it.
-- **Duplicate deliveries are real (§8.4).** ~20k "posit ACCEPT duplicate
-  ignored" on devnet, episodic, half from one node, in the presignature posit
-  layer. Harmless in themselves: the tallies are sets, so a duplicate costs a
-  log line. They do prove the channel is not exactly-once, which is why §8.4
-  is worth acting on, though reordering itself stays unobserved (zero REJECT
-  duplicates, START-from-non-proposer, or conflicting-proposer anywhere).
+**Rounds churn on both networks.** Devnet: ~100k reorganizes in 48h, and a
+midday hour with 3815 of them across only 79 distinct sign_ids. Testnet: 4296
+in a single 10-minute window. ~83% of devnet's reasons, and the largest share
+of testnet's, are "deliberator timeout waiting for Propose", rounds ending
+because no PROPOSE arrived. An earlier draft reported zero on testnet; that
+was a query matching a line only the newer build emits.
+
+_Testnet_: 
+On testnet it is sent and then thrown away on arrival: sign posit messages are handed to
+a bounded inbox through a lossy send whose result is ignored, so a full inbox
+drops the message and logs a warning. Testnet drops 737 an hour. The
+surrounding numbers agree, since proposers obtain a presignature 476 times an
+hour and return it to the pool on timeout 466 times an hour, against 24
+presignatures generated: proposers are working and deliberators are not
+hearing them. 
+
+_Devnet_: On devnet nothing is dropped across six hours, yet the churn is
+heavy. There the PROPOSE is never sent in the first place. Election picks the
+proposer from the full membership and never asks whether that node is actually
+working on the request, and often it is not. Scraped from all 12 pods on
+2026-08-26, every node reported the same 19-entry Ethereum backlog, while
+their live sign-task counts were 1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10:
+85 tasks against a possible 228, so 37% coverage and 4.5 nodes per request on
+average. The backlog is identical everywhere because it comes from the chain,
+but a task ends as soon as that node finishes its own part, while the backlog
+entry survives until the respond event is indexed.
+Until then the remaining nodes keep rotating rounds against nodes that will never propose.
+
+**The presignature pipeline is healthy on both.** Generation starts and
+completions run 1:1 (testnet 24:24 in an hour; devnet 7470 started against
+7008 completed in a day, with 3 timeouts). `MissingArtifact` on the sign path
+is bursty rather than steady: 298 across the 48h window, concentrated in a
+Redis master replacement, and 0 over a recent 6h window. Steady-state churn is
+not pool starvation.
+
+**Round correction traffic is small.** On devnet, across 179 `(sign_id,
+round)` pairs, pods enter the same round within ~200 ms, and against ~3250
+rotations an hour there are 1153 StaleRound rejects (median gap 3) and 4919
+future-round buffers (median gap 1).
+
+**Three things an earlier draft called zero are not.** Testnet logs "received
+Propose from non-proposer" (8 in 3h), "proposer timeout waiting for
+presignature" (~9 an hour) and "Got unexpected posit message while waiting for
+propose" (3 in 3h). Each had been measured on devnet alone, or with a query
+that could not match testnet's wording.
+
+**Duplicate deliveries are real (§8.4).** ~20k ignored duplicate ACCEPTs on
+devnet, episodic, half from one node, in the presignature posit layer. They
+are harmless in themselves, since the tallies are sets, but they show the
+channel is not exactly-once.
+
+**The delayed watcher** fired for ~3.1k distinct requests on devnet. The
+testnet figure is a lower bound and is per node, since each node logs the same
+delayed request.
 
 
-Improvement proposals, in recommended order of attack. Requests never expire
-by design, so the rotation has to be ended by information, not time.
+## 10. Improvement proposals
+
+In recommended order of attack. Requests never expire by design, so the
+rotation has to be ended by information, not time.
 
 1. **Answer posits for completed requests.** `dead_ids` silently drops them
    today; replying REJECT Completed lets a straggler end its task on the next
@@ -492,7 +506,7 @@ by design, so the rotation has to be ended by information, not time.
    one.
 
 
-## 10. Open design questions
+## 11. Open design questions
 
 Each is a decision about what the machine should do rather than a description
 of what it does, so none of them changed the model above. Recorded here to be
