@@ -370,7 +370,7 @@ because the round timeout ran out.
    sends `ACCEPT` after the proposer already sent `START`. The proposer is
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
-3. **`REJECT MissingArtifact` costs a whole round**, for the reason given under §3.
+3. **`REJECT MissingArtifact` can cost a whole round.** The proposer selects the presignature's holders that are active, itself included, and that set is only guaranteed to reach t. It abandons the round once the rejects exceed the set's size minus t. So at exactly threshold size it has no slack at all: every one of the other t−1 members must accept, and one reject ends the round. With k members of slack it takes k+1.
 4. **One slot per sender assumes an ordering which is not guaranteed.**
    Buffers are overwritten on arrival, so the later of two messages for one round
    wins and the other is dropped silently. Causality rules this out while a node stays up,
