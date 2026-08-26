@@ -250,7 +250,7 @@ fn process_port_slice() -> std::ops::RangeInclusive<u16> {
         .ok()
         .and_then(|id| id.parse::<u32>().ok())
         .unwrap_or(0);
-    
+
     let unique_id = (pid ^ execution_id) % NUM_SLICES;
     let start = BASE + (unique_id as u16) * SLICE_LEN;
     start..=start + SLICE_LEN - 1
