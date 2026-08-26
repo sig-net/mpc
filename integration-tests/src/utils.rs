@@ -237,8 +237,38 @@ fn reserve_port_block(start: u16, len: usize) -> bool {
     true
 }
 
-/// Request an unused port from the OS, guaranteed unique within this process.
+/// Returns the range of ports allocated to this process's slice of the port range.
+/// The slice is determined by the process ID modulo the number of slices.
+/// This ensures that each process gets a unique subset of the port range, preventing conflicts between parallel test processes.
+fn process_port_slice() -> std::ops::RangeInclusive<u16> {
+    const SLICE_LEN: u16 = 160;
+    const NUM_SLICES: u32 = 200;
+    const BASE: u16 = 30_000;
+
+    let slice = std::process::id() % NUM_SLICES;
+    let start = BASE + (slice as u16) * SLICE_LEN;
+    start..=start + SLICE_LEN - 1
+}
+
+/// Request an unused port, guaranteed unique within this process and
+/// allocated from this process's slice of the port range.
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
+    let slice = process_port_slice();
+    let (lo, hi) = (*slice.start(), *slice.end());
+    let span = (hi - lo) as u32;
+    let offset = rand::thread_rng().gen_range(0..=span);
+
+    for i in 0..=span {
+        // reserve_port_block checks both the in-process dedup set and that the
+        // port is actually bindable right now.
+        let port = lo + ((offset + i) % (span + 1)) as u16;
+        if reserve_port_block(port, 1) {
+            return Ok(port);
+        }
+    }
+
+    // Slice exhausted: fall back to an OS-assigned ephemeral port with the
+    // original drop-and-dedup behavior.
     // Port 0 means the OS gives us an unused port.
     // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
     // allow inbound connections on macOS.
