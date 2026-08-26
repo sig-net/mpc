@@ -504,7 +504,7 @@ rotation has to be ended by information, not time.
    accounted for, a proposer that already completed and retired the request,
    which 1 covers; SKIP covers the rest and sharpens the diagnosis, since a
    round that stays silent after SKIP has an absent proposer, not an unwilling
-   one.
+   one. This should only be worked on if data shows it will help .
 
 
 ## 11. Open design questions
