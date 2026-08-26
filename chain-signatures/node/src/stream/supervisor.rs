@@ -4,7 +4,7 @@
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
@@ -70,7 +70,11 @@ async fn detect_regression(
         return false;
     };
 
-    if backlog.latest_checkpoint(chain).await.is_none() {
+    // A node holding no checkpoint still has to re-anchor its cursor on a
+    // reset. Any other digest is unmatchable without one to compare against.
+    let is_reset =
+        Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
+    if !is_reset && backlog.latest_checkpoint(chain).await.is_none() {
         tracing::info!(?chain, "no local checkpoint; skipping regression check");
         return false;
     }
@@ -367,6 +371,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reset_detected_without_a_local_checkpoint() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        // "I hold no checkpoint" is not evidence there is nothing to do.
+        let (_tx, mut rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
+
+        assert!(
+            detect_regression(chain, &backlog, &mut rx).await,
+            "a reset must be applied even with no local checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_applied_reset_is_not_a_regression() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        // The state a node is left in once it has applied the reset: an empty
+        // backlog confirmed at the reset height.
+        backlog.set_processed_block(chain, 42).await;
+        let applied = backlog.checkpoint(chain).await.unwrap();
+        assert_eq!(
+            applied.digest(),
+            mpc_primitives::reset_checkpoint_digest(chain, 42)
+        );
+        assert!(backlog
+            .confirm_consensus(chain, applied.digest())
+            .await
+            .unwrap());
+
+        let (_tx, mut rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
+
+        assert!(
+            !detect_regression(chain, &backlog, &mut rx).await,
+            "an already-applied reset must not keep restarting the indexer"
+        );
+    }
+
+    #[tokio::test]
     async fn test_wait_detects_regression_after_consumed() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
@@ -566,6 +610,84 @@ mod tests {
             .await
             .expect("supervisor should shut down after second run() exits")
             .expect("supervisor task should not panic");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// End to end: a reset settled while the indexer is running must abort
+    /// in-flight work, re-anchor the cursor during recovery with no peer
+    /// reachable, and then settle rather than restarting on every pass.
+    #[tokio::test]
+    async fn reset_cancels_restarts_and_settles_without_peers() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        backlog.set_processed_block(chain, 100).await.unwrap();
+        let stale = backlog.checkpoint(chain).await.unwrap();
+        assert!(backlog
+            .confirm_consensus(chain, stale.digest())
+            .await
+            .unwrap());
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_cancel = Arc::new(Notify::new());
+        let indexer = StalledRunIndexer {
+            attempts: attempts.clone(),
+            first_cancel: first_cancel.clone(),
+        };
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cp_tx
+            .send(Some(CheckpointDigest {
+                height: 42,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
+                .await
+                .expect("reset should abort RPC work immediately"),
+            Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), sign_rx.recv())
+                .await
+                .expect("reset should abort sign tasks immediately"),
+            Some(SignCommand::AbortChain(Chain::Ethereum))
+        ));
+        first_cancel.notified().await;
+
+        // Deliberately nothing is sent to unblock the restart, unlike the
+        // peer-served regression above: the reset checkpoint is rebuilt
+        // locally, so recovery completes with the same digest still settled
+        // and no peer reachable.
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("recovery must not wait on peers for a reset")
+            .expect("supervisor task should not panic");
+
+        assert_eq!(
+            backlog.get_processed_block(chain).await,
+            Some(42),
+            "recovery must re-anchor the cursor at the reset height"
+        );
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await,
+            Some(Checkpoint::reset(chain, 42)),
+            "local state must be the canonical reset checkpoint"
+        );
+        // Exactly two runs: the stalled original and the post-reset rerun. A
+        // third would mean the unchanged settled digest keeps restarting.
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 

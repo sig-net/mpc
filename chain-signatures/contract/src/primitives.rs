@@ -25,6 +25,18 @@ pub enum StorageKey {
     Candidates,
 }
 
+/// One chain's entry in a checkpoint reset.
+///
+/// `resume_after` is exclusive, naming the last block treated as processed:
+/// indexing resumes at `resume_after + 1`. To re-process block `b`, pass
+/// `b - 1`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct CheckpointReset {
+    pub chain: Chain,
+    pub resume_after: u64,
+}
+
 #[derive(
     BorshDeserialize,
     BorshSerialize,
