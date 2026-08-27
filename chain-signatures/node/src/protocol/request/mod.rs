@@ -20,6 +20,7 @@ use mpc_utils::{
 };
 
 use cait_sith::protocol::Participant;
+use enum_map::EnumMap;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
 use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
@@ -143,8 +144,8 @@ pub struct SignatureSpawner {
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
-    /// Caps concurrent sign-task progress so requests don't flood the system's compute.
-    limiter: SignLimiter,
+    /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
+    limiters: EnumMap<Chain, SignLimiter>,
 
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -235,7 +236,7 @@ impl SignatureSpawner {
             cfg,
             is_proposer,
             round,
-            limiter: self.limiter.clone(),
+            limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
         };
 
@@ -495,7 +496,7 @@ impl SignatureSpawnerTask {
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
             mesh_state,
-            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog,
@@ -575,7 +576,7 @@ mod tests {
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state: mesh_rx,
-            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog: Backlog::new(),
@@ -739,5 +740,42 @@ mod tests {
         // may be arbitrary.
         assert_eq!(round_timeout(1024), ROUND_TIMEOUT_CEILING);
         assert_eq!(round_timeout(usize::MAX), ROUND_TIMEOUT_CEILING);
+    }
+
+    #[tokio::test]
+    async fn test_per_chain_sign_limiter_isolation() {
+        let limiters: EnumMap<Chain, SignLimiter> = EnumMap::from_fn(|_| SignLimiter::new(1));
+
+        let eth_permit = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("Ethereum permit acquisition should succeed");
+
+        // Ethereum is now at limit (1/1); second acquire should timeout
+        let eth_second = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(matches!(eth_second, Err(limiter::SignLimitError::Timeout)));
+
+        // Solana has its own independent limiter pool; should acquire immediately
+        let sol_permit = limiters[Chain::Solana]
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("Solana permit acquisition should succeed despite Ethereum being exhausted");
+
+        // Solana is now also at limit (1/1); second acquire on Solana should timeout
+        let sol_second = limiters[Chain::Solana]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(matches!(sol_second, Err(limiter::SignLimitError::Timeout)));
+
+        // Release Ethereum permit; Ethereum can acquire again while Solana is still holding its permit
+        drop(eth_permit);
+        let eth_third = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(eth_third.is_ok());
+
+        drop(sol_permit);
     }
 }
