@@ -1180,10 +1180,6 @@ impl MpcContract {
         &self.latest_checkpoints
     }
 
-    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
-        &mut self.latest_checkpoints
-    }
-
     fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
         self.latest_checkpoints.insert(chain, checkpoint);
     }
