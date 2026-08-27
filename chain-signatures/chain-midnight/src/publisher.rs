@@ -11,7 +11,7 @@ use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
-use crate::intent_gen::{is_ambiguous_submit, IntentGen, IntentRequest, WirePoint, WireSignature};
+use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
 const RESPOND: &str = "respond";
@@ -166,30 +166,12 @@ impl ChainPublisher for MidnightPublisher {
         };
         let bytes = self.client.build(&request).await?;
 
-        let receipt = self
-            .client
-            .submit(&bytes)
-            .await
-            .with_context(|| {
-                format!(
-                    "submitting the midnight respond intent built over the chain at {}",
-                    chain.at_hash
-                )
-            })
-            .inspect_err(|error| {
-                // The transaction may land even when its answer is lost. The backlog
-                // retries the publish, which can post a duplicate response.
-                if is_ambiguous_submit(error) {
-                    tracing::warn!(
-                        ?sign_id,
-                        circuit = call.circuit.wire_name(),
-                        request_id = %hex::encode(call.request_id),
-                        at_hash = %chain.at_hash,
-                        elapsed = ?action.timestamp.elapsed(),
-                        "midnight: submit answer was lost; a retry may repost"
-                    );
-                }
-            })?;
+        let receipt = self.client.submit(&bytes).await.with_context(|| {
+            format!(
+                "submitting the midnight respond intent built over the chain at {}",
+                chain.at_hash
+            )
+        })?;
 
         tracing::info!(
             ?sign_id,
@@ -276,7 +258,7 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
 mod tests {
     use super::*;
 
-    use crate::intent_gen::AmbiguousSubmit;
+    use crate::intent_gen::{is_ambiguous_submit, AmbiguousSubmit};
     use std::sync::Mutex;
     use std::time::Duration;
 
