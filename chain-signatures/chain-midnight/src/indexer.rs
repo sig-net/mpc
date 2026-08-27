@@ -1103,7 +1103,7 @@ mod tests {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
-        let calls = emissions_in(&tx, &hex_32(CAPTURE_SINGLETON), true)
+        let calls = emissions_in(&tx, &hex_32(CAPTURE_SINGLETON))
             .expect("captured singleton emission decodes");
         let [call] = calls.as_slice() else {
             panic!("expected one captured singleton call, got {calls:?}");

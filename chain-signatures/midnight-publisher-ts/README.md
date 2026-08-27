@@ -20,6 +20,12 @@ Operations are:
 
 The process memoizes one wallet facade, including while it is starting. A single submit gate protects that facade and its DUST UTXO; submissions are never processed concurrently.
 
+## Supported event transactions
+
+The MPC reader accepts events only from finalized `TxApplied` transactions and decodes only the guaranteed transcripts of calls to the configured Signet singleton. Unsupported statuses and singleton calls with a fallible transcript are logged and skipped so they cannot hold block processing.
+
+Integrations must enforce this before submission using the ledger builder's `{ tag: "guaranteedOnly" }` segment specifier, or by rejecting a constructed call when `partitionedTranscript[1]` is present. `guaranteedOnly` validates the partitioning result and fails construction when the call is too expensive; it does not move fallible work into the guaranteed phase.
+
 ## Deadlines and retry policy
 
 Each submit gets one absolute 360-second budget. Wallet startup, DUST readiness, base-transaction proof, DUST balancing, balancing-transaction proof/finalization, and submission all consume that same deadline rather than starting phase-specific clocks. Readiness and base proof still own cancellation at their respective boundaries; wallet-critical work does not.

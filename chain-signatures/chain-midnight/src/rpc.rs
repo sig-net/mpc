@@ -20,7 +20,7 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
-use crate::emissions::{emissions_in, DecodedTransaction};
+use crate::emissions::{emissions_in, DecodedTransaction, UnsupportedFallibleCall};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
@@ -127,25 +127,6 @@ struct TxApplied(TxAppliedDetails);
 impl subxt::events::StaticEvent for TxApplied {
     const PALLET: &'static str = "Midnight";
     const EVENT: &'static str = "TxApplied";
-}
-
-#[derive(DecodeAsType)]
-#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
-struct TxPartialSuccess(TxAppliedDetails);
-
-impl subxt::events::StaticEvent for TxPartialSuccess {
-    const PALLET: &'static str = "Midnight";
-    const EVENT: &'static str = "TxPartialSuccess";
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SegmentStatus {
-    Applied,
-    GuaranteedOnly,
-}
-
-const fn fallible_allowed(status: SegmentStatus) -> bool {
-    matches!(status, SegmentStatus::Applied)
 }
 
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
@@ -341,32 +322,16 @@ impl MidnightRpc {
                     anyhow::Error::new(err).context("TxApplied did not match metadata"),
                 )
             })?;
-            let (status, _ledger_tx_hash) = if let Some(TxApplied(details)) = applied {
-                (SegmentStatus::Applied, details.tx_hash)
-            } else {
-                match events.find_first::<TxPartialSuccess>().map_err(|err| {
-                    BlockHold::new(
-                        "emission-schema-hold",
-                        height,
-                        anyhow::Error::new(err).context("TxPartialSuccess did not match metadata"),
-                    )
-                })? {
-                    Some(TxPartialSuccess(details)) => {
-                        (SegmentStatus::GuaranteedOnly, details.tx_hash)
-                    }
-                    None => {
-                        return Err(BlockHold::new(
-                            "singleton-tx-without-status",
-                            height,
-                            anyhow::anyhow!(
-                                "candidate extrinsic {} has no Midnight status event",
-                                found.details.index()
-                            ),
-                        )
-                        .into());
-                    }
-                }
+            let Some(TxApplied(details)) = applied else {
+                tracing::warn!(
+                    reason = "unsupported-midnight-status",
+                    height,
+                    extrinsic_index = found.details.index(),
+                    "midnight transaction skipped: only TxApplied is supported"
+                );
+                continue;
             };
+            let _ledger_tx_hash = details.tx_hash;
 
             let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
                 &mut &found.value.midnight_tx[..],
@@ -381,16 +346,30 @@ impl MidnightRpc {
                     )),
                 )
             })?;
-            let calls = emissions_in(&tx, singleton, fallible_allowed(status)).map_err(|err| {
-                BlockHold::new(
-                    "emission-schema-hold",
-                    height,
-                    err.context(format!(
-                        "candidate extrinsic {} singleton emissions",
-                        found.details.index()
-                    )),
-                )
-            })?;
+            let calls = match emissions_in(&tx, singleton) {
+                Ok(calls) => calls,
+                Err(err) => {
+                    if let Some(unsupported) = err.downcast_ref::<UnsupportedFallibleCall>() {
+                        tracing::warn!(
+                            reason = "unsupported-fallible-singleton-call",
+                            height,
+                            extrinsic_index = found.details.index(),
+                            call_index = unsupported.call_index,
+                            "midnight transaction skipped: fallible singleton calls are unsupported"
+                        );
+                        continue;
+                    }
+                    return Err(BlockHold::new(
+                        "emission-schema-hold",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} singleton emissions",
+                            found.details.index()
+                        )),
+                    )
+                    .into());
+                }
+            };
             decoded_candidates.push(CandidateTransactionEmissions {
                 extrinsic_index: found.details.index(),
                 calls,
@@ -788,16 +767,6 @@ mod tests {
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    #[test]
-    fn applied_status_scans_fallible_transcripts() {
-        assert!(fallible_allowed(SegmentStatus::Applied));
-    }
-
-    #[test]
-    fn partial_success_scans_only_guaranteed_transcripts() {
-        assert!(!fallible_allowed(SegmentStatus::GuaranteedOnly));
-    }
-
     #[derive(DecodeAsType)]
     #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
     struct CaptureCallDetails {
@@ -940,15 +909,10 @@ mod tests {
             let applied = events
                 .find_first::<TxApplied>()
                 .expect("decode TxApplied from live metadata");
-            let partial = events
-                .find_first::<TxPartialSuccess>()
-                .expect("decode TxPartialSuccess from live metadata");
-            let (status, status_hash) = match (applied, partial) {
-                (Some(TxApplied(details)), None) => ("TxApplied", details.tx_hash),
-                (None, Some(TxPartialSuccess(details))) => ("TxPartialSuccess", details.tx_hash),
-                (None, None) => panic!("capture candidate has no Midnight status event"),
-                (Some(_), Some(_)) => panic!("capture candidate has both Midnight status events"),
-            };
+            let TxApplied(details) =
+                applied.expect("capture candidate must have a supported TxApplied status");
+            let status = "TxApplied";
+            let status_hash = details.tx_hash;
             let contract_calls = events
                 .find::<CaptureContractCall>()
                 .map(|call| {

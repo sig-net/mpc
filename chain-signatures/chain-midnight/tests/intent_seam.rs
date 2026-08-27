@@ -120,7 +120,7 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_respond_intent() {
     let call = sole_call(&bytes);
     assert_eq!(call.entry_point.0.as_slice(), b"respond");
     assert_eq!(
-        emissions_of_call(&call, true).expect("the singleton emission decodes"),
+        emissions_of_call(&call).expect("the singleton emission decodes"),
         vec![Emission {
             kind: EmissionKind::SignatureResponded,
             payload: expected_response_payload(),
@@ -147,7 +147,7 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
     let call = sole_call(&bytes);
     assert_eq!(call.entry_point.0.as_slice(), b"respondBidirectional");
     assert_eq!(
-        emissions_of_call(&call, true).expect("the singleton emission decodes"),
+        emissions_of_call(&call).expect("the singleton emission decodes"),
         vec![Emission {
             kind: EmissionKind::RespondBidirectional,
             payload: expected_response_payload(),

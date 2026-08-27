@@ -54,17 +54,32 @@ pub struct SingletonCallEmissions {
     pub emissions: Vec<Emission>,
 }
 
+#[derive(Debug)]
+pub(crate) struct UnsupportedFallibleCall {
+    pub call_index: u32,
+}
+
+impl std::fmt::Display for UnsupportedFallibleCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "singleton call {} contains a fallible transcript",
+            self.call_index
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedFallibleCall {}
+
 fn log_items<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
-    fallible_allowed: bool,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
     let context = QueryContext::new(
         ChargedState::new(StateValue::Array(Array::new())),
         call.address,
     );
-    let mut items = Vec::new();
-
-    let after_guaranteed = match call.guaranteed_transcript.as_deref() {
+    // TODO: Consider decoding fallible transcripts when indexing supports them.
+    match call.guaranteed_transcript.as_deref() {
         Some(transcript) => {
             let result = context
                 .query::<ResultModeVerify>(
@@ -73,26 +88,10 @@ fn log_items<P: ProofKind<DefaultDB>>(
                     &INITIAL_COST_MODEL,
                 )
                 .context("singleton guaranteed transcript rejected by the ledger VM")?;
-            items.extend(result.events);
-            result.context
+            Ok(result.events)
         }
-        None => context,
-    };
-
-    if fallible_allowed {
-        if let Some(transcript) = call.fallible_transcript.as_deref() {
-            let result = after_guaranteed
-                .query::<ResultModeVerify>(
-                    &Vec::from(&transcript.program),
-                    None,
-                    &INITIAL_COST_MODEL,
-                )
-                .context("singleton fallible transcript rejected by the ledger VM")?;
-            items.extend(result.events);
-        }
+        None => Ok(Vec::new()),
     }
-
-    Ok(items)
 }
 
 pub fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
@@ -151,9 +150,12 @@ pub fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Res
 
 pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
-    fallible_allowed: bool,
 ) -> anyhow::Result<Vec<Emission>> {
-    log_items(call, fallible_allowed)?
+    anyhow::ensure!(
+        call.fallible_transcript.is_none(),
+        "singleton call contains a fallible transcript"
+    );
+    log_items(call)?
         .iter()
         .map(emission_from_log_item)
         .collect()
@@ -162,7 +164,6 @@ pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
 pub fn emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
-    fallible_allowed: bool,
 ) -> anyhow::Result<Vec<SingletonCallEmissions>> {
     tx.calls()
         .enumerate()
@@ -170,9 +171,12 @@ pub fn emissions_in(
         .map(|(call_index, (_, call))| {
             let call_index = u32::try_from(call_index)
                 .context("transaction contains more calls than a u32 locator can represent")?;
+            if call.fallible_transcript.is_some() {
+                return Err(anyhow::Error::new(UnsupportedFallibleCall { call_index }));
+            }
             Ok(SingletonCallEmissions {
                 call_index,
-                emissions: emissions_of_call(&call, fallible_allowed)?,
+                emissions: emissions_of_call(&call)?,
             })
         })
         .collect()
@@ -382,7 +386,7 @@ mod tests {
         ] {
             let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
                 .unwrap_or_else(|err| panic!("{name}: captured transaction must decode: {err}"));
-            let calls = emissions_in(&tx, &singleton, true)
+            let calls = emissions_in(&tx, &singleton)
                 .unwrap_or_else(|err| panic!("{name}: singleton emissions must decode: {err:#}"));
             let [call] = calls.as_slice() else {
                 panic!("{name}: expected exactly one singleton call, got {calls:?}");
@@ -404,33 +408,19 @@ mod tests {
     }
 
     #[test]
-    fn applies_the_fallible_segment_rule_and_preserves_order() {
+    fn rejects_fallible_singleton_calls() {
         let tx = transaction(vec![call(
             SINGLETON,
             Some(emit_ops(padded_name(b"SignBidirectionalEvent"), GUARANTEED)),
             Some(emit_ops(padded_name(b"SignatureRespondedEvent"), FALLIBLE)),
         )]);
 
-        assert_eq!(
-            emissions_in(&tx, &SINGLETON, true).unwrap()[0].emissions,
-            vec![
-                Emission {
-                    kind: EmissionKind::SignBidirectional,
-                    payload: GUARANTEED,
-                },
-                Emission {
-                    kind: EmissionKind::SignatureResponded,
-                    payload: FALLIBLE,
-                },
-            ]
-        );
-        assert_eq!(
-            emissions_in(&tx, &SINGLETON, false).unwrap()[0].emissions,
-            vec![Emission {
-                kind: EmissionKind::SignBidirectional,
-                payload: GUARANTEED,
-            }]
-        );
+        let err = emissions_in(&tx, &SINGLETON)
+            .expect_err("a fallible singleton call is outside the supported integration contract");
+        let unsupported = err
+            .downcast_ref::<UnsupportedFallibleCall>()
+            .unwrap_or_else(|| panic!("unexpected rejection: {err:#}"));
+        assert_eq!(unsupported.call_index, 0);
     }
 
     #[test]
@@ -476,7 +466,7 @@ mod tests {
             ),
         ] {
             let tx = transaction(vec![call(SINGLETON, Some(logging(logged_value)), None)]);
-            let error = emissions_in(&tx, &SINGLETON, true).unwrap_err();
+            let error = emissions_in(&tx, &SINGLETON).unwrap_err();
             assert!(
                 error.to_string().contains("emission-schema"),
                 "{case}: {error:#}"
@@ -488,7 +478,7 @@ mod tests {
     fn the_vm_rejects_log_without_a_pushed_value() {
         let tx = transaction(vec![call(SINGLETON, Some(vec![Op::Log]), None)]);
 
-        assert!(emissions_in(&tx, &SINGLETON, true).is_err());
+        assert!(emissions_in(&tx, &SINGLETON).is_err());
     }
 
     #[test]
@@ -510,7 +500,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            emissions_in(&tx, &SINGLETON, true).unwrap(),
+            emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 1,
                 emissions: vec![Emission {
@@ -526,7 +516,7 @@ mod tests {
         let tx = transaction(vec![call(SINGLETON, None, None)]);
 
         assert_eq!(
-            emissions_in(&tx, &SINGLETON, true).unwrap(),
+            emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 0,
                 emissions: Vec::new(),
