@@ -241,9 +241,11 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     }
 
     // Collect events from the first client until it has seen both requests
-    // (they surface only after finalization; heartbeats stream meanwhile).
+    // (they surface only after finalization; dense Block markers stream
+    // meanwhile).
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
+    let mut prev_block: Option<u64> = None;
     let deadline = Instant::now() + FINALIZED_EVENT_TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(Some(event)) = timeout(Duration::from_secs(1), indexer1.next_event()).await {
@@ -254,7 +256,17 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
                         break;
                     }
                 }
-                ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
+                ChainEvent::Block(block) => {
+                    if let Some(prev) = prev_block {
+                        assert_eq!(
+                            block,
+                            prev + 1,
+                            "Block sequence must be gapless over a live run"
+                        );
+                    }
+                    prev_block = Some(block);
+                    last_block_client1 = last_block_client1.max(block);
+                }
                 _ => {}
             }
         }
