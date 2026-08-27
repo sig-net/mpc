@@ -35,9 +35,6 @@ struct PollState {
     last_observed_slot: Option<u64>,
     /// When `last_observed_slot` last advanced.
     slot_last_advanced_at: Instant,
-    /// Highest slot fully drained so far; the heartbeat never emits below
-    /// this, so a lagging replica's anchor can never regress the watermark.
-    heartbeat_floor: u64,
     /// Whether [`ChainEvent::CatchupCompleted`] has been emitted
     caught_up: bool,
 }
@@ -56,16 +53,15 @@ impl PollState {
             next_start,
             last_observed_slot: None,
             slot_last_advanced_at: Instant::now(),
-            heartbeat_floor: 0,
             caught_up: false,
         }
     }
 
     /// Slot-stall watchdog: only a strictly greater anchor counts as progress
     /// Warns at half the budget, bails at the full budget so the supervisor
-    /// restarts and surfaces the frozen node (The heartbeat keeps `Block`
-    /// events flowing even on a frozen node, so the supervisor cannot detect
-    /// this on its own)
+    /// restarts and surfaces the frozen node (dense markers cover only
+    /// drained slots, so a frozen anchor stops `Block` flow; this trips
+    /// sooner than the supervisor's block-event timeout)
     fn observe_anchor(self, anchor: u64, timeout: Duration) -> anyhow::Result<Self> {
         // Only a strictly greater anchor counts as progress
         match self.last_observed_slot {
@@ -101,19 +97,13 @@ impl PollState {
         }
     }
 
-    /// Update the heartbeat floor and next start slot after a tick has drained to the anchor.
-    fn drained(self, anchor: u64) -> (Self, Option<u64>) {
-        // The heartbeat is the highest slot that has been fully drained and emitted as a `Block` event.
-        let heartbeat = anchor.saturating_sub(1).max(self.heartbeat_floor);
-        (
-            Self {
-                next_start: anchor,
-                heartbeat_floor: heartbeat,
-                caught_up: true,
-                ..self
-            },
-            (heartbeat > 0).then_some(heartbeat),
-        )
+    /// Advance past a drained tick. The next tick starts at the anchor, and `CatchupCompleted` is emitted.
+    fn drained(self, anchor: u64) -> Self {
+        Self {
+            next_start: self.next_start.max(anchor),
+            caught_up: true,
+            ..self
+        }
     }
 }
 
@@ -403,6 +393,68 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         .await;
     }
 
+    /// Drain `[start_slot, anchor)`: process active slots in order and emit a
+    /// `Block` marker for every inactive slot, so each drained slot produces
+    /// exactly one marker, in order.
+    async fn drain_range(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        anchor: u64,
+        start_slot: u64,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let mut catchup_iter = self.catchup_blocks(anchor, start_slot).await?;
+        let mut next_marker = start_slot;
+        loop {
+            let item = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                item = catchup_iter.next() => item,
+            };
+            // Stream end is a landmark at the anchor: it flushes the
+            // trailing inactive slots, then exits the drain.
+            let (landmark, block) = match item {
+                Some(res) => {
+                    // Propagate RPC page errors so supervisor restarts cleanly
+                    let (slot, block) = res?;
+                    (slot, Some(block))
+                }
+                None => (anchor, None),
+            };
+            self.emit_block_markers_for_drained_inactive_slots(
+                events_tx,
+                next_marker..landmark,
+                cancel,
+            )
+            .await?;
+            let Some(block) = block else { break };
+            self.process_catchup_retrying(events_tx, landmark, &block, cancel)
+                .await;
+            next_marker = landmark + 1;
+        }
+        Ok(())
+    }
+
+    /// Emit a `Block` marker for each drained slot that had no
+    /// program activity (active slots emit their own marker via
+    /// `process_block`).
+    async fn emit_block_markers_for_drained_inactive_slots(
+        &self,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        slots: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        for slot in slots {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                res = events_tx.send(ChainEvent::Block(slot)) => {
+                    res.context("failed to send solana block marker event")?;
+                    self.telemetry.block_indexed(slot);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn process_block(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
@@ -471,29 +523,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             state = state.observe_anchor(anchor, self.config.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
-            let mut catchup_iter = self.catchup_blocks(anchor, state.next_start).await?;
-            loop {
-                let item = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    item = catchup_iter.next() => item,
-                };
-                let Some(res) = item else { break };
-                // Propagate RPC page errors so supervisor restarts cleanly
-                let (slot, block) = res?;
-                self.process_catchup_retrying(&events_tx, slot, &block, &cancel)
-                    .await;
-            }
+            self.drain_range(&events_tx, anchor, state.next_start, &cancel)
+                .await?;
 
             let was_caught_up = state.caught_up;
-            let (next_state, heartbeat) = state.drained(anchor);
-            state = next_state;
-
-            if let Some(height) = heartbeat {
-                events_tx
-                    .send(ChainEvent::Block(height))
-                    .await
-                    .context("failed to send heartbeat block event")?;
-            }
+            state = state.drained(anchor);
 
             if !was_caught_up {
                 tracing::info!(
