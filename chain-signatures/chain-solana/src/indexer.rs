@@ -1581,6 +1581,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_range_emits_gapless_markers_for_inactive_slots() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity only at slots 11 and 13; slot 9 (< start 10)
+        // terminates pagination.
+        let entries: Vec<_> = [13, 11, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let blocks = serde_json::json!([block_response(0, 11), block_response(1, 13)]).to_string();
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        indexer
+            .drain_range(&events_tx, 15, 10, &cancel)
+            .await
+            .unwrap();
+
+        // Every slot in [10, 15) produces exactly one Block marker, in order:
+        // active slots (11, 13) via process_block, inactive slots via markers.
+        for expected in 10..15 {
+            let event = events_rx.recv().await.unwrap();
+            assert!(
+                matches!(event, ChainEvent::Block(slot) if slot == expected),
+                "expected Block({expected}), got {event:?}"
+            );
+        }
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
         // interrupt the retry loop without waiting for it.
