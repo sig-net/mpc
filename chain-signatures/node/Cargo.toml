@@ -13,12 +13,9 @@ axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
 dashmap = "6.1"
-google-datastore1 = "=5.0.4"
-google-secretmanager1 = "5"
 highway = "1.1.0"
 hkdf = "0.12.4"
 http = "1.1.0"
-hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
 lru = "0.13.0"
 mime = "0.3.17"
@@ -53,8 +50,8 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
-hyper.workspace = true
 k256.workspace = true
+mpc-secrets.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 semver.workspace = true

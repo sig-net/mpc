@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
-use crate::gcp::GcpService;
 use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -42,6 +41,7 @@ use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+use mpc_secrets::GcpService;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -689,7 +689,12 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(account_id, storage_options).await?;
+        let gcp_service = GcpService::init(
+            account_id.as_str(),
+            &storage_options.env,
+            &storage_options.gcp_project_id,
+        )
+        .await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
         let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;

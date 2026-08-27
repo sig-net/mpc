@@ -1,11 +1,11 @@
 use anyhow::Context;
-use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
     network::Sandbox,
     types::{KeyType, SecretKey},
     Account, AccountId, Worker,
 };
 use rand::Rng;
+use reqwest::StatusCode;
 use std::collections::HashSet;
 use std::sync::{Mutex, Once};
 use tracing_subscriber::EnvFilter;
@@ -180,21 +180,8 @@ pub async fn vote_threshold(
     Ok(())
 }
 
-pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
-where
-    Uri: TryFrom<U>,
-    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
-{
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::empty())
-        .context("failed to build the request")?;
-
-    let client = Client::new();
-    let response = client
-        .request(req)
+pub async fn get<U: reqwest::IntoUrl>(url: U) -> anyhow::Result<reqwest::StatusCode> {
+    let response = reqwest::get(url)
         .await
         .context("failed to send the request")?;
     Ok(response.status())

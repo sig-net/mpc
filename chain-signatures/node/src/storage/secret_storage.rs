@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::gcp::{GcpService, SecretResult};
+use crate::protocol::state::PersistentNodeData;
 use crate::storage::Options;
-use crate::{gcp::SecretManagerService, protocol::state::PersistentNodeData};
 use async_trait::async_trait;
+use mpc_secrets::{GcpService, SecretManagerService, SecretResult};
 
 use near_account_id::AccountId;
 
@@ -349,7 +349,9 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
         let account_id = make_test_account_id();
-        let gcp_service = GcpService::init(&account_id, &opts).await.unwrap();
+        let gcp_service = GcpService::init(account_id.as_str(), &opts.env, &opts.gcp_project_id)
+            .await
+            .unwrap();
 
         let storage = init(Some(&gcp_service), &opts, &account_id);
 

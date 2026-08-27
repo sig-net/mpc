@@ -9,7 +9,6 @@ pub(crate) const CHECKPOINT_STORAGE_VERSION: &str = "v13";
 pub mod backlog;
 pub mod cli;
 pub mod config;
-pub mod gcp;
 pub mod indexer_hydration;
 pub mod logs;
 pub mod mesh;

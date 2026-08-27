@@ -4,9 +4,8 @@ use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
 use crate::web::{CheckpointResponse, StateView, StatusResponse};
 
-use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
-use reqwest::IntoUrl;
+use reqwest::{IntoUrl, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;

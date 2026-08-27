@@ -25,11 +25,11 @@ use mpc_chain_ethereum::EthConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
-use mpc_node::gcp::GcpService;
 use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::web::CheckpointResponse;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
+use mpc_secrets::GcpService;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -263,14 +263,24 @@ impl Nodes {
             Nodes::Local { nodes, .. } => {
                 for node in nodes {
                     gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
+                        GcpService::init(
+                            node.account.id().as_str(),
+                            &self.ctx().storage_options.env,
+                            &self.ctx().storage_options.gcp_project_id,
+                        )
+                        .await?,
                     );
                 }
             }
             Nodes::Docker { nodes, .. } => {
                 for node in nodes {
                     gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
+                        GcpService::init(
+                            node.account.id().as_str(),
+                            &self.ctx().storage_options.env,
+                            &self.ctx().storage_options.gcp_project_id,
+                        )
+                        .await?,
                     );
                 }
             }

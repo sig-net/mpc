@@ -16,6 +16,7 @@ members = [
     "chain-signatures/chain-near",
     "chain-signatures/chain-midnight",
     "chain-signatures/utils",
+    "chain-signatures/secrets",
 ]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
@@ -27,6 +28,8 @@ version = "1.16.8"
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 async-trait = "0.1"
+base64 = "0.22.1"
+gcp_auth = "0.12.7"
 backon = "0.4"
 borsh = { version = "1.6.1", features = ["derive"] }
 enum-map = "2.7.3"
@@ -36,7 +39,6 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hkdf = "0.12.4"
-hyper = { version = "0.14", features = ["full"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
@@ -87,7 +89,6 @@ midnight-base-crypto = "1.1.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
-
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-chain-integration-core = { path = "./chain-signatures/chain-integration-core" }
@@ -98,7 +99,9 @@ mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-utils = { path = "./chain-signatures/utils" }
+mpc-secrets = { path = "./chain-signatures/secrets" }
 mpc-node = { path = "./chain-signatures/node" }
+
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
 signet-primitives = { path = "./signet-primitives" }

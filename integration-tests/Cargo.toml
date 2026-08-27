@@ -21,7 +21,6 @@ futures = "0.3"
 futures-util.workspace = true
 generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
-hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -79,6 +78,7 @@ mpc-node = { path = "../chain-signatures/node", default-features = false, featur
     "debug-page",
 ] }
 mpc-primitives.workspace = true
+mpc-secrets.workspace = true
 mpc-utils.workspace = true
 
 [dev-dependencies]
