@@ -35,7 +35,8 @@ struct PollState {
     last_observed_slot: Option<u64>,
     /// When `last_observed_slot` last advanced.
     slot_last_advanced_at: Instant,
-    /// Lowest slot that has been fully drained and emitted as a heartbeat.
+    /// Highest slot fully drained so far; the heartbeat never emits below
+    /// this, so a lagging replica's anchor can never regress the watermark.
     heartbeat_floor: u64,
     /// Whether [`ChainEvent::CatchupCompleted`] has been emitted
     caught_up: bool,
