@@ -100,8 +100,7 @@ states after it get no time at all: the proposer's permit wait and presignature
 fetch and the deliberator's wait for `PROPOSE` are each given the time left in the round, which
 is now zero, so they fail on the first poll and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
-round, with a different proposer. Starting the clock once `t` peers are
-active, rather than at the round bump, would remove that cost.
+round, with a different proposer.
 
 ## 3. Inside Posit
 
@@ -171,8 +170,6 @@ the round is not bumped. A deliberator that lacks the presignature sends
 `REJECT MissingArtifact` and resumes waiting for a `PROPOSE` that a correct proposer
 will not resend, so it sits out the rest of the round and leaves via the timeout.
 
-Shrinking the holder set on `REJECT MissingArtifact` is proposal 2 in §10.
-
 ### Who each message goes to
 
 None of the four messages is a cluster-wide broadcast.
@@ -190,30 +187,21 @@ where it may be elected proposer and reserve a *second* presignature for a
 request that is already being signed. That is the waste the `pause_proposing_until`
 flag exists to limit after the fact.
 
-Sending `PROPOSE` to every member would help, cheaply: the tally is keyed
-on `SinglePositCounter::participants` and `process_action` drops senders outside
-that set, so extra replies cannot move `enough_rejects` or `meets_totality`. It
-would be a notification, not a vote. See also open questions on "active" checks below.
+The tally is keyed on `SinglePositCounter::participants` and `process_action`
+drops senders outside that set, so a reply from a member the proposer did not
+address cannot move `enough_rejects` or `meets_totality`. A member that holds
+the presignature but was absent from the active set at reservation time is in
+that position: it would `ACCEPT`, go uncounted, and wait for a `START` that
+never comes.
 
-It only half-solves the problem, though. A member holding the presignature but
-absent from the active set at reservation time would `ACCEPT`, go uncounted, and
-wait for a `START` that never comes. And the excluded member still cannot tell
-"round `r` succeeded without me" from "round `r` still running", which is what it
-needs. The narrow addressing is a symptom; the missing round-outcome signal is
-the cause.
-
-What the excluded member would do with that signal is stop. The cost of not
-stopping is three things, not one. It burns the round for every peer still
-waiting; in the rounds where it is elected proposer it takes one of the
-`MAX_CONCURRENT_PROPOSERS` (4) permits, which is proposer-only, so a
-deliberator holds none; and in those same rounds it reserves a presignature
-that it returns to the pool on timeout. So the permit is held intermittently
-rather than for the whole wait, and the steady cost is the wasted rounds and
-the repeated reservations.
-
-Open question: whether to send every message to every member, rejects included.
-Doing so needs the one-slot-per-sender buffers (§5) revisited first, since more
-messages per sender per round is exactly what they cannot represent.
+No message carries the outcome of a round, so an excluded member cannot tell
+"round `r` succeeded without me" from "round `r` still running". It keeps
+rotating: it burns the round for every peer still waiting, and in the rounds
+where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (4)
+permits, which is proposer-only, so a deliberator holds none, and reserves a
+presignature that it returns to the pool on timeout. The permit is therefore
+held intermittently rather than for the whole wait, and the steady cost is the
+wasted rounds and the repeated reservations.
 
 ## 4. Inside Generating
 
@@ -247,10 +235,7 @@ marked for republish, and the task still returns `Ok`: a reconstruction failure
 is silently recorded as success.
 
 Only the proposer submits, though every node reconstructs the signature and
-marks the backlog. That asymmetry has no failover: if the proposer goes offline
-before its respond transaction lands, no other node takes over, even though
-each of them holds the complete signature. See
-[#1063](https://github.com/sig-net/mpc/issues/1063).
+marks the backlog.
 
 The round timeout does not reach here, but generation is not untimed: every
 `recv` in the generator is wrapped in a deadline measured from when the
@@ -374,264 +359,18 @@ because the round timeout ran out.
 4. **One slot per sender assumes an ordering which is not guaranteed.**
    Buffers are overwritten on arrival, so the later of two messages for one
    round wins and the other is dropped silently. Causality rules this out
-   while a node stays up; the remaining exposure is a message redelivered by
-   the outbox retry, which §11 question 7 works through. Revisit before
-   sending more messages per sender per round (§3).
+   while a node stays up; the remaining exposure is redelivery, since the
+   outbox retries a whole encrypted partition whenever `client.msg` errors,
+   a non-2xx response counts as an error even when the peer already ingested
+   the batch, and nothing dedupes on receipt.
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
-   spawner and indexer, not in this machine — and publishing has no failover,
-   so a proposer that dies here stalls the request
-   ([#1063](https://github.com/sig-net/mpc/issues/1063)).
+   spawner and indexer, not in this machine.
 6. **`pause_proposing_until` is a hidden mode.** For up to `generation_timeout`
    a node declines proposership and takes the deliberator edge out of
    `Waiting for participants`. Since election is by round, nobody else proposes
    that round either, so the round is spent waiting for a `PROPOSE` that will
-   not come. Could be improved by more information being sent around.
+   not come.
 7. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
-
-
-## 9. What the logs show
-
-Read the numbers below with three caveats. Devnet runs the build this document
-describes; **testnet runs an older one**, whose posit code lives in a file that
-no longer exists here and whose log lines are worded differently. A testnet
-number therefore describes a different implementation, and a query written for
-one build silently returns zero against the other. Devnet has 12 nodes;
-testnet has 10 pods, 8 participants and a threshold of 5. Counts marked capped
-hit a query limit and are lower bounds.
-
-Sources: a 48h sweep over 2026-08-17 to 2026-08-19, a full day on devnet
-2026-08-20, and spot checks on 2026-08-26. Every count is summed across all
-pods in the cluster over the stated window, not per node.
-
-**Rounds churn on both networks.** Devnet: ~100k reorganizes in 48h, and a
-midday hour with 3815 of them across only 79 distinct sign_ids. Testnet: 4296
-in a single 10-minute window. ~83% of devnet's reasons, and the largest share
-of testnet's, are "deliberator timeout waiting for Propose", rounds ending
-because no PROPOSE arrived. An earlier draft reported zero on testnet; that
-was a query matching a line only the newer build emits.
-
-_Testnet_:
-On testnet it is sent and then thrown away on arrival: sign posit messages are handed to
-a bounded inbox through a lossy send whose result is ignored, so a full inbox
-drops the message and logs a warning. Testnet drops 737 an hour. The
-surrounding numbers agree, since proposers obtain a presignature 476 times an
-hour and return it to the pool on timeout 466 times an hour, against 24
-presignatures generated: proposers are working and deliberators are not
-hearing them.
-
-_Devnet_: On devnet nothing is dropped across six hours, yet the churn is
-heavy. There the PROPOSE is never sent in the first place. Election picks the
-proposer from the full membership and never asks whether that node is actually
-working on the request, and often it is not because it has completed the
-request already, but only participating nodes are informed.
-Scraped from all 12 pods on 2026-08-26, every node reported the same
-19-entry Ethereum backlog, while their running sign-task counts were
-1, 9, 7, 1, 5, 14, 3, 5, 19, 7, 4 and 10.
-The backlog is identical everywhere because it comes from the chain,
-but a task ends as soon as that node finishes its own part, while the backlog
-entry survives until the respond event is indexed.
-Until then the remaining nodes keep rotating rounds against nodes that will never propose.
-
-**The presignature pipeline is healthy on both.** Generation starts and
-completions run 1:1 (testnet 24:24 in an hour; devnet 7470 started against
-7008 completed in a day, with 3 timeouts). `MissingArtifact` on the sign path
-is bursty rather than steady: 298 across the 48h window, concentrated in a
-Redis master replacement, and 0 over a recent 6h window. Steady-state churn is
-not pool starvation.
-
-**Round correction traffic is small.** On devnet, across 179 `(sign_id,
-round)` pairs, pods enter the same round within ~200 ms, and against ~3250
-rotations an hour there are 1153 StaleRound rejects (median gap 3) and 4919
-future-round buffers (median gap 1).
-
-**Three things an earlier draft called zero are not.** Testnet logs "received
-Propose from non-proposer" (8 in 3h), "proposer timeout waiting for
-presignature" (~9 an hour) and "Got unexpected posit message while waiting for
-propose" (3 in 3h). Each had been measured on devnet alone, or with a query
-that could not match testnet's wording.
-
-**Duplicate deliveries are real (§8.4).** ~20k ignored duplicate ACCEPTs on
-devnet, episodic, half from one node, in the presignature posit layer. They
-are harmless in themselves, since the tallies are sets, but they show the
-channel is not exactly-once.
-
-**The delayed watcher** fired for ~3.1k distinct requests on devnet. The
-testnet figure is a lower bound and is per node, since each node logs the same
-delayed request.
-
-## 10. Improvement proposals
-
-In recommended order of attack. Requests never expire by design, so the
-rotation has to be ended by information, not time.
-
-1. **Answer posits for completed requests.** `dead_ids` silently drops them
-   today; replying REJECT Completed lets a straggler end its task on the next
-   message it sends. To be Byzantine fault tolerant, f+1 such rejects should
-   be seen before moving on. One new reject reason, no new message type. It is
-   the minimal form of the round-outcome signal (§3). It covers the subset of
-   "no proposer" where the elected node already completed and retired the
-   request. Three preconditions, none of them satisfied today:
-   - `dead_ids` cannot be the trigger as it stands. `retire_task` writes it
-     on four paths (completion, task exit, interruption, `AbortChain`), so an
-     aborted request is indistinguishable from a finished one. Replying
-     Completed for an abort would stop peers on a request nobody has signed.
-     The retire reason has to be carried into the entry.
-   - Local completion is not publication. `Complete(Ok)` fires after
-     `rpc.publish` and before any on-chain confirmation (§8.5), and publishing
-     has no failover ([#1063](https://github.com/sig-net/mpc/issues/1063)).
-     If the publish then fails, every peer that stopped on this signal is
-     unable to rejoin and generation is left with fewer participants than
-     before. Failover plausibly has to land first.
-   - The stop has to be revocable. A node can finish generation, send
-     Completed, and then regress on a checkpoint divergence; `respond()` is
-     never observed, so it must generate again, but its peers are already
-     holding f+1 Completed and will not join. `add_request` clears the local
-     tag on re-admission, which handles the node itself and not its peers, so
-     the peer-side stop needs its own way back.
-2. **Prune the pool.** Record `MissingArtifact` in the holder set. A `REJECT
-   MissingArtifact` is a peer stating it does not hold that share. Feed it to
-   `remove_holder_and_prune`, which sync already uses, so the holder set in
-   Redis reflects it and later reservations skip that peer. Do not remove
-   holders for active-set absence: that is transient, and deleting on it would
-   discard usable presignatures during a network blip. Pruning stays keyed on
-   the holder count falling below `t`, never on liveness. Ranked here for
-   recovery value after storage incidents rather than for steady-state churn,
-   which the sign-path reject counts above do not support.
-3. **SKIP.** A proposer that cannot propose (no presignature, no permit,
-   paused) says so; receivers end round `r` at once instead of timing out on
-   silence. Silent rounds dominate the churn. One class of them is now
-   accounted for, a proposer that already completed and retired the request,
-   which 1 covers; SKIP covers the rest and sharpens the diagnosis, since a
-   round that stays silent after SKIP has an absent proposer, not an unwilling
-   one. This should only be worked on if data shows it will help .
-
-
-## 11. Open design questions
-
-Each is a decision about what the machine should do rather than a description
-of what it does. Recorded here to be settled separately.
-
-1. **Does governance belong in this state machine?** Governance transitions
-   are rare, and carrying them as spawner state costs a branch on paths that
-   run for every request. Note that every in-flight task is already aborted
-   and rebuilt on each governance change; what survives is only the spawner's
-   cross-request state, the posit mailboxes, the retired-id record and the
-   delayed watchers, and that survival is deliberate. So the question is
-   whether that state should be discarded too. What has to hold: that nothing
-   in flight needs it, which is the same question as whether a governance
-   change may abort running signatures.
-
-   **Recommendation: keep as is.** Aborting in-flight
-   generation is forced, since the participant set and epoch define the
-   cait-sith instance, and each surviving item is separately justified: `r`
-   must survive or peers read a reset as time travel, the mailbox must survive
-   or a respawn loses messages for the round it re-enters, `dead_ids` is
-   cross-request by construction. 
-
-2. **Should `pause_proposing_until` exist?** §8.6 records it as a hidden mode.
-   It is set only when enough rejects arrive and the rejects say a quorum is
-   already generating, and cleared when the node commits to generating itself.
-   Removing it costs little per occurrence: the node reorganizes, is usually
-   not the proposer at `r+1`, and waits for a PROPOSE that the generating
-   group makes unnecessary; if it is elected again it is rejected again. The
-   objection is that those waits are silent rounds, the pattern §9 measures,
-   so removing the pause without a round-outcome signal trades a hidden mode
-   for more churn. A flat delay on entering reorganization, for any reason,
-   would keep the back-off without a per-node mode only that node knows
-   about.
-
-   **Recommendation: leave it, or delete.** `skipProposing` is true 44 times a
-   day on devnet and 3 on testnet, against roughly 90k reorganizes, and the
-   whole reject-driven branch that sets it is dormant. It explains none of the
-   churn, so the trade discussed above is not worth it.
-
-3. **Is the `active` check worth its complexity?** Reservation requires `t`
-   active holders and PROPOSE goes only to active holders, so `active` filters
-   twice before the posit asks the same question and gets a real answer. It is
-   a pure optimization: it saves calling nodes known to be offline, and costs
-   a second source of truth about who is available. Removing it also changes
-   the arithmetic in §8.3, since the abort test is relative to the size of the
-   PROPOSE set, so a wider set is harder to trip.
-
-   **Recommendation: split it into its three uses and answer them
-   separately.** Fix the organizing gate's clock. Keep the reservation filter,
-   which skips 34 presignatures a day on devnet for having too few active
-   holders. Treat the `PROPOSE` narrowing as a no-op: removing it is safe, but
-   `activeCount` equalled the participant count in every sample measured, so
-   it will not widen any `PROPOSE` set or reduce churn. Widening that set
-   means addressing all holders, which is a separate change, and it requires
-   widening `SinglePositCounter::participants` to match or a holder that was
-   inactive at reservation time accepts into a void.
-
-4. **Should a deliberator check `from == proposer`?** The check exists twice,
-   for PROPOSE and for START. Election is a pure function of round, membership
-   and entropy, so among nodes that agree the check can never fire. It fires
-   only against a node that disagrees, which is when it matters, and testnet
-   does log it. Keeping it depends on what the machine is meant to
-   defend against.
-
-   **Recommendation: keep it.** The inbox drops
-   messages whose claimed sender differs from the authenticated one, so `from`
-   is a proven identity. Without the check any 
-   participant could propose in every round and deliberators would follow it,
-   committing to a presignature of that node's choosing and defeating the
-   election. 
-
-5. **What should trigger state sync?** Today it is the `inactive -> active`
-   edge. Every node already syncs on start, so a `REJECT MissingArtifact` in
-   steady state says something larger than one missing share is wrong: on the
-   sign path it fired 0 times on devnet.
-
-   **Recommendation: Don't change, not important enough.
-
-6. **Is one buffering layer enough?** §5 describes two, both keeping one slot
-   per sender and both overwriting on arrival, but they do different jobs. The
-   ingress mailbox exists before any task does, which is how a posit arriving
-   before the request is spawned is not lost, and it survives a respawn on
-   purpose. The per-round buffer lives inside the task's state and holds
-   messages whose round is ahead of this node's. Collapsing them means the
-   survivor has to do both: exist without a task, and know the node's current
-   round.
-
-   **Recommendation: merge them.** The spawner
-   holds `requests` and `posit_mailboxes` keyed the same way, so the mailbox
-   can read the current round. `recv()` then returns only messages at that
-   round and stashes higher ones, and `highest_seen_round` moves next to the
-   mailbox. That also fixes an asymmetry: today `r` survives a respawn but
-   `highest_seen_round` is rebuilt at 0, so a node that had learned peers were
-   at round 50 while it sat at 10 forgets it and bumps to 11. The cost is that
-   `record_peer_round` writes into the mailbox, so it stops being a dumb
-   queue.
-
-7. **What guard, if any, for the §8.4 overwrite?** Within one incarnation
-   causality rules the clash out, since `START` follows the node's own
-   `ACCEPT`, which follows the `PROPOSE` leaving the mailbox. The restart case
-   looks like the exception and is not one: a restarted node re-enters at
-   round 0 while the stale `START` carries round `r`, so it lands in the
-   future-round buffer, and that buffer is drained only in `wait_for_propose`,
-   which discards anything that is not a `PROPOSE`. A node that is proposer at
-   `r` never drains it at all. A guard there would preserve a message the next
-   layer throws away.
-
-   The window where a guard changes an outcome is narrower: a live task in the
-   posit select loop at the matching round, with a second `PROPOSE` arriving
-   after the `START` and taking its slot. The proposer sends `PROPOSE` once
-   per round and never retransmits, so that needs a duplicate from the message
-   layer. Duplicates are real and explained: the outbox retries a whole
-   encrypted partition whenever `client.msg` errors, and a non-2xx response
-   counts as an error even when the peer already ingested the batch, so the
-   redelivery repeats every message in it. Nothing dedupes on receipt.
-
-   **Recommendation: count the overwrites, do not add the guard yet.** The
-   duplicate ACCEPTs in §9 are logged only in the presignature posit layer;
-   the sign path re-inserts into a `HashSet` without a line, so its duplicate
-   rate is unknown rather than zero. Count the overwrites that discard a
-   message, in the mailbox and in the per-round buffer, and count duplicate
-   ACCEPTs on the sign path. Those are metrics rather than behaviour changes,
-   and they turn a causality argument into a number. The guard earns its place
-   if that count is non-zero, or if §3's wider addressing lands, since more
-   messages per sender per round is what actually breaks the one-slot
-   invariant.
