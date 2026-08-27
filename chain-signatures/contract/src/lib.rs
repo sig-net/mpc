@@ -1492,14 +1492,15 @@ mod tests {
 
     #[test]
     fn reset_height_is_a_vote_floor_without_extra_logic() {
+        let resume_at_height = 101;
         let mut contract = running_contract(1);
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            height: 101,
+            height: resume_at_height,
         }]);
 
         // Below the reset height the ordinary "behind" rule already rejects.
-        let behind = ConsensusCheckpointDigest::new(Chain::Solana, 99, [1u8; 32]);
+        let behind = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
         assert!(contract
             .vote_checkpoint(behind)
             .unwrap_err()
@@ -1511,14 +1512,15 @@ mod tests {
         // which is what lets nodes confirm it rather than fight over it.
         let reset = ConsensusCheckpointDigest::new(
             Chain::Solana,
-            100,
-            mpc_primitives::reset_checkpoint_digest(Chain::Solana, 100),
+            resume_at_height - 1,
+            mpc_primitives::reset_checkpoint_digest(Chain::Solana, resume_at_height - 1),
         );
         assert!(contract.vote_checkpoint(reset).unwrap());
 
         // A competing digest at the reset height is a conflict, not a silent
         // overwrite of the state the network was told to restart from.
-        let conflicting = ConsensusCheckpointDigest::new(Chain::Solana, 100, [2u8; 32]);
+        let conflicting =
+            ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
         assert!(contract
             .vote_checkpoint(conflicting)
             .unwrap_err()
@@ -1526,7 +1528,7 @@ mod tests {
             .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
 
         // Above it, voting resumes normally and settles past the reset.
-        let above = ConsensusCheckpointDigest::new(Chain::Solana, 101, [3u8; 32]);
+        let above = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
         assert!(contract.vote_checkpoint(above).unwrap());
         assert_eq!(
             contract.latest_checkpoint(Chain::Solana),
@@ -1537,10 +1539,11 @@ mod tests {
 
     #[test]
     fn reset_logs_the_event_that_identifies_it() {
+        let resume_at_height = 101;
         let mut contract = running_contract(1);
         contract.reset_checkpoints(vec![CheckpointReset {
             chain: Chain::Solana,
-            height: 101,
+            height: resume_at_height,
         }]);
 
         // The settled checkpoint is deliberately indistinguishable from an
@@ -1554,7 +1557,7 @@ mod tests {
         let event: serde_json::Value = serde_json::from_str(event).expect("event must be JSON");
         assert_eq!(event["event"], "checkpoint_reset");
         assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
-        assert_eq!(event["height"], 101);
-        assert_eq!(event["resume_after"], 100);
+        assert_eq!(event["height"], resume_at_height);
+        assert_eq!(event["resume_after"], resume_at_height - 1);
     }
 }

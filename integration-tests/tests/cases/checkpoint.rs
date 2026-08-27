@@ -338,7 +338,7 @@ async fn test_reset_converges_divergent_nodes() {
     assert_eq!(
         digests_before.len(),
         network.nodes.len(),
-        "test setup should leave every node on a different checkpoint"
+        "every node must produce a distinct checkpoint digest before reset"
     );
 
     // Governance settles the canonical reset checkpoint. Each node aligns
