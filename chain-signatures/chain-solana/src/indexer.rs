@@ -1632,6 +1632,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_block_sequence_is_poll_phase_invariant() {
+        // Identical chain content drained under different tick phases must
+        // emit identical Block heights. Activity at 10 and 12 leaves an
+        // inactive slot between them, so the markers (11) are covered too.
+        async fn block_heights(slots: &[u64]) -> Vec<u64> {
+            let mut server = mockito::Server::new_async().await;
+            let entries: Vec<_> = [12, 10, 9].into_iter().map(signature_entry).collect();
+            let _signatures = server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::Regex(
+                    "getSignaturesForAddress".to_string(),
+                ))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(signatures_response(&entries))
+                .create_async()
+                .await;
+            let _blocks = server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    serde_json::json!([block_response(0, 10), block_response(1, 12)]).to_string(),
+                )
+                .create_async()
+                .await;
+
+            let mut f = RunFixture::spawn_with_server(server, slots, Some(9), None).await;
+            let mut heights = Vec::new();
+            while heights.len() < 3 {
+                if let Some(ChainEvent::Block(height)) = f.next_event().await {
+                    heights.push(height);
+                }
+            }
+            f.cancel_and_join().await;
+            heights
+        }
+
+        assert_eq!(block_heights(&[13, 13]).await, [10, 11, 12]);
+        assert_eq!(block_heights(&[10, 10, 13]).await, [10, 11, 12]);
+    }
+
+    #[tokio::test]
     async fn process_catchup_retrying_stops_on_cancel() {
         // No mock: any RPC attempt fails after fast retries; cancel must
         // interrupt the retry loop without waiting for it.
