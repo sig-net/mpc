@@ -1465,44 +1465,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_state_drained_advances_watermark_and_monotonic_heartbeat() {
+    async fn poll_state_drained_advances_next_start_monotonically() {
         let sm = MockStateManager::new();
         let state = PollState::resumed(&sm, 10).await;
 
-        // anchor 10 drains `[next_start, 10)`: watermark advances to 10,
-        // heartbeat covers slot 9, catchup gate flips.
-        let (state, heartbeat) = state.drained(10);
+        // anchor 10 drains `[next_start, 10)`: the next tick starts at 10
+        // and the catchup gate flips.
+        let state = state.drained(10);
         assert_eq!(state.next_start, 10);
-        assert_eq!(heartbeat, Some(9));
-        assert_eq!(state.heartbeat_floor, 9);
         assert!(state.caught_up);
 
-        // Heartbeat advances with the anchor: 30 - 1 = 29 beats the floor of 9.
-        let (state, heartbeat) = state.drained(30);
+        let state = state.drained(30);
         assert_eq!(state.next_start, 30);
-        assert_eq!(heartbeat, Some(29));
-        assert_eq!(state.heartbeat_floor, 29);
 
-        // A regressing anchor cannot regress the heartbeat: the floor holds at 29
-        let (_state, heartbeat) = state.drained(5);
-        assert_eq!(heartbeat, Some(29));
+        // A regressing anchor (lagging replica behind an LB) cannot rewind
+        // the next drain range.
+        let state = state.drained(5);
+        assert_eq!(state.next_start, 30);
     }
 
     #[tokio::test]
-    async fn run_emits_heartbeat_and_single_catchup_completed_when_idle() {
-        // Frozen anchor: an idle chain whose tip never moves. The indexer
-        // must still emit a heartbeat for the covered tip and a single
-        // CatchupCompleted event.
+    async fn run_emits_single_catchup_completed_when_anchor_frozen() {
+        // Frozen anchor: the range [10, 10) covers no new slots, so the only
+        // event is exactly one CatchupCompleted — no Block markers.
         let mut f = RunFixture::spawn(&[10], Some(9), None).await;
 
-        // First tick: heartbeat for the covered tip, then exactly one
-        // CatchupCompleted. Second tick: heartbeat again — same height.
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
         assert!(matches!(
             f.next_event().await,
             Some(ChainEvent::CatchupCompleted)
         ));
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
+        assert!(
+            f.events_rx.try_recv().is_err(),
+            "a frozen anchor covers no new slots, so no Block markers may be emitted"
+        );
 
         f.cancel_and_join().await;
     }
@@ -1510,8 +1505,8 @@ mod tests {
     #[tokio::test]
     async fn run_bails_when_observed_slot_frozen() {
         // A frozen RPC node: getSlot keeps returning the same slot forever.
-        // The heartbeat keeps Block events flowing, so only the indexer-side
-        // slot-stall watchdog can catch this.
+        // Dense markers cover only drained slots, so a frozen anchor stops
+        // Block flow; the indexer-side stall watchdog trips first.
         let f = RunFixture::spawn(
             &[10],
             Some(9),
@@ -1565,21 +1560,22 @@ mod tests {
         // (drains [10, 12)), tick 3 at 12 again (empty, proves no re-drain).
         let mut f = RunFixture::spawn_with_server(server, &[10, 10, 12], Some(9), None).await;
 
-        // Tick 1: caught up at anchor 10.
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(9))));
+        // Tick 1: empty range — caught up at once, no markers.
         assert!(matches!(
             f.next_event().await,
             Some(ChainEvent::CatchupCompleted)
         ));
 
-        // Tick 2: drain [10, 12) — both slots' block events, then the
-        // heartbeat for the new tip. No second CatchupCompleted.
+        // Tick 2: drain [10, 12) — exactly one Block event per slot, and no
+        // duplicate marker at the tip.
         assert!(matches!(f.next_event().await, Some(ChainEvent::Block(10))));
         assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
 
-        // Tick 3: anchor unchanged — heartbeat only, same height.
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
+        // Tick 3: anchor unchanged — no re-drain, no markers.
+        assert!(
+            f.events_rx.try_recv().is_err(),
+            "an unchanged anchor covers no new slots, so no events may be emitted"
+        );
 
         f.cancel_and_join().await;
     }
