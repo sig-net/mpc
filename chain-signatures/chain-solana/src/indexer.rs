@@ -396,6 +396,14 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     /// Drain `[start_slot, anchor)`: process active slots in order and emit a
     /// `Block` marker for every inactive slot, so each drained slot produces
     /// exactly one marker, in order.
+    //
+    // TODO: the anchor (`getSlot`) and the signature walk
+    // (`getSignaturesForAddress`) may be served by different RPC backends
+    // behind a load balancer. A lagging signatures backend reports the top
+    // of the range empty, so markers advance the watermark past slots the
+    // walk never actually verified — silent loss. Consider discounting the
+    // anchor by a requery margin before draining, so both the drain range
+    // and the emitted markers stay behind the verified head.
     async fn drain_range(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
