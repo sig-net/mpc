@@ -310,6 +310,7 @@ impl ClusterSpawner {
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
+                indexer: Default::default(),
             });
         }
         self

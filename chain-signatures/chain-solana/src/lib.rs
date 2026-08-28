@@ -6,6 +6,5 @@ mod utils;
 
 pub use anchor_lang::prelude::Pubkey;
 pub use client::SolanaClient;
-pub use config::SolConfig;
-pub use events::{emit_events, extract_tx_signature};
+pub use config::{SolConfig, SolIndexerConfig};
 pub use indexer::SolanaIndexer;
