@@ -25,6 +25,16 @@ pub enum StorageKey {
     Candidates,
 }
 
+/// One chain's entry in a checkpoint reset.
+///
+/// `height` is inclusive: indexing resumes at `height` itself.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct CheckpointReset {
+    pub chain: Chain,
+    pub height: u64,
+}
+
 #[derive(
     BorshDeserialize,
     BorshSerialize,

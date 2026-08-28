@@ -25,8 +25,9 @@ use near_sdk::{
     PublicKey,
 };
 use primitives::{
-    CandidateEntry, CandidateInfo, Candidates, CheckpointVotes, InternalSignRequest, Participants,
-    PendingRequest, PkVotes, Read, SignPoll, SignRequest, StorageKey, View, Votes, YieldIndex,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
+    InternalSignRequest, Participants, PendingRequest, PkVotes, Read, SignPoll, SignRequest,
+    StorageKey, View, Votes, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
@@ -1179,10 +1180,6 @@ impl MpcContract {
         &self.latest_checkpoints
     }
 
-    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
-        &mut self.latest_checkpoints
-    }
-
     fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
         self.latest_checkpoints.insert(chain, checkpoint);
     }
@@ -1191,11 +1188,45 @@ impl MpcContract {
         &mut self.checkpoint_votes
     }
 
+    /// Settle each chain's *canonical reset checkpoint*: the one asserting an
+    /// empty backlog just before `height`.
+    ///
+    /// Its digest is derived from `(chain, height - 1)` alone, so every node
+    /// can rebuild it locally and regress onto it through the ordinary
+    /// divergence path. Votes for the chain are dropped, since they describe
+    /// the abandoned history.
+    ///
+    /// `height` is inclusive: indexing resumes at `height` itself.
+    ///
+    /// The resulting checkpoint is deliberately indistinguishable from one the
+    /// network settled with an empty backlog at the same height, because it
+    /// describes the same state. What makes a reset recognisable is the event
+    /// logged here, not the state it leaves behind.
+    ///
+    /// Callable only by the contract account itself.
     #[private]
-    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
-        let chains: HashSet<Chain> = chains.into_iter().collect();
-        for chain in &chains {
-            self.latest_checkpoints_mut().remove(chain);
+    pub fn reset_checkpoints(&mut self, resets: Vec<CheckpointReset>) {
+        let mut chains = HashSet::new();
+        for CheckpointReset { chain, height } in resets {
+            let resume_after = height.saturating_sub(1);
+            chains.insert(chain);
+            self.insert_checkpoint(
+                chain,
+                ConsensusCheckpointDigest::new(
+                    chain,
+                    resume_after,
+                    mpc_primitives::reset_checkpoint_digest(chain, resume_after),
+                ),
+            );
+            env::log_str(
+                &serde_json::json!({
+                    "event": "checkpoint_reset",
+                    "chain": chain,
+                    "height": height,
+                    "resume_after": resume_after,
+                })
+                .to_string(),
+            );
         }
         self.checkpoint_votes_mut()
             .votes
@@ -1357,8 +1388,51 @@ mod tests {
         assert_eq!(stored.digest, checkpoint.digest);
     }
 
+    // A Running-state contract with `alice.near` as sole participant, so that
+    // `vote_checkpoint` gets past the voter and protocol-state checks.
+    fn running_contract(threshold: usize) -> MpcContract {
+        use std::str::FromStr;
+
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id("alice.near".parse().unwrap())
+            .build());
+
+        let public_key =
+            PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
+        let alice: AccountId = "alice.near".parse().unwrap();
+        let mut participants = Participants::new();
+        participants.insert(
+            alice.clone(),
+            primitives::ParticipantInfo {
+                account_id: alice,
+                url: "https://alice.example".to_owned(),
+                cipher_pk: [7; 32],
+                sign_pk: public_key.clone(),
+            },
+        );
+
+        MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 0,
+                participants,
+                threshold,
+                public_key,
+                candidates: Candidates::new(),
+                join_votes: Votes::new(),
+                leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        }
+    }
+
     #[test]
-    fn reset_checkpoint_clears_votes_for_selected_chains() {
+    fn reset_settles_the_canonical_checkpoint_and_clears_votes() {
         let mut contract = MpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
@@ -1367,6 +1441,7 @@ mod tests {
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
+
         let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
         let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
@@ -1380,10 +1455,109 @@ mod tests {
             .entry(ethereum_checkpoint)
             .insert("voter.near".parse().unwrap());
 
-        contract.reset_checkpoint(vec![Chain::Solana]);
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: 6,
+        }]);
 
-        assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
+        // `height` is inclusive: indexing resumes at 6 itself, whose empty
+        // checkpoint lives at 5.
+        // The reset is an ordinary settled checkpoint whose digest is derived
+        // from the pair, which is what every node re-derives locally.
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&ConsensusCheckpointDigest::new(
+                Chain::Solana,
+                5,
+                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 5),
+            ))
+        );
         assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
         assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+
+        // Reissuable, including backwards — it's just another settled checkpoint.
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: 31,
+        }]);
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&ConsensusCheckpointDigest::new(
+                Chain::Solana,
+                30,
+                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 30),
+            ))
+        );
+    }
+
+    #[test]
+    fn reset_height_is_a_vote_floor_without_extra_logic() {
+        let resume_at_height = 101;
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: resume_at_height,
+        }]);
+
+        // Below the reset height the ordinary "behind" rule already rejects.
+        let behind = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
+        assert!(contract
+            .vote_checkpoint(behind)
+            .unwrap_err()
+            .to_string()
+            .contains(&CheckpointError::CheckpointBehind.to_string()));
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+
+        // Re-submitting the reset checkpoint itself is an idempotent no-op,
+        // which is what lets nodes confirm it rather than fight over it.
+        let reset = ConsensusCheckpointDigest::new(
+            Chain::Solana,
+            resume_at_height - 1,
+            mpc_primitives::reset_checkpoint_digest(Chain::Solana, resume_at_height - 1),
+        );
+        assert!(contract.vote_checkpoint(reset).unwrap());
+
+        // A competing digest at the reset height is a conflict, not a silent
+        // overwrite of the state the network was told to restart from.
+        let conflicting =
+            ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
+        assert!(contract
+            .vote_checkpoint(conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
+
+        // Above it, voting resumes normally and settles past the reset.
+        let above = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
+        assert!(contract.vote_checkpoint(above).unwrap());
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&above),
+            "a settled checkpoint replaces the reset checkpoint"
+        );
+    }
+
+    #[test]
+    fn reset_logs_the_event_that_identifies_it() {
+        let resume_at_height = 101;
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: resume_at_height,
+        }]);
+
+        // The settled checkpoint is deliberately indistinguishable from an
+        // ordinary empty-backlog one, so this log is the only record that a
+        // reset happened. Operators and indexers read it, hence the assertion.
+        let logs = near_sdk::test_utils::get_logs();
+        let event = logs
+            .iter()
+            .find(|line| line.contains("checkpoint_reset"))
+            .expect("a reset must log an event identifying it");
+        let event: serde_json::Value = serde_json::from_str(event).expect("event must be JSON");
+        assert_eq!(event["event"], "checkpoint_reset");
+        assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
+        assert_eq!(event["height"], resume_at_height);
+        assert_eq!(event["resume_after"], resume_at_height - 1);
     }
 }
