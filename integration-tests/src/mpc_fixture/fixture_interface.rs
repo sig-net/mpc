@@ -190,6 +190,32 @@ impl MpcFixture {
         }
     }
 
+    /// Like [`Self::wait_for_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn wait_for_actions_matching(
+        &self,
+        threshold: usize,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        loop {
+            let matching: Vec<String> = self
+                .output
+                .rpc_actions
+                .lock()
+                .await
+                .iter()
+                .filter(|action| predicate(action.as_str()))
+                .cloned()
+                .collect();
+
+            if matching.len() >= threshold {
+                return matching;
+            }
+
+            self.output.actions_changed.notified().await;
+        }
+    }
+
     pub async fn assert_triples(&self, threshold_per_node: usize, timeout: Duration) {
         let result = tokio::time::timeout(timeout, self.wait_for_triples(threshold_per_node)).await;
         if result.is_err() {
@@ -217,6 +243,33 @@ impl MpcFixture {
             self.print_actions().await;
         }
         result.expect("should produce enough signatures")
+    }
+
+    /// Like [`Self::assert_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn assert_actions_matching(
+        &self,
+        threshold: usize,
+        timeout: Duration,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let result = tokio::time::timeout(
+            timeout,
+            self.wait_for_actions_matching(threshold, &predicate),
+        )
+        .await;
+        if result.is_err() {
+            self.print_actions().await;
+        }
+        result.unwrap_or_else(|_| panic!("should produce {threshold} matching actions"))
+    }
+
+    /// Wait for `threshold` `RpcAction::Publish` actions.
+    pub async fn assert_publish_actions(&self, threshold: usize, timeout: Duration) -> Vec<String> {
+        self.assert_actions_matching(threshold, timeout, |action| {
+            action.contains("RpcAction::Publish")
+        })
+        .await
     }
 
     /// Send the same `SignCommand` to every node's `sign_tx`.
