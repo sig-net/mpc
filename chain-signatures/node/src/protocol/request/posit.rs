@@ -348,26 +348,13 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
-                            let peers_already_generating = counter.num_peers_already_generating();
-                            let too_few_available = ctx
-                                .governance
-                                .participants
-                                .len()
-                                .saturating_sub(peers_already_generating)
-                                < ctx.governance.threshold;
-                            let reason = if too_few_available {
-                                state.pause_proposing_until = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(ctx.cfg.signature.generation_timeout),
-                                );
-                                "peers already generating this signature"
-                            } else {
-                                "received enough rejects"
-                            };
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
-                            return state.reorganize(reason);
+                            return state.reorganize(&format!(
+                                "received enough rejects: {:?}",
+                                counter.rejects
+                            ));
                         }
 
                         // Starting as soon as we have enough accepts leaves

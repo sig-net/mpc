@@ -53,9 +53,6 @@ impl GeneratingPhase {
         state: &mut SignState,
         mailbox: &PositMailbox,
     ) -> SignPhase {
-        // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing_until = None;
-
         let sign_id = ctx.sign_id;
 
         tracing::info!(
