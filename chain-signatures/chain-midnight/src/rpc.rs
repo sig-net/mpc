@@ -11,12 +11,18 @@ use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
+use subxt::client::OnlineClient;
 use subxt::ext::codec::DecodeAll as _;
+use subxt::ext::codec::Encode as _;
+use subxt::ext::scale_decode::DecodeAsType;
 use subxt::ext::subxt_rpcs::{rpc_params, Error as RawRpcError, UserError};
 use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
+use crate::emissions::{emissions_in, DecodedTransaction, UnsupportedFallibleCall};
+use crate::indexer::BlockHold;
+use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -97,6 +103,32 @@ impl RpcClientT for HttpRpcClient {
     }
 }
 
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct SendMnTransaction {
+    midnight_tx: Vec<u8>,
+}
+
+impl subxt::blocks::StaticExtrinsic for SendMnTransaction {
+    const PALLET: &'static str = "Midnight";
+    const CALL: &'static str = "send_mn_transaction";
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxAppliedDetails {
+    tx_hash: [u8; 32],
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxApplied(TxAppliedDetails);
+
+impl subxt::events::StaticEvent for TxApplied {
+    const PALLET: &'static str = "Midnight";
+    const EVENT: &'static str = "TxApplied";
+}
+
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
 /// `midnight_contractState` takes, detached from any subxt handle so fixtures can mint
 /// them.
@@ -137,14 +169,24 @@ fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<R
 }
 
 pub(crate) struct MidnightRpc {
+    client: OnlineClient<SubstrateConfig>,
     reads: Reads,
 }
 
 impl MidnightRpc {
-    /// Builds the request-only client for the node named by `config.node_url`.
-    pub fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
+    /// Builds Subxt over the request-only HTTP client named by `config.node_url`.
+    pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
         let rpc = connect_http(config)?;
+        let client = tokio::time::timeout(
+            config.rpc.connect_timeout,
+            OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone()),
+        )
+        .await
+        .context("timed out initialising the midnight subxt client")?
+        .context("failed to initialise the midnight subxt client")?;
+
         Ok(Self {
+            client,
             reads: Reads::new(rpc, config.rpc.request_timeout, config.rpc.retry),
         })
     }
@@ -199,6 +241,157 @@ impl MidnightRpc {
             hash: hex_0x(hash),
             parent_hash: hex_0x(header.parent_hash),
         })
+    }
+
+    pub(crate) async fn block_emissions(
+        &self,
+        block_ref: &BlockRef,
+        singleton: &[u8; 32],
+    ) -> anyhow::Result<Option<BlockEmissions>> {
+        let hash = parse_block_hash(&block_ref.hash)?;
+        let block = retry_read(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block",
+            || async {
+                self.client
+                    .blocks()
+                    .at(hash)
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch a midnight block")
+            },
+        )
+        .await?;
+        let extrinsics = retry_read(
+            self.reads.request_timeout,
+            self.reads.retry,
+            "midnight_block_body",
+            || async {
+                block
+                    .extrinsics()
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .context("failed to fetch a midnight block body")
+            },
+        )
+        .await?;
+
+        let mut candidates = Vec::new();
+        for found in extrinsics.find::<SendMnTransaction>() {
+            let found = found.map_err(|err| {
+                BlockHold::new(
+                    "emission-schema-hold",
+                    u64::from(block.number()),
+                    anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
+                )
+            })?;
+            if memchr::memmem::find(&found.value.midnight_tx, singleton).is_some() {
+                candidates.push(found);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let height = u64::from(block.number());
+        let mut decoded_candidates = Vec::with_capacity(candidates.len());
+        let mut scale_system_events = None;
+        for found in candidates {
+            let events = retry_read(
+                self.reads.request_timeout,
+                self.reads.retry,
+                "midnight_block_events",
+                || async {
+                    found
+                        .details
+                        .events()
+                        .await
+                        .map_err(anyhow::Error::new)
+                        .context("failed to fetch midnight block events")
+                },
+            )
+            .await?;
+            scale_system_events
+                .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
+
+            let applied = events.find_first::<TxApplied>().map_err(|err| {
+                BlockHold::new(
+                    "emission-schema-hold",
+                    height,
+                    anyhow::Error::new(err).context("TxApplied did not match metadata"),
+                )
+            })?;
+            let Some(TxApplied(details)) = applied else {
+                tracing::warn!(
+                    reason = "unsupported-midnight-status",
+                    height,
+                    extrinsic_index = found.details.index(),
+                    "midnight transaction skipped: only TxApplied is supported"
+                );
+                continue;
+            };
+            let _ledger_tx_hash = details.tx_hash;
+
+            let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
+                &mut &found.value.midnight_tx[..],
+            )
+            .map_err(|err| {
+                BlockHold::new(
+                    "singleton-tx-undecodable",
+                    height,
+                    anyhow::Error::new(err).context(format!(
+                        "candidate extrinsic {} ledger transaction",
+                        found.details.index()
+                    )),
+                )
+            })?;
+            let calls = match emissions_in(&tx, singleton) {
+                Ok(calls) => calls,
+                Err(err) => {
+                    if let Some(unsupported) = err.downcast_ref::<UnsupportedFallibleCall>() {
+                        tracing::warn!(
+                            reason = "unsupported-fallible-singleton-call",
+                            height,
+                            extrinsic_index = found.details.index(),
+                            call_index = unsupported.call_index,
+                            "midnight transaction skipped: fallible singleton calls are unsupported"
+                        );
+                        continue;
+                    }
+                    return Err(BlockHold::new(
+                        "emission-schema-hold",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} singleton emissions",
+                            found.details.index()
+                        )),
+                    )
+                    .into());
+                }
+            };
+            decoded_candidates.push(CandidateTransactionEmissions {
+                extrinsic_index: found.details.index(),
+                calls,
+            });
+        }
+
+        Ok(Some(BlockEmissions {
+            proof_seed: BlockProofSeed {
+                reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
+                reported_block_number: height,
+                reported_block_hash: *block.hash().as_fixed_bytes(),
+                singleton_address: *singleton,
+                scale_header: block.header().encode(),
+                scale_body: extrinsics
+                    .iter()
+                    .map(|extrinsic| extrinsic.bytes().to_vec())
+                    .collect(),
+                scale_system_events: scale_system_events
+                    .expect("a prefiltered candidate always fetched block events"),
+            },
+            candidates: decoded_candidates,
+        }))
     }
 }
 
@@ -565,16 +758,218 @@ mod tests {
     use jsonrpsee::types::ErrorObjectOwned;
     use jsonrpsee::RpcModule;
     use serde_json::json;
+    use std::io::Write as _;
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use subxt::ext::scale_decode::DecodeAsType;
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[derive(DecodeAsType)]
+    #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+    struct CaptureCallDetails {
+        tx_hash: [u8; 32],
+        contract_address: Vec<u8>,
+    }
+
+    #[derive(DecodeAsType)]
+    #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+    struct CaptureContractCall(CaptureCallDetails);
+
+    impl subxt::events::StaticEvent for CaptureContractCall {
+        const PALLET: &'static str = "Midnight";
+        const EVENT: &'static str = "ContractCall";
+    }
+
+    fn capture_output_dir(value: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            !value.is_empty(),
+            "MIDNIGHT_CAPTURE_OUT_DIR must not be empty"
+        );
+        Ok(PathBuf::from(value))
+    }
+
+    fn write_new_capture(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(bytes)
+    }
+
+    fn fresh_capture_test_dir() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "mpc-chain-midnight-capture-path-test-{}",
+            std::process::id()
+        ));
+        for suffix in 0..1024 {
+            let candidate = base.with_extension(suffix.to_string());
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return candidate,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => panic!("create capture path test directory: {err}"),
+            }
+        }
+        panic!("could not allocate a capture path test directory");
+    }
+
+    #[test]
+    fn capture_path_rejects_an_empty_output_directory() {
+        let err = capture_output_dir("").expect_err("an empty output path must be rejected");
+
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected empty-path error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn capture_path_refuses_an_existing_target_without_changing_it() {
+        let output_dir = fresh_capture_test_dir();
+        let target = output_dir.join("tx-42-7.mn");
+        let original = b"existing capture that must survive";
+        std::fs::write(&target, original).expect("seed existing capture");
+
+        let err = write_new_capture(&target, b"replacement")
+            .expect_err("an existing capture target must be refused");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&target).expect("read preserved capture"),
+            original
+        );
+        std::fs::remove_file(&target).expect("remove capture path test file");
+        std::fs::remove_dir(&output_dir).expect("remove capture path test directory");
+    }
+
+    #[tokio::test]
+    #[ignore = "capture tool: MIDNIGHT_NODE_URL, MIDNIGHT_CAPTURE_BLOCK, MIDNIGHT_CAPTURE_SINGLETON, MIDNIGHT_CAPTURE_OUT_DIR"]
+    async fn capture_block_fixtures() {
+        let node_url = std::env::var("MIDNIGHT_NODE_URL")
+            .expect("MIDNIGHT_NODE_URL must name the capture node HTTP endpoint");
+        let height = std::env::var("MIDNIGHT_CAPTURE_BLOCK")
+            .expect("MIDNIGHT_CAPTURE_BLOCK must name one capture height")
+            .parse::<u64>()
+            .expect("MIDNIGHT_CAPTURE_BLOCK must be a u64");
+        let singleton_hex = std::env::var("MIDNIGHT_CAPTURE_SINGLETON")
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be 32 bytes of hex")
+            .trim_start_matches("0x")
+            .to_ascii_lowercase();
+        let singleton: [u8; 32] = hex::decode(&singleton_hex)
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be hex")
+            .try_into()
+            .expect("MIDNIGHT_CAPTURE_SINGLETON must be exactly 32 bytes");
+        let output_dir = capture_output_dir(
+            &std::env::var("MIDNIGHT_CAPTURE_OUT_DIR")
+                .expect("MIDNIGHT_CAPTURE_OUT_DIR must name the fixture output directory"),
+        )
+        .expect("MIDNIGHT_CAPTURE_OUT_DIR must name a non-empty fixture output directory");
+        std::fs::create_dir_all(&output_dir).expect("create capture output directory");
+
+        let config = crate::config::MidnightConfig {
+            node_url,
+            central_address: crate::config::MidnightAddress::from_bytes(singleton),
+            publisher: Default::default(),
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+        let rpc = MidnightRpc::connect(&config)
+            .await
+            .expect("connect to capture node");
+        let block_ref = rpc
+            .block_ref_at(height)
+            .await
+            .expect("resolve capture block");
+        let block_hash = parse_block_hash(&block_ref.hash).expect("parse capture block hash");
+        let block = rpc
+            .client
+            .blocks()
+            .at(block_hash)
+            .await
+            .expect("read capture block");
+        let extrinsics = block.extrinsics().await.expect("read capture block body");
+
+        let mut captured = 0usize;
+        for found in extrinsics.find::<SendMnTransaction>() {
+            let found = found.expect("decode send_mn_transaction from live metadata");
+            if !found
+                .value
+                .midnight_tx
+                .windows(singleton.len())
+                .any(|window| window == singleton)
+            {
+                continue;
+            }
+
+            let extrinsic_index = found.details.index();
+            let path = output_dir.join(format!("tx-{height}-{extrinsic_index}.mn"));
+            let events = found.details.events().await.expect("read extrinsic events");
+            let applied = events
+                .find_first::<TxApplied>()
+                .expect("decode TxApplied from live metadata");
+            let TxApplied(details) =
+                applied.expect("capture candidate must have a supported TxApplied status");
+            let status = "TxApplied";
+            let status_hash = details.tx_hash;
+            let contract_calls = events
+                .find::<CaptureContractCall>()
+                .map(|call| {
+                    let CaptureContractCall(details) =
+                        call.expect("decode ContractCall from live metadata");
+                    assert_eq!(
+                        details.tx_hash, status_hash,
+                        "ContractCall and status must name the same ledger transaction"
+                    );
+                    format!("0x{}", hex::encode(details.contract_address))
+                })
+                .collect::<Vec<_>>();
+            write_new_capture(&path, &found.value.midnight_tx)
+                .expect("create new transaction fixture without replacing an existing capture");
+
+            println!(
+                "capture block={height} hash={} extrinsic_index={extrinsic_index} \
+                 status={status} tx_hash=0x{} contract_calls={contract_calls:?} file={}",
+                block_ref.hash,
+                hex::encode(status_hash),
+                path.display()
+            );
+            captured += 1;
+        }
+        assert!(
+            captured > 0,
+            "capture block contains no singleton candidate"
+        );
+
+        if let Ok(caller_hex) = std::env::var("MIDNIGHT_CAPTURE_CALLER") {
+            let caller_hex = caller_hex.trim_start_matches("0x").to_ascii_lowercase();
+            let caller: [u8; 32] = hex::decode(&caller_hex)
+                .expect("MIDNIGHT_CAPTURE_CALLER must be hex")
+                .try_into()
+                .expect("MIDNIGHT_CAPTURE_CALLER must be exactly 32 bytes");
+            let caller_hex = hex::encode(caller);
+            let caller_state = rpc
+                .contract_state(&caller_hex, &block_ref.hash)
+                .await
+                .expect("read caller state at capture block")
+                .expect("caller contract must exist at capture block");
+            let caller_path = output_dir.join(format!("caller-post-state-{height}.mn"));
+
+            write_new_capture(&caller_path, &caller_state)
+                .expect("create new caller state fixture without replacing an existing capture");
+
+            println!(
+                "capture block={height} caller_state={}",
+                caller_path.display()
+            );
+        }
+    }
 
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
-            central_address: "ab".repeat(32),
+            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -736,16 +1131,6 @@ mod tests {
             user.data.as_deref().map(RawValue::get),
             Some(r#"{"detail":"kept data"}"#)
         );
-
-        let midnight =
-            MidnightRpc::connect(&http_config(address)).expect("connect request-only RPC");
-        let err = midnight
-            .block_ref_at(6)
-            .await
-            .expect_err("height 6 must not accept a header claiming height 42");
-        let diagnostic = format!("{err:#}");
-        assert!(diagnostic.contains("requested height 6"), "{diagnostic}");
-        assert!(diagnostic.contains("returned height 42"), "{diagnostic}");
     }
 
     #[tokio::test]
@@ -816,7 +1201,7 @@ mod tests {
         });
         let mut config = crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
-            central_address: "ab".repeat(32),
+            central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),

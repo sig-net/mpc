@@ -1,18 +1,19 @@
-//! Catchup from the persisted checkpoint, then the live finalized loop.
+//! Catch up from the persisted checkpoint, then follow the live finalized chain. For
+//! each block, discovery reads the ordered body and decodes the singleton's transcript
+//! emissions. The source also returns the V1 proof-ready seed for the block, but the
+//! indexer currently discards it; persistence and independent verification come later.
 
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
+use crate::emissions::{EmissionKind, SingletonCallEmissions};
 use crate::reader::{
-    central_map, decode_notification, decode_response_entry, resolve_verified_record,
-    signet_field_node_by_path, signet_map_key_rid, unpack_notification_v1, DecodedResponseEntry,
-    Node, Resolved, NOTIFICATION_MAP_FIELD, RESPOND_BIDIRECTIONAL_MAP_FIELD, RESPOND_MAP_FIELD,
+    decode_notification, decode_response_payload, resolve_verified_record,
+    signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
-use crate::rpc::{is_oversized_contract_state, BlockRef, STATE_TOO_LARGE};
-use crate::source::{ChainSource, ContractState, LiveSource};
+use crate::records::SignBidirectionalEventNotification;
+use crate::rpc::{is_oversized_contract_state, BlockRef};
+use crate::source::{BlockEmissions, ChainSource, ContractState, LiveSource};
 
-use midnight_base_crypto::fab::AlignedValue;
-
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,33 +32,34 @@ use tokio_util::sync::CancellationToken;
 
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// Marker context on a central state the ledger deserializer refused: this build can
-/// no longer read the chain, so the block-level retry must halt on it, not spin.
-const CENTRAL_STATE_UNDECODABLE: &str = "the central contract's own state did not decode";
-
-/// A typed permanent failure so the retry boundary can halt without parsing prose.
 #[derive(Debug)]
-struct ResponseSchemaDrift {
-    response_map: &'static str,
-    request_id: Option<[u8; 32]>,
-    cause: anyhow::Error,
+pub(crate) struct BlockHold {
+    pub reason: &'static str,
+    pub height: u64,
+    pub cause: anyhow::Error,
 }
 
-impl std::fmt::Display for ResponseSchemaDrift {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "central {} entry violates the deployed contract schema",
-            self.response_map
-        )?;
-        if let Some(request_id) = self.request_id {
-            write!(formatter, " for request {}", hex::encode(request_id))?;
+impl BlockHold {
+    pub(crate) fn new(reason: &'static str, height: u64, cause: impl Into<anyhow::Error>) -> Self {
+        Self {
+            reason,
+            height,
+            cause: cause.into(),
         }
-        write!(formatter, ": {:#}", self.cause)
     }
 }
 
-impl std::error::Error for ResponseSchemaDrift {
+impl std::fmt::Display for BlockHold {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} at block {}: {:#}",
+            self.reason, self.height, self.cause
+        )
+    }
+}
+
+impl std::error::Error for BlockHold {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.cause.as_ref())
     }
@@ -76,40 +78,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         state_manager: S,
         telemetry: T,
     ) -> anyhow::Result<Self> {
-        // `MidnightConfig` is publicly constructible with `String` fields, so a non-CLI
-        // caller reaches here without passing the CLI's own check.
         config.validate()?;
-        // Network-free beyond that.
         Ok(Self {
             config,
             state_manager,
             telemetry,
         })
     }
-}
-
-/// One entry of a central map, keyed by the composite `SignetMapKey`.
-#[derive(Clone, PartialEq)]
-pub(crate) struct MapEntry {
-    pub key: AlignedValue,
-    pub value: Node,
-}
-
-#[derive(Clone, Default)]
-struct CentralEntries {
-    notifications: Vec<MapEntry>,
-    responses: Vec<MapEntry>,
-    bidirectional_responses: Vec<MapEntry>,
-}
-
-type CentralCache = Option<(String, CentralEntries)>;
-
-fn new_entries<'a>(entries: &'a [MapEntry], parent: &[MapEntry]) -> Vec<&'a MapEntry> {
-    let parent_keys: HashSet<&AlignedValue> = parent.iter().map(|entry| &entry.key).collect();
-    entries
-        .iter()
-        .filter(|entry| !parent_keys.contains(&entry.key))
-        .collect()
 }
 
 /// One drop, one WARN, one distinct reason label.
@@ -128,47 +103,6 @@ fn drop_entry<T>(
     None
 }
 
-fn response_event(
-    entry: &MapEntry,
-    response_map: &'static str,
-    height: u64,
-    make_event: impl FnOnce([u8; 32], mpc_primitives::Signature) -> ChainEvent,
-) -> anyhow::Result<Option<ChainEvent>> {
-    let request_id = signet_map_key_rid(&entry.key);
-    let DecodedResponseEntry {
-        request_id: decoded_request_id,
-        signature,
-    } = match decode_response_entry(&entry.key, &entry.value) {
-        Ok(decoded) => decoded,
-        Err(cause) => {
-            let drift = ResponseSchemaDrift {
-                response_map,
-                request_id,
-                cause,
-            };
-            tracing::error!(
-                reason = "response-entry-structural-hold",
-                height,
-                response_map,
-                request_id = request_id.map(hex::encode),
-                error = %format_args!("{drift:#}"),
-                "midnight central response entry violates the deployed contract schema; holding block"
-            );
-            return Err(drift.into());
-        }
-    };
-
-    match signature {
-        Ok(signature) => Ok(Some(make_event(decoded_request_id, signature))),
-        Err(err) => Ok(drop_entry(
-            "response-signature-invalid",
-            height,
-            Some(decoded_request_id),
-            &format!("{response_map}: {err:#}"),
-        )),
-    }
-}
-
 /// The outcome of fully indexing one block: processed and emitted, or `cancel` fired
 /// mid-flight, which every caller answers by returning `Ok(())`.
 enum Indexed {
@@ -177,164 +111,130 @@ enum Indexed {
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
-    /// The central singleton's tree at `at_hash`, or `None` when the contract is not
-    /// present there, which is ordinary during catchup from before deployment.
-    async fn central_tree<C: ChainSource>(
-        &self,
-        source: &C,
-        at_hash: &str,
-    ) -> anyhow::Result<Option<Node>> {
-        match source
-            .contract_state_tree(&self.config.central_address, at_hash)
-            .await?
-        {
-            ContractState::Tree(tree) => Ok(Some(tree)),
-            ContractState::Absent => Ok(None),
-            ContractState::Undecodable(err) => Err(err.context(CENTRAL_STATE_UNDECODABLE)),
-        }
-    }
-
-    fn map_entries(
-        tree: &Node,
-        field: u8,
-        field_name: &'static str,
-    ) -> anyhow::Result<Vec<MapEntry>> {
-        Ok(central_map(tree, field, field_name)?
-            .iter()
-            .map(|entry| {
-                let (key, value) = &*entry;
-                MapEntry {
-                    key: (**key).clone(),
-                    value: (**value).clone(),
-                }
-            })
-            .collect())
-    }
-
-    /// The three append logs consumed by the node, all from one finalized central tree.
-    /// Their positions and map shapes are fixed by the deployed singleton, so drift
-    /// halts before the block checkpoint can advance.
-    fn central_entries(tree: &Node) -> anyhow::Result<CentralEntries> {
-        Ok(CentralEntries {
-            notifications: Self::map_entries(
-                tree,
-                NOTIFICATION_MAP_FIELD,
-                "signBidirectionalEventNotificationMap",
-            )?,
-            responses: Self::map_entries(tree, RESPOND_MAP_FIELD, "respondMap")?,
-            bidirectional_responses: Self::map_entries(
-                tree,
-                RESPOND_BIDIRECTIONAL_MAP_FIELD,
-                "respondBidirectionalMap",
-            )?,
-        })
-    }
-
-    /// Per-block processing, shared by catchup and live: diff all three central event
-    /// maps against the parent block and translate their new entries.
+    /// Per-block processing, shared by catchup and live: discover the singleton's
+    /// transcript emissions from the finalized block body and translate them.
     async fn process_block<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut CentralCache,
         block: &BlockRef,
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        // An absent central is ordinary during catchup from before deployment.
-        let entries = match self.central_tree(source, &block.hash).await? {
-            Some(tree) => Self::central_entries(&tree)?,
-            None => CentralEntries::default(),
+        let Some(BlockEmissions {
+            proof_seed,
+            candidates,
+        }) = source
+            .block_emissions(block, self.config.central_address.as_bytes())
+            .await?
+        else {
+            return Ok(Vec::new());
         };
-        let fetched_parent;
-        let parent_entries = match cache.as_ref() {
-            Some((hash, entries)) if hash == &block.parent_hash => entries,
-            _ => {
-                fetched_parent = match self.central_tree(source, &block.parent_hash).await? {
-                    Some(tree) => Self::central_entries(&tree)?,
-                    None => CentralEntries::default(),
-                };
-                &fetched_parent
-            }
-        };
-
+        // V1 carries the raw proof seed across the source boundary but has no verifier
+        // or persistence policy yet. A later verifier consumes this exact object.
+        drop(proof_seed);
         let mut events = Vec::new();
-        let notification_entries =
-            new_entries(&entries.notifications, &parent_entries.notifications);
-        if !notification_entries.is_empty() {
-            let indexed_ts = current_unix_timestamp();
-            for entry in notification_entries {
-                if let Some(request) = self
-                    .process_entry(source, entry, &block.hash, block.number, indexed_ts)
-                    .await?
-                {
-                    events.push(ChainEvent::SignRequest {
-                        request: Arc::new(request),
-                        block_timestamp: None,
-                    });
+        let mut indexed_ts = None;
+        for candidate in candidates {
+            for SingletonCallEmissions {
+                call_index,
+                emissions,
+            } in candidate.calls
+            {
+                if emissions.is_empty() {
+                    tracing::warn!(
+                        reason = "singleton-call-silent",
+                        height = block.number,
+                        extrinsic_index = candidate.extrinsic_index,
+                        call_index,
+                        "midnight singleton call emitted no decoded events"
+                    );
+                }
+                for emission in emissions {
+                    match emission.kind {
+                        EmissionKind::SignBidirectional => {
+                            let notification = decode_notification(&emission.payload);
+                            let indexed_ts = *indexed_ts.get_or_insert_with(current_unix_timestamp);
+                            if let Some(request) = self
+                                .process_entry(
+                                    source,
+                                    notification,
+                                    &block.hash,
+                                    block.number,
+                                    indexed_ts,
+                                )
+                                .await?
+                            {
+                                events.push(ChainEvent::SignRequest {
+                                    request: Arc::new(request),
+                                    block_timestamp: None,
+                                });
+                            }
+                        }
+                        EmissionKind::SignatureResponded => {
+                            let decoded = decode_response_payload(&emission.payload);
+                            match decoded.signature {
+                                Ok(signature) => {
+                                    events.push(ChainEvent::Respond(SignatureRespondedEvent {
+                                        request_id: decoded.request_id,
+                                        signature,
+                                        chain: Chain::Midnight,
+                                    }));
+                                }
+                                Err(err) => {
+                                    drop_entry::<()>(
+                                        "response-signature-invalid",
+                                        block.number,
+                                        Some(decoded.request_id),
+                                        &format!("respond: {err:#}"),
+                                    );
+                                }
+                            }
+                        }
+                        EmissionKind::RespondBidirectional => {
+                            let decoded = decode_response_payload(&emission.payload);
+                            match decoded.signature {
+                                Ok(signature) => events.push(ChainEvent::RespondBidirectional(
+                                    RespondBidirectionalEvent {
+                                        request_id: decoded.request_id,
+                                        signature,
+                                        chain: Chain::Midnight,
+                                    },
+                                )),
+                                Err(err) => {
+                                    drop_entry::<()>(
+                                        "response-signature-invalid",
+                                        block.number,
+                                        Some(decoded.request_id),
+                                        &format!("respondBidirectional: {err:#}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-
-        for entry in new_entries(&entries.responses, &parent_entries.responses) {
-            if let Some(event) = response_event(
-                entry,
-                "respondMap",
-                block.number,
-                |request_id, signature| {
-                    ChainEvent::Respond(SignatureRespondedEvent {
-                        request_id,
-                        signature,
-                        chain: Chain::Midnight,
-                    })
-                },
-            )? {
-                events.push(event);
-            }
-        }
-
-        for entry in new_entries(
-            &entries.bidirectional_responses,
-            &parent_entries.bidirectional_responses,
-        ) {
-            if let Some(event) = response_event(
-                entry,
-                "respondBidirectionalMap",
-                block.number,
-                |request_id, signature| {
-                    ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
-                        request_id,
-                        signature,
-                        chain: Chain::Midnight,
-                    })
-                },
-            )? {
-                events.push(event);
-            }
-        }
-
-        *cache = Some((block.hash.clone(), entries));
         Ok(events)
     }
 
-    /// One notification entry: decode and unpack it, read the caller's ledger at
+    /// One decoded notification: unpack it, read the caller's ledger at
     /// `at_hash`, gate through `resolve_verified_record`, convert.
     ///
-    /// An unreadable dependency returns `Err` so the block cannot be checkpointed.
-    /// Decoded caller-owned invalid data is a counted `Ok(None)` drop.
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
-        entry: &MapEntry,
+        notification: SignBidirectionalEventNotification,
         at_hash: &str,
         height: u64,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
-        let Some(rid) = signet_map_key_rid(&entry.key) else {
-            anyhow::bail!(
-                "central map key with {} atoms is not a SignetMapKey",
-                entry.key.value.0.len()
-            );
-        };
-        let notification =
-            decode_notification(&entry.value).context("central notification value")?;
+        let rid = notification.request_id;
+        if notification.version != 1 {
+            return Ok(drop_entry(
+                "notification-version",
+                height,
+                Some(rid),
+                &format!("unsupported version {}", notification.version),
+            ));
+        }
         let unpacked = match unpack_notification_v1(&notification) {
             Ok(unpacked) => unpacked,
             // Depth and path are caller-supplied payload bytes, not circuit-enforced.
@@ -440,40 +340,27 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 
     /// [`process_block`](Self::process_block) under the per-block retry policy.
-    /// Spelled out because holding `&mut cache` across attempts needs an `async ||`,
-    /// whose lending future defeats `Send` inference at the node's spawn boundary on
-    /// stable Rust; a halt there (schema drift, undecodable central state) ends the run.
+    /// Permanent scanner failures escape immediately; transport failures retry here.
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut CentralCache,
         block: &BlockRef,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<Vec<ChainEvent>>> {
         loop {
             let result = tokio::select! {
                 _ = cancel.cancelled() => return Ok(None),
-                result = self.process_block(source, cache, block) => result,
+                result = self.process_block(source, block) => result,
             };
             match result {
                 Ok(requests) => return Ok(Some(requests)),
                 Err(err) => {
-                    if is_oversized_contract_state(&err) {
-                        return Err(err.context(format!(
-                            "{STATE_TOO_LARGE} for central contract at height {}",
-                            block.number
-                        )));
-                    }
-                    if err.downcast_ref::<ResponseSchemaDrift>().is_some() {
-                        return Err(err);
-                    }
-                    if err.to_string().contains(CENTRAL_STATE_UNDECODABLE) {
+                    if let Some(block_hold) = err.downcast_ref::<BlockHold>() {
                         tracing::error!(
-                            reason = "central-state-undecodable-hold",
-                            height = block.number,
-                            "midnight central contract state does not decode with this \
-                             build's ledger crates; holding. If the chain upgraded, \
-                             upgrade mpc-node"
+                            reason = block_hold.reason,
+                            height = block_hold.height,
+                            error = %format_args!("{:#}", block_hold.cause),
+                            "midnight block processing held"
                         );
                         return Err(err);
                     }
@@ -495,7 +382,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     async fn index_height<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut CentralCache,
         events_tx: &mpsc::Sender<ChainEvent>,
         number: u64,
         cancel: &CancellationToken,
@@ -508,8 +394,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         else {
             return Ok(Indexed::Cancelled);
         };
-        self.index_block(source, cache, events_tx, &block, cancel)
-            .await
+        self.index_block(source, events_tx, &block, cancel).await
     }
 
     /// Processes and emits one block under the retry policy, surfacing the pruning
@@ -517,15 +402,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     async fn index_block<C: ChainSource>(
         &self,
         source: &C,
-        cache: &mut CentralCache,
         events_tx: &mpsc::Sender<ChainEvent>,
         block: &BlockRef,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
-        let Some(events) = self
-            .process_block_retrying(source, cache, block, cancel)
-            .await?
-        else {
+        let Some(events) = self.process_block_retrying(source, block, cancel).await? else {
             return Ok(Indexed::Cancelled);
         };
         self.emit_block(events_tx, block, events).await?;
@@ -580,7 +461,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             return Ok(());
         };
 
-        let mut cache: CentralCache = None;
         let mut last_processed = checkpoint;
         if checkpoint == 0 {
             // A fresh node has no gap to close, and walking from genesis would
@@ -593,7 +473,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         } else {
             for number in checkpoint.saturating_add(1)..anchor.number {
                 match self
-                    .index_height(source, &mut cache, &events_tx, number, &cancel)
+                    .index_height(source, &events_tx, number, &cancel)
                     .await?
                 {
                     Indexed::Done => last_processed = number,
@@ -602,7 +482,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
             if anchor.number > checkpoint {
                 match self
-                    .index_block(source, &mut cache, &events_tx, &anchor, &cancel)
+                    .index_block(source, &events_tx, &anchor, &cancel)
                     .await?
                 {
                     Indexed::Done => last_processed = anchor.number,
@@ -641,7 +521,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             }
             for number in last_processed.saturating_add(1)..block.number {
                 match self
-                    .index_height(source, &mut cache, &events_tx, number, &cancel)
+                    .index_height(source, &events_tx, number, &cancel)
                     .await?
                 {
                     Indexed::Done => {}
@@ -649,7 +529,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 }
             }
             match self
-                .index_block(source, &mut cache, &events_tx, &block, &cancel)
+                .index_block(source, &events_tx, &block, &cancel)
                 .await?
             {
                 Indexed::Done => {
@@ -671,7 +551,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let source = LiveSource::connect(&self.config)?;
+        let source = LiveSource::connect(&self.config).await?;
         self.run_with_source(&source, events_tx, cancel).await
     }
 }
@@ -679,53 +559,47 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::CENTRAL_LEDGER_FIELDS;
-    use crate::state::decode_contract_state;
+
+    use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
+    use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
+    use crate::test_utils::{
+        array_of, cell_from_record, key_of, map_of, notification_payload, response_payload,
+        sample_record,
+    };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-    use std::time::Duration;
+    use mpc_primitives::SignId;
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::Mutex;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
 
-    // run() over an injected ChainSource.
-
-    use crate::test_utils::{
-        array_of, ascii_padded, cell_from_atoms, cell_from_record, key_of, map_of, sample_record,
-        trim,
-    };
-    use crate::PublisherConfig;
-    use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom};
-    use mpc_primitives::SignId;
-    use std::collections::{HashMap, VecDeque};
-
-    /// A record with a distinguishing nonce, and the id it files itself under.
-    fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
-        let mut record = sample_record();
-        record.request_nonce = nonce;
-        let rid = crate::request_id::compute_request_id(&record);
-        (record, rid)
-    }
-
-    fn caller_record_and_rid() -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
-        named_record_and_rid(7)
-    }
-
-    /// The caller contract whose ledger the fixture serves: minimal-1word's sender,
-    /// with its request map at flat field 4 (the 5-field layout).
     const CALLER: [u8; 32] = [0xab; 32];
+    const SINGLETON: [u8; 32] = [0x12; 32];
     const REQUESTS_FIELD: u8 = 4;
+    const CAPTURE_HEIGHT: u64 = 156;
+    const CAPTURE_BLOCK_HASH: &str =
+        "0xdc5fcc9c954d8e65937cdb3c6904809cde15bfce3f11a2a2ab4b4bb379a59a3e";
+    const CAPTURE_SINGLETON: &str =
+        "b116cd0482b84922e761278a25d1ee2305fd6d630f0d48954d2af6537f8e214e";
+    const CAPTURE_CALLER: &str = "e4ae041a1c3f1538902c6a8f5aedb1e791b66cef7a715114153f3bba44a87eb6";
+    const CAPTURE_REQUEST_ID: &str =
+        "1cd10eb1f4fa5c665084d24a7982b09aa321886dce77d85b5f6feee0687a414b";
+    const CAPTURE_NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
+    const CAPTURE_CALLER_STATE: &[u8] = include_bytes!("../fixtures/caller-post-state-156.mn");
 
-    fn central_address() -> String {
-        "12".repeat(32)
+    fn hex_32(value: &str) -> [u8; 32] {
+        let mut decoded = [0u8; 32];
+        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
+        decoded
     }
 
-    /// The config every fixture indexer runs on: a never-dialed URL and the fixture central.
     fn test_config() -> MidnightConfig {
         MidnightConfig {
             node_url: "http://127.0.0.1:1".to_string(),
-            central_address: central_address(),
-            publisher: PublisherConfig {
+            central_address: crate::MidnightAddress::from_bytes(SINGLETON),
+            publisher: crate::PublisherConfig {
                 funding_seed: "ab".repeat(32),
                 proof_server_url: "http://127.0.0.1:1".to_string(),
                 indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
@@ -749,96 +623,56 @@ mod tests {
         }
     }
 
-    /// The composite `SignetMapKey { count: Uint<64>, requestId: Bytes<32> }`.
-    fn signet_map_key(count: u8, rid: &[u8; 32]) -> AlignedValue {
-        AlignedValue {
-            value: Value(vec![ValueAtom(trim(&[count])), ValueAtom(trim(rid))]),
-            alignment: Alignment(vec![
-                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 8 }),
-                AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
-            ]),
+    fn proof_seed(height: u64) -> BlockProofSeed {
+        BlockProofSeed {
+            reported_genesis_hash: [0x11; 32],
+            reported_block_number: height,
+            reported_block_hash: [height as u8; 32],
+            singleton_address: SINGLETON,
+            scale_header: vec![0x21, height as u8],
+            scale_body: vec![vec![0x31], vec![0x32, height as u8]],
+            scale_system_events: vec![0x41, height as u8],
         }
     }
 
-    /// One notification-map entry: V1 payload naming CALLER and the depth-1 path
-    /// `[REQUESTS_FIELD]` (this caller is flat).
-    fn notification_entry(count: u8, rid: &[u8; 32]) -> (AlignedValue, Node) {
-        let mut payload = CALLER.to_vec();
-        payload.push(1); // requests_path_depth
-        payload.push(REQUESTS_FIELD); // path[0]
-        (
-            signet_map_key(count, rid),
-            cell_from_atoms(&[vec![1u8], payload], &[1, 128]),
-        )
+    fn batch(height: u64, calls: Vec<SingletonCallEmissions>) -> BlockEmissions {
+        BlockEmissions {
+            proof_seed: proof_seed(height),
+            candidates: vec![CandidateTransactionEmissions {
+                extrinsic_index: 1,
+                calls,
+            }],
+        }
     }
 
-    fn response_entry(
-        count: u8,
-        rid: &[u8; 32],
-        signature: &mpc_primitives::Signature,
-    ) -> (AlignedValue, Node) {
-        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-
-        let encoded = signature.big_r.to_encoded_point(false);
-        (
-            signet_map_key(count, rid),
-            cell_from_atoms(
-                &[
-                    trim(encoded.x().expect("affine x")),
-                    trim(encoded.y().expect("affine y")),
-                    trim(signature.s.to_bytes().as_slice()),
-                    trim(&[signature.recovery_id]),
-                ],
-                &[32, 32, 32, 1],
-            ),
-        )
+    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
+        vec![SingletonCallEmissions {
+            call_index: 1,
+            emissions: vec![Emission { kind, payload }],
+        }]
     }
 
-    fn raw_response_entry(
-        count: u8,
-        rid: &[u8; 32],
-        x: [u8; 32],
-        y: [u8; 32],
-        s: [u8; 32],
-        recovery_id: u8,
-    ) -> (AlignedValue, Node) {
-        (
-            signet_map_key(count, rid),
-            cell_from_atoms(
-                &[trim(&x), trim(&y), trim(&s), trim(&[recovery_id])],
-                &[32, 32, 32, 1],
-            ),
-        )
+    fn notification(rid: [u8; 32]) -> [u8; 256] {
+        notification_payload(1, rid, CALLER, &[REQUESTS_FIELD])
     }
 
-    /// The central singleton: six flat fields, notification map at ordinal 1.
-    fn central_state(entries: Vec<(AlignedValue, Node)>) -> Node {
-        central_state_with_responses(entries, vec![], vec![])
+    fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
+        let mut record = sample_record();
+        record.request_nonce = nonce;
+        let rid = crate::request_id::compute_request_id(&record);
+        (record, rid)
     }
 
-    fn central_state_with_responses(
-        notifications: Vec<(AlignedValue, Node)>,
-        responses: Vec<(AlignedValue, Node)>,
-        bidirectional_responses: Vec<(AlignedValue, Node)>,
-    ) -> Node {
-        array_of(vec![
-            map_of(vec![]),
-            map_of(notifications),
-            map_of(vec![]),
-            map_of(responses),
-            map_of(vec![]),
-            map_of(bidirectional_responses),
-        ])
-    }
-
-    /// The caller's five-field ledger with the record filed under its rid at field 4.
-    fn caller_state(record: &crate::records::SignBidirectionalRecord, rid: &[u8; 32]) -> Node {
+    fn caller_state(
+        record: &crate::records::SignBidirectionalRecord,
+        rid: [u8; 32],
+    ) -> crate::reader::Node {
         array_of(vec![
             StateValue::Null,
             StateValue::Null,
             StateValue::Null,
             StateValue::Null,
-            map_of(vec![(key_of(*rid), cell_from_record(record))]),
+            map_of(vec![(key_of(rid), cell_from_record(record))]),
         ])
     }
 
@@ -850,99 +684,61 @@ mod tests {
     #[derive(Default)]
     struct FixtureSource {
         head: u64,
-        /// Finalized-head samples consumed in order before falling back to `head`.
-        sampled_heads: std::sync::Mutex<VecDeque<HeadSample>>,
+        sampled_heads: Mutex<VecDeque<HeadSample>>,
         successful_head_calls: std::sync::atomic::AtomicUsize,
-        /// (address, at_hash) -> tree; absent means Ok(None), contract not present at
-        /// that block.
-        states: HashMap<(String, String), Node>,
-        /// Contract states that exceed the response cap; checked before `states`.
+        emissions: HashMap<u64, Option<BlockEmissions>>,
+        emission_errors: Mutex<HashMap<u64, (String, usize)>>,
+        emission_holds: HashMap<u64, &'static str>,
+        states: HashMap<(String, String), crate::reader::Node>,
+        state_errors: HashMap<(String, String), String>,
         oversized_states: HashSet<(String, String)>,
-        /// (address, at_hash) -> (error message, failures still owed). Counts down per
-        /// read and then lets the read succeed, which is how a test distinguishes a
-        /// retry from a restart: a restarting indexer never reaches the success.
-        transient_state_errors: std::sync::Mutex<HashMap<(String, String), (String, usize)>>,
-        /// (address, at_hash) -> decode rejection; the node served the bytes
-        /// and the DECODER refused them.
         undecodable_states: HashMap<(String, String), String>,
-        /// `finalized_head` failures still owed before the read succeeds, the
-        /// startup twin of `transient_state_errors`.
-        transient_head_errors: std::sync::Mutex<usize>,
-        /// A permanent `finalized_head` failure, checked before the transient debt.
-        sticky_head_error: Option<String>,
+        transient_head_errors: Mutex<usize>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
-        /// Deterministic suspension: the read named here announces itself on `reached`
-        /// and then never resolves, so a test can cancel while a walk is PROVABLY
-        /// mid-flight instead of racing a sleep against it.
         park_at: Option<u64>,
         reached: Option<mpsc::Sender<String>>,
     }
 
     impl FixtureSource {
-        /// Announce arrival at a park point, then never resolve.
+        fn set_emissions(&mut self, height: u64, calls: Vec<SingletonCallEmissions>) {
+            self.emissions.insert(height, Some(batch(height, calls)));
+        }
+
+        fn set_state(&mut self, address: [u8; 32], height: u64, state: crate::reader::Node) {
+            self.states
+                .insert((hex::encode(address), hash_of(height)), state);
+        }
+
+        fn set_state_error(&mut self, address: [u8; 32], height: u64, message: &str) {
+            self.state_errors
+                .insert((hex::encode(address), hash_of(height)), message.to_string());
+        }
+
+        fn set_oversized_state(&mut self, address: [u8; 32], height: u64) {
+            self.oversized_states
+                .insert((hex::encode(address), hash_of(height)));
+        }
+
+        fn set_transient_emission_error(&mut self, height: u64, times: usize, message: &str) {
+            self.emission_errors
+                .lock()
+                .expect("emission errors")
+                .insert(height, (message.to_string(), times));
+        }
+
         async fn park(&self, label: String) -> ! {
             if let Some(reached) = &self.reached {
                 reached.send(label).await.expect("park signal receiver");
             }
             std::future::pending().await
         }
-
-        fn set_state(&mut self, address: &str, at: u64, tree: Node) {
-            self.states.insert((address.to_string(), hash_of(at)), tree);
-        }
-
-        /// Injects a read failure that clears itself after `times` reads.
-        fn set_transient_error(&mut self, address: &str, at: u64, times: usize, message: &str) {
-            self.transient_state_errors
-                .lock()
-                .expect("fixture transient errors")
-                .insert(
-                    (address.to_string(), hash_of(at)),
-                    (message.to_string(), times),
-                );
-        }
-
-        /// Consumes one failure still owed for `key`, or `None` once the debt is paid.
-        fn take_transient_error(&self, key: &(String, String)) -> Option<String> {
-            let mut pending = self
-                .transient_state_errors
-                .lock()
-                .expect("fixture transient errors");
-            let (message, remaining) = pending.get_mut(key)?;
-            if *remaining == 0 {
-                return None;
-            }
-            *remaining -= 1;
-            Some(message.clone())
-        }
-
-        fn set_oversized(&mut self, address: &str, at: u64) {
-            self.oversized_states
-                .insert((address.to_string(), hash_of(at)));
-        }
-
-        /// Injects a real decode failure for one (address, height): the ledger's own
-        /// deserializer refuses bytes whose tag is not the contract state this build
-        /// speaks, which is how a chain that moved ahead of us surfaces.
-        fn set_undecodable(&mut self, address: &str, at: u64) {
-            self.undecodable_states.insert(
-                (address.to_string(), hash_of(at)),
-                "contract state did not deserialize: unexpected tag".to_string(),
-            );
-        }
     }
 
     #[async_trait]
     impl ChainSource for FixtureSource {
         async fn finalized_head(&self) -> anyhow::Result<BlockRef> {
-            if let Some(message) = &self.sticky_head_error {
-                anyhow::bail!("{message}");
-            }
             {
-                let mut owed = self
-                    .transient_head_errors
-                    .lock()
-                    .expect("fixture head errors");
+                let mut owed = self.transient_head_errors.lock().expect("head errors");
                 if *owed > 0 {
                     *owed -= 1;
                     anyhow::bail!("finalized head fetch failed: connection reset by peer");
@@ -954,7 +750,7 @@ mod tests {
             let sample = self
                 .sampled_heads
                 .lock()
-                .expect("fixture sampled heads")
+                .expect("sampled heads")
                 .pop_front();
             match sample {
                 Some(HeadSample::Block(block)) => return Ok(block),
@@ -978,21 +774,49 @@ mod tests {
             Ok(block_ref(number))
         }
 
+        async fn block_emissions(
+            &self,
+            block: &BlockRef,
+            singleton: &[u8; 32],
+        ) -> anyhow::Result<Option<BlockEmissions>> {
+            assert_eq!(singleton, &SINGLETON, "configured singleton bytes");
+            if let Some(reason) = self.emission_holds.get(&block.number) {
+                return Err(BlockHold::new(
+                    reason,
+                    block.number,
+                    anyhow::anyhow!("fixture scanner rejected the block"),
+                )
+                .into());
+            }
+            if let Some((message, remaining)) = self
+                .emission_errors
+                .lock()
+                .expect("emission errors")
+                .get_mut(&block.number)
+            {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    anyhow::bail!("{message}");
+                }
+            }
+            Ok(self.emissions.get(&block.number).cloned().flatten())
+        }
+
         async fn contract_state_tree(
             &self,
             address_64hex: &str,
             at_hash: &str,
         ) -> anyhow::Result<ContractState> {
             let key = (address_64hex.to_string(), at_hash.to_string());
-            if let Some(message) = self.take_transient_error(&key) {
-                anyhow::bail!("{message}");
-            }
             if self.oversized_states.contains(&key) {
                 return Err(crate::rpc::oversized_contract_state(
                     subxt::ext::subxt_rpcs::Error::Client(Box::new(std::io::Error::other(
                         "fixture oversized contract state",
                     ))),
                 ));
+            }
+            if let Some(message) = self.state_errors.get(&key) {
+                anyhow::bail!("{message}");
             }
             if let Some(message) = self.undecodable_states.get(&key) {
                 return Ok(ContractState::Undecodable(anyhow::anyhow!("{message}")));
@@ -1003,6 +827,12 @@ mod tests {
                 .cloned()
                 .map_or(ContractState::Absent, ContractState::Tree))
         }
+    }
+
+    async fn direct_indexer() -> TestIndexer {
+        MidnightIndexer::new(test_config(), MockStateManager::new(), NoopChainTelemetry)
+            .await
+            .expect("indexer constructs")
     }
 
     struct RunFixture {
@@ -1021,8 +851,6 @@ mod tests {
             Self::spawn_with_state(source, state).await
         }
 
-        /// Spawns over an EXISTING state manager: the restart tests' seam, so a second
-        /// run provably resumes from what the first persisted.
         async fn spawn_with_state(source: FixtureSource, state: MockStateManager) -> Self {
             Self::spawn_with_config(source, state, test_config()).await
         }
@@ -1035,7 +863,6 @@ mod tests {
             let indexer = MidnightIndexer::new(config, state.clone(), NoopChainTelemetry)
                 .await
                 .expect("indexer constructs");
-
             let (events_tx, events_rx) = chain_event_channel();
             let cancel = CancellationToken::new();
             let handle = tokio::spawn({
@@ -1053,35 +880,58 @@ mod tests {
         async fn next_event(&mut self) -> ChainEvent {
             tokio::time::timeout(Duration::from_secs(5), self.events_rx.recv())
                 .await
-                .expect("timed out waiting for a chain event")
-                .expect("events channel closed")
+                .expect("timed out waiting for event")
+                .expect("event channel closed")
         }
 
         async fn cancel_and_join(self) {
             self.cancel.cancel();
             tokio::time::timeout(Duration::from_secs(5), self.handle)
                 .await
-                .expect("run() should stop promptly after cancel")
-                .expect("run task panicked")
-                .expect("run() should exit Ok on cancel");
+                .expect("run stops after cancel")
+                .expect("run task")
+                .expect("cancel returns Ok");
         }
     }
 
-    fn assert_block(event: &ChainEvent, number: u64) {
+    fn with_live(head: u64) -> (FixtureSource, mpsc::Sender<BlockRef>) {
+        let (tx, rx) = mpsc::channel(16);
+        (
+            FixtureSource {
+                head,
+                live: tokio::sync::Mutex::new(Some(rx)),
+                ..Default::default()
+            },
+            tx,
+        )
+    }
+
+    fn assert_block(event: ChainEvent, expected: u64) {
         assert!(
-            matches!(event, ChainEvent::Block(n) if *n == number),
-            "expected Block({number}), got {event:?}"
+            matches!(event, ChainEvent::Block(number) if number == expected),
+            "expected Block({expected}), got {event:?}"
         );
+    }
+
+    fn assert_request(event: ChainEvent, rid: [u8; 32]) {
+        let ChainEvent::SignRequest {
+            request,
+            block_timestamp,
+        } = event
+        else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(request.id, SignId::new(rid));
+        assert_eq!(block_timestamp, None);
     }
 
     #[tokio::test(start_paused = true)]
     async fn polling_ignores_nonadvancing_samples_then_closes_the_gap_in_order() {
-        let central = central_address();
         let mut divergent = block_ref(8);
         divergent.hash = hash_of(800);
-        let mut source = FixtureSource {
+        let source = FixtureSource {
             head: 11,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+            sampled_heads: Mutex::new(VecDeque::from([
                 HeadSample::Block(block_ref(8)),
                 HeadSample::Block(divergent),
                 HeadSample::Block(block_ref(7)),
@@ -1089,9 +939,6 @@ mod tests {
             ])),
             ..Default::default()
         };
-        for number in 8..=11 {
-            source.set_state(&central, number, central_state(vec![]));
-        }
         let mut config = test_config();
         config.indexer.poll_interval = Duration::from_secs(1);
         let state = MockStateManager::new();
@@ -1106,10 +953,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
-        assert!(
-            !harness.handle.is_finished(),
-            "a nonadvancing sample must not stop the polling loop"
-        );
+        assert!(!harness.handle.is_finished());
         assert!(harness.events_rx.try_recv().is_err());
 
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -1119,20 +963,20 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(1)).await;
         for number in 9..=11 {
-            assert_block(&harness.next_event().await, number);
+            assert_block(harness.next_event().await, number);
         }
         assert!(harness.events_rx.try_recv().is_err());
         harness.cancel_and_join().await;
     }
 
     #[tokio::test(start_paused = true)]
-    async fn nonadvancing_heads_emit_nothing_and_share_one_stall_budget() {
+    async fn nonadvancing_heads_share_one_stall_budget() {
         let mut config = test_config();
         config.indexer.poll_interval = Duration::from_secs(1);
         config.indexer.stall_timeout = Duration::from_secs(2);
         let source = FixtureSource {
             head: 8,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+            sampled_heads: Mutex::new(VecDeque::from([
                 HeadSample::Block(block_ref(8)),
                 HeadSample::Block(block_ref(7)),
             ])),
@@ -1153,686 +997,421 @@ mod tests {
         let err = harness
             .handle
             .await
-            .expect("run task panicked")
-            .expect_err("regressed and equal samples must share the original stall budget");
+            .expect("run task")
+            .expect_err("regressed and equal samples share the stall budget");
         assert!(err.to_string().contains("no progress"), "{err:#}");
     }
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_is_prompt_during_a_finalized_head_read() {
-        let (head_reached_tx, mut head_reached_rx) = mpsc::channel(1);
-        let sampling = FixtureSource {
+        let (reached_tx, mut reached_rx) = mpsc::channel(1);
+        let source = FixtureSource {
             head: 8,
-            sampled_heads: std::sync::Mutex::new(VecDeque::from([
+            sampled_heads: Mutex::new(VecDeque::from([
                 HeadSample::Block(block_ref(8)),
                 HeadSample::Park,
             ])),
-            reached: Some(head_reached_tx),
+            reached: Some(reached_tx),
             ..Default::default()
         };
         let mut config = test_config();
         config.indexer.poll_interval = Duration::from_secs(1);
-        let mut sampling =
-            RunFixture::spawn_with_config(sampling, MockStateManager::new(), config).await;
+        let mut harness =
+            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
         assert!(matches!(
-            sampling.next_event().await,
+            harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
+
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(
-            head_reached_rx.recv().await,
-            Some("finalized_head".to_string())
-        );
-        sampling.cancel_and_join().await;
+        assert_eq!(reached_rx.recv().await.as_deref(), Some("finalized_head"));
+        harness.cancel_and_join().await;
     }
 
-    /// Asserts the emitted request end to end: the id and the absent block timestamp.
-    fn assert_sign_request(event: &ChainEvent, rid: [u8; 32]) {
-        match event {
-            ChainEvent::SignRequest {
-                request,
-                block_timestamp,
-            } => {
-                assert_eq!(request.id, SignId::new(rid), "request id");
-                assert_eq!(
-                    *block_timestamp, None,
-                    "midnight carries no block timestamp"
+    #[tokio::test]
+    async fn fixture_source_preserves_the_proof_seed_and_stable_locator() {
+        let expected = batch(
+            42,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: [0x71; 256],
+                    },
+                    Emission {
+                        kind: EmissionKind::SignatureResponded,
+                        payload: [0x72; 256],
+                    },
+                ],
+            }],
+        );
+        let mut source = FixtureSource::default();
+        source.emissions.insert(42, Some(expected.clone()));
+
+        let carried = source
+            .block_emissions(&block_ref(42), &SINGLETON)
+            .await
+            .expect("source read")
+            .expect("candidate block");
+
+        assert_eq!(carried, expected);
+        assert_eq!(carried.candidates[0].extrinsic_index, 1);
+        assert_eq!(carried.candidates[0].calls[0].call_index, 1);
+        assert_eq!(
+            carried.candidates[0].calls[0].emissions[1].kind,
+            EmissionKind::SignatureResponded
+        );
+    }
+
+    #[tokio::test]
+    async fn process_block_emits_one_request_per_notify_emission() {
+        let (record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                ],
+            }],
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_request(event, rid);
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_entry_decodes_resolves_and_converts() {
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
+                .expect("captured notify transaction decodes");
+        let calls = emissions_in(&tx, &hex_32(CAPTURE_SINGLETON))
+            .expect("captured singleton emission decodes");
+        let [call] = calls.as_slice() else {
+            panic!("expected one captured singleton call, got {calls:?}");
+        };
+        let [emission] = call.emissions.as_slice() else {
+            panic!(
+                "expected one captured singleton emission, got {:?}",
+                call.emissions
+            );
+        };
+        assert_eq!(emission.kind, EmissionKind::SignBidirectional);
+        let notification = decode_notification(&emission.payload);
+
+        let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
+            .expect("captured caller state decodes");
+        let caller = hex_32(CAPTURE_CALLER);
+        let mut source = FixtureSource::default();
+        source.states.insert(
+            (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
+            caller_tree,
+        );
+
+        let request = direct_indexer()
+            .await
+            .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
+            .await
+            .expect("captured entry processing does not hold")
+            .expect("captured entry produces a request");
+
+        assert_eq!(request.id, SignId::new(hex_32(CAPTURE_REQUEST_ID)));
+        assert_eq!(request.args.key_version, 1);
+        assert_eq!(
+            request.args.path,
+            "63616c6c65722d70617468000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[tokio::test]
+    async fn respond_emissions_emit_both_lifecycle_events_in_locator_order() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("y"));
+        let respond_rid = [0x31; 32];
+        let bidirectional_rid = [0x32; 32];
+        let s1: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let s2: [u8; 32] = k256::Scalar::from(10u64).to_bytes().into();
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 4,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignatureResponded,
+                        payload: response_payload(respond_rid, x, y, s1, 0),
+                    },
+                    Emission {
+                        kind: EmissionKind::RespondBidirectional,
+                        payload: response_payload(bidirectional_rid, x, y, s2, 1),
+                    },
+                ],
+            }],
+        );
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("responses process");
+        assert_eq!(events.len(), 2);
+        let ChainEvent::Respond(respond) = &events[0] else {
+            panic!("first locator must be Respond: {events:?}");
+        };
+        assert_eq!(respond.request_id, respond_rid);
+        assert_eq!(respond.signature.s, k256::Scalar::from(9u64));
+        let ChainEvent::RespondBidirectional(respond) = &events[1] else {
+            panic!("second locator must be RespondBidirectional: {events:?}");
+        };
+        assert_eq!(respond.request_id, bidirectional_rid);
+        assert_eq!(respond.signature.s, k256::Scalar::from(10u64));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_response_is_dropped_without_hiding_the_next_emission() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("y"));
+        let rid = [0x44; 32];
+        let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignatureResponded,
+                        payload: response_payload([0x43; 32], [0xff; 32], [0xff; 32], s, 0),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignatureResponded,
+                        payload: response_payload(rid, x, y, s, 0),
+                    },
+                ],
+            }],
+        );
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("invalid signature is a per-emission drop");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ChainEvent::Respond(event) if event.request_id == rid));
+    }
+
+    #[tokio::test]
+    async fn a_block_hold_from_the_block_reader_halts_without_events() {
+        let mut source = FixtureSource::default();
+        source.emission_holds.insert(9, "singleton-tx-undecodable");
+        let indexer = direct_indexer().await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            indexer.index_block(
+                &source,
+                &events_tx,
+                &block_ref(9),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a BlockHold surfaces without retrying");
+        let result = match result {
+            Ok(_) => panic!("held block must fail"),
+            Err(err) => err,
+        };
+        let block_hold = result
+            .downcast_ref::<BlockHold>()
+            .expect("typed BlockHold preserved");
+        assert_eq!(block_hold.reason, "singleton-tx-undecodable");
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_caller_read_error_holds_the_block() {
+        let (_record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state_error(CALLER, 9, "state is unavailable at the requested block");
+
+        let err = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect_err("an unreadable caller state holds the block");
+        assert!(
+            format!("{err:#}").contains("state is unavailable at the requested block"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_data_failures_drop_only_the_affected_notification() {
+        let (good, good_rid) = named_record_and_rid(7);
+        let (_absent, absent_rid) = named_record_and_rid(8);
+        let mut source = FixtureSource {
+            head: 9,
+            ..Default::default()
+        };
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification_payload(2, [0x01; 32], CALLER, &[REQUESTS_FIELD]),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification_payload(1, [0x02; 32], CALLER, &[]),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(absent_rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(good_rid),
+                    },
+                ],
+            }],
+        );
+        source.set_state(CALLER, 9, caller_state(&good, good_rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("caller data failures do not hold");
+        assert_eq!(events.len(), 1);
+        assert_request(events.into_iter().next().expect("good request"), good_rid);
+    }
+
+    #[tokio::test]
+    async fn caller_state_too_large_and_undecodable_are_per_entry_drops() {
+        let (_record, rid) = named_record_and_rid(7);
+        for failure in ["too-large", "undecodable"] {
+            let mut source = FixtureSource::default();
+            source.set_emissions(
+                9,
+                one_call(EmissionKind::SignBidirectional, notification(rid)),
+            );
+            if failure == "too-large" {
+                source.set_oversized_state(CALLER, 9);
+            } else {
+                source.undecodable_states.insert(
+                    (hex::encode(CALLER), hash_of(9)),
+                    "unexpected state tag".to_string(),
                 );
             }
-            other => panic!("expected SignRequest, got {other:?}"),
+            assert!(
+                direct_indexer()
+                    .await
+                    .process_block(&source, &block_ref(9))
+                    .await
+                    .expect("entry is dropped")
+                    .is_empty(),
+                "{failure}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn a_silent_singleton_call_only_warns_and_the_block_advances() {
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 6,
+                emissions: Vec::new(),
+            }],
+        );
+        let indexer = direct_indexer().await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+        indexer
+            .index_block(
+                &source,
+                &events_tx,
+                &block_ref(9),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("silent call is not a hold");
+        assert_block(events_rx.recv().await.expect("Block event"), 9);
     }
 
     #[tokio::test]
     async fn run_emits_catchup_before_completed_and_live_blocks() {
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        // Parent-of-first-catchup-block state exists and is empty.
-        source.set_state(&central, 5, central_state(vec![]));
-        source.set_state(&central, 6, central_state(vec![]));
-        // Block 7 files the notification; block 8 carries it unchanged.
-        source.set_state(
-            &central,
+        let (record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(8);
+        source.set_emissions(
             7,
-            central_state(vec![notification_entry(1, &rid)]),
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
         );
-        source.set_state(
-            &central,
-            8,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 7, caller_state(&record, &rid));
-
-        // A live block is already queued BEFORE run() starts; its events must still
-        // come after CatchupCompleted.
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
+        source.set_state(CALLER, 7, caller_state(&record, rid));
         live_tx.send(block_ref(9)).await.expect("queue live block");
 
         let mut harness = RunFixture::spawn(source, 5).await;
-
-        assert_block(&harness.next_event().await, 6);
-        assert_sign_request(&harness.next_event().await, rid);
-        assert_block(&harness.next_event().await, 7);
-        assert_block(&harness.next_event().await, 8);
-        assert!(
-            matches!(harness.next_event().await, ChainEvent::CatchupCompleted),
-            "catchup events and only catchup events precede CatchupCompleted"
-        );
-        // The pre-queued live block adds nothing new (same entry) and emits its Block
-        // only now.
-        assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-    }
-
-    #[tokio::test]
-    async fn process_block_emits_one_request_per_new_entry() {
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        // The pre-existing entry files the SAME rid under count 1 (a re-notification
-        // scenario), so it is fully resolvable: a diff mutant that treats every entry
-        // as new re-emits it and fails the exactly-one assertion below, rather than
-        // hiding behind an unresolvable decoy rid.
-        source.set_state(
-            &central,
-            8,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![
-                notification_entry(1, &rid),
-                notification_entry(2, &rid),
-            ]),
-        );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
+        assert_block(harness.next_event().await, 6);
+        assert_request(harness.next_event().await, rid);
+        assert_block(harness.next_event().await, 7);
+        assert_block(harness.next_event().await, 8);
         assert!(matches!(
             harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
-
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        // Exactly ONE request: the pre-existing entry is not re-emitted (a diff mutant
-        // that treats every entry as new emits two).
-        assert_sign_request(&harness.next_event().await, rid);
-        assert_block(&harness.next_event().await, 9);
+        assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
 
     #[tokio::test]
-    async fn response_maps_emit_both_lifecycle_events_before_the_block() {
-        let respond_rid = [0x31; 32];
-        let bidirectional_rid = [0x32; 32];
-        let respond_signature = mpc_primitives::Signature::new(
-            k256::AffinePoint::GENERATOR,
-            k256::Scalar::from(9u64),
-            0,
+    async fn catchup_retries_a_transient_block_emission_read() {
+        let (record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(8);
+        source.set_emissions(
+            7,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
         );
-        let bidirectional_signature = mpc_primitives::Signature::new(
-            k256::AffinePoint::GENERATOR,
-            k256::Scalar::from(10u64),
-            1,
-        );
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        let response_state = central_state_with_responses(
-            vec![],
-            vec![
-                raw_response_entry(
-                    1,
-                    &respond_rid,
-                    [0xff; 32],
-                    [0xff; 32],
-                    k256::Scalar::from(8u64).to_bytes().into(),
-                    0,
-                ),
-                response_entry(2, &respond_rid, &respond_signature),
-            ],
-            vec![
-                raw_response_entry(
-                    1,
-                    &bidirectional_rid,
-                    [0xff; 32],
-                    [0xff; 32],
-                    k256::Scalar::from(8u64).to_bytes().into(),
-                    0,
-                ),
-                response_entry(2, &bidirectional_rid, &bidirectional_signature),
-            ],
-        );
-        source.set_state(&central, 9, response_state);
-        let repeated_response_state = central_state_with_responses(
-            vec![],
-            vec![
-                raw_response_entry(
-                    1,
-                    &respond_rid,
-                    [0xff; 32],
-                    [0xff; 32],
-                    k256::Scalar::from(8u64).to_bytes().into(),
-                    0,
-                ),
-                response_entry(2, &respond_rid, &respond_signature),
-                response_entry(3, &respond_rid, &respond_signature),
-            ],
-            vec![
-                raw_response_entry(
-                    1,
-                    &bidirectional_rid,
-                    [0xff; 32],
-                    [0xff; 32],
-                    k256::Scalar::from(8u64).to_bytes().into(),
-                    0,
-                ),
-                response_entry(2, &bidirectional_rid, &bidirectional_signature),
-            ],
-        );
-        source.set_state(&central, 10, repeated_response_state.clone());
-        source.set_state(&central, 11, repeated_response_state);
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        match harness.next_event().await {
-            ChainEvent::Respond(event) => {
-                assert_eq!(event.request_id, respond_rid);
-                assert_eq!(event.signature, respond_signature);
-                assert_eq!(event.chain, Chain::Midnight);
-            }
-            other => panic!("expected Respond, got {other:?}"),
-        }
-        match harness.next_event().await {
-            ChainEvent::RespondBidirectional(event) => {
-                assert_eq!(event.request_id, bidirectional_rid);
-                assert_eq!(event.signature, bidirectional_signature);
-                assert_eq!(event.chain, Chain::Midnight);
-            }
-            other => panic!("expected RespondBidirectional, got {other:?}"),
-        }
-        assert_block(&harness.next_event().await, 9);
-        live_tx
-            .send(block_ref(10))
-            .await
-            .expect("send repeat block");
-        match harness.next_event().await {
-            ChainEvent::Respond(event) => {
-                assert_eq!(event.request_id, respond_rid);
-                assert_eq!(event.signature, respond_signature);
-            }
-            other => panic!("expected repeated Respond, got {other:?}"),
-        }
-        assert_block(&harness.next_event().await, 10);
-        live_tx
-            .send(block_ref(11))
-            .await
-            .expect("send unchanged block");
-        assert_block(&harness.next_event().await, 11);
-        harness.cancel_and_join().await;
-    }
-
-    #[tokio::test]
-    async fn response_schema_drift_halts_without_events_or_cache_commit() {
-        let valid_rid = [0x40; 32];
-        let drift_rid = [0x41; 32];
-        let valid_signature = mpc_primitives::Signature::new(
-            k256::AffinePoint::GENERATOR,
-            k256::Scalar::from(9u64),
-            0,
-        );
-
-        for (map_name, drift_in_bidirectional_map) in
-            [("respondMap", false), ("respondBidirectionalMap", true)]
-        {
-            let central = central_address();
-            let mut source = FixtureSource::default();
-            source.set_state(&central, 7, central_state(vec![]));
-            source.set_state(&central, 8, central_state(vec![]));
-
-            // The invalid point must not hide the extra atom: contract structure is
-            // exhausted before caller-controlled cryptographic values are checked.
-            let structurally_invalid = (
-                signet_map_key(2, &drift_rid),
-                cell_from_atoms(
-                    &[vec![0xff; 32], vec![0xff; 32], vec![9], vec![], vec![1]],
-                    &[32, 32, 32, 1, 1],
-                ),
-            );
-            let entries = vec![
-                response_entry(1, &valid_rid, &valid_signature),
-                structurally_invalid,
-            ];
-            let (responses, bidirectional_responses) = if drift_in_bidirectional_map {
-                (vec![], entries)
-            } else {
-                (entries, vec![])
-            };
-            source.set_state(
-                &central,
-                9,
-                central_state_with_responses(vec![], responses, bidirectional_responses),
-            );
-
-            let indexer = direct_indexer().await;
-            let mut cache = None;
-            indexer
-                .process_block(&source, &mut cache, &block_ref(8))
-                .await
-                .expect("the parent primes the cache");
-            let parent_hash = hash_of(8);
-            assert_eq!(
-                cache.as_ref().map(|(hash, _)| hash.as_str()),
-                Some(parent_hash.as_str())
-            );
-
-            let (events_tx, mut events_rx) = chain_event_channel();
-            let result = tokio::time::timeout(
-                Duration::from_secs(1),
-                indexer.index_block(
-                    &source,
-                    &mut cache,
-                    &events_tx,
-                    &block_ref(9),
-                    &CancellationToken::new(),
-                ),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("{map_name} schema drift must halt, not retry"));
-            let err = match result {
-                Err(err) => err,
-                Ok(_) => panic!("{map_name} schema drift must fail the block"),
-            };
-            assert!(
-                format!("{err:#}").contains(map_name),
-                "the error must name its response map: {err:#}"
-            );
-            assert!(
-                events_rx.try_recv().is_err(),
-                "no lifecycle or Block event may escape a failed block"
-            );
-            assert_eq!(
-                cache.as_ref().map(|(hash, _)| hash.as_str()),
-                Some(parent_hash.as_str()),
-                "a failed block must preserve the parent cache"
-            );
-        }
-    }
-
-    /// An indexer plus a `cache` slot for driving `process_block`/`process_entry`
-    /// directly: the drift classification is about return values, not event flows.
-    async fn direct_indexer() -> TestIndexer {
-        MidnightIndexer::new(test_config(), MockStateManager::new(), NoopChainTelemetry)
-            .await
-            .expect("indexer constructs")
-    }
-
-    // ---- The committed capture (fixtures/README.md) ----------------------------
-
-    /// Raw `midnight_contractState` bytes from the capture chain at its notify block.
-    const CAPTURED_SINGLETON_POST: &[u8] = include_bytes!("../fixtures/singleton-post-state-64.mn");
-    const CAPTURED_CALLER_POST: &[u8] = include_bytes!("../fixtures/caller-post-state-64.mn");
-    const CAPTURED_HEIGHT: u64 = 64;
-
-    fn hex32(hex64: &str) -> [u8; 32] {
-        <[u8; 32]>::try_from(hex::decode(hex64).expect("hex")).expect("32 bytes")
-    }
-
-    /// The capture chain's deployed test caller.
-    fn captured_caller() -> [u8; 32] {
-        hex32("34f8406321f607763d3176d07f486db807d05d7c5103f2550850119d353a2987")
-    }
-
-    /// The request id the capture's submit filed.
-    fn captured_rid() -> [u8; 32] {
-        hex32("aadca83b95a932a675a6298ac3b4fa2ac092ecc19e4aef8001a496cf2ace84d7")
-    }
-
-    /// The record the capture's `submitSignatureRequest(evmNonce: 0, keyVersion: 1)`
-    /// files, rebuilt from the caller contract's own constants
-    /// (test-caller-contract.compact), never from anything this crate decoded.
-    fn captured_record() -> crate::records::SignBidirectionalRecord {
-        use crate::records::{
-            CompactMaybe, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
-        };
-        SignBidirectionalRecord {
-            sender: captured_caller(),
-            request_nonce: 0,
-            key_version: 1,
-            path: ascii_padded(b"caller-path"),
-            algo: 0,
-            dest: 0,
-            params: [0u8; 64],
-            tx_param_type: 0,
-            tx_params: EvmType2TxParams {
-                chain_id: 31337,
-                nonce: 0,
-                max_priority_fee_per_gas: 1_000_000_000,
-                max_fee_per_gas: 30_000_000_000,
-                gas_limit: 100_000,
-                to: ascii_padded(b"signet-caller-e2e-to"),
-                value: 0,
-                calldata: CompactMaybe {
-                    is_some: true,
-                    value: EvmCalldata {
-                        selector: [0xca, 0x11, 0xab, 0x1e],
-                        no_words: 1,
-                        words: vec![ascii_padded(b"signet-caller:fixed-word")],
-                    },
-                },
-                access_list_entry_count: 0,
-                access_list: Vec::new(),
-            },
-            caip2_id: ascii_padded(b"eip155:31337"),
-            output_deserialization_schema: br#"[{"name":"success","type":"bool"}]"#.to_vec(),
-            respond_serialization_schema: br#"[{"name":"success","type":"bool"}]"#.to_vec(),
-        }
-    }
-
-    /// The other tests in this module build their cells with the same width tables the
-    /// decoder checks, so they cannot catch both sides being wrong about the actual
-    /// contract. This one runs the entry pipeline over bytes the contract toolchain
-    /// produced, and every expectation is fixed outside this crate: the deployed
-    /// caller's address, the ledger path its source pins ([4] at depth 1), and the
-    /// record fields its submit circuit hardcodes.
-    #[tokio::test]
-    async fn captured_entry_decodes_resolves_and_converts() {
-        let central = crate::state::decode_contract_state(CAPTURED_SINGLETON_POST)
-            .expect("the captured singleton state decodes");
-        let entries =
-            TestIndexer::central_entries(&central).expect("the captured central event maps decode");
-        assert_eq!(
-            entries.notifications.len(),
-            1,
-            "the capture holds exactly one notify"
-        );
-        let entry = &entries.notifications[0];
-        assert_eq!(
-            signet_map_key_rid(&entry.key),
-            Some(captured_rid()),
-            "the registry keys the notification by the filed request id"
-        );
-
-        let notification =
-            decode_notification(&entry.value).expect("the stored notification cell decodes");
-        let unpacked = unpack_notification_v1(&notification).expect("the V1 payload unpacks");
-        assert_eq!(unpacked.caller_address, captured_caller());
-        assert_eq!(
-            unpacked.requests_path,
-            vec![REQUESTS_FIELD],
-            "the payload carries the caller's contract-info path"
-        );
-
-        let caller_tree = crate::state::decode_contract_state(CAPTURED_CALLER_POST)
-            .expect("the captured caller state decodes");
-        let field = signet_field_node_by_path(&caller_tree, &unpacked.requests_path)
-            .expect("the carried path walks the captured ledger");
-        let Resolved::Found(record) = resolve_verified_record(field, captured_rid()) else {
-            panic!("the captured record must resolve, request-id recompute included");
-        };
-        assert_eq!(*record, captured_record());
-
-        // The production entry pipeline over the same bytes, conversion included.
-        let indexer = direct_indexer().await;
-        let mut source = FixtureSource::default();
-        source.set_state(
-            &hex::encode(captured_caller()),
-            CAPTURED_HEIGHT,
-            caller_tree,
-        );
-        let request = indexer
-            .process_entry(
-                &source,
-                entry,
-                &hash_of(CAPTURED_HEIGHT),
-                CAPTURED_HEIGHT,
-                0,
-            )
-            .await
-            .expect("nothing in the capture is drift")
-            .expect("the captured entry must produce a request");
-        assert_eq!(request.id, SignId::new(captured_rid()));
-        assert_eq!(request.args.key_version, 1);
-        assert_eq!(
-            request.args.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
-            "the full 32 path bytes as lowercase hex"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_block_errors_on_central_schema_drift() {
-        // None of the three event-map fields can change shape through a caller: a
-        // non-map is contract drift or a wrong central address and must halt loudly.
-        let central = central_address();
-        let indexer = direct_indexer().await;
-        for field in [
-            usize::from(NOTIFICATION_MAP_FIELD),
-            usize::from(RESPOND_MAP_FIELD),
-            usize::from(RESPOND_BIDIRECTIONAL_MAP_FIELD),
-        ] {
-            let mut source = FixtureSource::default();
-            source.set_state(&central, 8, central_state(vec![]));
-            let mut fields: Vec<Node> =
-                (0..CENTRAL_LEDGER_FIELDS).map(|_| map_of(vec![])).collect();
-            fields[field] = StateValue::Null;
-            source.set_state(&central, 9, array_of(fields));
-
-            let mut cache = None;
-            let err = indexer
-                .process_block(&source, &mut cache, &block_ref(9))
-                .await
-                .expect_err("a non-map central field must error, never degrade")
-                .to_string();
-            assert!(err.contains("is not a map"), "field {field}, err: {err}");
-        }
-    }
-
-    #[tokio::test]
-    async fn process_entry_errors_on_singleton_shapes_and_drops_caller_data() {
-        // The singleton's circuits fix the key shape, the value shape and version, so
-        // those failures are drift (Err); the payload's depth byte is caller data (drop).
-        let (_record, rid) = caller_record_and_rid();
-        let source = FixtureSource::default();
-        let indexer = direct_indexer().await;
-
-        let one_atom_key = MapEntry {
-            key: AlignedValue::from([0x11; 32]),
-            value: notification_entry(1, &rid).1,
-        };
-        let err = indexer
-            .process_entry(&source, &one_atom_key, &hash_of(9), 9, 0)
-            .await
-            .expect_err("a non-SignetMapKey key is drift")
-            .to_string();
-        assert!(err.contains("SignetMapKey"), "err: {err}");
-
-        let three_atom_value = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
-        };
-        let err = indexer
-            .process_entry(&source, &three_atom_value, &hash_of(9), 9, 0)
-            .await
-            .expect_err("a malformed notification cell is drift")
-            .to_string();
-        assert!(err.contains("notification"), "err: {err}");
-
-        let mut payload = CALLER.to_vec();
-        payload.extend([1u8, REQUESTS_FIELD]);
-        let version_two = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: cell_from_atoms(&[vec![2u8], payload], &[1, 128]),
-        };
-        let err = format!(
-            "{:#}",
-            indexer
-                .process_entry(&source, &version_two, &hash_of(9), 9, 0)
-                .await
-                .expect_err("the singleton asserts version 1 in circuit, so 2 is drift")
-        );
-        assert!(err.contains("version 2"), "err: {err}");
-
-        // Depth 0 is caller-writable payload: a drop, and never an abort.
-        let mut zero_depth = CALLER.to_vec();
-        zero_depth.push(0);
-        let bad_depth = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: cell_from_atoms(&[vec![1u8], zero_depth], &[1, 128]),
-        };
-        let dropped = indexer
-            .process_entry(&source, &bad_depth, &hash_of(9), 9, 0)
-            .await
-            .expect("caller-supplied depth must not abort the block");
-        assert!(dropped.is_none());
-    }
-
-    /// What `captured_entry_decodes_resolves_and_converts` does not cover: the
-    /// parent-diff over the real pre/post states finds exactly the one new entry, and
-    /// the emitted epsilon matches the derivation the TS reference pins for the
-    /// deployed caller.
-    #[tokio::test]
-    async fn process_block_diffs_the_captured_states() {
-        let pre = decode_contract_state(include_bytes!("../fixtures/singleton-pre-state-63.mn"))
-            .expect("the pre-notify singleton capture decodes");
-        let post = decode_contract_state(CAPTURED_SINGLETON_POST)
-            .expect("the post-notify singleton capture decodes");
-        let caller =
-            decode_contract_state(CAPTURED_CALLER_POST).expect("the caller capture decodes");
-
-        let central = central_address();
-        let mut source = FixtureSource::default();
-        source.set_state(&central, CAPTURED_HEIGHT - 1, pre);
-        source.set_state(&central, CAPTURED_HEIGHT, post);
-        source.set_state(&hex::encode(captured_caller()), CAPTURED_HEIGHT, caller);
-        let indexer = direct_indexer().await;
-        let mut cache = None;
-        let events = indexer
-            .process_block(&source, &mut cache, &block_ref(CAPTURED_HEIGHT))
-            .await
-            .expect("the captured block processes");
-        let [ChainEvent::SignRequest { request, .. }] = events.as_slice() else {
-            panic!("exactly one captured request, got {events:?}")
-        };
-        assert_eq!(request.id, SignId::new(captured_rid()));
-        let path_hex = "63616c6c65722d70617468000000000000000000000000000000000000000000";
-        assert_eq!(
-            request.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(1, &hex::encode(captured_caller()), path_hex),
-            "epsilon derives from the deployed caller and the contract's own path"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_entry_drops_unreadable_caller_state() {
-        let (_record, rid) = caller_record_and_rid();
-        let indexer = direct_indexer().await;
-        let entry = MapEntry {
-            key: signet_map_key(1, &rid),
-            value: notification_entry(1, &rid).1,
-        };
-
-        for (failure, inject) in [
-            (
-                "undecodable",
-                FixtureSource::set_undecodable as fn(&mut FixtureSource, &str, u64),
-            ),
-            ("oversized", FixtureSource::set_oversized),
-        ] {
-            let mut source = FixtureSource::default();
-            inject(&mut source, &hex::encode(CALLER), 9);
-            let dropped = indexer
-                .process_entry(&source, &entry, &hash_of(9), 9, 0)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("{failure} caller state was not dropped: {error:#}")
-                });
-            assert!(dropped.is_none(), "{failure} caller state emitted an event");
-        }
-    }
-
-    #[tokio::test]
-    async fn catchup_retries_a_transient_caller_read() {
-        // The request before block 8 proves a caller read must recover before the
-        // watermark can advance past it.
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 6, central_state(vec![]));
-        source.set_state(&central, 7, central_state(vec![]));
-        source.set_state(
-            &central,
-            8,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![notification_entry(1, &rid)]),
-        );
-        source.set_state(&hex::encode(CALLER), 8, caller_state(&record, &rid));
-        source.set_transient_error(
-            &hex::encode(CALLER),
-            8,
-            1,
-            "contract state read failed: connection reset by peer",
-        );
+        source.set_state(CALLER, 7, caller_state(&record, rid));
+        source.set_transient_emission_error(7, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 6).await;
-        assert_block(&harness.next_event().await, 7);
-        assert_sign_request(&harness.next_event().await, rid);
-        assert_block(&harness.next_event().await, 8);
-        assert_block(&harness.next_event().await, 9);
+        assert_request(harness.next_event().await, rid);
+        assert_block(harness.next_event().await, 7);
+        assert_block(harness.next_event().await, 8);
         assert!(matches!(
             harness.next_event().await,
             ChainEvent::CatchupCompleted
@@ -1842,48 +1421,195 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permanent_central_state_failures_stop_the_live_loop() {
-        for (failure, inject, diagnostic) in [
-            (
-                "oversized",
-                FixtureSource::set_oversized as fn(&mut FixtureSource, &str, u64),
-                STATE_TOO_LARGE,
-            ),
-            (
-                "undecodable",
-                FixtureSource::set_undecodable,
-                "did not decode",
-            ),
-        ] {
-            let central = central_address();
-            let (live_tx, live_rx) = mpsc::channel(8);
-            let mut source = FixtureSource {
-                head: 9,
-                live: tokio::sync::Mutex::new(Some(live_rx)),
-                ..Default::default()
-            };
-            source.set_state(&central, 8, central_state(vec![]));
-            source.set_state(&central, 9, central_state(vec![]));
-            inject(&mut source, &central, 10);
+    async fn run_returns_ok_on_cancel_mid_catchup() {
+        let (reached_tx, mut reached_rx) = mpsc::channel(1);
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let source = FixtureSource {
+            head: 600,
+            park_at: Some(103),
+            reached: Some(reached_tx),
+            live: tokio::sync::Mutex::new(Some(live_rx)),
+            ..Default::default()
+        };
+        let mut harness = RunFixture::spawn(source, 100).await;
+        assert_block(harness.next_event().await, 101);
+        assert_block(harness.next_event().await, 102);
+        assert_eq!(
+            reached_rx.recv().await.expect("park reached"),
+            "block_at:103"
+        );
+        assert!(harness.events_rx.try_recv().is_err());
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
 
-            let mut harness = RunFixture::spawn(source, 8).await;
-            assert_block(&harness.next_event().await, 9);
-            assert!(matches!(
-                harness.next_event().await,
-                ChainEvent::CatchupCompleted
-            ));
-            live_tx.send(block_ref(10)).await.expect("send live block");
-
-            let err = tokio::time::timeout(Duration::from_secs(5), harness.handle)
-                .await
-                .unwrap_or_else(|_| panic!("{failure} central state did not stop run()"))
-                .expect("run task panicked")
-                .unwrap_err();
-            assert!(
-                err.to_string().contains(diagnostic),
-                "{failure} central state lost its diagnostic: {err:#}"
-            );
+    #[tokio::test]
+    async fn run_leaves_the_persisted_checkpoint_to_the_block_consumer() {
+        let (source, live_tx) = with_live(9);
+        let mut harness = RunFixture::spawn(source, 5).await;
+        for number in 6..=9 {
+            assert_block(harness.next_event().await, number);
         }
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        assert_eq!(
+            harness.state.get_processed_block(Chain::Midnight).await,
+            Some(5)
+        );
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn run_anchors_at_head_without_catchup_and_skips_replayed_live_blocks() {
+        let (source, live_tx) = with_live(8);
+        let mut harness = RunFixture::spawn(source, 0).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(8)).await.expect("replay anchor");
+        live_tx.send(block_ref(9)).await.expect("new live block");
+        assert_block(harness.next_event().await, 9);
+        assert!(harness.events_rx.try_recv().is_err());
+        harness.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_retries_a_transient_anchor_read() {
+        let (mut source, live_tx) = with_live(8);
+        source.transient_head_errors = Mutex::new(2);
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        harness.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn live_retries_a_transient_block_emission_read() {
+        let (record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(8);
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_transient_emission_error(9, 1, "connection reset by peer");
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(9)).await.expect("send live block");
+        assert_request(harness.next_event().await, rid);
+        assert_block(harness.next_event().await, 9);
+        harness.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_recatches_from_the_persisted_checkpoint_after_restart() {
+        let (source, live_tx) = with_live(9);
+        let mut first = RunFixture::spawn(source, 5).await;
+        for number in 6..=9 {
+            assert_block(first.next_event().await, number);
+        }
+        assert!(matches!(
+            first.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        let state = first.state.clone();
+        first.cancel_and_join().await;
+        drop(live_tx);
+        state.set_processed_block(Chain::Midnight, 9).await;
+
+        let (source, live_tx) = with_live(12);
+        let mut second = RunFixture::spawn_with_state(source, state).await;
+        for number in 10..=12 {
+            assert_block(second.next_event().await, number);
+        }
+        assert!(matches!(
+            second.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        second.cancel_and_join().await;
+        drop(live_tx);
+    }
+
+    #[tokio::test]
+    async fn caller_contract_absent_is_a_per_entry_drop() {
+        let (_record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource {
+            head: 9,
+            ..Default::default()
+        };
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("an absent caller contract is not a read failure");
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
+        let (good_record, good_rid) = named_record_and_rid(7);
+        let mut bad_record = sample_record();
+        bad_record.request_nonce = 8;
+        bad_record.algo = 1;
+        let bad_rid = crate::request_id::compute_request_id(&bad_record);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification_payload(1, [0x81; 32], CALLER, &[9]),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(bad_rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(good_rid),
+                    },
+                ],
+            }],
+        );
+        source.set_state(
+            CALLER,
+            9,
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![
+                    (key_of(bad_rid), cell_from_record(&bad_record)),
+                    (key_of(good_rid), cell_from_record(&good_record)),
+                ]),
+            ]),
+        );
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("per-entry failures do not hold the block");
+        assert_eq!(events.len(), 1);
+        assert_request(events.into_iter().next().expect("good request"), good_rid);
     }
 
     #[tokio::test]
@@ -1911,266 +1637,45 @@ mod tests {
             }
         }
 
-        let (record, rid) = caller_record_and_rid();
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
+        let (record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(9);
+        source.set_emissions(
             9,
-            central_state(vec![notification_entry(1, &rid)]),
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
         );
-        source.set_state(&hex::encode(CALLER), 9, caller_state(&record, &rid));
-
-        let counted = CountingTelemetry::default();
+        source.set_state(CALLER, 9, caller_state(&record, rid));
         let state = MockStateManager::new();
         state.set_processed_block(Chain::Midnight, 8).await;
+        let counted = CountingTelemetry::default();
         let indexer = MidnightIndexer::new(test_config(), state, counted.clone())
             .await
             .expect("indexer constructs");
-
         let (events_tx, mut events_rx) = chain_event_channel();
         let cancel = CancellationToken::new();
         let handle = tokio::spawn({
             let cancel = cancel.clone();
             async move { indexer.run_with_source(&source, events_tx, cancel).await }
         });
-        // Drain until the block that carries the request has been emitted.
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
-                .await
-                .expect("timed out")
-                .expect("channel closed");
-            if matches!(event, ChainEvent::Block(9)) {
+            if matches!(events_rx.recv().await.expect("event"), ChainEvent::Block(9)) {
                 break;
             }
         }
-        assert_eq!(
-            counted.0.load(Ordering::Relaxed),
-            0,
-            "the indexer must not count requests itself; the stream layer counts every one"
-        );
+        assert_eq!(counted.0.load(Ordering::Relaxed), 0);
         cancel.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        handle.await.expect("run task").expect("cancel returns Ok");
         drop(live_tx);
     }
 
     #[tokio::test]
-    async fn run_returns_ok_on_cancel_mid_catchup() {
-        // The range walk's own cancel arms.
-        let (reached_tx, mut reached_rx) = mpsc::channel(1);
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let source = FixtureSource {
-            head: 600,
-            park_at: Some(103),
-            reached: Some(reached_tx),
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-
-        let mut harness = RunFixture::spawn(source, 100).await;
-        assert_block(&harness.next_event().await, 101);
-        assert_block(&harness.next_event().await, 102);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), reached_rx.recv())
-                .await
-                .expect("the range walk must reach the parked height")
-                .expect("park signal channel closed"),
-            "block_at:103",
-            "cancel must arrive while the walk is parked mid-range"
-        );
-
-        // A walk parked mid-range emits exactly the blocks it completed, no more: 103 is
-        // suspended, so nothing beyond 102 can have reached the channel.
-        assert!(
-            harness.events_rx.try_recv().is_err(),
-            "the walk emitted past the last block it actually completed"
-        );
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_leaves_the_persisted_checkpoint_to_the_block_consumer() {
-        // The height belongs to whoever CONSUMED the block's events, not to whoever
-        // queued them: the node advances it in `process_block_event` after the block's
-        // requests have been processed, and only once caught up. An indexer that
-        // advanced it here would claim blocks whose events are still sitting in the
-        // channel, and a supervised restart drops that channel.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        for n in 5..=10 {
-            source.set_state(&central, n, central_state(vec![]));
-        }
-        let mut harness = RunFixture::spawn(source, 5).await;
-        for n in 6..=9 {
-            assert_block(&harness.next_event().await, n);
-        }
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        live_tx.send(block_ref(10)).await.expect("send live block");
-        assert_block(&harness.next_event().await, 10);
-
-        assert_eq!(
-            harness.state.get_processed_block(Chain::Midnight).await,
-            Some(5),
-            "the indexer only READS the checkpoint at startup; emitting Block is how it \
-         reports progress"
-        );
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn run_recatches_from_checkpoint_on_restart() {
-        // A restart resumes from the persisted checkpoint rather than re-walking from
-        // zero or skipping the gap.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 9,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        for n in 5..=9 {
-            source.set_state(&central, n, central_state(vec![]));
-        }
-        let mut harness = RunFixture::spawn(source, 5).await;
-        for n in 6..=9 {
-            assert_block(&harness.next_event().await, n);
-        }
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        let state = harness.state.clone();
-        harness.cancel_and_join().await;
-        drop(live_tx);
-        // Stands in for the node's `process_block_event`, which is what advances the
-        // height once it has consumed each `Block` event asserted above.
-        state.set_processed_block(Chain::Midnight, 9).await;
-
-        // The restart: same persisted state, head advanced to 12.
-        let (live_tx2, live_rx2) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 12,
-            live: tokio::sync::Mutex::new(Some(live_rx2)),
-            ..Default::default()
-        };
-        for n in 9..=12 {
-            source.set_state(&central, n, central_state(vec![]));
-        }
-        let mut second = RunFixture::spawn_with_state(source, state).await;
-        for n in 10..=12 {
-            assert_block(&second.next_event().await, n);
-        }
-        assert!(matches!(
-            second.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        second.cancel_and_join().await;
-        drop(live_tx2);
-    }
-
-    #[tokio::test]
-    async fn run_anchors_at_head_without_catchup_when_fresh() {
-        // Checkpoint 0: no gap to close and no genesis walk; live starts at the anchor.
-        let central = central_address();
-        let (live_tx, live_rx) = mpsc::channel(8);
-        let mut source = FixtureSource {
-            head: 8,
-            live: tokio::sync::Mutex::new(Some(live_rx)),
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(&central, 9, central_state(vec![]));
-
-        let mut harness = RunFixture::spawn(source, 0).await;
-        assert!(
-            matches!(harness.next_event().await, ChainEvent::CatchupCompleted),
-            "a fresh node emits no catchup blocks"
-        );
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn process_block_drops_only_failing_entry() {
-        // One malformed record must never stop indexing for everyone.
-        let (good_record, good_rid) = caller_record_and_rid();
-        // Reserved algo: decodes off the wire, then fails conversion.
-        let mut bad_record = sample_record();
-        bad_record.algo = 1;
-        let bad_rid = crate::request_id::compute_request_id(&bad_record);
-        let central = central_address();
-        let mut source = FixtureSource {
-            head: 8,
-            ..Default::default()
-        };
-        source.set_state(&central, 8, central_state(vec![]));
-        source.set_state(
-            &central,
-            9,
-            central_state(vec![
-                notification_entry(1, &bad_rid),
-                notification_entry(2, &good_rid),
-            ]),
-        );
-        source.set_state(
-            &hex::encode(CALLER),
-            9,
-            array_of(vec![
-                StateValue::Null,
-                StateValue::Null,
-                StateValue::Null,
-                StateValue::Null,
-                map_of(vec![
-                    (key_of(bad_rid), cell_from_record(&bad_record)),
-                    (key_of(good_rid), cell_from_record(&good_record)),
-                ]),
-            ]),
-        );
-
-        let (live_tx, live_rx) = mpsc::channel(8);
-        source.live = tokio::sync::Mutex::new(Some(live_rx));
-
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_sign_request(&harness.next_event().await, good_rid);
-        // The block completes and reports progress past the bad entry.
-        assert_block(&harness.next_event().await, 9);
-        harness.cancel_and_join().await;
-        drop(live_tx);
-    }
-
-    #[tokio::test]
-    async fn midnight_indexer_new_rejects_unusable_config() {
+    async fn midnight_indexer_new_rejects_zero_poll_interval() {
         let mut config = test_config();
-        config.node_url = String::new();
-        let Err(err) = TestIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await
-        else {
-            panic!("an empty node_url must fail at construction, not forever at runtime")
-        };
-        let err = err.to_string();
-        assert!(err.contains("node_url"), "unexpected error: {err}");
+        config.indexer.poll_interval = std::time::Duration::ZERO;
+        let err =
+            match MidnightIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await {
+                Ok(_) => panic!("invalid config must fail"),
+                Err(err) => err,
+            };
+        assert!(err.to_string().contains("poll_interval"));
     }
 }

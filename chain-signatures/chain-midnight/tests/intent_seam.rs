@@ -11,6 +11,7 @@ use midnight_ledger_v9::structure::{
 use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
+use mpc_chain_midnight::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
 use mpc_chain_midnight::{IntentGen, IntentRequest, WirePoint, WireSignature};
 
 /// Any well-formed 32-byte hex address serves.
@@ -23,9 +24,6 @@ const REQUEST_ID: &str = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420ee
 const BIG_R_X: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const BIG_R_Y: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const S: &str = "3333333333333333333333333333333333333333333333333333333333333333";
-
-/// The transcript renders a trailing-zero-trimmed value, so a zero recovery id is `-`.
-const RECOVERY_ID_ZERO: &str = "-";
 
 /// The publisher package's committed fixture, valid input at any contract version.
 const SINGLETON_STATE: &[u8] =
@@ -97,58 +95,64 @@ fn sole_call(bytes: &[u8]) -> ContractCall<ProofPreimageMarker, DefaultDB> {
     (**call).clone()
 }
 
-/// The circuit's arguments as the transcript pushed them: one `pushs` op ending in the
-/// signature's `b32b32b32b1`. The only thing that can tell a correctly encoded request
-/// from a transposed one, since the package pins the same string from its own TypeScript input.
-fn pushed_call_args(call: &ContractCall<ProofPreimageMarker, DefaultDB>) -> String {
-    let rendered = format!(
-        "{:#?}",
-        call.guaranteed_transcript
-            .as_ref()
-            .expect("the guaranteed transcript is present")
-    );
-    let ops: Vec<&str> = rendered
-        .lines()
-        .map(|line| line.trim().trim_end_matches(','))
-        .filter(|op| op.starts_with("pushs <[") && op.ends_with("b32b32b32b1>"))
-        .collect();
-
-    assert_eq!(
-        ops.len(),
-        1,
-        "expected one argument push in the transcript: {rendered}"
-    );
-    ops[0].to_string()
+fn expected_response_payload() -> [u8; MISC_PAYLOAD_LEN] {
+    let mut payload = [0u8; MISC_PAYLOAD_LEN];
+    hex::decode_to_slice(REQUEST_ID, &mut payload[0..32]).expect("request id is 32-byte hex");
+    hex::decode_to_slice(BIG_R_X, &mut payload[32..64]).expect("big R x is 32-byte hex");
+    hex::decode_to_slice(BIG_R_Y, &mut payload[64..96]).expect("big R y is 32-byte hex");
+    hex::decode_to_slice(S, &mut payload[96..128]).expect("s is 32-byte hex");
+    payload[128] = 0;
+    payload
 }
 
 #[tokio::test]
 #[ignore = "needs npm ci and npm run build in chain-signatures/midnight-publisher-ts"]
-async fn the_rust_client_and_the_ts_builder_agree_on_respond_intents() {
+async fn the_rust_client_and_the_ts_builder_agree_on_a_respond_intent() {
     let builder = IntentGen::spawn(&common::base_live_config(), NETWORK_ID)
         .await
         .expect("spawn the builder");
 
-    for circuit in ["respond", "respondBidirectional"] {
-        let bytes = builder
-            .build(&IntentRequest {
-                circuit,
-                ..respond_request()
-            })
-            .await
-            .unwrap_or_else(|error| panic!("the builder refused {circuit}: {error:#}"));
+    let bytes = builder
+        .build(&respond_request())
+        .await
+        .expect("the builder answers");
 
-        let call = sole_call(&bytes);
-        assert_eq!(
-            call.entry_point.0.as_slice(),
-            circuit.as_bytes(),
-            "{circuit}"
-        );
-        assert_eq!(
-            pushed_call_args(&call),
-            format!("pushs <[{BIG_R_X}, {BIG_R_Y}, {S}, {RECOVERY_ID_ZERO}]: b32b32b32b1>"),
-            "{circuit}"
-        );
-    }
+    let call = sole_call(&bytes);
+    assert_eq!(call.entry_point.0.as_slice(), b"respond");
+    assert_eq!(
+        emissions_of_call(&call).expect("the singleton emission decodes"),
+        vec![Emission {
+            kind: EmissionKind::SignatureResponded,
+            payload: expected_response_payload(),
+        }]
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs npm ci and npm run build in chain-signatures/midnight-publisher-ts"]
+async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
+    // A separate deployed operation: the unidirectional case says nothing about it.
+    let builder = IntentGen::spawn(&common::base_live_config(), NETWORK_ID)
+        .await
+        .expect("spawn the builder");
+
+    let bytes = builder
+        .build(&IntentRequest {
+            circuit: "respondBidirectional",
+            ..respond_request()
+        })
+        .await
+        .expect("the builder answers");
+
+    let call = sole_call(&bytes);
+    assert_eq!(call.entry_point.0.as_slice(), b"respondBidirectional");
+    assert_eq!(
+        emissions_of_call(&call).expect("the singleton emission decodes"),
+        vec![Emission {
+            kind: EmissionKind::RespondBidirectional,
+            payload: expected_response_payload(),
+        }]
+    );
 }
 
 #[tokio::test]

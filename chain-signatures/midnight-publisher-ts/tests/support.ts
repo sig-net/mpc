@@ -89,40 +89,13 @@ export function primeStub(edges: StubEdges = {}): void {
 export const decodeIntent = (bytes: Uint8Array) =>
   Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
 
-// Both respond circuits push byte-identical signature-only args; the entry point is the
-// stable route discriminator (their ledger-cell writes also differ, but those indices
-// are compiler-assigned and contract-version-coupled).
+// The entry point distinguishes the two response circuits without depending on
+// compiler-generated transcript details.
 export function calledEntryPoint(bytes: Uint8Array): string {
   const [action] = decodeIntent(bytes).actions;
   if (!(action instanceof ContractCall))
     throw new Error("expected the intent's one action to be a contract call");
   return String(action.entryPoint);
-}
-
-// Values pushed by typed VM operations. Byte goldens cannot compare an entire intent
-// because the communication commitment is fresh on every build.
-export function pushedCells(
-  bytes: Uint8Array,
-  storage: boolean,
-  widths: readonly number[],
-): string[][] {
-  const [action] = decodeIntent(bytes).actions;
-  if (!(action instanceof ContractCall))
-    throw new Error("expected the intent's one action to be a contract call");
-  const program = action.guaranteedTranscript?.program;
-  if (program === undefined) throw new Error("expected a guaranteed transcript");
-
-  return program.flatMap((op) => {
-    if (typeof op === "string" || !("push" in op)) return [];
-    const pushed = op.push;
-    if (pushed.storage !== storage || pushed.value.tag !== "cell") return [];
-    const actual = pushed.value.content.alignment.map((segment) =>
-      segment.tag === "atom" && segment.value.tag === "bytes" ? segment.value.length : undefined,
-    );
-    if (actual.length !== widths.length || actual.some((width, index) => width !== widths[index]))
-      return [];
-    return [pushed.value.content.value.map(toHex)];
-  });
 }
 
 let singletonStateHex: Promise<string> | undefined;

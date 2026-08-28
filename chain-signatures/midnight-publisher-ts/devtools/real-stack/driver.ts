@@ -23,6 +23,7 @@ import {
   parseSecp256k1PublicKey,
   pureCircuits as signetCircuits,
   requestIdBytes,
+  signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
   type RequestIdHex,
   type Secp256k1Point,
@@ -235,6 +236,7 @@ async function bootstrap(request: BootstrapRequest) {
       requesterRequestsPath: [3],
       signetContractAddress: central.contractAddress,
       publicDataProvider: providers.publicDataProvider,
+      eventSource: signetEventSourceFromPublicDataProvider(providers.publicDataProvider),
     }),
   };
   return {

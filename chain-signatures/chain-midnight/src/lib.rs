@@ -1,7 +1,12 @@
 //! Midnight chain integration for the MPC node.
+//!
+//! Discovery joins status events attached to `Phase::ApplyExtrinsic`. A root-scheduled
+//! `Midnight::send_mn_transaction` dispatched in `Phase::Initialization` is outside
+//! this scanner's discovery surface.
 
 mod config;
 mod convert;
+pub mod emissions;
 mod indexer;
 mod intent_gen;
 mod publisher;
@@ -15,7 +20,7 @@ mod state;
 mod test_utils;
 mod tx;
 
-pub use config::{IndexerConfig, MidnightConfig, PublisherConfig, RpcConfig};
+pub use config::{IndexerConfig, MidnightAddress, MidnightConfig, PublisherConfig, RpcConfig};
 pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};

@@ -83,7 +83,9 @@ near-jsonrpc-client = "0.22"
 near-sdk = { version = "5.29.0", features = ["unstable", "non-contract-usage"] }
 near-workspaces = "0.23.0"
 
+memchr = "2"
 midnight-base-crypto = "1.1.0"
+midnight-onchain-runtime = "4.0.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"

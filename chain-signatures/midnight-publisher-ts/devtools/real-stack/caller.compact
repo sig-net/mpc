@@ -1,6 +1,5 @@
 // Test-only real caller for the Rust-owned integration stack. Its structure is the
-// minimal subset of sig-net/midnight-integration's v0.15.0 test caller (commit
-// b270880f71a229ae0724c60d32d8215aeb0f59ed), using the same Signet.compact API.
+// minimal subset of sig-net/midnight-integration's v0.20.0-rc.1 test caller.
 pragma language_version >= 0.25;
 
 import CompactStandardLibrary;
@@ -38,7 +37,7 @@ export circuit submitIsEvenRequest(
   keyVersion: Uint<8>,
   to: Bytes<20>,
   argWord: Bytes<32>
-): SignetMapKey {
+): [] {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
@@ -78,7 +77,7 @@ export circuit submitIsEvenRequest(
   requestNonce.increment(1);
   requests.insert(requestId, disclose(request));
 
-  return signetSigner.signBidirectional(
+  signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
       kernel.self(),

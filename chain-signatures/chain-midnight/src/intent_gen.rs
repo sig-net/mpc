@@ -25,8 +25,8 @@ pub(crate) struct AmbiguousSubmit;
 impl std::fmt::Display for AmbiguousSubmit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "the answer was lost; the transaction may still reach the chain, so the next \
-             attempt checks finalized state for this request before posting again",
+            "the answer was lost; the transaction may still land, and a later publisher retry \
+             may post the response again",
         )
     }
 }
@@ -645,7 +645,7 @@ struct WireReply {
 mod tests {
     use super::*;
 
-    use crate::config::{MidnightConfig, PublisherConfig};
+    use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -661,7 +661,7 @@ mod tests {
         );
         MidnightConfig {
             node_url: NODE_URL.to_string(),
-            central_address: "ab".repeat(32),
+            central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
                 funding_seed: "ab".repeat(32),

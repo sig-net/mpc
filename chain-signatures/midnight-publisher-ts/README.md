@@ -20,6 +20,12 @@ Operations are:
 
 The process memoizes one wallet facade, including while it is starting. A single submit gate protects that facade and its DUST UTXO; submissions are never processed concurrently.
 
+## Supported event transactions
+
+The MPC reader accepts events only from finalized `TxApplied` transactions and decodes only the guaranteed transcripts of calls to the configured Signet singleton. Unsupported statuses and singleton calls with a fallible transcript are logged and skipped so they cannot hold block processing.
+
+Integrations must enforce this before submission using the ledger builder's `{ tag: "guaranteedOnly" }` segment specifier, or by rejecting a constructed call when `partitionedTranscript[1]` is present. `guaranteedOnly` validates the partitioning result and fails construction when the call is too expensive; it does not move fallible work into the guaranteed phase.
+
 ## Deadlines and retry policy
 
 Each submit gets one absolute 360-second budget. Wallet startup, DUST readiness, base-transaction proof, DUST balancing, balancing-transaction proof/finalization, and submission all consume that same deadline rather than starting phase-specific clocks. Readiness and base proof still own cancellation at their respective boundaries; wallet-critical work does not.
@@ -29,7 +35,7 @@ Four errors have especially important retry semantics:
 - `wallet_unsynced`: wallet startup or DUST readiness exhausted the submit deadline. Nothing was posted, so retrying is safe; the background startup launched by `ready` continues.
 - `proving_timeout`: base proving exhausted the remaining submit deadline. No wallet operation started, so retrying is safe.
 - `state_conflict`: the node refused the transaction as invalid, which is how a stale contract read, an expired TTL, or any other pool rejection surfaces; the node does not report which. Nothing was posted. Rebuild the intent against fresh contract state before retrying.
-- `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background; check the chain for the request before retrying to avoid paying or posting twice.
+- `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background, and the MPC retries automatically, so it may publish the response more than once. Duplicate response events are acceptable and require no operator reconciliation.
 
 ## Configuration
 

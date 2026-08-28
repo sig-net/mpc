@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use mpc_chain_midnight::{MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
 /// CLI arguments for the Midnight integration. The node url requires the whole
@@ -92,8 +92,8 @@ impl MidnightArgs {
         args
     }
 
-    /// String fields, so the boundary check is `validate()`; clap's `requires_all`
-    /// on the node url makes the flags all-or-nothing before this runs.
+    /// Clap's `requires_all` on the node URL makes the flags all-or-nothing before
+    /// this conversion parses the central address and validates the remaining fields.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
         let (
             Some(node_url),
@@ -125,6 +125,8 @@ impl MidnightArgs {
                 format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
             })?;
         }
+        let central_address = MidnightAddress::from_hex(&central_address)
+            .context("midnight config: central_address must be 32 bytes of hex")?;
         let config = MidnightConfig {
             node_url,
             central_address,
@@ -160,7 +162,7 @@ impl MidnightArgs {
                 } = c;
                 MidnightArgs {
                     midnight_node_url: Some(node_url),
-                    midnight_central_address: Some(central_address),
+                    midnight_central_address: Some(central_address.to_hex()),
                     midnight_funding_seed: Some(funding_seed.into()),
                     midnight_intent_gen_command: Some(
                         serde_json::to_string(&intent_gen_command)
@@ -196,7 +198,7 @@ mod tests {
     fn configured() -> MidnightConfig {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944".into(),
-            central_address: "ab".repeat(32),
+            central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
                 // A space and a leading dash, which only a structured encoding gets back out intact.
@@ -283,6 +285,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reparsed.into_config().unwrap(), Some(cfg));
+    }
+
+    #[test]
+    fn central_address_is_parsed_at_the_config_boundary() {
+        for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(31))] {
+            let mut args = MidnightArgs::from_config(Some(configured()));
+            args.midnight_central_address = Some(invalid);
+
+            let error = args.into_config().unwrap_err().to_string();
+            assert!(
+                error.contains("central_address"),
+                "unexpected address error: {error}"
+            );
+        }
     }
 
     #[test]

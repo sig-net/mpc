@@ -111,15 +111,15 @@ function asPublisherError(error: unknown): PublisherError {
   return new PublisherError(code ?? "internal", described, { cause: error });
 }
 
-function ambiguousSubmit(id: number, reason: string, cause?: unknown): PublisherError {
+function ambiguousSubmit(reason: string, cause?: unknown): PublisherError {
   return new PublisherError(
     "ambiguous_submit",
-    `${reason}; the transaction may still land, so check the chain for request ${id} before retrying`,
+    `${reason}; the transaction may still land, and the MPC retries automatically, so it may publish the response more than once; duplicate response posts are safe`,
     { cause },
   );
 }
 
-async function spend(ready: Publisher, proven: UnboundTransaction, id: number): Promise<Landed> {
+async function spend(ready: Publisher, proven: UnboundTransaction): Promise<Landed> {
   let finalized: Parameters<FundingWallet["submitTx"]>[0];
   try {
     const recipe = await ready.wallet.balanceTx(proven);
@@ -132,7 +132,7 @@ async function spend(ready: Publisher, proven: UnboundTransaction, id: number): 
   } catch (error) {
     const classified = asPublisherError(error);
     if (classified.code !== "internal") throw classified;
-    throw ambiguousSubmit(id, "transaction submission returned no definitive answer", error);
+    throw ambiguousSubmit("transaction submission returned no definitive answer", error);
   }
 }
 
@@ -200,7 +200,7 @@ export async function handleSubmit(
   if (remaining() <= 0) throw provingTimeout;
 
   inFlightId = id;
-  const work = spend(ready, proven, id);
+  const work = spend(ready, proven);
   // The gate follows the WORK, not the answer: an abandoned submit is still spending.
   const release = (): void => {
     inFlightId = undefined;
@@ -209,7 +209,7 @@ export async function handleSubmit(
 
   // Balance, finalize and submit are not cancellable, so work past the deadline keeps
   // spending; the caller has to learn its post may land anyway.
-  const timeout = ambiguousSubmit(id, `submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
+  const timeout = ambiguousSubmit(`submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
   const answerBudgetMs = remaining();
   if (answerBudgetMs <= 0) throw timeout;
   return withDeadline(work, answerBudgetMs, timeout);
