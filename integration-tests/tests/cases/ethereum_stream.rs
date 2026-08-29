@@ -25,7 +25,7 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs,
+    BidirectionalTx, Chain, ChainEvent, IndexedSignRequest, SignArgs,
     SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
@@ -932,6 +932,258 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 }
 
 #[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+
+    // Dedicated funded account
+    let responder_secret_key = random_secret_key();
+    let (responder, responder_address) = eth::client(
+        &ctx.sandbox.external_http_endpoint,
+        &responder_secret_key,
+        ctx.sandbox.chain_id,
+    )?;
+    let fund_tx = transfer_tx(responder_address, U256::from(1_000_000_000_000_000_000u64));
+    let pending_fund = ctx.signer.send_transaction(fund_tx).await?;
+    let _ = pending_fund
+        .get_receipt()
+        .await
+        .context("failed to mine responder funding transaction")?;
+    let nonce = responder.get_transaction_count(responder_address).await?;
+
+    // Pause interval mining so tx A can sit in the mempool
+    responder
+        .raw_request::<_, ()>("evm_setIntervalMining".into(), [0u64])
+        .await?;
+
+    // Respond tx A: enters the mempool but is never mined while mining is
+    // paused.
+    let dummy_response = ChainSignatures::Response {
+        requestId: [0x71; 32].into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::ONE,
+                y: U256::ONE,
+            },
+            s: U256::from(12345u64),
+            recoveryId: 0,
+        },
+    };
+    let respond_calldata = ChainSignatures::new(ctx.contract_address, responder.clone())
+        .respond(vec![dummy_response])
+        .calldata()
+        .clone();
+    let tx_a = TransactionRequest::default()
+        .from(responder_address)
+        .to(ctx.contract_address)
+        .nonce(nonce)
+        .max_fee_per_gas(10_000_000_000)
+        .max_priority_fee_per_gas(1_000_000_000)
+        .input(respond_calldata.into());
+    let tx_a_hash = *responder.send_transaction(tx_a).await?.tx_hash();
+
+    // Register the execution watcher
+    let sign_id = SignId::new([0x71; 32]);
+    let watched_tx_id = mpc_primitives::BidirectionalTxId(tx_a_hash.0);
+    let tx = mpc_primitives::BidirectionalTx {
+        id: watched_tx_id,
+        sender: [0u8; 32],
+        serialized_transaction: vec![],
+        source_chain: Chain::Solana,
+        target_chain: Chain::Ethereum,
+        caip2_id: "eip155:31337".to_string(),
+        key_version: LATEST_MPC_KEY_VERSION,
+        deposit: 0,
+        path: "m/44'/60'/0'/0/0".to_string(),
+        algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
+        params: "{}".to_string(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+        request_id: sign_id.request_id,
+        from_address: **responder_address,
+        nonce,
+    };
+
+    // Insert the sign request into the backlog
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            test_sign_args(0x71),
+            Chain::Solana,
+            current_unix_timestamp(),
+            test_bidirectional_event(),
+        )))
+        .await;
+
+    // Set the status to PendingPublish so the watcher is active
+    backlog
+        .set_status(
+            tx.source_chain,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                }),
+            },
+        )
+        .await;
+
+    // Advance the sign request to execution
+    backlog
+        .advance(Chain::Solana, sign_id, Arc::new(tx.clone()))
+        .await
+        .context("failed to register execution watcher")?;
+
+    // Replacement: same sender and nonce with a fee bump
+    let tx_b = TransactionRequest::default()
+        .from(responder_address)
+        .to(ctx.wallet)
+        .nonce(nonce)
+        .max_fee_per_gas(50_000_000_000) // bump the fee so it replaces tx A
+        .max_priority_fee_per_gas(25_000_000_000)
+        .value(U256::ZERO);
+    let pending_b = responder.send_transaction(tx_b).await?;
+    responder
+        .raw_request::<_, ()>("anvil_mine".into(), [U256::from(1u64)])
+        .await?;
+    let receipt_b = pending_b
+        .get_receipt()
+        .await
+        .context("replacement transaction was not mined")?;
+    let replaced_at = receipt_b
+        .block_number
+        .context("replacement receipt missing block number")?;
+
+    // Watch the replacement transaction
+    let replacement_sign_id = SignId::new([0x72; 32]);
+    let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
+
+    // Insert the replacement sign request into the backlog
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+            replacement_sign_id,
+            test_sign_args(0x72),
+            Chain::Solana,
+            current_unix_timestamp(),
+            test_bidirectional_event(),
+        )))
+        .await;
+
+    // Set the status of the replacement sign request to PendingPublish
+    backlog
+        .set_status(
+            Chain::Solana,
+            &replacement_sign_id,
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                }),
+            },
+        )
+        .await;
+
+    // Advance the replacement sign request
+    backlog
+        .advance(
+            Chain::Solana,
+            replacement_sign_id,
+            Arc::new(BidirectionalTx {
+                id: replacement_tx_id,
+                request_id: replacement_sign_id.request_id,
+                ..tx.clone()
+            }),
+        )
+        .await
+        .context("failed to register replacement watcher")?;
+
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // Drive block production so the stream can observe the replacement transaction being mined and the original transaction being replaced.
+    for _ in 0..3 {
+        responder
+            .raw_request::<_, ()>("anvil_mine".into(), [U256::from(1u64)])
+            .await?;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+
+    // The nonce-gated sweep must resolve both watchers:
+    // the replaced respond tx as failed (nonce consumed, receipt absent) instead of hanging,
+    // the replacement at its actual mined block with its real outcome.
+    let mut confirmations = Vec::new();
+    stream
+        .wait_for(
+            |event| {
+                if matches!(event, ChainEvent::ExecutionConfirmed { .. }) {
+                    confirmations.push(event.clone());
+                    let resolved = |id| {
+                        confirmations.iter().any(
+                            |event| matches!(event, ChainEvent::ExecutionConfirmed { tx_id, .. } if *tx_id == id),
+                        )
+                    };
+                    resolved(watched_tx_id) && resolved(replacement_tx_id)
+                } else {
+                    false
+                }
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("watchers never resolved both the replaced and the replacement tx")?;
+
+    assert_eq!(
+        confirmations.len(),
+        2,
+        "each watcher must resolve exactly once"
+    );
+    for event in confirmations {
+        let ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id: event_sign_id,
+            block_height,
+            result,
+            ..
+        } = event
+        else {
+            panic!("expected ExecutionConfirmed, got {event:?}")
+        };
+
+        if tx_id == watched_tx_id {
+            assert_eq!(event_sign_id, sign_id);
+            assert!(
+                matches!(result, mpc_primitives::ExecutionOutcome::Failed),
+                "a replaced respond tx must resolve as failed"
+            );
+            assert!(block_height >= replaced_at);
+        } else if tx_id == replacement_tx_id {
+            assert_eq!(event_sign_id, replacement_sign_id);
+            assert!(
+                matches!(result, mpc_primitives::ExecutionOutcome::Success { .. }),
+                "the mined replacement tx must resolve as succeeded"
+            );
+            assert_eq!(
+                block_height, replaced_at,
+                "the replacement resolves at its actual mined block"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
@@ -1149,5 +1401,160 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     }
 
     assert!(saw_respond, "did not receive SignatureResponded event");
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_off_curve_point_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // Submit a respond with an off-curve bigR point
+    let malformed_id = [0xf1; 32];
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::ZERO,
+                y: U256::ZERO,
+            },
+            s: U256::from(12345u64),
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow:
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    // Block order (malformed → valid → later sign request, each receipt awaited
+    // before the next send) guarantees the respond set is complete once the
+    // later sign request is observed.
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream stalled after the malformed respond event")?;
+
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
+    );
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // s = U256::MAX ABI-decodes but exceeds the secp256k1 curve order.
+    let malformed_id = [0xf1; 32];
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::MAX,
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow:
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream stalled after the malformed respond event")?;
+
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
+    );
     Ok(())
 }

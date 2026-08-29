@@ -164,7 +164,7 @@ impl ChainIndexerStream {
     /// First event matching `predicate` within `duration`.
     pub async fn wait_for(
         &mut self,
-        predicate: impl Fn(&ChainEvent) -> bool,
+        mut predicate: impl FnMut(&ChainEvent) -> bool,
         duration: Duration,
     ) -> anyhow::Result<ChainEvent> {
         timeout(duration, async {

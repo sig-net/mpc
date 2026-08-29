@@ -48,15 +48,30 @@ pub async fn align_backlog_with_consensus(
         ?checkpoint_digest.digest,
         "Consensus checkpoint mismatch/divergence detected: triggering regression"
     );
-    let fetched_checkpoint = find_consensus_checkpoint(
-        mesh_state,
-        node_client,
-        chain,
-        checkpoint_digest.digest,
-        checkpoints_rx,
-        my_account_id,
-    )
-    .await?;
+    // A reset settles this digest for a state no node has produced, so
+    // `find_consensus_checkpoint` would poll peers forever. Rebuild it instead
+    // and fall through to the ordinary regression path, which is what makes a
+    // reset idempotent: once regressed, the local checkpoint matches the
+    // settled digest and the next pass confirms it.
+    let reset_checkpoint = Checkpoint::reset(chain, checkpoint_digest.height);
+    let fetched_checkpoint = if reset_checkpoint.digest() == checkpoint_digest.digest {
+        tracing::warn!(
+            ?chain,
+            height = checkpoint_digest.height,
+            "consensus checkpoint was reset; rebuilding it locally"
+        );
+        reset_checkpoint
+    } else {
+        find_consensus_checkpoint(
+            mesh_state,
+            node_client,
+            chain,
+            checkpoint_digest.digest,
+            checkpoints_rx,
+            my_account_id,
+        )
+        .await?
+    };
 
     let height = fetched_checkpoint.block_height;
 
@@ -278,7 +293,7 @@ mod tests {
                 remote_use_peer_digest: true,
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
-                peer_checkpoint_has_pending_tx: false,
+                peer_checkpoint_has_pending_tx: true,
                 expected_result: Some(100),
                 expected_persisted_height: Some(100),
             },
@@ -343,7 +358,7 @@ mod tests {
                 remote_use_peer_digest: true,
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
-                peer_checkpoint_has_pending_tx: false,
+                peer_checkpoint_has_pending_tx: true,
                 expected_result: Some(100),
                 expected_persisted_height: Some(100),
             },
@@ -390,7 +405,9 @@ mod tests {
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
                     vec![BacklogEntry::new(Arc::new(IndexedSignRequest::sign(
-                        SignId::new([1u8; 32]),
+                        // Distinct from the local entry's id, so a peer
+                        // checkpoint holding a request diverges from ours.
+                        SignId::new([2u8; 32]),
                         SignArgs {
                             entropy: [1u8; 32],
                             epsilon: k256::Scalar::ONE,
@@ -586,6 +603,92 @@ mod tests {
         assert!(result.is_some());
         newer_mock.assert_async().await;
         current_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn align_applies_a_reset_without_any_peer() {
+        use mpc_chain_integration_core::StateManager as _;
+
+        let chain = Chain::Ethereum;
+        let mut fixture = AlignFixture::new(None);
+
+        // Pre-reset state: a confirmed local checkpoint at height 100 and a
+        // cursor to match.
+        fixture.backlog.set_processed_block(chain, 100).await;
+        let stale = fixture.backlog.checkpoint(chain).await.unwrap();
+        assert!(fixture
+            .backlog
+            .confirm_consensus(chain, stale.digest())
+            .await
+            .unwrap());
+
+        // The contract settles the canonical reset checkpoint for height 42.
+        // The mesh is empty, so any attempt to fetch this from a peer would
+        // block forever; the node must rebuild it locally instead.
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDigest {
+                height: 42,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
+            }))
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("align must not wait on peers for a reset checkpoint");
+
+        assert_eq!(result, Some(42));
+        assert_eq!(
+            fixture.backlog.latest_checkpoint(chain).await,
+            Some(Checkpoint::reset(chain, 42)),
+            "local state should be the canonical reset checkpoint"
+        );
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "cursor re-anchored at the reset height; indexing resumes at 43"
+        );
+
+        // Re-running while the same reset is settled is a no-op: no "have I
+        // applied this?" bookkeeping is needed, because the applied state
+        // matches the settled digest.
+        let again = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("a re-applied reset must not wait on peers either");
+        assert_eq!(again, None, "an already-applied reset reports aligned");
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "a second pass must not rewind the cursor again"
+        );
+    }
+
+    #[tokio::test]
+    async fn align_applies_a_reset_over_a_node_with_no_local_state() {
+        use mpc_chain_integration_core::StateManager as _;
+
+        let chain = Chain::Ethereum;
+        let mut fixture = AlignFixture::new(None);
+        fixture.backlog.set_processed_block(chain, 500).await;
+
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDigest {
+                height: 42,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
+            }))
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("align must not wait on peers for a reset checkpoint");
+
+        assert_eq!(result, Some(42));
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "a node that never held a checkpoint must still re-anchor"
+        );
     }
 
     #[tokio::test]

@@ -1,14 +1,23 @@
+use backon::{ExponentialBuilder, Retryable};
 use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
-use std::{fmt, time::Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
+
+// Redis connection backoff configuration
+const REDIS_CONNECT_MIN_DELAY_MS: u64 = 100;
+const REDIS_CONNECT_MAX_DELAY_SECS: u64 = 2;
+const REDIS_CONNECT_MAX_TIMES: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -306,13 +315,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
+    /// Returns a backoff builder for retrying Redis connections.
+    fn connect_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(REDIS_CONNECT_MIN_DELAY_MS))
+            .with_max_delay(Duration::from_secs(REDIS_CONNECT_MAX_DELAY_SECS))
+            .with_max_times(REDIS_CONNECT_MAX_TIMES)
+    }
+
     async fn connect(&self) -> Option<Connection> {
-        self.redis_pool
-            .get()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to connect to redis");
+        let mut attempt = 0;
+        let op = || self.redis_pool.get();
+        op.retry(&Self::connect_backoff())
+            .notify(move |err: &deadpool_redis::PoolError, sleep: Duration| {
+                attempt += 1;
+                tracing::warn!(attempt, ?err, retry_in = ?sleep, "failed to connect to redis");
             })
+            .await
             .ok()
     }
 

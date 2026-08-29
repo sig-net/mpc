@@ -209,8 +209,6 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
                 threshold_votes: Default::default(),
@@ -788,13 +786,11 @@ mod tests {
         );
         let governance = watcher.governance().unwrap();
 
-        let running = |epoch, join_votes| RunningContractState {
+        let running = |epoch, leave_votes| RunningContractState {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes,
-            leave_votes: Default::default(),
+            leave_votes,
             threshold: 1,
             threshold_votes: Default::default(),
         };
@@ -879,8 +875,6 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),
@@ -913,8 +907,6 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),

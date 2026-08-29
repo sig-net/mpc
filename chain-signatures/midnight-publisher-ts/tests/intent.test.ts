@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContractOperation, ContractState } from "@midnight-ntwrk/compact-runtime";
-import { ContractCall } from "@midnightntwrk/ledger-v9";
+import { ContractCall, type Proofish } from "@midnightntwrk/ledger-v9";
 
 import { buildIntent } from "../src/intent.js";
 import {
@@ -14,17 +14,27 @@ import {
   decodeIntent,
   initialSingletonStateHex,
   managedDir,
-  pushedCells,
   respondInput,
   toHex,
 } from "./support.js";
 
 const CONTRACT_STATE = await initialSingletonStateHex();
 
-// All different, so a transposed component cannot look correct.
-const X = "11".repeat(32);
-const Y = "22".repeat(32);
-const S = "33".repeat(32);
+function onlyCall(bytes: Uint8Array): ContractCall<Proofish> {
+  const intent = decodeIntent(bytes);
+  expect(intent.actions).toHaveLength(1);
+  const [call] = intent.actions;
+  expect(call).toBeInstanceOf(ContractCall);
+  if (!(call instanceof ContractCall)) throw new Error("expected a contract call");
+  return call;
+}
+
+function storageWrites(call: ContractCall<Proofish>): unknown[] {
+  const program = call.guaranteedTranscript?.program;
+  expect(program).toBeDefined();
+  if (program === undefined) throw new Error("expected a guaranteed transcript");
+  return program.filter((op) => typeof op !== "string" && "push" in op && op.push.storage);
+}
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -39,34 +49,35 @@ describe("buildIntent", () => {
     const bytes = await buildIntent(await respondInput());
 
     expect(calledEntryPoint(bytes)).toBe("respond");
-    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, ""]]);
+    const call = onlyCall(bytes);
+    expect(call.guaranteedTranscript).toBeDefined();
+    expect(call.fallibleTranscript).toBeUndefined();
+    expect(storageWrites(call)).toHaveLength(0);
   });
 
-  it("builds one guaranteed respond call with the exact wire arguments", async () => {
+  it("builds one guaranteed respond call without storage writes", async () => {
     const input = await respondInput();
     const bytes = await buildIntent({ ...input, signature: { ...input.signature, recoveryId: 1 } });
 
-    const intent = decodeIntent(bytes);
-    expect(intent.actions).toHaveLength(1);
-    const [call] = intent.actions;
-    expect(call).toBeInstanceOf(ContractCall);
-    if (!(call instanceof ContractCall)) throw new Error("expected a contract call");
+    const call = onlyCall(bytes);
     expect(call.address).toBe(input.contractAddress);
     expect(calledEntryPoint(bytes)).toBe("respond");
-    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, "01"]]);
-    expect(pushedCells(bytes, false, [32])).toContainEqual([input.requestId]);
     expect(call.guaranteedTranscript).toBeDefined();
     expect(call.fallibleTranscript).toBeUndefined();
+    expect(storageWrites(call)).toHaveLength(0);
+    const intent = decodeIntent(bytes);
     expect(intent.ttl.getTime()).toBe(input.ttlSeconds * 1_000);
     expect(Buffer.from(bytes.slice(0, 20)).toString("utf8")).toContain("midnight:intent[v9]");
   });
 
-  it("builds respondBidirectional with the same signature-only shape as respond", async () => {
+  it("builds respondBidirectional without storage writes", async () => {
     const bytes = await buildIntent(await respondInput({ circuit: "respondBidirectional" }));
 
-    expect(decodeIntent(bytes).actions).toHaveLength(1);
     expect(calledEntryPoint(bytes)).toBe("respondBidirectional");
-    expect(pushedCells(bytes, true, [32, 32, 32, 1])).toEqual([[X, Y, S, ""]]);
+    const call = onlyCall(bytes);
+    expect(call.guaranteedTranscript).toBeDefined();
+    expect(call.fallibleTranscript).toBeUndefined();
+    expect(storageWrites(call)).toHaveLength(0);
   });
 
   it("names the mismatch when the deployed respond is absent, proofless, or differently keyed", async () => {

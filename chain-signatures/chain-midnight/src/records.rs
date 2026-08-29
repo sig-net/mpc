@@ -70,9 +70,10 @@ pub struct EvmAccessListEntry {
     pub storage_keys: Vec<[u8; 32]>,
 }
 
-/// Entry of the central singleton's notification map.
+/// Notification recovered from the central singleton's emitted event payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignBidirectionalEventNotification {
     pub version: u8,
+    pub request_id: [u8; 32],
     pub payload: [u8; 128],
 }

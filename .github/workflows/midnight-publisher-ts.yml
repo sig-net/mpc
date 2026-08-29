@@ -7,8 +7,8 @@
 # with the real client, which is what catches the two sides drifting apart, and is
 # why the `chain-midnight` path filter below is among the triggers.
 #
-# The live end-to-end path (boot the dockerized stack, deploy a singleton,
-# balance/prove/submit, confirm on chain) is deliberately NOT automated here.
+# The required live end-to-end path runs in the Integration workflow's
+# Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
 name: Midnight Publisher TS
 
 on:

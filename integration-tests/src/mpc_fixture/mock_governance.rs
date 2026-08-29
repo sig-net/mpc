@@ -21,6 +21,13 @@ impl Governance for MockGovernance {
         Ok(())
     }
 
+    async fn candidate_info(
+        &self,
+        _account_id: &AccountId,
+    ) -> anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>> {
+        Ok(None)
+    }
+
     async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
         tracing::debug!(me = ?self.me, ?epoch, "vote_reshared");
         Ok(true)
@@ -46,8 +53,6 @@ impl Governance for MockGovernance {
                             participants: state.candidates.clone().into(),
                             threshold: state.threshold,
                             public_key: public_key.clone().into_affine_point(),
-                            candidates: Default::default(),
-                            join_votes: Default::default(),
                             leave_votes: Default::default(),
                             threshold_votes: Default::default(),
                         }));

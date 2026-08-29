@@ -4,16 +4,16 @@ use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
+use crate::primitives::{Candidates, CandidatesView, Participants, PkVotes, ThresholdVotes, Votes};
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct InitializingContractState {
     pub candidates: Candidates,
     pub threshold: usize,
     pub pk_votes: PkVotes,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -47,7 +47,7 @@ pub struct ResharingContractState {
     pub cancel_votes: HashSet<AccountId>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub enum ProtocolContractState {
     NotInitialized,
     Initializing(InitializingContractState),
@@ -62,6 +62,67 @@ impl ProtocolContractState {
             ProtocolContractState::Initializing(_) => "Initializing",
             ProtocolContractState::Running(_) => "Running",
             ProtocolContractState::Resharing(_) => "Resharing",
+        }
+    }
+}
+
+/// Public running state. Candidate data is available through `candidate_info`.
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct RunningContractStateView {
+    pub epoch: u64,
+    pub participants: Participants,
+    pub threshold: usize,
+    pub public_key: PublicKey,
+    pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub struct InitializingContractStateView {
+    pub candidates: CandidatesView,
+    pub threshold: usize,
+    pub pk_votes: PkVotes,
+}
+
+impl From<&InitializingContractState> for InitializingContractStateView {
+    fn from(state: &InitializingContractState) -> Self {
+        Self {
+            candidates: (&state.candidates).into(),
+            threshold: state.threshold,
+            pk_votes: state.pk_votes.clone(),
+        }
+    }
+}
+
+impl From<&RunningContractState> for RunningContractStateView {
+    fn from(state: &RunningContractState) -> Self {
+        RunningContractStateView {
+            epoch: state.epoch,
+            participants: state.participants.clone(),
+            threshold: state.threshold,
+            public_key: state.public_key.clone(),
+            leave_votes: state.leave_votes.clone(),
+            threshold_votes: state.threshold_votes.clone(),
+        }
+    }
+}
+
+/// Public protocol state returned by contract views.
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+pub enum ProtocolContractStateView {
+    NotInitialized,
+    Initializing(InitializingContractStateView),
+    Running(RunningContractStateView),
+    Resharing(ResharingContractState),
+}
+
+impl ProtocolContractStateView {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ProtocolContractStateView::NotInitialized => "NotInitialized",
+            ProtocolContractStateView::Initializing(_) => "Initializing",
+            ProtocolContractStateView::Running(_) => "Running",
+            ProtocolContractStateView::Resharing(_) => "Resharing",
         }
     }
 }

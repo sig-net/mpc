@@ -21,12 +21,12 @@ RUN chmod +x /opt/midnight-publisher/dist/main.js \
     && ln -s /opt/midnight-publisher/dist/main.js /usr/local/bin/midnight-publisher \
     && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/keys/respond.prover \
     && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/keys/respondBidirectional.prover \
-    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respond.zkir \
-    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respondBidirectional.zkir \
+    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respond.bzkir \
+    && test -s /opt/midnight-publisher/node_modules/@sig-net/midnight-contract/dist/managed/zkir/respondBidirectional.bzkir \
     && test "$(printf '{"id":0,"op":"ready","protocolVersion":1}\n' | env -i \
       PATH=/usr/local/bin:/usr/bin:/bin \
       MIDNIGHT_PUB_NETWORK_ID=undeployed \
-      MIDNIGHT_PUB_NODE_URL=ws://127.0.0.1:9944 \
+      MIDNIGHT_PUB_NODE_URL=http://127.0.0.1:9944 \
       MIDNIGHT_PUB_PROOF_SERVER_URL=http://127.0.0.1:6300 \
       MIDNIGHT_PUB_INDEXER_URL=http://127.0.0.1:8088/api/v3/graphql \
       MIDNIGHT_PUB_INDEXER_WS_URL=ws://127.0.0.1:8088/api/v3/graphql/ws \
@@ -48,7 +48,7 @@ COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
 RUN cargo build --release --package mpc-node --features helios
 
-FROM debian:stable-slim AS runtime
+FROM midnight-publisher-runtime AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
 
 RUN update-ca-certificates
