@@ -1,7 +1,7 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
-use std::sync::Arc;
+use futures_util::{stream, Stream, StreamExt};
 
 use crate::config::RpcConfig;
 use crate::indexer_eth_direct_rpc;
@@ -16,6 +16,9 @@ use super::indexer_eth_helios;
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
 
+/// Default number of catchup batch fetches kept in flight.
+pub const DEFAULT_CATCHUP_FETCH_CONCURRENCY: usize = 4;
+
 /// Result of attempting to fetch a single block
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -29,7 +32,8 @@ pub fn block_may_contain_logs(block: &Block, address: Address) -> bool {
     block.header.logs_bloom.contains_raw_log(address, &[])
 }
 
-/// Catchup item yielded by [`CatchupIter`] and consumed by `process_catchup`.
+/// Catchup item yielded by [`EthereumClient::catchup_batch_stream`] and
+/// consumed by `process_catchup`.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum CatchupItem {
@@ -48,132 +52,85 @@ enum BlockSlot {
     PendingLogs(Block, BlockId),
 }
 
-/// Lazy batching iterator over `[start_block, end_block)` range.
-pub struct CatchupIter {
-    client: Arc<EthereumClient>,
+/// Fetch one `[batch_start, batch_end)` chunk of the catchup range: blocks in
+/// a single batched POST, then logs for bloom-positive blocks in a second
+/// batched POST.
+async fn fetch_catchup_batch(
+    client: &EthereumClient,
+    batch_start: BlockNumber,
+    batch_end: BlockNumber,
     contract_address: Address,
-    batch_size: u64,
-    next_block: BlockNumber,
-    end_block: BlockNumber,
-    buffered_blocks: std::vec::IntoIter<CatchupItem>,
-}
+) -> Vec<CatchupItem> {
+    let batch_block_ids: Vec<BlockId> = (batch_start..batch_end)
+        .map(|n| BlockId::Number(BlockNumberOrTag::Number(n)))
+        .collect();
 
-impl CatchupIter {
-    pub fn new(
-        client: Arc<EthereumClient>,
-        start_block: BlockNumber,
-        end_block: BlockNumber,
-        contract_address: Address,
-        batch_size: u64,
-    ) -> Self {
-        Self {
-            client,
-            contract_address,
-            batch_size,
-            next_block: start_block,
-            end_block,
-            buffered_blocks: Vec::new().into_iter(),
-        }
-    }
+    #[cfg(feature = "bench")]
+    let start = std::time::Instant::now();
 
-    async fn fetch_next_batch(&mut self) {
-        if self.next_block >= self.end_block {
-            return;
-        }
+    let blocks = client.get_blocks(&batch_block_ids).await;
 
-        let batch_end = self
-            .next_block
-            .saturating_add(self.batch_size)
-            .min(self.end_block);
-
-        let batch_block_ids: Vec<BlockId> = (self.next_block..batch_end)
-            .map(|n| BlockId::Number(BlockNumberOrTag::Number(n)))
-            .collect();
-
-        #[cfg(feature = "bench")]
-        let start = std::time::Instant::now();
-
-        let blocks = self.client.get_blocks(&batch_block_ids).await;
-
-        // Classify each block: missing, bloom-negative (no logs to fetch), or
-        // bloom-positive (needs a slot in the logs batch request).
-        let slots: Vec<BlockSlot> = blocks
-            .into_iter()
-            .zip(&batch_block_ids)
-            .map(|(maybe, &block_id)| match maybe {
-                MaybeBlock::Missing(_) => BlockSlot::Missing(block_id),
-                MaybeBlock::Block(block) => {
-                    if block_may_contain_logs(&block, self.contract_address) {
-                        BlockSlot::PendingLogs(block, block_id)
-                    } else {
-                        BlockSlot::NoLogs(block)
-                    }
+    // Classify each block: missing, bloom-negative (no logs to fetch), or
+    // bloom-positive (needs a slot in the logs batch request).
+    let slots: Vec<BlockSlot> = blocks
+        .into_iter()
+        .zip(&batch_block_ids)
+        .map(|(maybe, &block_id)| match maybe {
+            MaybeBlock::Missing(_) => BlockSlot::Missing(block_id),
+            MaybeBlock::Block(block) => {
+                if block_may_contain_logs(&block, contract_address) {
+                    BlockSlot::PendingLogs(block, block_id)
+                } else {
+                    BlockSlot::NoLogs(block)
                 }
-            })
-            .collect();
-
-        let logs_request_ids: Vec<BlockId> = slots
-            .iter()
-            .filter_map(|slot| match slot {
-                BlockSlot::PendingLogs(_, id) => Some(*id),
-                _ => None,
-            })
-            .collect();
-
-        // Fetch logs for bloom-positive blocks. On failure, those blocks are
-        // reported as missing so the caller refetches them individually.
-        let (mut logs_iter, logs_failed) = if logs_request_ids.is_empty() {
-            (Vec::new().into_iter(), false)
-        } else {
-            match self
-                .client
-                .get_logs_batch(self.contract_address, &logs_request_ids)
-                .await
-            {
-                Ok(logs) => (logs.into_iter(), false),
-                Err(_) => (Vec::new().into_iter(), true),
             }
-        };
+        })
+        .collect();
 
-        // Reconstruct the batch items in the original order, with logs for bloom-positive blocks.
-        let items: Vec<CatchupItem> = slots
-            .into_iter()
-            .map(|slot| match slot {
-                BlockSlot::Missing(block_id) => CatchupItem::Missing(block_id),
-                BlockSlot::NoLogs(block) => CatchupItem::BatchBlock {
-                    block,
-                    logs: Vec::new(),
-                },
-                BlockSlot::PendingLogs(_block, block_id) if logs_failed => {
-                    CatchupItem::Missing(block_id)
-                }
-                BlockSlot::PendingLogs(block, _) => CatchupItem::BatchBlock {
-                    block,
-                    logs: logs_iter.next().unwrap_or_default(),
-                },
-            })
-            .collect();
+    let logs_request_ids: Vec<BlockId> = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            BlockSlot::PendingLogs(_, id) => Some(*id),
+            _ => None,
+        })
+        .collect();
 
-        #[cfg(feature = "bench")]
-        crate::bench::add_batch_fetch_time(start.elapsed());
-
-        self.buffered_blocks = items.into_iter();
-        self.next_block = batch_end;
-    }
-
-    pub async fn next(&mut self) -> Option<CatchupItem> {
-        loop {
-            if let Some(block) = self.buffered_blocks.next() {
-                return Some(block);
-            }
-
-            if self.next_block >= self.end_block {
-                return None;
-            }
-
-            self.fetch_next_batch().await;
+    // Fetch logs for bloom-positive blocks. On failure, those blocks are
+    // reported as missing so the caller refetches them individually.
+    let (mut logs_iter, logs_failed) = if logs_request_ids.is_empty() {
+        (Vec::new().into_iter(), false)
+    } else {
+        match client
+            .get_logs_batch(contract_address, &logs_request_ids)
+            .await
+        {
+            Ok(logs) => (logs.into_iter(), false),
+            Err(_) => (Vec::new().into_iter(), true),
         }
-    }
+    };
+
+    let items: Vec<CatchupItem> = slots
+        .into_iter()
+        .map(|slot| match slot {
+            BlockSlot::Missing(block_id) => CatchupItem::Missing(block_id),
+            BlockSlot::NoLogs(block) => CatchupItem::BatchBlock {
+                block,
+                logs: Vec::new(),
+            },
+            BlockSlot::PendingLogs(_block, block_id) if logs_failed => {
+                CatchupItem::Missing(block_id)
+            }
+            BlockSlot::PendingLogs(block, _) => CatchupItem::BatchBlock {
+                block,
+                logs: logs_iter.next().unwrap_or_default(),
+            },
+        })
+        .collect();
+
+    #[cfg(feature = "bench")]
+    crate::bench::add_batch_fetch_time(start.elapsed());
+
+    items
 }
 
 #[derive(Clone)]
@@ -381,6 +338,42 @@ impl EthereumClient {
         )
     }
 
+    /// Stream [`CatchupItem`]s for `[start_block, end_block)` in block order.
+    ///
+    /// The range is split into `batch_size` chunks; up to `concurrency` chunk
+    /// fetches (each one batched `get_blocks` POST plus one batched `get_logs`
+    /// POST for bloom-positive blocks) are in flight at once. `concurrency
+    /// == 1` reproduces the sequential one-batch-at-a-time behavior.
+    pub fn catchup_batch_stream(
+        &self,
+        start_block: BlockNumber,
+        end_block: BlockNumber,
+        contract_address: Address,
+        batch_size: u64,
+        concurrency: usize,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = CatchupItem> + Send + 'static>> {
+        let batch_size = batch_size.max(1);
+        let n_batches = (end_block.saturating_sub(start_block)).div_ceil(batch_size);
+
+        let client = self.clone();
+        let batches =
+            (0..n_batches).map(move |i| {
+                let client = client.clone();
+                let batch_start = start_block + i * batch_size;
+                let batch_end = (batch_start + batch_size).min(end_block);
+                async move {
+                    fetch_catchup_batch(&client, batch_start, batch_end, contract_address).await
+                }
+            });
+
+        Box::pin(
+            stream::iter(batches)
+                .buffered(concurrency.max(1))
+                .map(stream::iter)
+                .flatten(),
+        )
+    }
+
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         retry_rpc_gated!(
             self.rpc.timeout,
@@ -487,6 +480,7 @@ mod tests {
     use super::*;
     use crate::test_utils;
     use alloy::primitives::Bloom;
+    use futures_util::StreamExt;
     use mockito::{Matcher, Server};
     use serde_json::json;
     use std::time::Duration;
@@ -629,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catchup_iter_fetches_batches_lazily() {
+    async fn catchup_stream_fetches_batches_lazily() {
         let mut server = mockito::Server::new_async().await;
 
         let first_batch = (10..42)
@@ -664,11 +658,11 @@ mod tests {
 
         let contract_address = Address::with_last_byte(0x42);
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 43, contract_address, 32);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(10, 43, contract_address, 32, 1);
 
         for expected_number in 10..42 {
-            let next = iter.next().await;
+            let next = stream.next().await;
             assert!(
                 matches!(
                     &next,
@@ -683,7 +677,7 @@ mod tests {
         assert!(first_batch_mock.matched_async().await);
         assert!(!second_batch_mock.matched_async().await);
 
-        let next = iter.next().await;
+        let next = stream.next().await;
         assert!(
             matches!(
                 &next,
@@ -693,11 +687,11 @@ mod tests {
             next
         );
         assert!(second_batch_mock.matched_async().await);
-        assert!(iter.next().await.is_none());
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn catchup_iter_splits_requests_into_32_32_1_batches() {
+    async fn catchup_stream_splits_requests_into_32_32_1_batches() {
         let mut server = mockito::Server::new_async().await;
 
         let first_batch = (0..32)
@@ -750,11 +744,11 @@ mod tests {
 
         let contract_address = Address::with_last_byte(0x42);
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 0, 65, contract_address, 32);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(0, 65, contract_address, 32, 1);
 
         for expected_number in 0..65 {
-            let next = iter.next().await;
+            let next = stream.next().await;
             assert!(
                 matches!(
                     &next,
@@ -766,10 +760,64 @@ mod tests {
             );
         }
 
-        assert!(iter.next().await.is_none());
+        assert!(stream.next().await.is_none());
         assert!(first_batch_mock.matched_async().await);
         assert!(second_batch_mock.matched_async().await);
         assert!(third_batch_mock.matched_async().await);
+    }
+
+    #[tokio::test]
+    async fn catchup_batch_stream_fetches_batches_concurrently() {
+        let mut server = Server::new_async().await;
+
+        // Each batch response is held back 250ms server-side. Sequential
+        // fetching would need >= 750ms; concurrency=3 overlaps them.
+        let delayed_body = |blocks: Vec<serde_json::Value>| {
+            let body = json!(blocks).to_string();
+            move |w: &mut dyn std::io::Write| {
+                std::thread::sleep(Duration::from_millis(250));
+                w.write_all(body.as_bytes())
+            }
+        };
+
+        for (hi_hex, lo) in [("1f", 0u64), ("3f", 32), ("5f", 64)] {
+            let blocks: Vec<_> = (lo..lo + 32)
+                .enumerate()
+                .map(|(i, n)| test_utils::block_response(lo + i as u64 + 1, n))
+                .collect();
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::Regex(format!(
+                    r#"eth_getBlockByNumber.*\"0x{hi_hex}\""#
+                )))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_chunked_body(delayed_body(blocks))
+                .expect(1)
+                .create_async()
+                .await;
+        }
+
+        let contract_address = Address::with_last_byte(0x42);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+
+        let start = std::time::Instant::now();
+        let mut stream = client.catchup_batch_stream(0, 96, contract_address, 32, 3);
+        for expected_number in 0..96u64 {
+            assert!(
+                matches!(
+                    stream.next().await,
+                    Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == expected_number
+                ),
+                "expected block {expected_number} in order"
+            );
+        }
+        assert!(stream.next().await.is_none());
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "concurrent fetch took {:?}, batches were serialized",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -929,11 +977,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 12, contract_address, 32);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(10, 12, contract_address, 32, 1);
 
-        let item1 = iter.next().await.unwrap();
-        let item2 = iter.next().await.unwrap();
+        let item1 = stream.next().await.unwrap();
+        let item2 = stream.next().await.unwrap();
 
         if let CatchupItem::BatchBlock { block, logs } = item1 {
             assert_eq!(block.header.number, 10, "first item should be block 10");
@@ -985,11 +1033,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 12, contract_address, 32);
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let mut stream = client.catchup_batch_stream(10, 12, contract_address, 32, 1);
 
         for expected_number in [10u64, 11] {
-            let item = iter.next().await.expect("expected item");
+            let item = stream.next().await.expect("expected item");
             match item {
                 CatchupItem::BatchBlock { block, logs } => {
                     assert_eq!(block.header.number, expected_number);
@@ -998,7 +1046,7 @@ mod tests {
                 other => panic!("expected BatchBlock for {expected_number}, got {other:?}"),
             }
         }
-        assert!(iter.next().await.is_none());
+        assert!(stream.next().await.is_none());
     }
 
     /// Build a `Block` with the given `logs_bloom`.
