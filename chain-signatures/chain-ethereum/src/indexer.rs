@@ -1,7 +1,5 @@
 use crate::abi::ChainSignatures;
-use crate::client::{
-    block_may_contain_logs, CatchupItem, EthereumClient, DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-};
+use crate::client::{block_may_contain_logs, CatchupItem, EthereumClient};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
@@ -50,7 +48,7 @@ impl BlockAndRequests {
 }
 
 pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
-    eth: EthConfig,
+    config: EthConfig,
     state_manager: S,
     telemetry: T,
     client: Arc<EthereumClient>,
@@ -71,7 +69,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
         let finalized_head = FinalizedHeadTracker::new(&eth);
         Ok(Self {
-            eth,
+            config: eth,
             state_manager,
             telemetry,
             client,
@@ -93,7 +91,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     ) -> Self {
         let finalized_head = FinalizedHeadTracker::new(&eth);
         Self {
-            eth,
+            config: eth,
             state_manager,
             telemetry,
             client,
@@ -185,7 +183,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let watcher = ExecutionWatcher::new(
             self.client.as_ref(),
             &self.state_manager,
-            &self.eth.indexer,
+            &self.config.indexer,
             &self.watcher_gate,
             &self.telemetry,
         );
@@ -266,13 +264,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        self.client.catchup_batch_stream(
-            catchup_start,
-            anchor_height,
-            self.contract_address,
-            self.eth.indexer.catchup_block_batch_size,
-            DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-        )
+        self.client
+            .catchup_batch_stream(catchup_start, anchor_height, self.contract_address)
     }
 
     /// Process a single catchup item (batch block or missing-block refetch)
@@ -313,7 +306,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        let tag = if self.eth.optimistic_requests {
+        let tag = if self.config.optimistic_requests {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
@@ -357,13 +350,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         end: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut stream = self.client.catchup_batch_stream(
-            start,
-            end,
-            self.contract_address,
-            self.eth.indexer.catchup_block_batch_size,
-            DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-        );
+        let mut stream = self
+            .client
+            .catchup_batch_stream(start, end, self.contract_address);
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -473,7 +462,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
 #[cfg(test)]
 mod tests {
-    use crate::client::{CatchupItem, DEFAULT_CATCHUP_FETCH_CONCURRENCY};
+    use crate::client::CatchupItem;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::rpc::types::BlockId;
@@ -620,13 +609,9 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
 
-        let mut iter = indexer.client.catchup_batch_stream(
-            1,
-            33,
-            indexer.contract_address,
-            indexer.eth.indexer.catchup_block_batch_size,
-            DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-        );
+        let mut iter = indexer
+            .client
+            .catchup_batch_stream(1, 33, indexer.contract_address);
         for n in 1..=32 {
             let item = iter.next().await.expect("expected item");
             indexer
@@ -680,13 +665,9 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
 
-        let mut iter = indexer.client.catchup_batch_stream(
-            10,
-            12,
-            indexer.contract_address,
-            indexer.eth.indexer.catchup_block_batch_size,
-            DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-        );
+        let mut iter = indexer
+            .client
+            .catchup_batch_stream(10, 12, indexer.contract_address);
 
         let item1 = iter.next().await.unwrap();
         indexer
@@ -792,13 +773,9 @@ mod tests {
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();
 
-        let mut iter = indexer.client.catchup_batch_stream(
-            42,
-            43,
-            indexer.contract_address,
-            indexer.eth.indexer.catchup_block_batch_size,
-            DEFAULT_CATCHUP_FETCH_CONCURRENCY,
-        );
+        let mut iter = indexer
+            .client
+            .catchup_batch_stream(42, 43, indexer.contract_address);
         let item = iter.next().await.unwrap();
 
         indexer

@@ -16,9 +16,6 @@ use super::indexer_eth_helios;
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
 
-/// Default number of catchup batch fetches kept in flight.
-pub const DEFAULT_CATCHUP_FETCH_CONCURRENCY: usize = 4;
-
 /// Result of attempting to fetch a single block
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -340,19 +337,19 @@ impl EthereumClient {
 
     /// Stream [`CatchupItem`]s for `[start_block, end_block)` in block order.
     ///
-    /// The range is split into `batch_size` chunks; up to `concurrency` chunk
-    /// fetches (each one batched `get_blocks` POST plus one batched `get_logs`
-    /// POST for bloom-positive blocks) are in flight at once. `concurrency
-    /// == 1` reproduces the sequential one-batch-at-a-time behavior.
+    /// The range is split into chunks of `self.rpc.catchup.block_batch_size`
+    /// blocks; up to `self.rpc.catchup.fetch_concurrency` chunk fetches (each
+    /// one batched `get_blocks` POST plus one batched `get_logs` POST for
+    /// bloom-positive blocks) are in flight at once. `fetch_concurrency == 1`
+    /// reproduces the sequential one-batch-at-a-time behavior.
     pub fn catchup_batch_stream(
         &self,
         start_block: BlockNumber,
         end_block: BlockNumber,
         contract_address: Address,
-        batch_size: u64,
-        concurrency: usize,
     ) -> std::pin::Pin<Box<dyn Stream<Item = CatchupItem> + Send + 'static>> {
-        let batch_size = batch_size.max(1);
+        let batch_size = self.rpc.catchup.block_batch_size.max(1);
+        let concurrency = self.rpc.catchup.fetch_concurrency;
         let n_batches = (end_block.saturating_sub(start_block)).div_ceil(batch_size);
 
         let client = self.clone();
@@ -478,6 +475,7 @@ impl EthereumClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CatchupFetchConfig;
     use crate::test_utils;
     use alloy::primitives::Bloom;
     use futures_util::StreamExt;
@@ -658,8 +656,15 @@ mod tests {
 
         let contract_address = Address::with_last_byte(0x42);
 
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let mut stream = client.catchup_batch_stream(10, 43, contract_address, 32, 1);
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            CatchupFetchConfig {
+                block_batch_size: 32,
+                fetch_concurrency: 1,
+            },
+        )
+        .await;
+        let mut stream = client.catchup_batch_stream(10, 43, contract_address);
 
         for expected_number in 10..42 {
             let next = stream.next().await;
@@ -744,8 +749,15 @@ mod tests {
 
         let contract_address = Address::with_last_byte(0x42);
 
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let mut stream = client.catchup_batch_stream(0, 65, contract_address, 32, 1);
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            CatchupFetchConfig {
+                block_batch_size: 32,
+                fetch_concurrency: 1,
+            },
+        )
+        .await;
+        let mut stream = client.catchup_batch_stream(0, 65, contract_address);
 
         for expected_number in 0..65 {
             let next = stream.next().await;
@@ -798,11 +810,19 @@ mod tests {
                 .await;
         }
 
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            CatchupFetchConfig {
+                block_batch_size: 32,
+                fetch_concurrency: 3,
+            },
+        )
+        .await;
+
         let contract_address = Address::with_last_byte(0x42);
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
 
         let start = std::time::Instant::now();
-        let mut stream = client.catchup_batch_stream(0, 96, contract_address, 32, 3);
+        let mut stream = client.catchup_batch_stream(0, 96, contract_address);
         for expected_number in 0..96u64 {
             assert!(
                 matches!(
@@ -978,7 +998,7 @@ mod tests {
             .await;
 
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let mut stream = client.catchup_batch_stream(10, 12, contract_address, 32, 1);
+        let mut stream = client.catchup_batch_stream(10, 12, contract_address);
 
         let item1 = stream.next().await.unwrap();
         let item2 = stream.next().await.unwrap();
@@ -1034,7 +1054,7 @@ mod tests {
             .await;
 
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let mut stream = client.catchup_batch_stream(10, 12, contract_address, 32, 1);
+        let mut stream = client.catchup_batch_stream(10, 12, contract_address);
 
         for expected_number in [10u64, 11] {
             let item = stream.next().await.expect("expected item");
