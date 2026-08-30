@@ -125,7 +125,7 @@ async fn fetch_catchup_batch(
         .collect();
 
     #[cfg(feature = "bench")]
-    crate::bench::add_batch_fetch_time(start.elapsed());
+    crate::bench::record_batch_fetch(start);
 
     items
 }
