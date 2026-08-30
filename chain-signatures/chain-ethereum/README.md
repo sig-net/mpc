@@ -1,10 +1,10 @@
 # mpc-chain-ethereum
 
 Ethereum integration for the MPC chain-signatures stack. Provides the
-[`EthereumStream`] indexer that drives catchup over historical Ethereum blocks,
+`EthereumIndexer` that drives catchup over historical Ethereum blocks,
 emits MPC signing request/response events, and surfaces them through the
-[`mpc-chain-integration-core`](../chain-integration-core) `ChainStream` /
-`ChainIndexer` traits.
+[`mpc-chain-integration-core`](../chain-integration-core) `ChainIndexer`
+trait.
 
 Two clients are supported:
 
@@ -15,11 +15,11 @@ Two clients are supported:
   helpers intentionally only instrument the direct-RPC backend.
 
 In the full node, this crate is driven by [`mpc-node`](../node) via the
-`ChainStream` / `ChainIndexer` traits. The `EthereumStream::new(config, state,
-telemetry)` builder, `start()` → `EthereumIndexer` handle, and the
-`catchup_range` / `process_catchup` / `notify_catchup_completed` flow are wired
-up there on the operator's behalf — config is plumbed through from the node's
-config, not constructed by hand.
+`ChainIndexer` trait (`EthereumIndexer::run`). Catchup and the live tail are
+one cursor-driven path: historical blocks stream out of
+`EthereumClient::catchup_batch_stream` and are processed strictly in order via
+`process_catchup_item` — all wired up on the operator's behalf, with config
+plumbed through from the node's config, not constructed by hand.
 
 ## Configuration
 
@@ -35,6 +35,17 @@ config, not constructed by hand.
 | `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
 | `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
 | `light_client`            | —                   | no        | set `true` to select the Helios backend (`helios` feature required) |
+
+### Catchup fetch tuning
+
+`rpc.catchup` (`CatchupFetchConfig`) shapes historical block fetching:
+
+| field | default | notes |
+|---|---|---|
+| `block_batch_size` | 32 | blocks per `eth_getBlockByNumber` JSON-RPC batch |
+| `fetch_concurrency` | 4 | batch fetches kept in flight at once |
+
+Batches are fetched concurrently but yielded strictly in block order.
 
 ## Benchmarking catchup
 
@@ -91,15 +102,17 @@ range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
 
 #### Speed (reference snapshot)
 
-| metric | local eRPC | Alchemy (cold) |
-|---|---|---|
-| catchup wall time | 0.15 s | 1.12 s |
-| blocks/s | 668 | 89 |
-| `eth_getBlockByNumber(Finalized)` | 1 | 1 |
-| `eth_getBlockByNumber(batch)` | 100 | 100 |
-| `eth_getLogs(batch)` | 9 | 9 |
-| `batch_fetch_ms` | 132 | 1115 |
-| `process_ms` | 18 | 4 |
+100-block Alchemy catchup with default settings (concurrent batch fetching,
+`fetch_concurrency: 4`):
+
+| metric | value |
+|---|---|
+| catchup wall time | 0.54 s |
+| blocks/s | 186 |
+| `batch_fetch_ms` (wall) | 535 |
+| `fetch_work_ms` (summed) | 1955 |
+| `fetch_parallelism` | 3.7 |
+| `process_ms` | 1 |
 
 > NOTE: Wall-clock figures are a reference snapshot (endpoint tier, latency, and
 > load dependent), not a guarantee.
