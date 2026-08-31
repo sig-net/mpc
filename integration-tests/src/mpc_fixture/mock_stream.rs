@@ -138,7 +138,7 @@ impl InnerMockStream {
             }
 
             block.push(ChainEvent::SignRequest {
-                request: request.clone(),
+                request: Arc::new(request.clone()),
                 block_timestamp: None,
             });
         }
@@ -151,7 +151,9 @@ impl InnerMockStream {
         let mut block = Vec::new();
 
         for action in actions {
-            let RpcAction::Publish(publish_action) = action;
+            let RpcAction::Publish(publish_action) = action else {
+                continue;
+            };
 
             // Skip events for other chains
             if publish_action.request.chain != Chain::Solana {

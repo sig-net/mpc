@@ -5,25 +5,26 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
 use rlp::{Rlp, RlpStream};
+use serde::{Deserialize, Serialize};
 
-pub type RequestId = [u8; 32];
+use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishState {
     pub signature: Signature,
     pub participants: Vec<Participant>,
     pub is_proposer: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish { publish: PublishState },
-    PendingExecution { tx: BidirectionalTx },
+    PendingPublish { publish: Arc<PublishState> },
+    PendingExecution { tx: Arc<BidirectionalTx> },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
+    PendingPublishBidirectional { publish: Arc<PublishState> },
 }
 
 impl SignStatus {
@@ -38,28 +39,42 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
-    pub fn checkpoint_consensus_bytes(&self) -> Vec<u8> {
+    /// Project this status onto what is observable at a checkpoint's own chain height.
+    ///
+    /// A source-chain checkpoint cannot observe either of the distinguishing axes
+    /// below, so the status collapses into one of two phases:
+    ///
+    /// * `0` — the initial source-chain phase (`PendingGeneration` /
+    ///   `PendingPublish`). Generation and publication are local attempts to reach
+    ///   the initial on-chain response: only a signature's participants advance to
+    ///   publishing, so nodes cannot be required to agree on which of the two a
+    ///   request is in.
+    /// * `1` — the post-initial phase (`PendingExecution`,
+    ///   `PendingGenerationBidirectional`, `PendingPublishBidirectional`). Once the
+    ///   initial response has been produced, the remaining progress — awaiting
+    ///   target-chain execution and then signing/publishing the final response — is
+    ///   not observable at the source-chain checkpoint height. Nodes therefore
+    ///   cannot be required to agree on whether a request is still awaiting
+    ///   execution or already in the final-response generation/publish step, so all
+    ///   of these statuses share a single tag.
+    pub fn consensus_tag(&self) -> u8 {
         match self {
-            SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { .. } => vec![1],
-            SignStatus::PendingExecution { tx } => {
-                let mut bytes = vec![2];
-                bytes.extend_from_slice(tx.id.0.as_slice());
-                bytes.extend_from_slice(&tx.target_chain.to_bytes());
-                bytes
-            }
-            SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { .. } => vec![4],
+            SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => 0,
+            SignStatus::PendingExecution { .. }
+            | SignStatus::PendingGenerationBidirectional
+            | SignStatus::PendingPublishBidirectional { .. } => 1,
         }
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),
             _ => None,
         }
     }
 }
+
+pub type RequestId = [u8; 32];
 
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
@@ -71,7 +86,7 @@ pub trait SignBidirectionalEventExt {
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
     fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
-            Chain::Canton => Ok(hex::encode(self.sender)),
+            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
             _ => crate::stream::ops::sender_string(self.sender, self.chain),
         }
     }
@@ -93,6 +108,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path,
             )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -110,7 +130,7 @@ pub trait BidirectionalTxExt {
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
-        if self.source_chain == Chain::Canton {
+        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
             return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
@@ -129,6 +149,11 @@ impl BidirectionalTxExt for BidirectionalTx {
                 path,
             )),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 path,
@@ -257,7 +282,7 @@ pub fn sign_and_hash_legacy_from_unsigned(
     out.append_uint_bytes(s);
 
     let signed_bytes = out.into_vec();
-    let hash = alloy_primitives::keccak256(&signed_bytes);
+    let hash = alloy::primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
 }
 
@@ -359,6 +384,7 @@ mod tests {
     use alloy::consensus::{SignableTransaction, TxEip1559};
     use alloy::eips::eip2718::Encodable2718;
     use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+    use std::sync::Arc;
 
     #[test]
     fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
@@ -392,5 +418,70 @@ mod tests {
 
         assert_eq!(hash, expected_hash);
         assert_eq!(nonce, 3);
+    }
+
+    #[test]
+    fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
+        use super::{PublishState, SignStatus};
+        use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, Signature};
+
+        let dummy_sig = Signature {
+            big_r: k256::ProjectivePoint::GENERATOR.to_affine(),
+            s: k256::Scalar::ONE,
+            recovery_id: 0,
+        };
+        let dummy_tx = Arc::new(BidirectionalTx {
+            id: BidirectionalTxId([1u8; 32]),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: String::new(),
+            key_version: 0,
+            deposit: 0,
+            path: String::new(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: [1u8; 32],
+            from_address: [0u8; 20],
+            nonce: 0,
+        });
+        let publish = || {
+            Arc::new(PublishState {
+                signature: dummy_sig,
+                participants: vec![],
+                is_proposer: true,
+            })
+        };
+
+        let generation_tag = SignStatus::PendingGeneration.consensus_tag();
+        let publish_tag = SignStatus::PendingPublish { publish: publish() }.consensus_tag();
+        assert_eq!(
+            generation_tag, publish_tag,
+            "PendingGeneration and PendingPublish must produce identical consensus tags"
+        );
+
+        // Post-initial phase: target-chain execution and the final response
+        // generation/publish are indistinguishable at the source-chain height.
+        let execution_tag = SignStatus::PendingExecution { tx: dummy_tx }.consensus_tag();
+        let gen_bidi_tag = SignStatus::PendingGenerationBidirectional.consensus_tag();
+        let pub_bidi_tag =
+            SignStatus::PendingPublishBidirectional { publish: publish() }.consensus_tag();
+        assert_eq!(
+            execution_tag, gen_bidi_tag,
+            "PendingExecution and PendingGenerationBidirectional must share a consensus tag \
+             (target-chain execution is not observable at the source-chain height)"
+        );
+        assert_eq!(
+            gen_bidi_tag, pub_bidi_tag,
+            "PendingGenerationBidirectional and PendingPublishBidirectional must produce identical consensus tags"
+        );
+
+        // The initial source-chain phase is observable at this checkpoint's height,
+        // so it differs from the post-initial phase (execution / final response).
+        assert_ne!(generation_tag, gen_bidi_tag);
     }
 }

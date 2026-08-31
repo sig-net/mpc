@@ -26,7 +26,6 @@ rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-semver.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
@@ -62,9 +61,9 @@ near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.15.0"
+near-jsonrpc-client.workspace = true
 near-primitives.workspace = true
-near-workspaces = "0.21.0"
+near-workspaces.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
@@ -72,14 +71,16 @@ mpc-contract.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-chain-canton.workspace = true
 mpc-chain-solana.workspace = true
-mpc-chain-ethereum.workspace = true
+mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
 mpc-chain-near.workspace = true
+mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",
     "debug-page",
 ] }
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"

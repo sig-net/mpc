@@ -66,6 +66,14 @@ impl Drop for MpcSignProtocol {
 pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
+    /// Returns candidate information and admission votes for `account_id`.
+    fn candidate_info(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send;
+
     fn vote_reshared(
         &self,
         epoch: u64,
@@ -74,6 +82,11 @@ pub trait Governance {
     fn vote_public_key(
         &self,
         public_key: &near_crypto::PublicKey,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+
+    fn vote_threshold(
+        &self,
+        new_threshold: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 

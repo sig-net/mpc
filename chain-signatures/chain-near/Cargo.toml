@@ -14,6 +14,7 @@ k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-contract.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true

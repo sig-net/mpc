@@ -7,8 +7,8 @@ use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{supervisor::run_supervised, StreamContext};
-use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
@@ -18,7 +18,9 @@ use mpc_primitives::{
     RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     Signature, SignatureRespondedEvent,
 };
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 pub fn test_indexed_request(
@@ -27,8 +29,14 @@ pub fn test_indexed_request(
     args: SignArgs,
     unix_timestamp_indexed: u64,
     kind: SignKind,
-) -> IndexedSignRequest {
-    IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+) -> Arc<IndexedSignRequest> {
+    Arc::new(IndexedSignRequest::new(
+        sign_id,
+        args,
+        chain,
+        unix_timestamp_indexed,
+        kind,
+    ))
 }
 
 pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
@@ -67,13 +75,13 @@ pub fn test_sign_args(id: u8) -> SignArgs {
 pub fn test_canton_sign_bidirectional_request(
     sign_id: SignId,
     sign_event_contract_id: &str,
-) -> IndexedSignRequest {
+) -> Arc<IndexedSignRequest> {
     let ctx = CantonChainCtx {
         sign_event_contract_id: sign_event_contract_id.to_string(),
     };
     let chain_ctx =
         Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
-    IndexedSignRequest::sign_bidirectional(
+    Arc::new(IndexedSignRequest::sign_bidirectional(
         sign_id,
         test_sign_args(sign_id.request_id[0]),
         Chain::Canton,
@@ -93,7 +101,7 @@ pub fn test_canton_sign_bidirectional_request(
             chain: Chain::Canton,
             chain_ctx,
         },
-    )
+    ))
 }
 
 pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
@@ -123,7 +131,7 @@ pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>
 
 /// Build a test [`StreamContext`] and return the checkpoint / mesh watch
 /// senders so callers can drive them. `threshold` is the contract-watcher's
-/// signing threshold — pass `0` to skip the mesh wait in `recover_backlog`.
+/// signing threshold.
 pub fn make_test_stream_context(
     backlog: Backlog,
     sign_tx: mpsc::Sender<SignCommand>,
@@ -134,6 +142,7 @@ pub fn make_test_stream_context(
     StreamContext,
     watch::Sender<Option<CheckpointDigest>>,
     watch::Sender<MeshState>,
+    mpsc::Receiver<RpcAction>,
 ) {
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _tx) =
@@ -141,7 +150,7 @@ pub fn make_test_stream_context(
     let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (cp_tx, cp_rx) = watch::channel(None);
     let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
+    let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
         sign_tx,
@@ -152,7 +161,33 @@ pub fn make_test_stream_context(
         cp_rx,
     );
     ctx.caught_up = caught_up;
-    (ctx, cp_tx, mesh_tx)
+    (ctx, cp_tx, mesh_tx, rpc_rx)
+}
+
+pub fn make_test_stream_context_with_rpc(
+    backlog: Backlog,
+    sign_tx: mpsc::Sender<SignCommand>,
+    caught_up: bool,
+    root_pk: AffinePoint,
+) -> (StreamContext, mpsc::Receiver<RpcAction>) {
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, rpc_rx) = test_rpc_channel(8);
+    let mut ctx = StreamContext::new(
+        backlog,
+        sign_tx,
+        rpc,
+        contract_watcher,
+        mesh_rx,
+        node_client,
+        cp_rx,
+    );
+    ctx.caught_up = caught_up;
+    (ctx, rpc_rx)
 }
 
 /// Convenience wrapper for tests that don't need the watch senders and use the
@@ -162,7 +197,7 @@ pub fn make_test_stream_context_with_generator_pk(
     sign_tx: mpsc::Sender<SignCommand>,
     caught_up: bool,
 ) -> StreamContext {
-    let (ctx, _, _) = make_test_stream_context(
+    let (ctx, _, _, _) = make_test_stream_context(
         backlog,
         sign_tx,
         caught_up,
@@ -209,11 +244,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
     for (index, server) in servers.iter().enumerate() {
         let mut info = ParticipantInfo::new(index as u32);
         info.url = server.url();
-        mesh_state.update(
-            cait_sith::protocol::Participant::from(index as u32),
-            NodeStatus::Active,
-            info,
-        );
+        mesh_state.update(Participant::from(index as u32), NodeStatus::Active, info);
     }
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
     let (_cp_tx, cp_rx) = watch::channel(None);

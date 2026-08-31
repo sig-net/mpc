@@ -5,7 +5,7 @@ version.workspace = true
 description = "Solana chain integration for MPC"
 
 [dependencies]
-alloy-sol-types.workspace = true
+alloy.workspace = true
 anchor-client.workspace = true
 anchor-lang.workspace = true
 # TODO: replace with thiserror
@@ -18,6 +18,7 @@ k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

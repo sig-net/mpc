@@ -25,6 +25,7 @@ pub mod compat;
 pub mod ethereum;
 pub mod ethereum_stream;
 pub mod helpers;
+pub mod midnight_stream;
 pub mod mpc;
 pub mod mpc_with_stream;
 pub mod nightly;
@@ -256,7 +257,7 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert!(matches!(
         nodes.contract_state().await?,
-        mpc_contract::ProtocolContractState::Resharing(_)
+        mpc_contract::ProtocolContractStateView::Resharing(_)
     ));
 
     // Restart the node that was offline during the resharing.
@@ -332,7 +333,7 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
 
     assert!(matches!(
         nodes.contract_state().await?,
-        mpc_contract::ProtocolContractState::Resharing(_)
+        mpc_contract::ProtocolContractStateView::Resharing(_)
     ));
 
     nodes.restart_node(target_config).await?;

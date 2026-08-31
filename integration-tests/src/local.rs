@@ -8,7 +8,7 @@ use anyhow::Context;
 use async_process::Child;
 use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
@@ -71,6 +71,7 @@ impl Node {
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
         let canton = CantonArgs::from_config(cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(cfg.midnight.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = Cli::Start {
@@ -85,6 +86,7 @@ impl Node {
             sol,
             hydration,
             canton,
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -173,6 +175,7 @@ impl Node {
         let sol = SolArgs::from_config(config.cfg.sol.clone());
         let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
         let canton = CantonArgs::from_config(config.cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
         let cli = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -185,6 +188,7 @@ impl Node {
             sol,
             hydration,
             canton,
+            midnight,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -198,7 +202,7 @@ impl Node {
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_node_with_binary(
+        let mut process = execute::spawn_node_with_binary(
             config.binary_path.clone(),
             ctx.release,
             &mpc_node_id,
@@ -206,7 +210,7 @@ impl Node {
         )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
-        utils::ping_until_ok(&address, 120).await?;
+        utils::ping_until_ok(&mut process, &address, 120).await?;
         tracing::info!(node_account_id = %config.account.id(), ?address, "node started");
 
         Ok(Self {

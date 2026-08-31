@@ -128,7 +128,7 @@ mod tests {
         let associated_data = b"";
         let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
-            from: cait_sith::protocol::Participant::from(0),
+            from: Participant::from(0),
             data: vec![],
         });
 
@@ -331,6 +331,119 @@ mod tests {
             new_batch, old_batch,
             "encrypt/decrypt failed backward compatibility"
         );
+    }
+
+    /// `PositMessage::stale_round` lets a `StaleRound` reject carry the
+    /// rejector's round without changing `PositRejectReason`'s wire shape.
+    /// Prove the property that motivated it: the field is compatible in both
+    /// directions, and a message bundled *after* the posit in the same batch
+    /// still decodes.
+    #[test]
+    fn test_posit_stale_round_field_is_wire_compatible() {
+        use crate::protocol::message::{PositMessage, PositProtocolId};
+        use crate::protocol::posit::{PositAction, PositRejectReason};
+
+        /// Mirrors `PositMessage`'s shape before `stale_round` was added.
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct OldPositMessage {
+            id: PositProtocolId,
+            from: Participant,
+            action: PositAction,
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        enum OldMessage {
+            Posit(OldPositMessage),
+            Generating(GeneratingMessage),
+        }
+
+        impl PartialEq<Message> for OldMessage {
+            fn eq(&self, other: &Message) -> bool {
+                match (self, other) {
+                    (OldMessage::Posit(a), Message::Posit(b)) => {
+                        a.id == b.id && a.from == b.from && a.action == b.action
+                    }
+                    (OldMessage::Generating(a), Message::Generating(b)) => a == b,
+                    _ => false,
+                }
+            }
+        }
+
+        let from = Participant::from(7);
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-stale-round");
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+        let participants = ParticipantMap::One(participants);
+        let sign_id = SignId::new([9; 32]);
+
+        // Forward compatibility: a new node sends a `StaleRound` reject with
+        // `stale_round` set, bundled with an unrelated trailing message. An
+        // old node without the field still decodes the whole batch — it
+        // simply never learns the rejector's round.
+        let new_batch = vec![
+            Message::Posit(PositMessage {
+                id: PositProtocolId::Signature(sign_id, 1, 2),
+                from,
+                action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                stale_round: Some(5),
+            }),
+            Message::Generating(GeneratingMessage {
+                from,
+                data: vec![1, 2, 3],
+            }),
+        ];
+        let encrypted = SignedMessage::encrypt(&new_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let old_decoded: Vec<OldMessage> =
+            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+        assert_eq!(
+            old_decoded.len(),
+            2,
+            "old node must still see both messages in the batch, not just the posit"
+        );
+        assert_eq!(old_decoded, new_batch);
+
+        // Backward compatibility: an old node's `StaleRound` reject (no
+        // `stale_round` field at all) is decoded by new code as `None`, and
+        // the trailing message still decodes.
+        let old_batch = vec![
+            OldMessage::Posit(OldPositMessage {
+                id: PositProtocolId::Signature(sign_id, 1, 2),
+                from,
+                action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+            }),
+            OldMessage::Generating(GeneratingMessage {
+                from,
+                data: vec![4, 5, 6],
+            }),
+        ];
+        let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let new_decoded: Vec<Message> =
+            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+        assert_eq!(
+            new_decoded.len(),
+            2,
+            "new node must still see both messages in the batch, not just the posit"
+        );
+        let Message::Posit(posit) = &new_decoded[0] else {
+            panic!("expected a posit message");
+        };
+        assert_eq!(posit.stale_round, None);
+        assert!(matches!(
+            posit.action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
+        assert_eq!(old_batch[1], new_decoded[1]);
     }
 
     #[test]

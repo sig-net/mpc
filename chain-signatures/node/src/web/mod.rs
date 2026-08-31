@@ -242,6 +242,13 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointResponse {
+    #[serde(default)]
+    pub version: u64,
+    pub checkpoints: HashMap<Chain, Checkpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub status: NodeStatus,
     #[serde(default)]
@@ -390,7 +397,7 @@ impl CheckpointQuery {
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
+) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
     let mut resp = HashMap::new();
@@ -415,7 +422,10 @@ async fn checkpoint(
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(resp))
+    Ok(Cbor(CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        checkpoints: resp,
+    }))
 }
 
 #[cfg(not(feature = "debug-page"))]

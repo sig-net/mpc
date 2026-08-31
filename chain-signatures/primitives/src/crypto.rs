@@ -1,7 +1,7 @@
 use k256::Scalar;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignArgs {
     #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],
@@ -43,11 +43,29 @@ pub mod cbor_scalar {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Scalar, D::Error> {
         let bytes = match ciborium::Value::deserialize(deserializer)? {
-            ciborium::Value::Bytes(bytes) if bytes.len() != 32 => {
-                return Err(de::Error::custom("expected 32 bytes for Scalar"))
+            ciborium::Value::Bytes(bytes) => {
+                if bytes.len() != 32 {
+                    return Err(de::Error::custom("expected 32 bytes for Scalar"));
+                }
+                bytes
             }
-            ciborium::Value::Bytes(bytes) => bytes,
-            _ => return Err(de::Error::custom("expected ciborium::Value::Bytes")),
+            ciborium::Value::Array(items) => {
+                if items.len() != 32 {
+                    return Err(de::Error::custom("expected 32 bytes for Scalar"));
+                }
+                let mut bytes = Vec::with_capacity(32);
+                for item in items {
+                    match item {
+                        ciborium::Value::Integer(i) => {
+                            let b: u8 = i.try_into().map_err(de::Error::custom)?;
+                            bytes.push(b);
+                        }
+                        _ => return Err(de::Error::custom("expected integer in byte array")),
+                    }
+                }
+                bytes
+            }
+            _ => return Err(de::Error::custom("expected bytes for Scalar")),
         };
 
         let mut buf = [0u8; 32];

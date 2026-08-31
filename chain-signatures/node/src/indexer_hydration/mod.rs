@@ -9,7 +9,7 @@ use crate::types::CheckpointWatcher;
 
 pub use config::HydrationConfig;
 
-use alloy_sol_types::SolValue;
+use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -23,12 +23,14 @@ use mpc_primitives::{
     SignCommand, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
+use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
+use std::sync::Arc;
 use std::time::Duration;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
@@ -109,7 +111,7 @@ impl HydrationSignatureRequestedEvent {
                 key_version: self.key_version,
             },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
         ))
     }
 
@@ -235,7 +237,7 @@ impl HydrationSignBidirectionalRequestedEvent {
                 key_version: self.key_version,
             },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
             SignBidirectionalEvent {
                 sender: self.sender,
                 serialized_transaction: self.serialized_transaction.clone(),
@@ -323,11 +325,10 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
 ) {
-    let threshold = contract_watcher.wait_threshold().await;
-    crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
-
-    // Load local checkpoint from storage first
-    match backlog.storage.load_latest(Chain::Hydration).await {
+    // Hydrate the local checkpoint before aligning: the web server (spawned
+    // independently) can then serve durable pending bodies to peers during
+    // startup. `load_local` only reads local storage and does not need the mesh.
+    match backlog.load_local(Chain::Hydration).await {
         Ok(Some(checkpoint)) => {
             tracing::info!(
                 chain = ?Chain::Hydration,
@@ -346,6 +347,10 @@ pub async fn run<T: ChainTelemetry>(
         }
     }
 
+    // Wait for the contract (and its checkpoint digest) to be available before
+    // aligning; this also yields the root public key used in the event loop.
+    let root_pk = contract_watcher.wait_public_key().await;
+
     // Align with consensus
     crate::backlog::consensus::align_backlog_with_consensus(
         Chain::Hydration,
@@ -356,8 +361,6 @@ pub async fn run<T: ChainTelemetry>(
         contract_watcher.account_id(),
     )
     .await;
-
-    let root_pk = contract_watcher.wait_public_key().await;
 
     // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)
     let ctx = {
@@ -556,7 +559,7 @@ pub async fn run<T: ChainTelemetry>(
                     };
 
                     if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
+                        crate::stream::ops::process_sign_request(Arc::new(sign_request), &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }
@@ -607,7 +610,7 @@ pub async fn run<T: ChainTelemetry>(
                     };
 
                     if let Err(e) =
-                        crate::stream::ops::process_sign_request(sign_request, &ctx).await
+                        crate::stream::ops::process_sign_request(Arc::new(sign_request), &ctx).await
                     {
                         tracing::error!("failed to process sign event: {e}");
                     }

@@ -4,8 +4,9 @@ use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
+use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -23,19 +24,23 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    // If we can find the consensus checkpoint locally, confirm it and return.
-    if let Some(matched) = backlog
-        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+    match backlog
+        .confirm_consensus(chain, checkpoint_digest.digest)
         .await
     {
-        tracing::info!(
-            ?chain,
-            matched_height = matched.block_height,
-            consensus_height = checkpoint_digest.height,
-            "consensus checkpoint matches a local checkpoint; confirming"
-        );
-        backlog.on_consensus_confirmed(chain, &matched).await;
-        return None;
+        Ok(found) => {
+            if found {
+                return None;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?chain,
+                %err,
+                "transient storage error confirming consensus checkpoint; retrying later"
+            );
+            return None;
+        }
     }
 
     tracing::warn!(
@@ -43,26 +48,35 @@ pub async fn align_backlog_with_consensus(
         ?checkpoint_digest.digest,
         "Consensus checkpoint mismatch/divergence detected: triggering regression"
     );
-    let fetched_checkpoint = find_consensus_checkpoint(
-        mesh_state,
-        node_client,
-        chain,
-        checkpoint_digest.digest,
-        checkpoints_rx,
-        my_account_id,
-    )
-    .await?;
+    // A reset settles this digest for a state no node has produced, so
+    // `find_consensus_checkpoint` would poll peers forever. Rebuild it instead
+    // and fall through to the ordinary regression path, which is what makes a
+    // reset idempotent: once regressed, the local checkpoint matches the
+    // settled digest and the next pass confirms it.
+    let reset_checkpoint = Checkpoint::reset(chain, checkpoint_digest.height);
+    let fetched_checkpoint = if reset_checkpoint.digest() == checkpoint_digest.digest {
+        tracing::warn!(
+            ?chain,
+            height = checkpoint_digest.height,
+            "consensus checkpoint was reset; rebuilding it locally"
+        );
+        reset_checkpoint
+    } else {
+        find_consensus_checkpoint(
+            mesh_state,
+            node_client,
+            chain,
+            checkpoint_digest.digest,
+            checkpoints_rx,
+            my_account_id,
+        )
+        .await?
+    };
 
     let height = fetched_checkpoint.block_height;
 
-    // Persist the recovered checkpoint as the latest consensus checkpoint
-    // before overwriting the local backlog, so the node has a fallback on restart.
-    if let Err(err) = backlog.storage.persist(&fetched_checkpoint).await {
-        tracing::warn!(?chain, %err, "failed to persist regressed checkpoint");
-    }
-
-    if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
+    if let Err(err) = backlog.regress(fetched_checkpoint).await {
+        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 
@@ -75,33 +89,30 @@ async fn fetch_peer_checkpoint(
     chain: Chain,
     target_digest: [u8; 32],
 ) -> Option<Checkpoint> {
-    let result = node_client
+    let checkpoint = node_client
         .fetch_checkpoint_by_digest(url, chain, target_digest)
-        .await;
-    match result {
-        Ok(Some(checkpoint)) => {
-            let digest = checkpoint.digest();
-            if digest == target_digest {
-                Some(checkpoint)
-            } else {
-                tracing::warn!(
-                    ?url,
-                    ?chain,
-                    ?digest,
-                    "peer checkpoint with mismatched digest; skipping"
-                );
-                None
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
-            None
-        }
-        Err(err) => {
-            tracing::debug!(?url, ?chain, ?err, "failed to query peer for checkpoint");
-            None
-        }
+        .await
+        .inspect_err(|err| {
+            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+        })
+        .ok()?;
+
+    let Some(checkpoint) = checkpoint else {
+        tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
+        return None;
+    };
+
+    let digest = checkpoint.digest();
+    if digest != target_digest {
+        tracing::warn!(
+            ?url,
+            ?chain,
+            ?digest,
+            "peer checkpoint returns mismatched digest"
+        );
+        return None;
     }
+    Some(checkpoint)
 }
 
 async fn query_peers_checkpoint(
@@ -112,8 +123,9 @@ async fn query_peers_checkpoint(
 ) -> Option<Checkpoint> {
     for (peer, info) in peers {
         tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-        let checkpoint = fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await;
-        if let Some(checkpoint) = checkpoint {
+        if let Some(checkpoint) =
+            fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await
+        {
             return Some(checkpoint);
         }
     }
@@ -184,10 +196,8 @@ pub(crate) async fn find_consensus_checkpoint(
             ) => {
                 let Some(checkpoint) = checkpoint else {
                     // this should not happen in normal circumstances, but just in case
-                    // all nodes do not have the checkpoint, we will retry in 3 seconds.
-                    // In that span of time, either the consensus digest must have changed
-                    // or one of the nodes should have set the digest checkpoint.
-                    tracing::warn!("all peers do not have the checkpoint, retrying in 3 seconds");
+                    // all nodes do not have the checkpoint.
+                    tracing::warn!("all nodes do not have the checkpoint, retrying in 3 seconds");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 };
@@ -204,9 +214,10 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
-    use sha3::Digest;
+    use crate::backlog::BacklogEntry;
+    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     struct AlignFixture {
         chain: Chain,
@@ -282,7 +293,7 @@ mod tests {
                 remote_use_peer_digest: true,
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
-                peer_checkpoint_has_pending_tx: false,
+                peer_checkpoint_has_pending_tx: true,
                 expected_result: Some(100),
                 expected_persisted_height: Some(100),
             },
@@ -347,15 +358,14 @@ mod tests {
                 remote_use_peer_digest: true,
                 peer_has_checkpoint: true,
                 peer_checkpoint_height: 100,
-                peer_checkpoint_has_pending_tx: false,
+                peer_checkpoint_has_pending_tx: true,
                 expected_result: Some(100),
                 expected_persisted_height: Some(100),
             },
         ];
 
-        let chain = Chain::Ethereum;
-
         for case in cases {
+            let chain = Chain::Ethereum;
             let mut fixture = AlignFixture::new(None);
 
             // 1. Setup local checkpoints
@@ -374,11 +384,15 @@ mod tests {
                         chain,
                         0,
                     );
-                    fixture.backlog.insert(tx).await;
+                    fixture.backlog.insert(Arc::new(tx)).await;
                 }
 
                 for &height in &case.local_checkpoints {
-                    fixture.backlog.set_processed_block(chain, height).await;
+                    fixture
+                        .backlog
+                        .set_processed_block(chain, height)
+                        .await
+                        .unwrap();
                     let cp = fixture.backlog.checkpoint(chain).await.unwrap();
                     local_digests.push(cp.digest());
                 }
@@ -390,22 +404,28 @@ mod tests {
             let mut peer_digest = [0u8; 32];
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
-                    vec![PendingTx {
-                        sign_id: SignId::new([1u8; 32]),
-                        transaction: vec![1, 2, 3],
-                    }]
+                    vec![BacklogEntry::new(Arc::new(IndexedSignRequest::sign(
+                        // Distinct from the local entry's id, so a peer
+                        // checkpoint holding a request diverges from ours.
+                        SignId::new([2u8; 32]),
+                        SignArgs {
+                            entropy: [1u8; 32],
+                            epsilon: k256::Scalar::ONE,
+                            payload: k256::Scalar::ONE,
+                            path: "test".to_string(),
+                            key_version: 0,
+                        },
+                        chain,
+                        0,
+                    )))]
                 } else {
                     vec![]
                 };
-                let mut cumulative = sha3::Sha3_256::new();
-                if case.peer_checkpoint_has_pending_tx {
-                    cumulative.update([0u8]);
-                }
                 let peer_checkpoint = Checkpoint {
                     chain,
                     block_height: case.peer_checkpoint_height,
                     pending_requests,
-                    cumulative_digest: cumulative.finalize().into(),
+                    cumulative_digest: Checkpoint::empty_cumulative_digest(),
                 };
                 peer_digest = peer_checkpoint.digest();
 
@@ -414,8 +434,12 @@ mod tests {
 
                 let mut response_map = HashMap::new();
                 response_map.insert(chain, peer_checkpoint);
+                let response = crate::web::CheckpointResponse {
+                    version: crate::CHECKPOINT_VERSION,
+                    checkpoints: response_map,
+                };
                 let mut body = Vec::new();
-                ciborium::into_writer(&response_map, &mut body).unwrap();
+                ciborium::into_writer(&response, &mut body).unwrap();
 
                 let mock = s
                     .mock("GET", "/checkpoint")
@@ -464,7 +488,12 @@ mod tests {
             );
 
             // 6. Assert persisted state
-            let persisted = fixture.backlog.storage.load_latest(chain).await.unwrap();
+            let persisted = fixture
+                .backlog
+                .checkpoint_storage()
+                .load_latest(chain)
+                .await
+                .unwrap();
             if let Some(expected_height) = case.expected_persisted_height {
                 assert!(
                     persisted.is_some(),
@@ -509,6 +538,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_skips_newer_checkpoint_peer() {
+        let chain = Chain::Ethereum;
+        let checkpoint = Checkpoint::empty(chain);
+        let digest = checkpoint.digest();
+        let mut newer_server = mockito::Server::new_async().await;
+        let mut newer_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION + 1,
+                checkpoints: [(chain, checkpoint.clone())].into_iter().collect(),
+            },
+            &mut newer_body,
+        )
+        .unwrap();
+        let newer_mock = newer_server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(newer_body)
+            .create_async()
+            .await;
+
+        let mut current_server = mockito::Server::new_async().await;
+        let mut current_body = Vec::new();
+        ciborium::into_writer(
+            &crate::web::CheckpointResponse {
+                version: crate::CHECKPOINT_VERSION,
+                checkpoints: [(chain, checkpoint)].into_iter().collect(),
+            },
+            &mut current_body,
+        )
+        .unwrap();
+        let current_mock = current_server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(current_body)
+            .create_async()
+            .await;
+
+        let peers = [
+            (Participant::from(0u32), {
+                let mut info = ParticipantInfo::new(0);
+                info.url = newer_server.url();
+                info
+            }),
+            (Participant::from(1u32), {
+                let mut info = ParticipantInfo::new(1);
+                info.url = current_server.url();
+                info
+            }),
+        ];
+        let result = query_peers_checkpoint(
+            &peers,
+            &NodeClient::new(&NodeClientOptions::default()),
+            chain,
+            digest,
+        )
+        .await;
+
+        assert!(result.is_some());
+        newer_mock.assert_async().await;
+        current_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn align_applies_a_reset_without_any_peer() {
+        use mpc_chain_integration_core::StateManager as _;
+
+        let chain = Chain::Ethereum;
+        let mut fixture = AlignFixture::new(None);
+
+        // Pre-reset state: a confirmed local checkpoint at height 100 and a
+        // cursor to match.
+        fixture.backlog.set_processed_block(chain, 100).await;
+        let stale = fixture.backlog.checkpoint(chain).await.unwrap();
+        assert!(fixture
+            .backlog
+            .confirm_consensus(chain, stale.digest())
+            .await
+            .unwrap());
+
+        // The contract settles the canonical reset checkpoint for height 42.
+        // The mesh is empty, so any attempt to fetch this from a peer would
+        // block forever; the node must rebuild it locally instead.
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDigest {
+                height: 42,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
+            }))
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("align must not wait on peers for a reset checkpoint");
+
+        assert_eq!(result, Some(42));
+        assert_eq!(
+            fixture.backlog.latest_checkpoint(chain).await,
+            Some(Checkpoint::reset(chain, 42)),
+            "local state should be the canonical reset checkpoint"
+        );
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "cursor re-anchored at the reset height; indexing resumes at 43"
+        );
+
+        // Re-running while the same reset is settled is a no-op: no "have I
+        // applied this?" bookkeeping is needed, because the applied state
+        // matches the settled digest.
+        let again = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("a re-applied reset must not wait on peers either");
+        assert_eq!(again, None, "an already-applied reset reports aligned");
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "a second pass must not rewind the cursor again"
+        );
+    }
+
+    #[tokio::test]
+    async fn align_applies_a_reset_over_a_node_with_no_local_state() {
+        use mpc_chain_integration_core::StateManager as _;
+
+        let chain = Chain::Ethereum;
+        let mut fixture = AlignFixture::new(None);
+        fixture.backlog.set_processed_block(chain, 500).await;
+
+        fixture
+            .checkpoints_tx
+            .send(Some(CheckpointDigest {
+                height: 42,
+                digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
+            }))
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), fixture.run())
+            .await
+            .expect("align must not wait on peers for a reset checkpoint");
+
+        assert_eq!(result, Some(42));
+        assert_eq!(
+            fixture.backlog.get_processed_block(chain).await,
+            Some(42),
+            "a node that never held a checkpoint must still re-anchor"
+        );
+    }
+
+    #[tokio::test]
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
         let fixture = AlignFixture::new(Some(CheckpointDigest {
@@ -517,7 +700,11 @@ mod tests {
         }));
 
         // Create a local checkpoint at 100
-        fixture.backlog.set_processed_block(chain, 100).await;
+        fixture
+            .backlog
+            .set_processed_block(chain, 100)
+            .await
+            .unwrap();
         let _cp = fixture.backlog.checkpoint(chain).await.unwrap();
 
         let backlog_clone = fixture.backlog.clone();

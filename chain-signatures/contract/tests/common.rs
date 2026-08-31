@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
+#[path = "support/sandbox.rs"]
+mod sandbox;
+pub use sandbox::{contract_file_path, SANDBOX_VERSION};
+
 use digest::{Digest, FixedOutput};
 use ecdsa::signature::Verifier;
 use k256::elliptic_curve::ops::Reduce;
@@ -17,14 +21,8 @@ use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
 use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 
-pub const CONTRACT_FILE_PATH: &str =
-    "../../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
-/// Protocol 84 is where the runtime starts accepting the bulk-memory and reference-types
-/// opcodes rustc emits past 1.81, and 2.12.0 is the first sandbox release carrying it.
-/// near-workspaces defaults to an older one, which rejects the contract at deploy time.
-pub const SANDBOX_VERSION: &str = "2.12.0";
 
 pub fn candidates(names: Option<Vec<AccountId>>) -> HashMap<AccountId, CandidateInfo> {
     let mut candidates: HashMap<AccountId, CandidateInfo> = HashMap::new();
@@ -70,7 +68,7 @@ pub async fn init() -> (Worker<Sandbox>, Contract) {
     let worker = near_workspaces::sandbox_with_version(SANDBOX_VERSION)
         .await
         .unwrap();
-    let wasm = std::fs::read(CONTRACT_FILE_PATH).unwrap();
+    let wasm = std::fs::read(contract_file_path()).unwrap();
     let contract = worker.dev_deploy(&wasm).await.unwrap();
     (worker, contract)
 }
@@ -126,16 +124,60 @@ pub async fn init_with_candidates(
 }
 
 pub async fn init_env() -> (Worker<Sandbox>, Contract, Vec<Account>, k256::SecretKey) {
+    init_env_with_participant_count(PARTICIPANT_LEN, 2).await
+}
+
+/// Like [`init_env`] but with a configurable number of participants and
+/// initial threshold. The contract starts in `Running` state with a key
+/// already voted in.
+pub async fn init_env_with_participant_count(
+    participant_count: usize,
+    threshold: usize,
+) -> (Worker<Sandbox>, Contract, Vec<Account>, k256::SecretKey) {
     let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk = sk.public_key();
-    let (worker, contract, accounts) =
-        init_with_candidates(Some(near_crypto::PublicKey::SECP256K1(
-            near_crypto::Secp256K1PublicKey::try_from(
-                &pk.as_affine().to_encoded_point(false).as_bytes()[1..65],
-            )
-            .unwrap(),
-        )))
-        .await;
+
+    let (worker, contract) = init().await;
+
+    let mut accounts = Vec::with_capacity(participant_count);
+    for _ in 0..participant_count {
+        let account = worker.dev_create_account().await.unwrap();
+        accounts.push(account);
+    }
+    let candidate_map = candidates(Some(accounts.iter().map(|a| a.id().clone()).collect()));
+
+    let participants_map = candidate_map
+        .into_iter()
+        .map(|(k, v)| (k, Into::<ParticipantInfo>::into(v)))
+        .collect::<BTreeMap<_, _>>();
+    let participants = Participants {
+        next_id: participants_map.len().try_into().unwrap(),
+        participants: participants_map.clone(),
+        account_to_participant_id: participants_map
+            .into_iter()
+            .enumerate()
+            .map(|(id, (account_id, _))| (account_id, id.try_into().unwrap()))
+            .collect(),
+    };
+
+    contract
+        .call("init_running")
+        .args_json(serde_json::json!({
+            "epoch": 0,
+            "threshold": threshold,
+            "participants": participants,
+            "public_key": near_crypto::PublicKey::SECP256K1(
+                near_crypto::Secp256K1PublicKey::try_from(
+                    &pk.as_affine().to_encoded_point(false).as_bytes()[1..65],
+                )
+                .unwrap(),
+            ),
+        }))
+        .transact()
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
 
     (worker, contract, accounts, sk)
 }

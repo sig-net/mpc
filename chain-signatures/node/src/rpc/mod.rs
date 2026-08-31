@@ -5,13 +5,14 @@ use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use crate::sign_bidirectional::PublishState;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
 pub use hydration::HydrationClient;
-pub use near_governance::NearGovernanceClient;
+pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -22,12 +23,13 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
@@ -38,8 +40,26 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
+/// The maximum time to wait for a checkpoint vote to complete before retrying
+const VOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
+    max_times: usize::MAX,
+    min_delay: PUBLISH_MIN_DELAY,
+    max_delay: PUBLISH_MAX_DELAY,
+    jitter: true,
+};
+
+// `PublishAction` makes this enum relatively large, but boxing it is not worth
+// the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
+// enum storage), and these values are not copied on a performance-critical path.
+#[allow(clippy::large_enum_variant)]
 pub enum RpcAction {
     Publish(PublishAction),
+    VoteCheckpoint {
+        checkpoint: ConsensusCheckpointDigest,
+        created_at: Instant,
+    },
+    AbortCheckpoints(Chain),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,10 +78,32 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
+    pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
+        let tx = self.tx.clone();
+        let created_at = Instant::now();
+        tokio::spawn(async move {
+            if let Err(err) = tx
+                .send(RpcAction::VoteCheckpoint {
+                    checkpoint,
+                    created_at,
+                })
+                .await
+            {
+                tracing::error!(%err, ?checkpoint, "failed to send checkpoint vote");
+            }
+        });
+    }
+
+    pub async fn abort_checkpoints(&self, chain: Chain) {
+        if let Err(err) = self.tx.send(RpcAction::AbortCheckpoints(chain)).await {
+            tracing::error!(%err, ?chain, "failed to send RPC chain abort");
+        }
+    }
+
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
@@ -84,7 +126,7 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
@@ -104,6 +146,20 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
+    }
+
+    pub fn publish_with_state(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: Arc<IndexedSignRequest>,
+        publish: &PublishState,
+    ) {
+        self.publish_signature(
+            public_key,
+            request,
+            publish.signature,
+            publish.participants.clone(),
+        );
     }
 }
 
@@ -153,10 +209,9 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
+                threshold_votes: Default::default(),
             }),
         )
     }
@@ -387,50 +442,99 @@ impl RpcExecutor {
             }
         });
 
-        Self::dispatch_loop(&self.publishers, &mut self.action_rx).await;
+        Self::dispatch_loop(
+            &self.publishers,
+            Some(self.near.clone()),
+            &mut self.action_rx,
+        )
+        .await;
     }
 
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        near: Option<NearGovernanceClient>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
+        let mut checkpoint_cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
+        let mut checkpoint_abort_times = HashMap::<Chain, Instant>::new();
         // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
         let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
         loop {
-            let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
+            let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
 
-            let chain = action.request.chain;
-            let sign_id = action.request.id;
+            match action {
+                RpcAction::Publish(action) => {
+                    let chain = action.request.chain;
+                    let Some(publisher) = publishers.get(&chain) else {
+                        tracing::warn!(?chain, "no publisher configured for chain");
+                        continue;
+                    };
 
-            if !in_flight.insert(sign_id) {
-                tracing::info!(
-                    ?sign_id,
-                    ?chain,
-                    "publish already in flight; skipping duplicate"
-                );
-                continue;
+                    let sign_id = action.request.id;
+                    if !in_flight.insert(sign_id) {
+                        tracing::info!(
+                            ?sign_id,
+                            ?chain,
+                            "publish already in flight; skipping duplicate"
+                        );
+                        continue;
+                    }
+
+                    let publisher = publisher.clone();
+                    let in_flight = in_flight.clone();
+                    tokio::spawn(async move {
+                        let _guard = InFlightGuard {
+                            in_flight,
+                            id: sign_id,
+                        };
+                        execute_publish(publisher, action).await;
+                    });
+                }
+                RpcAction::VoteCheckpoint {
+                    checkpoint,
+                    created_at,
+                } => {
+                    let chain = checkpoint.chain;
+                    if checkpoint_abort_times
+                        .get(&chain)
+                        .is_some_and(|abort_time| *abort_time >= created_at)
+                    {
+                        tracing::info!(?chain, ?checkpoint, "discarding stale checkpoint vote");
+                        continue;
+                    }
+
+                    let Some(near) = near.clone() else {
+                        tracing::error!(?checkpoint, "checkpoint vote has no governance client");
+                        continue;
+                    };
+
+                    let cancellation = checkpoint_cancellation_tokens
+                        .entry(chain)
+                        .or_default()
+                        .clone();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                tracing::info!(?chain, ?checkpoint, "cancelled checkpoint vote");
+                            }
+                            _ = execute_vote_checkpoint(near, checkpoint) => {}
+                        }
+                    });
+                }
+                RpcAction::AbortCheckpoints(chain) => {
+                    checkpoint_abort_times.insert(chain, Instant::now());
+                    checkpoint_cancellation_tokens
+                        .entry(chain)
+                        .or_default()
+                        .cancel();
+                    checkpoint_cancellation_tokens.insert(chain, CancellationToken::new());
+                    tracing::info!(?chain, "cancelled checkpoint vote tasks");
+                }
             }
-
-            // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
-            let Some(publisher) = publishers.get(&chain) else {
-                in_flight.remove(&sign_id);
-                tracing::warn!(?chain, "no publisher configured for chain");
-                continue;
-            };
-
-            let publisher = publisher.clone();
-            let in_flight = in_flight.clone();
-            tokio::spawn(async move {
-                let _guard = InFlightGuard {
-                    in_flight,
-                    id: sign_id,
-                };
-                execute_publish(publisher, action).await;
-            });
         }
     }
 }
@@ -489,8 +593,8 @@ async fn update_contract_data(
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
             let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.checkpoint.height,
-                digest: sc.checkpoint.digest,
+                height: sc.height,
+                digest: sc.digest,
             });
             tx.send_if_modified(|old| {
                 if *old == new_digest {
@@ -563,17 +667,109 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
+async fn execute_vote_checkpoint(
+    near: NearGovernanceClient,
+    checkpoint: ConsensusCheckpointDigest,
+) {
+    vote_checkpoint_with_retry(
+        &checkpoint,
+        VOTE_CHECKPOINT_TIMEOUT,
+        VOTE_CHECKPOINT_RETRY,
+        || near.vote_checkpoint(&checkpoint),
+    )
+    .await
+}
+
+/// Submit a checkpoint vote under a bounded retry policy.
+async fn vote_checkpoint_with_retry<F, Fut>(
+    checkpoint: &ConsensusCheckpointDigest,
+    timeout: Duration,
+    retry_config: RetryConfig,
+    vote: F,
+) where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
+{
+    let result = retry_rpc!(
+        timeout,
+        retry_config,
+        |attempt, err, sleep| {
+            tracing::warn!(
+                ?checkpoint,
+                retry_count = attempt,
+                ?err,
+                ?sleep,
+                "failed to vote for checkpoint, retrying"
+            );
+        },
+        { vote().await }
+    );
+
+    match result {
+        Ok(CheckpointVoteOutcome::Submitted { threshold_reached }) => {
+            tracing::info!(?checkpoint, threshold_reached, "checkpoint vote submitted");
+        }
+        Ok(CheckpointVoteOutcome::Behind) => {
+            tracing::info!(
+                ?checkpoint,
+                "checkpoint vote ignored because checkpoint is behind the latest checkpoint"
+            );
+        }
+        Ok(CheckpointVoteOutcome::Conflicting) => {
+            tracing::warn!(
+                ?checkpoint,
+                "checkpoint vote ignored because a conflicting checkpoint is finalized"
+            );
+        }
+        Err(err) => {
+            tracing::error!(?checkpoint, ?err, "checkpoint vote failed permanently");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
+        let checkpoint = ConsensusCheckpointDigest {
+            chain: Chain::Ethereum,
+            height: 1,
+            digest: [0; 32],
+        };
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let vote = move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<anyhow::Result<CheckpointVoteOutcome>>().await
+            }
+        };
+
+        let timeout = Duration::from_millis(20);
+        let retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+
+        vote_checkpoint_with_retry(&checkpoint, timeout, retry, vote).await;
+
+        // 1 initial attempt + 2 retries, each cut off by the per-attempt timeout.
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 
     /// Vote churn must be absorbed without completing; real governance changes
     /// and leaving the running state must be delivered.
@@ -590,14 +786,13 @@ mod tests {
         );
         let governance = watcher.governance().unwrap();
 
-        let running = |epoch, join_votes| RunningContractState {
+        let running = |epoch, leave_votes| RunningContractState {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes,
-            leave_votes: Default::default(),
+            leave_votes,
             threshold: 1,
+            threshold_votes: Default::default(),
         };
 
         // Vote churn: state changed, governance content did not.
@@ -680,10 +875,9 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(initial))).unwrap();
 
@@ -713,10 +907,9 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
+            threshold_votes: Default::default(),
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 
@@ -752,7 +945,7 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
@@ -786,7 +979,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -826,7 +1019,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -886,7 +1079,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -894,9 +1087,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executor_aborts_checkpoint_vote_on_abort_checkpoints() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect_at_least(1)
+            .expect_at_most(2)
+            .create_async()
+            .await;
+
+        let account_id: AccountId = "node.testnet".parse().unwrap();
+        let sign_sk = near_crypto::SecretKey::from_seed(
+            near_crypto::KeyType::ED25519,
+            "rpc-cancellation-test",
+        );
+        let signer =
+            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
+            {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
+        let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
+        let my_addr = "http://127.0.0.1:3000".parse().unwrap();
+        let contract_id: AccountId = "contract.testnet".parse().unwrap();
+        let near = NearGovernanceClient::new(
+            &server.url(),
+            &my_addr,
+            &sign_sk,
+            &cipher_sk,
+            &contract_id,
+            signer,
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let publishers = HashMap::new();
+        let dispatch = tokio::spawn(async move {
+            RpcExecutor::dispatch_loop(&publishers, Some(near), &mut rx).await;
+        });
+
+        tx.send(RpcAction::VoteCheckpoint {
+            checkpoint: ConsensusCheckpointDigest {
+                chain: Chain::Ethereum,
+                height: 10,
+                digest: [7; 32],
+            },
+            created_at: Instant::now(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(RpcAction::AbortCheckpoints(Chain::Ethereum))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        drop(tx);
+        dispatch.await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn executor_dedupes_concurrent_publishes_with_the_same_sign_id() {
         let call_count = Arc::new(AtomicUsize::new(0));
-
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(
             Chain::Ethereum,
@@ -921,7 +1174,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;

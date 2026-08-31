@@ -8,6 +8,8 @@ use std::{
     str::FromStr,
 };
 
+pub use mpc_contract::primitives::ThresholdVotes;
+
 type ParticipantId = u32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -233,6 +235,17 @@ pub struct CandidateInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
+impl From<mpc_contract::primitives::CandidateInfo> for CandidateInfo {
+    fn from(candidate_info: mpc_contract::primitives::CandidateInfo) -> Self {
+        Self {
+            account_id: AccountId::from_str(candidate_info.account_id.as_ref()).unwrap(),
+            url: candidate_info.url,
+            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
+            sign_pk: BorshDeserialize::try_from_slice(candidate_info.sign_pk.as_bytes()).unwrap(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Candidates {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
@@ -260,8 +273,8 @@ impl Candidates {
     }
 }
 
-impl From<mpc_contract::primitives::Candidates> for Candidates {
-    fn from(contract_candidates: mpc_contract::primitives::Candidates) -> Self {
+impl From<mpc_contract::primitives::CandidatesView> for Candidates {
+    fn from(contract_candidates: mpc_contract::primitives::CandidatesView) -> Self {
         Candidates {
             candidates: contract_candidates
                 .candidates
@@ -269,16 +282,7 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
                 .map(|(account_id, candidate_info)| {
                     (
                         AccountId::from_str(account_id.as_ref()).unwrap(),
-                        CandidateInfo {
-                            account_id: AccountId::from_str(candidate_info.account_id.as_ref())
-                                .unwrap(),
-                            url: candidate_info.url,
-                            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
-                            sign_pk: BorshDeserialize::try_from_slice(
-                                candidate_info.sign_pk.as_bytes(),
-                            )
-                            .unwrap(),
-                        },
+                        candidate_info.into(),
                     )
                 })
                 .collect(),

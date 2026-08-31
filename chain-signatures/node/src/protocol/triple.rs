@@ -7,10 +7,9 @@ use crate::mesh::MeshState;
 use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::JoinMap;
 use mpc_chain_near::AffinePointExt as _;
-
 use mpc_contract::config::ProtocolConfig;
+use mpc_utils::task::JoinMap;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::triples::{TriplePub, TripleShare};
@@ -434,6 +433,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action,
+                            stale_round: None,
                         },
                     )
                     .await;
@@ -462,6 +462,7 @@ impl TripleSpawner {
                         id: PositProtocolId::Triple(pair_id),
                         from: self.me,
                         action: PositAction::Propose,
+                        stale_round: None,
                     },
                 )
                 .await;
@@ -488,6 +489,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            stale_round: None,
                         },
                     )
                     .await;

@@ -7,17 +7,10 @@ use crate::daml::{
 use crate::ledger_api;
 use crate::signing::{parse_canton_signature, CantonSignBidirectionalRequestedEvent};
 use mpc_primitives::{Chain, ChainEvent, RespondBidirectionalEvent, SignatureRespondedEvent};
+use mpc_utils::time::current_unix_timestamp;
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-
-// TODO: this is a duplicate of the same function in `mpc-node`, consider moving to shared crate like `mpc-utils` or something.
-pub fn current_unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
-}
 
 /// Process a single Canton event from a WebSocket transaction update.
 ///
@@ -63,7 +56,7 @@ pub async fn process_canton_event(
                     Ok(request) => {
                         if events_tx
                             .send(ChainEvent::SignRequest {
-                                request,
+                                request: Arc::new(request),
                                 block_timestamp: None,
                             })
                             .await

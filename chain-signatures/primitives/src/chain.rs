@@ -26,6 +26,7 @@ impl ChainConfig for Chain {
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
             Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
+            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
         };
 
         let interval = std::env::var(key)
@@ -41,6 +42,7 @@ impl ChainConfig for Chain {
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
     }
 
@@ -48,10 +50,14 @@ impl ChainConfig for Chain {
         match self {
             Chain::NEAR => 3,
             Chain::Ethereum => 30 * 60,
-            Chain::Solana => 3,
+            // The indexer waits for finalized (supermajority-epoch) blocks: the
+            // finalized pointer advances in ~32-slot batches, trailing the tip
+            // by up to ~13s.
+            Chain::Solana => 15,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
             Chain::Canton => 15,
+            Chain::Midnight => 15,
         }
     }
 
@@ -62,7 +68,9 @@ impl ChainConfig for Chain {
 
     fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
-            Chain::Canton => SerDeserFormat::Abi,
+            // TODO: Midnight's response format is still under discussion and may
+            // move off Abi.
+            Chain::Canton | Chain::Midnight => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }

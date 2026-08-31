@@ -36,6 +36,7 @@ pub(super) fn test_mock_network(
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
+    let actions_changed = Arc::clone(&shared_output.actions_changed);
     // Participant info as of network start, consulted for recipient's encryption key
     let initial_participants = mesh.borrow().active().clone();
 
@@ -88,11 +89,18 @@ pub(super) fn test_mock_network(
                                 publish_action.request,
                             )
                         },
+                        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+                            format!("RpcAction::VoteCheckpoint({checkpoint:?})")
+                        },
+                        RpcAction::AbortCheckpoints(chain) => {
+                            format!("RpcAction::AbortCheckpoints({chain:?})")
+                        }
                     };
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
                     drop(actions_log);
+                    actions_changed.notify_one();
 
                     if let Some(chain) = &mock_chain {
                         chain.on_rpc_publish(&rpc).await;

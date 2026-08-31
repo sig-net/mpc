@@ -39,9 +39,6 @@ pub enum CatchupItem {
     /// A block that was missing from the catchup batch response.
     /// `process_catchup` refetches both block and receipts individually.
     Missing(BlockId),
-    /// A block from the live stream. Receipts are fetched lazily in
-    /// `process`.
-    LiveBlock(Block),
 }
 
 /// Intermediate state of a block during catchup batch processing.
@@ -246,9 +243,11 @@ impl EthereumClient {
         }
     }
 
-    pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
+    /// Retrieves a block by its ID. Returns `Ok(Some(Block))` if the block is found,
+    /// `Ok(None)` if the block is not found, or an error if the request fails.
+    pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         let max_attempts = self.rpc.retry.max_times;
-        let res = retry_rpc_gated!(
+        retry_rpc_gated!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -265,22 +264,7 @@ impl EthereumClient {
                     EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
                 }
             }
-        );
-
-        match res {
-            Ok(Some(block)) => Some(block),
-            Ok(None) => {
-                tracing::warn!(client = self.client_name(), "Block {block_id:?} not found");
-                None
-            }
-            Err(err) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    "get_block failed for {block_id:?}: {err:#}"
-                );
-                None
-            }
-        }
+        )
     }
 
     pub async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<MaybeBlock> {
@@ -443,10 +427,9 @@ impl EthereumClient {
     pub async fn trace_transaction_output(
         &self,
         tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<alloy::primitives::Bytes> {
-        // TODO: trace_transaction_output can be slow, consider a longer timeout than the configured RPC timeout if necessary
+    ) -> anyhow::Result<Option<alloy::primitives::Bytes>> {
         retry_rpc_gated!(
-            self.rpc.timeout,
+            self.rpc.trace_timeout,
             self.rpc.retry,
             self.shared_backoff,
             "trace_transaction_output",
@@ -462,12 +445,6 @@ impl EthereumClient {
                 }
             }
         )
-    }
-
-    pub async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Latest))
-            .await
-            .map(|block| block.header.number)
     }
 
     pub fn clamp_oldest_supported(
@@ -809,7 +786,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(99)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_some());
         assert_eq!(block.unwrap().header.number, 99);
@@ -829,7 +807,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(1)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_none());
     }
@@ -857,7 +836,8 @@ mod tests {
         let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block = client
             .get_block(BlockId::Number(BlockNumberOrTag::Number(7)))
-            .await;
+            .await
+            .unwrap();
 
         assert!(block.is_some());
     }
@@ -879,7 +859,7 @@ mod tests {
             .get_block(BlockId::Number(BlockNumberOrTag::Number(8)))
             .await;
 
-        assert!(block.is_none());
+        assert!(block.is_err());
     }
 
     #[tokio::test]
@@ -899,7 +879,7 @@ mod tests {
             .get_block(BlockId::Number(BlockNumberOrTag::Number(9)))
             .await;
 
-        assert!(block.is_none());
+        assert!(block.is_err());
     }
 
     #[tokio::test]

@@ -9,10 +9,12 @@ use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
+use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
-use mpc_primitives::{Chain, ChainConfig as _, Checkpoint, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ChainConfig as _, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
 
@@ -315,7 +317,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.sign_id.request_id == expected_request_bytes);
+        .any(|entry| entry.sign_id().request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,
@@ -347,7 +349,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        eth::submit_sign_request(&eth_contract, i).await?;
+        submit_sign_request(&eth_contract, i).await?;
     }
 
     let active_idx = 1usize;
@@ -370,7 +372,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     // Submit a few requests, then pump empty blocks so checkpoint progression
     // does not depend on signature throughput under test load.
     for seed in 100usize..103usize {
-        eth::submit_sign_request(&eth_contract, seed).await?;
+        submit_sign_request(&eth_contract, seed).await?;
     }
 
     produce_empty_eth_blocks_for_duration(&eth_client, Duration::from_secs(12)).await?;
@@ -430,8 +432,9 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(
-        active_checkpoint_after_restart, recovered_checkpoint_after_restart,
-        "restarted node should converge to the same checkpoint as the active node via consensus"
+        active_checkpoint_after_restart.digest(),
+        recovered_checkpoint_after_restart.digest(),
+        "restarted node should converge to the same checkpoint digest as the active node"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
@@ -532,7 +535,7 @@ async fn wait_matching_node_checkpoints(
                 continue;
             }
 
-            if left_checkpoint == right_checkpoint {
+            if left_checkpoint.digest() == right_checkpoint.digest() {
                 return Ok((left_checkpoint, right_checkpoint));
             }
         }

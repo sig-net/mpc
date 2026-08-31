@@ -45,7 +45,7 @@ impl MockChain {
         let events: Vec<ChainEvent> = requests
             .iter()
             .map(|r| ChainEvent::SignRequest {
-                request: r.clone(),
+                request: Arc::new(r.clone()),
                 block_timestamp: None,
             })
             .collect();
@@ -62,7 +62,9 @@ impl MockChain {
     }
 
     fn rpc_action_to_events(action: &RpcAction) -> Vec<ChainEvent> {
-        let RpcAction::Publish(publish_action) = action;
+        let RpcAction::Publish(publish_action) = action else {
+            return vec![];
+        };
 
         if publish_action.request.chain != Chain::Solana {
             return vec![];
