@@ -248,7 +248,7 @@ fn process_port_slice() -> std::ops::RangeInclusive<u16> {
     const BASE: u16 = 16_000;
 
     // Use the process ID and the NEXTEST_RUN_ID environment variable to determine a unique slice for this process.
-    let pid = std::process::id() as u32;
+    let pid = std::process::id();
     let execution_id = std::env::var("NEXTEST_RUN_ID")
         .ok()
         .and_then(|id| id.parse::<u32>().ok())
