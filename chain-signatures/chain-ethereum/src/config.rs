@@ -1,9 +1,9 @@
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use reqwest::Url;
 use std::fmt;
 use std::time::Duration;
+use url::Url;
 
 /// Timeouts and retry budget for the read-side Ethereum RPC client.
 #[derive(Clone, Debug)]

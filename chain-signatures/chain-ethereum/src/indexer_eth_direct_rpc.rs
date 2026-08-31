@@ -24,7 +24,7 @@ pub struct RpcEthereumClient {
 }
 
 impl RpcEthereumClient {
-    pub fn new(url: reqwest::Url) -> Self {
+    pub fn new(url: url::Url) -> Self {
         Self {
             client: ClientBuilder::default().http(url),
         }
