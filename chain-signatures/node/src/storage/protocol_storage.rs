@@ -776,71 +776,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         outcome.is_some()
     }
 
-    /// Take one artifact owned by the given participant.
-    /// It is very important to NOT reuse the same artifact twice for two different
-    /// protocols.
-    pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-
-            if redis.call("SCARD", mine_key) < 1 then
-                return nil
-            end
-
-            -- pop one artifact from the self owner set and delete it once successfully fetched
-            local id = redis.call("SPOP", mine_key)
-            local artifact = redis.call("HGET", artifact_key, id)
-            if not artifact then
-                return {err = "WARN unexpected, artifact " .. id .. " is missing"}
-            end
-
-            -- Delete the artifact from the hash map
-            redis.call("HDEL", artifact_key, id)
-            -- delete the artifact from our self owner set
-            redis.call("SREM", mine_key, id)
-
-            -- Read and delete the holders set
-            local holders_key = artifact_key .. ':holders:' .. id
-            local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
-
-            -- Return the artifact and holders
-            return {artifact, holders}
-        "#;
-
-        let start = Instant::now();
-        let mut conn = self.connect().await?;
-        let me = self.me().ok()?;
-        let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(Some((mut artifact, holders))) => {
-                let holders = holders.into_iter().map(Participant::from).collect();
-                artifact.set_holders(holders);
-                let id = artifact.id();
-                self.reserved.write().await.using.insert(id, true);
-                let taken = ArtifactTaken::new(artifact, self.clone());
-                tracing::debug!(id, ?elapsed, "took mine artifact");
-                Some(taken)
-            }
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
-                None
-            }
-        }
-    }
-
     /// Peek at an available mine artifact without removing it from Redis.
     /// Marks the chosen ID as `pending` in memory so concurrent proposer tasks on this
     /// node cannot select the same artifact. Call `ArtifactReservation::commit()` to
@@ -893,6 +828,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 .collect()
         };
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
         let result: Result<Option<(A::Id, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
@@ -900,6 +836,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .arg(excluded.as_slice())
             .invoke_async(&mut conn)
             .await;
+
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "peek_mine"])
+            .observe(start.elapsed().as_millis() as f64);
 
         let (id, holders_raw) = match result {
             Ok(Some(val)) => val,
