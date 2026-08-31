@@ -73,9 +73,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &mut StreamContext, sou
         }
 
         let sign_id = sign_request.id;
-        // Recorded so the failover sweep does not publish this entry a second time
-        // on the next block: it is already dispatched, and its deadline, anchored
-        // on a stamp from before the restart, is long past.
+        // Recorded so the sweep does not republish it on the next block: its
+        // deadline, anchored before the restart, is long past.
         ctx.published
             .insert((sign_id, PublishKind::of(&sign_request.kind)));
         ctx.rpc.publish_with_state(sign_request, &publish);
@@ -85,11 +84,7 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &mut StreamContext, sou
 
 /// Publish entries whose proposer stayed silent past this node's deadline.
 ///
-/// Runs on every block rather than on a timer: a chain observed through block N
-/// is exactly the state in which "the response did not land" is a conclusion
-/// rather than a guess, so a stream that is not delivering blocks holds fire
-/// instead of publishing blind. Only one of the `m` participants needs a healthy
-/// stream for failover to happen.
+/// Only one of the `m` participants needs a healthy stream for failover to happen.
 pub(crate) async fn publish_failover_due(ctx: &mut StreamContext, chain: Chain) {
     if !ctx.caught_up {
         return;

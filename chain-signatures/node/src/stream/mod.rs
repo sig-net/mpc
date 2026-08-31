@@ -31,15 +31,13 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
-    /// Overrides the publish failover schedule's observe lag; `None` is production
-    /// (chain finality plus a margin). Fixtures pin it.
+    /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
+    /// pin it.
     pub observe_lag: Option<Duration>,
-    /// Entries this node has already dispatched a publish for, whether from the
-    /// catchup resume or the failover sweep, so a sweep that runs on every block
-    /// fires each one once. Pruned against the pending set each sweep, so an entry
-    /// that leaves the backlog and returns is scheduled afresh. Keyed by publish
-    /// kind as well: the two legs of a bidirectional request share a sign id and
-    /// must not inherit each other's history.
+    /// Entries this node has dispatched a publish for, from the catchup resume or
+    /// the failover sweep, so a per-block sweep fires each one once. Pruned against
+    /// the pending set each sweep, so an entry that leaves and returns is scheduled
+    /// afresh. Keyed by publish kind too: the two legs share a sign id.
     pub(crate) published: HashSet<(SignId, PublishKind)>,
 }
 
@@ -142,9 +140,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
-            // Observing the chain through this block is the precondition for
-            // concluding that the proposer's response did not land, so the sweep
-            // rides the block stream rather than a timer of its own.
+            // A block observed is what licenses concluding the response did not land.
             publish_failover_due(ctx, chain).await;
             process_block_event(chain, block, ctx, telemetry)
                 .await

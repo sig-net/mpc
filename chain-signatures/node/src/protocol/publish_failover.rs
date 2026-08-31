@@ -1,22 +1,17 @@
 //! Publish failover: republish a response the proposer never got on chain.
 //!
 //! Every participant stores the [`PublishState`] when it marks the entry
-//! publishing, so failover needs no protocol change, only someone acting on that
-//! stored state. The schedule is a pure function of the entry: the stamp it
-//! carries plus a per-node jitter, so nothing has to be tracked between sweeps
-//! and a restart does not restart the clock.
+//! publishing. The schedule is a pure function of that entry, its stamp plus a
+//! per-node jitter, so a restart does not restart the clock.
 //!
-//! The sweep itself lives in the chain stream, on block events. Having observed
-//! the chain through block N is the precondition for concluding the proposer's
-//! response did not land, so the catch-up gate is structural rather than a flag
-//! that can drift: no blocks observed, no failover.
+//! The sweep lives in the chain stream, on block events: having observed the
+//! chain through block N is what licenses concluding the response did not land,
+//! so the catch-up gate is structural rather than a flag that can drift.
 //!
-//! Every participant is scheduled, the proposer included. Its own deadline is one
-//! observe lag away, by which point its response has either been observed, so the
-//! entry is gone and the sweep finds nothing, or it has not, and a second attempt
-//! is what we wanted anyway. Skipping it would buy nothing and would make the
-//! schedule depend on `is_proposer`, which is the writing node's local role and
-//! is replaced wholesale by whichever peer serves a checkpoint recovery.
+//! The proposer is scheduled too. Its own deadline is one observe lag away, by
+//! which point its response is either observed, so the entry is gone, or it is
+//! not, and a second attempt is wanted. Skipping it would make the schedule
+//! depend on `is_proposer`, a local role that checkpoint recovery overwrites.
 
 use crate::sign_bidirectional::PublishState;
 
@@ -32,18 +27,17 @@ const FAILOVER_DUPLICATE_RATE: f64 = 2.0;
 /// (submission, a few publish retries, indexer lag) before the failover takes over.
 pub const DEFAULT_OBSERVE_MARGIN: Duration = Duration::from_secs(15);
 
-/// The lag from one node publishing a response until another node has observed it.
-///
-/// `override_lag` is `None` in production, giving chain finality plus the margin.
-/// A fixture pins it so its timing does not move when a finality constant does.
+/// The lag from one node publishing a response until another has observed it.
+/// `None` in production, giving chain finality plus the margin; a fixture pins it
+/// so its timing does not move when a finality constant does.
 fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
     override_lag.unwrap_or_else(|| {
         Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
     })
 }
 
-/// The longest any participant can wait before publishing, for fixtures that
-/// outlast the schedule without restating it.
+/// The longest any participant can wait, for fixtures that outlast the schedule
+/// without restating it.
 #[cfg(any(test, feature = "test-feature"))]
 pub fn max_publish_failover_delay(
     chain: Chain,
@@ -53,11 +47,9 @@ pub fn max_publish_failover_delay(
     failover_delay(participants, 1.0, observe_lag(chain, override_lag))
 }
 
-/// This node's position in the failover schedule for one request: uniform in
-/// [0, 1) as a pure function of sign id and account id.
-///
-/// Identical draws would put every participant on chain at once (`E[responses]`
-/// of `m`, not `1 + d`); determinism is what lets the schedule survive restarts.
+/// This node's position in the schedule for one request: uniform in [0, 1) as a
+/// pure function of sign id and account id. Identical draws would put every
+/// participant on chain at once (`E[responses]` of `m`, not `1 + d`).
 fn failover_jitter(sign_id: &SignId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();
     (sign_id.request_id, me.as_str()).hash(&mut hasher);
@@ -66,22 +58,20 @@ fn failover_jitter(sign_id: &SignId, me: &AccountId) -> f64 {
 }
 
 /// How long a node waits before publishing: `L + jitter * m*L/d`, for `L` the
-/// observe lag, `m` the number of participants that could publish and `d`
-/// [`FAILOVER_DUPLICATE_RATE`].
+/// observe lag, `m` the participants and `d` [`FAILOVER_DUPLICATE_RATE`].
 ///
-/// The `L` offset keeps the happy path at one response: a proposer that publishes
-/// is observed before the earliest failover can fire. The window prices failover:
-/// the lowest draw publishes, and so does every draw within `L` of it, which over
-/// a window of `m*L/d` is `d` nodes in expectation. Slow-finality chains fail
-/// over in tens of minutes; accepted, since the alternative is no response at all.
+/// The `L` offset keeps the happy path at one response, since a proposer that
+/// publishes is observed before the earliest failover fires. The window prices
+/// failover: the lowest draw publishes, and so does every draw within `L` of it,
+/// which over `m*L/d` is `d` nodes in expectation.
 fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
     let window = lag.mul_f64(participants as f64 / FAILOVER_DUPLICATE_RATE);
     lag + window.mul_f64(jitter)
 }
 
-/// Unix second from which `me` may publish `request` itself, if the proposer's
-/// response has still not been observed by then. `None` for an entry that
-/// carries no stamp, which never fails over; see [`PublishState::publishing_since`].
+/// Unix second from which `me` may publish this entry itself. `None` for an entry
+/// carrying no stamp, which never fails over; see
+/// [`PublishState::publishing_since`].
 pub(crate) fn publish_deadline(
     sign_id: &SignId,
     publish: &PublishState,

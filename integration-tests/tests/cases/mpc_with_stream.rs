@@ -49,12 +49,12 @@ async fn test_sign() {
     );
 }
 
-/// Pinned observe lag: fast, immune to chain finality constants changing, and far
-/// enough past in-process event propagation that no failover fires on the happy path.
+/// Pinned observe lag: fast, immune to finality constants changing, and far enough
+/// past in-process event propagation that no failover fires on the happy path.
 const TEST_OBSERVE_LAG: Duration = Duration::from_secs(5);
 
-/// Upper bound on any node's failover delay, derived from the schedule so the control
-/// test cannot silently sleep through less than the real delay.
+/// Upper bound on any node's failover delay, derived from the schedule so the
+/// control test cannot silently sleep through less than the real delay.
 fn max_failover_delay(network: &integration_tests::mpc_fixture::MpcFixture) -> Duration {
     mpc_node::protocol::publish_failover::max_publish_failover_delay(
         Chain::Solana,
@@ -65,10 +65,9 @@ fn max_failover_delay(network: &integration_tests::mpc_fixture::MpcFixture) -> D
 
 /// Wait for `count` publishes across all nodes, keeping the chain moving.
 ///
-/// The failover sweep runs on block events, so a test that only slept would
-/// wait forever: it is the arrival of a block, not the passage of time, that lets
-/// a node conclude the proposer's response did not land. The first publish (the
-/// proposer's) is the timing anchor: deadlines start at marking, not submission.
+/// The sweep runs on block events, so a test that only slept would wait forever.
+/// The first publish (the proposer's) is the timing anchor: deadlines start at
+/// marking, not submission.
 async fn wait_for_publishes(
     network: &integration_tests::mpc_fixture::MpcFixture,
     count: usize,
@@ -87,8 +86,8 @@ async fn wait_for_publishes(
     }
 }
 
-/// Keep the chain moving for `duration`, so work that rides the block stream has
-/// every chance to run before a test concludes that it did not.
+/// Keep the chain moving for `duration`, so work riding the block stream has every
+/// chance to run before a test concludes it did not.
 async fn tick_blocks_for(network: &integration_tests::mpc_fixture::MpcFixture, duration: Duration) {
     let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
@@ -137,8 +136,8 @@ async fn test_observed_response_stands_down_failover() {
     );
 }
 
-/// `Dropped` withholds respond events from every node: what a proposer dying
-/// before its response lands looks like to the others.
+/// `Dropped` withholds respond events from every node: what a proposer dying before
+/// its response lands looks like to the others.
 enum RespondEvents {
     Delivered,
     Dropped,

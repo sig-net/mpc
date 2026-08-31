@@ -334,9 +334,8 @@ impl MpcFixture {
     /// Advance every node's stream by one empty block.
     ///
     /// Real indexers emit `ChainEvent::Block` whether or not the block held
-    /// anything (the supervisor's watchdog restarts a chain that stops), and work
-    /// that rides the block stream, like the publish failover sweep, only runs
-    /// when one arrives. Tests that wait on such work have to keep the chain
+    /// anything, and work riding the block stream, like the publish failover sweep,
+    /// only runs when one arrives. Tests waiting on such work must keep the chain
     /// moving rather than only sleeping.
     pub async fn tick_block(&self, chain: Chain) {
         for node in &self.nodes {

@@ -1372,9 +1372,8 @@ async fn live_block_votes_for_checkpoint() {
         .is_err());
 }
 
-/// The sweep fires each entry once, and the two legs of a bidirectional request
-/// share a sign id, so only the publish kind in the key keeps a fired first leg
-/// from suppressing the second.
+/// The sweep fires each entry once, and the two legs share a sign id, so only the
+/// publish kind in the key keeps a fired first leg from suppressing the second.
 #[tokio::test]
 async fn publish_failover_fires_once_per_leg() {
     let backlog = Backlog::new();
@@ -1471,9 +1470,9 @@ async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
         .flatten()
 }
 
-/// A proposer that restarts republishes from the catchup resume, and its own
-/// deadline is long past by then. The resume records what it dispatched, so the
-/// first block afterwards does not put a second copy of the same response on chain.
+/// A restarting proposer republishes from the catchup resume, and its deadline is
+/// long past by then. The resume records what it sent, so the next block does not
+/// put a second copy of the same response on chain.
 #[tokio::test]
 async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
     let backlog = Backlog::new();
