@@ -192,7 +192,10 @@ pub enum EthereumClientInner {
 }
 
 impl EthereumClient {
-    pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
+    pub async fn new(
+        eth: EthConfig,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<EthereumClient> {
         let inner = if eth.light_client {
             #[cfg(feature = "helios")]
             {
@@ -213,7 +216,7 @@ impl EthereumClient {
         Ok(Self {
             inner,
             rpc: eth.rpc.clone(),
-            shared_backoff: SharedBackoff::new(),
+            shared_backoff,
         })
     }
 
@@ -222,8 +225,9 @@ impl EthereumClient {
     pub(crate) async fn new_with_strategy(
         eth: EthConfig,
         retry_strategy: RetryConfig,
+        shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
-        let mut client = Self::new(eth).await?;
+        let mut client = Self::new(eth, shared_backoff).await?;
         client.rpc.retry = retry_strategy;
         Ok(client)
     }
@@ -504,6 +508,19 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
+    }
+
+    #[tokio::test]
+    async fn ethereum_client_uses_injected_backoff_gate() {
+        let eth = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
+            .eth
+            .clone();
+        let gate = SharedBackoff::new();
+        let client = EthereumClient::new(eth, gate.clone()).await.unwrap();
+
+        client.shared_backoff.report_rate_limited();
+
+        assert!(gate.remaining() > Duration::ZERO);
     }
 
     #[tokio::test]

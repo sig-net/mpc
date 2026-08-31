@@ -11,7 +11,9 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
@@ -63,8 +65,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Delay between retries of transient RPC failures
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-    pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let client = Arc::new(EthereumClient::new(eth.clone()).await?);
+    pub async fn new(
+        eth: EthConfig,
+        state_manager: S,
+        telemetry: T,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<Self> {
+        let client = Arc::new(EthereumClient::new(eth.clone(), shared_backoff).await?);
         let contract_address = eth.contract_address;
 
         let finalized_head = FinalizedHeadTracker::new(&eth);

@@ -43,14 +43,16 @@ impl RpcEthereumClient {
         });
 
         let result = match block_id {
-            BlockId::Number(_) => self
-                .client
-                .request::<_, Option<Block>>("eth_getBlockByNumber", (block_id, false))
-                .await,
-            BlockId::Hash(hash) => self
-                .client
-                .request::<_, Option<Block>>("eth_getBlockByHash", (hash.block_hash,))
-                .await,
+            BlockId::Number(_) => {
+                self.client
+                    .request::<_, Option<Block>>("eth_getBlockByNumber", (block_id, false))
+                    .await
+            }
+            BlockId::Hash(hash) => {
+                self.client
+                    .request::<_, Option<Block>>("eth_getBlockByHash", (hash.block_hash,))
+                    .await
+            }
         };
         result.map_err(|err| anyhow::anyhow!("failed to fetch block {block_id:?}: {err}"))
     }
@@ -83,13 +85,16 @@ impl RpcEthereumClient {
         let mut batch = self.client.new_batch();
         let mut waiters = Vec::with_capacity(block_ids.len());
         for &block_id in block_ids {
-            let waiter = match block_id {
-                BlockId::Number(_) => batch
-                    .add_call::<_, Option<Block>>("eth_getBlockByNumber", &(block_id, false)),
-                BlockId::Hash(hash) => batch
-                    .add_call::<_, Option<Block>>("eth_getBlockByHash", &(hash.block_hash,)),
-            }
-            .map_err(|err| anyhow::anyhow!("failed to queue batch block fetch {block_id:?}: {err}"))?;
+            let waiter =
+                match block_id {
+                    BlockId::Number(_) => batch
+                        .add_call::<_, Option<Block>>("eth_getBlockByNumber", &(block_id, false)),
+                    BlockId::Hash(hash) => batch
+                        .add_call::<_, Option<Block>>("eth_getBlockByHash", &(hash.block_hash,)),
+                }
+                .map_err(|err| {
+                    anyhow::anyhow!("failed to queue batch block fetch {block_id:?}: {err}")
+                })?;
             waiters.push(waiter);
         }
 
@@ -239,7 +244,9 @@ impl RpcEthereumClient {
                 ),
             )
             .await
-            .map_err(|err| anyhow::anyhow!("debug_traceTransaction failed for {tx_hash:#x}: {err}"))?;
+            .map_err(|err| {
+                anyhow::anyhow!("debug_traceTransaction failed for {tx_hash:#x}: {err}")
+            })?;
 
         trace_output_to_bytes(tx_hash, &call_frame)
     }
