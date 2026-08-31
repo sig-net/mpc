@@ -85,6 +85,9 @@ struct FixtureConfig {
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
+
+    /// Overrides the deliberator publish schedule's observe lag; `None` is production.
+    deliberator_observe_lag: Option<std::time::Duration>,
 }
 
 /// Context required to start a fixture node.
@@ -97,6 +100,7 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
+    deliberator_observe_lag: Option<std::time::Duration>,
 
     #[allow(dead_code)]
     node_account_id: AccountId,
@@ -135,6 +139,7 @@ impl FixtureConfig {
             max_concurrent_generation: defaults.max_concurrent_generation,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
+            deliberator_observe_lag: None,
             triple_timeout_ms: min_to_ms(10),
         }
     }
@@ -266,6 +271,7 @@ impl MpcFixtureBuilder {
                 redis_pool: redis_container.pool(),
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
+                deliberator_observe_lag: self.fixture_config.deliberator_observe_lag,
                 node_account_id: node.participant_info.account_id.clone(),
             };
 
@@ -409,6 +415,13 @@ impl MpcFixtureBuilder {
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
         self.prepared_nodes[node_idx].messaging.filter = filter;
+        self
+    }
+
+    /// Pin the deliberator publish schedule's observe lag for every node, for tests
+    /// that assert the failover itself rather than its production timing.
+    pub fn with_deliberator_observe_lag(mut self, lag: std::time::Duration) -> Self {
+        self.fixture_config.deliberator_observe_lag = Some(lag);
         self
     }
 
@@ -596,6 +609,7 @@ impl MpcFixtureNodeBuilder {
             context.contract_state.clone(),
             &mesh_rx,
             checkpoints_rx,
+            context.deliberator_observe_lag,
         );
 
         // handle outbox messages manually, we want them before they are

@@ -290,7 +290,7 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
-        // Read-only scan; the backup sweep calls this every second per chain, so a
+        // Read-only scan; the deliberator sweep calls this on every block, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
 
@@ -934,11 +934,11 @@ mod tests {
     }
 
     fn test_publish_state(is_proposer: bool) -> Arc<PublishState> {
-        Arc::new(PublishState {
-            signature: test_signature(),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+        Arc::new(PublishState::new(
+            test_signature(),
+            vec![Participant::from(0u32), Participant::from(1u32)],
             is_proposer,
-        })
+        ))
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {

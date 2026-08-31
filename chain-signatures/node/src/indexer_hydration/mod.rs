@@ -324,6 +324,7 @@ pub async fn run<T: ChainTelemetry>(
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
+    rpc: crate::rpc::RpcChannel,
 ) {
     // Hydrate the local checkpoint before aligning: the web server (spawned
     // independently) can then serve durable pending bodies to peers during
@@ -362,22 +363,16 @@ pub async fn run<T: ChainTelemetry>(
     )
     .await;
 
-    // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)
-    let ctx = {
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let rpc = crate::rpc::RpcChannel { tx: rpc_tx };
-        let mut ctx = StreamContext::new(
-            backlog.clone(),
-            sign_tx.clone(),
-            rpc,
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx.clone(),
-        );
-        ctx.caught_up = true;
-        ctx
-    };
+    let mut ctx = StreamContext::new(
+        backlog.clone(),
+        sign_tx.clone(),
+        rpc,
+        contract_watcher.clone(),
+        mesh_state.clone(),
+        node_client.clone(),
+        checkpoints_rx.clone(),
+    );
+    ctx.caught_up = true;
 
     let ws_url: &str = hydration.rpc_ws_url.as_str();
     const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -661,6 +656,7 @@ pub async fn run<T: ChainTelemetry>(
                 }
             }
 
+            crate::stream::ops::deliberator_publish_due(&mut ctx, Chain::Hydration).await;
             telemetry.block_indexed(number.into());
         }
 

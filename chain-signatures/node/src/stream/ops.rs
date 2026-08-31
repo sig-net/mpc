@@ -1,8 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::protocol::deliberator_publish::publish_deadline;
 use crate::respond_bidirectional::CompletedTx;
+use crate::rpc::PublishKind;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
@@ -23,10 +26,9 @@ pub(crate) async fn process_sign_request(
 
     // Reject malformed bidirectional requests at ingestion, running the same
     // deterministic derivations the respond event will need later. A request
-    // admitted here but failing there is worse than one never admitted: its entry
-    // sticks in pending-publish forever, and every backup's sweep fires into a
-    // duplicate-publish retry loop that no cancellation ever ends, because the
-    // failing respond processing is where the cancel lives.
+    // admitted here but failing there can never advance: its entry sticks in
+    // pending-publish forever, and every deliberator publishes a leg-1 response
+    // whose second leg will never come.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
         event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
@@ -73,6 +75,63 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         let sign_id = sign_request.id;
         ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+    }
+}
+
+/// Publish entries whose proposer stayed silent past this node's deadline.
+///
+/// Runs on every block rather than on a timer: a chain observed through block N
+/// is exactly the state in which "the response did not land" is a conclusion
+/// rather than a guess, so a stream that is not delivering blocks holds fire
+/// instead of publishing blind. Only one of the `m` deliberators needs a healthy
+/// stream for failover to happen.
+pub(crate) async fn deliberator_publish_due(ctx: &mut StreamContext, chain: Chain) {
+    if !ctx.caught_up {
+        return;
+    }
+
+    let publishable = ctx.backlog.publishable_requests(chain).await;
+    if publishable.is_empty() {
+        ctx.deliberator_published.clear();
+        return;
+    }
+
+    // Only worth building when something has fired: an entry that left the backlog
+    // and came back is marked publishing afresh and must be scheduled afresh.
+    if !ctx.deliberator_published.is_empty() {
+        let live: HashSet<(SignId, PublishKind)> = publishable
+            .iter()
+            .map(|(request, _)| (request.id, PublishKind::of(&request.kind)))
+            .collect();
+        ctx.deliberator_published.retain(|key| live.contains(key));
+    }
+
+    let me = ctx.contract_watcher.account_id().clone();
+    let now = mpc_utils::time::current_unix_timestamp();
+    for (request, publish) in &publishable {
+        if publish.is_proposer {
+            continue;
+        }
+        let key = (request.id, PublishKind::of(&request.kind));
+        if ctx.deliberator_published.contains(&key) {
+            continue;
+        }
+        let Some(deadline) = publish_deadline(&request.id, publish, &me, chain, ctx.observe_lag)
+        else {
+            continue;
+        };
+        if now < deadline {
+            continue;
+        }
+
+        ctx.deliberator_published.insert(key);
+        let sign_id = request.id;
+        tracing::warn!(
+            ?sign_id,
+            %chain,
+            "proposer response not observed in time; publishing as deliberator"
+        );
+        ctx.rpc.publish_with_state(Arc::clone(request), publish);
     }
 }
 
@@ -137,7 +196,7 @@ async fn advance_bidirectional_to_execution(
     // without passing admission (checkpoint recovery restores them wholesale). One
     // that fails here fails identically on every node and on every replay, so it
     // can never advance: leaving it would park it in pending-publish forever, with
-    // every backup's sweep republishing a response that is already on chain.
+    // every deliberator publishing a response that is already on chain.
     // Removing it is deterministic across the network, so checkpoints stay aligned.
     if let Err(err) = event.validate() {
         tracing::error!(
