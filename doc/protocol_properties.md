@@ -182,7 +182,6 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 
 The draw is anchored on a stamp stored with the entry, so it survives a restart rather than restarting the clock, and the sweep runs on block arrival, so a node that is not observing its chain holds fire instead of publishing blind. One participant with a healthy stream is enough.
 
-Two gaps remain. The delay follows chain finality, so a silent proposer costs a first failover of about `1.5·L`, tens of minutes on Ethereum. And entries checkpointed before the stamp existed carry no anchor and never fail over, which leaves the old behaviour for that set until it drains.
 
 ### L4. Mesh convergence
 
