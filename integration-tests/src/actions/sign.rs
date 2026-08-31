@@ -720,7 +720,7 @@ pub async fn wait_for_respond_bidirectional(
 
         sleep(Duration::from_secs(2)).await;
         elapsed_secs += 2;
-        if elapsed_secs % 30 == 0 {
+        if elapsed_secs.is_multiple_of(30) {
             tracing::info!(
                 request_id = %hex::encode(expected_request_id),
                 elapsed_secs,
