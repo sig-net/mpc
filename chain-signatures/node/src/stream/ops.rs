@@ -67,23 +67,13 @@ pub(crate) async fn requeue_pending_sign_requests(
 }
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
-    let publishable = ctx.backlog.publishable_requests(source_chain).await;
-    if publishable.is_empty() {
-        return;
-    }
-
-    let Some(public_key) = ctx.contract_watcher.public_key().await else {
-        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
-        return;
-    };
-    for (sign_request, publish) in publishable {
+    for (sign_request, publish) in ctx.backlog.publishable_requests(source_chain).await {
         if !publish.is_proposer {
             continue;
         }
 
         let sign_id = sign_request.id;
-        ctx.rpc
-            .publish_with_state(public_key, sign_request, &publish);
+        ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }

@@ -667,7 +667,6 @@ async fn test_solana_respond_round_trip() -> Result<()> {
     // Publish a signature for the request
     publisher
         .publish_signature(&PublishAction {
-            public_key: AffinePoint::GENERATOR,
             request: request.clone(),
             signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
             participants: vec![Participant::from(0u32)],
