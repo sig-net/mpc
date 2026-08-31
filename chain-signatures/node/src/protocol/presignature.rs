@@ -438,11 +438,15 @@ impl PresignatureSpawner {
             self.triples.contains_reserved(id.pair_id).await
                 || self.triples.contains(id.pair_id).await
         } {
-            tracing::warn!(
+            // We do not hold the proposed triple pair: it has not reached us
+            // yet, or we already spent it. Rejecting is the designed answer
+            // here and the proposer retries with another pair, so this is a
+            // normal outcome rather than a fault.
+            tracing::debug!(
                 ?id,
                 ?from,
                 ?action,
-                "presignature required triples are not known"
+                "rejecting presignature posit: triple pair not held locally"
             );
             PositInternalAction::Reply(PositAction::RejectWithReason(
                 PositRejectReason::MissingArtifact,
