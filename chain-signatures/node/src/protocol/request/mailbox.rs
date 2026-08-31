@@ -14,8 +14,6 @@ pub(crate) struct SignPositMessage {
     pub round: usize,
     pub from: Participant,
     pub action: PositAction,
-    /// The rejector's own round, set only alongside a `StaleRound` reject.
-    pub stale_round: Option<usize>,
 }
 
 /// Mailbox holding the latest posit message per sending participant.
@@ -105,7 +103,6 @@ mod tests {
             round,
             from: Participant::from(from),
             action,
-            stale_round: None,
         }
     }
 

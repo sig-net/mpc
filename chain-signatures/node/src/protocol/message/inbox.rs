@@ -76,14 +76,7 @@ pub struct MessageInbox {
     /// Protocol messages per running signature generation.
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
     /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
-    signature_posit: Subscriber<(
-        SignId,
-        PresignatureId,
-        Round,
-        Participant,
-        PositAction,
-        Option<Round>,
-    )>,
+    signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -146,7 +139,6 @@ impl MessageInbox {
                         round,
                         message.from,
                         message.action,
-                        message.stale_round,
                     ));
                     self.signature_posit.report_capacity_global();
                 }
@@ -797,7 +789,6 @@ mod tests {
                 id: PositProtocolId::Signature(sign_id, 77, round),
                 from,
                 action: PositAction::Accept,
-                stale_round: None,
             }));
         }
         messages.push(Message::Ready(ReadyMessage {
