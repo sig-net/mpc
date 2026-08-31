@@ -24,11 +24,15 @@ pub struct TestProtocolChannels {
 }
 
 impl MpcSignProtocol {
+    /// `backlog` is the one the caller's chain streams write to. Handing the sign
+    /// side its own would leave every request `NotFound` when it marks publishing,
+    /// which silently skips the backlog half of the sign path in every fixture.
     pub async fn new_test(
         my_account_id: AccountId,
         storage: TestProtocolStorage,
         channels: TestProtocolChannels,
         contract: ContractStateWatcher,
+        backlog: Backlog,
     ) -> Self {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
@@ -42,7 +46,7 @@ impl MpcSignProtocol {
             channels.mesh_state.clone(),
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
-            Backlog::new(),
+            backlog,
         );
         Self {
             my_account_id,
