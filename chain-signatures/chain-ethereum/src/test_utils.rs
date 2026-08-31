@@ -25,6 +25,15 @@ const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
+    create_test_ethereum_client_with_backoff(url, SharedBackoff::new()).await
+}
+
+/// Like [`create_test_ethereum_client`] but injecting a caller-owned shared
+/// backoff gate (e.g. to assert 429-gating behavior across calls).
+pub async fn create_test_ethereum_client_with_backoff(
+    url: &str,
+    shared_backoff: SharedBackoff,
+) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
     let retry_strategy = RetryConfig {
         min_delay: Duration::from_millis(1),
@@ -49,7 +58,7 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
         indexer: Default::default(),
     };
 
-    EthereumClient::new_with_strategy(eth, retry_strategy, SharedBackoff::new())
+    EthereumClient::new_with_strategy(eth, retry_strategy, shared_backoff)
         .await
         .unwrap()
 }

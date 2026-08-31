@@ -232,13 +232,6 @@ impl EthereumClient {
         Ok(client)
     }
 
-    /// Overrides the shared 429 cooldown gate
-    #[cfg(test)]
-    pub(crate) fn with_shared_backoff(mut self, shared_backoff: SharedBackoff) -> Self {
-        self.shared_backoff = shared_backoff;
-        self
-    }
-
     fn client_name(&self) -> &str {
         match &self.inner {
             #[cfg(feature = "helios")]
@@ -511,19 +504,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ethereum_client_uses_injected_backoff_gate() {
-        let eth = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
-            .eth
-            .clone();
-        let gate = SharedBackoff::new();
-        let client = EthereumClient::new(eth, gate.clone()).await.unwrap();
-
-        client.shared_backoff.report_rate_limited();
-
-        assert!(gate.remaining() > Duration::ZERO);
-    }
-
-    #[tokio::test]
     async fn shared_backoff_gates_concurrent_calls_on_429() {
         let mut server = Server::new_async().await;
         server
@@ -536,12 +516,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = test_utils::create_test_ethereum_client(&server.url())
-            .await
-            .with_shared_backoff(SharedBackoff::with_cooldowns(
-                Duration::from_millis(50),
-                Duration::from_millis(200),
-            ));
+        let client = test_utils::create_test_ethereum_client_with_backoff(
+            &server.url(),
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200)),
+        )
+        .await;
 
         let start = std::time::Instant::now();
         let (r1, r2) = tokio::join!(

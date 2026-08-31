@@ -380,6 +380,7 @@ mod tests {
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
+    use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, SignKind};
@@ -577,18 +578,42 @@ mod tests {
         )
     }
 
-    #[test]
-    fn publisher_uses_injected_backoff_gate() {
-        let gate = SharedBackoff::new();
-        let publisher = BatchPublisher::new(
-            &mock_config("http://127.0.0.1:1"),
-            Arc::new(NoopPublisherTelemetry),
-            gate.clone(),
+    #[tokio::test]
+    async fn publisher_429_engages_shared_backoff_gate() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // 1 initial + max_times(2) retries per op, 2 concurrent ops.
+            // Ungated, all 6 would fire within ~25ms of local backoff.
+            .expect(6)
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .create_async()
+            .await;
+
+        let mut cfg = mock_config(&server.url());
+        cfg.publisher.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
+        let publisher = BatchPublisher::new(&cfg, Arc::new(NoopPublisherTelemetry), gate);
+
+        let start = std::time::Instant::now();
+        let ids1 = [SignId::new([1u8; 32])];
+        let ids2 = [SignId::new([2u8; 32])];
+        let (r1, r2) = tokio::join!(
+            publisher.send_responses(vec![], 21000, &ids1),
+            publisher.send_responses(vec![], 21000, &ids2),
         );
 
-        publisher.shared_backoff.report_rate_limited();
-
-        assert!(gate.remaining() > Duration::ZERO);
+        assert!(r1.is_err() && r2.is_err());
+        assert!(r1.unwrap_err().to_string().contains("429"));
+        // The gate forces retries into separate >= 50ms cooldown windows.
+        assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
     #[test]
