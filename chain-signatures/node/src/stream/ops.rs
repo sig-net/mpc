@@ -21,18 +21,16 @@ pub(crate) async fn process_sign_request(
         anyhow::bail!("Unexpected sign request kind");
     }
 
-    // Reject malformed bidirectional requests at ingestion: an empty
-    // `serialized_transaction` cannot be RLP-decoded and would otherwise be
-    // stored in the backlog and only blow up later when the respond event
-    // advances it to execution (see `sign_and_hash_transaction`). Drop it here
-    // so a poison-pill request never enters the backlog.
+    // Reject malformed bidirectional requests at ingestion, running the same
+    // deterministic derivations the respond event will need later. A request
+    // admitted here but failing there is worse than one never admitted: its entry
+    // sticks in pending-publish forever, and every backup's sweep fires into a
+    // duplicate-publish retry loop that no cancellation ever ends, because the
+    // failing respond processing is where the cancel lives.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
-        if event.serialized_transaction.is_empty() {
-            anyhow::bail!(
-                "rejecting bidirectional sign request {:?} with empty serialized_transaction",
-                sign_request.id
-            );
-        }
+        validate_bidirectional_event(event).with_context(|| {
+            format!("rejecting bidirectional sign request {:?}", sign_request.id)
+        })?;
     }
 
     // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
@@ -45,6 +43,26 @@ pub(crate) async fn process_sign_request(
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
     Ok(is_new)
+}
+
+/// The deterministic derivations respond processing runs for every bidirectional
+/// request. Shared between admission (reject before the backlog) and the respond
+/// path's failure handling (quarantine, see `process_respond_event`): both must
+/// agree on what "can never advance" means.
+fn validate_bidirectional_event(
+    event: &mpc_primitives::SignBidirectionalEvent,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !event.serialized_transaction.is_empty(),
+        "empty serialized_transaction"
+    );
+    event
+        .target_chain()
+        .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+    event.epsilon().context("cannot derive epsilon")?;
+    crate::sign_bidirectional::validate_unsigned_transaction(&event.serialized_transaction)
+        .context("undecodable serialized_transaction")?;
+    Ok(())
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -147,6 +165,23 @@ async fn advance_bidirectional_to_execution(
             entry_type = %entry.typename(),
             "respond event backlog entry is already advanced; treating as processed"
         );
+        return Ok(());
+    }
+
+    // Admission validates the same derivations, but entries can enter the backlog
+    // without passing admission (checkpoint recovery restores them wholesale). One
+    // that fails here fails identically on every node and on every replay, so it
+    // can never advance: leaving it would park it in pending-publish forever, with
+    // every backup's sweep republishing a response that is already on chain.
+    // Removing it is deterministic across the network, so checkpoints stay aligned.
+    if let Err(err) = validate_bidirectional_event(event) {
+        tracing::error!(
+            ?sign_id,
+            ?source_chain,
+            ?err,
+            "quarantining bidirectional request that can never advance"
+        );
+        ctx.backlog.remove(source_chain, &sign_id).await;
         return Ok(());
     }
 
@@ -283,6 +318,19 @@ pub async fn process_execution_confirmed(
     if unwatched_sign_id != sign_id {
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
+    // The watched transaction is the source of truth for the source chain. The
+    // follow-up request's chain decides which backlog bucket, publish key, and
+    // cancellation key it lives under, and all of them must agree; an execution
+    // watcher filling the event's field differently must not split them.
+    if source_chain != pending_tx.source_chain {
+        tracing::warn!(
+            ?tx_id,
+            event = ?source_chain,
+            watcher = ?pending_tx.source_chain,
+            "source_chain mismatch between event and watcher; using the watcher's"
+        );
+    }
+    let source_chain = pending_tx.source_chain;
 
     let chain_ctx = ctx
         .backlog
