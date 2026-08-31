@@ -29,6 +29,19 @@ pub fn block_may_contain_logs(block: &Block, address: Address) -> bool {
     block.header.logs_bloom.contains_raw_log(address, &[])
 }
 
+/// Build the `eth_getLogs` filter for a single `address` scoped to one block.
+///
+/// - `BlockId::Hash` → pins to the exact block, immune to reorgs.
+/// - `BlockId::Number(tag)` → requests by number/tag.
+pub(crate) fn logs_filter(address: Address, block_id: BlockId) -> alloy::rpc::types::Filter {
+    let mut filter = alloy::rpc::types::Filter::new().address(address);
+    filter = match block_id {
+        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
+        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
+    };
+    filter
+}
+
 /// Catchup item yielded by [`CatchupIter`] and consumed by `process_catchup`.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]

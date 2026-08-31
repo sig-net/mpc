@@ -3,12 +3,12 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex;
 use alloy::primitives::{Address, Bytes, B256};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
-use alloy::rpc::types::{Block, BlockId, Filter, Log, Transaction, TransactionReceipt};
+use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde_json::json;
 
 #[cfg(feature = "bench")]
 use crate::bench;
-use crate::client::MaybeBlock;
+use crate::client::{logs_filter, MaybeBlock};
 
 // This is more than likely limited by the RPC provider, but alchemy
 // supports archive nodes, so we effectively can go as far back as needed
@@ -343,19 +343,6 @@ fn trace_output_to_bytes(
     }
 
     Ok(Some(Bytes::from(hex::decode(stripped)?)))
-}
-
-/// Build the `eth_getLogs` filter for a single `address` scoped to one block.
-///
-/// - `BlockId::Hash` → pins to the exact block, immune to reorgs.
-/// - `BlockId::Number(tag)` → requests by number/tag.
-fn logs_filter(address: Address, block_id: BlockId) -> Filter {
-    let mut filter = Filter::new().address(address);
-    filter = match block_id {
-        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
-        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
-    };
-    filter
 }
 
 #[cfg(test)]
