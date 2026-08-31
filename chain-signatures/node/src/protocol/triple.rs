@@ -425,6 +425,7 @@ impl TripleSpawner {
             PositInternalAction::None => {}
             PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
+                crate::metrics::protocols::record_posit_reject("triple", &action);
                 self.msg
                     .send(
                         self.me,

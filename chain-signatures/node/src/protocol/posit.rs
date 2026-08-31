@@ -72,6 +72,19 @@ pub enum PositRejectReason {
     StaleRound,
 }
 
+impl PositRejectReason {
+    /// Stable label for metrics; keep the values lowercase and snake_case.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::AlreadyGenerating => "already_generating",
+            Self::MissingArtifact => "missing_artifact",
+            Self::InvalidRequest => "invalid_request",
+            Self::StaleRound => "stale_round",
+        }
+    }
+}
+
 impl PositAction {
     pub fn is_accept(&self) -> bool {
         matches!(self, PositAction::Accept)

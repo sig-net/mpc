@@ -1,11 +1,35 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, linear_buckets, Counter, Histogram, IntGauge};
+use prometheus::{exponential_buckets, linear_buckets, Counter, CounterVec, Histogram, IntGauge};
 
 use super::{
     try_create_counter_vec_with_node_account_id, try_create_histogram_vec_with_node_account_id,
     try_create_int_gauge_vec_with_node_account_id, Histogram as MetricsHistogram,
 };
+
+/// Posit replies that reject, by protocol and reason. Rejections are normal
+/// protocol outcomes rather than faults, so they are counted here instead of
+/// being logged at warn. Covers triple and presignature posits; the signature
+/// posit path is not instrumented yet and will appear under its own
+/// `protocol` label when it is.
+pub(crate) static POSIT_REJECTS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_account_id(
+        "multichain_posit_rejects_total",
+        "Number of posit rejections sent by this node, by protocol and reason.",
+        &["protocol", "reason"],
+    )
+    .unwrap()
+});
+
+/// Count `action` if it is a rejection; accepts and proposals are ignored so
+/// callers can pass whatever reply they are about to send.
+pub(crate) fn record_posit_reject(protocol: &str, action: &crate::protocol::posit::PositAction) {
+    if let crate::protocol::posit::PositAction::RejectWithReason(reason) = action {
+        POSIT_REJECTS
+            .with_label_values(&[protocol, reason.as_str()])
+            .inc();
+    }
+}
 
 // Triple metrics
 pub(crate) static TRIPLE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {

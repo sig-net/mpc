@@ -465,6 +465,7 @@ impl PresignatureSpawner {
                 tracing::warn!(?id, "presignature posit aborted due to too many rejections");
             }
             PositInternalAction::Reply(action) => {
+                crate::metrics::protocols::record_posit_reject("presignature", &action);
                 self.msg
                     .send(
                         self.me,
