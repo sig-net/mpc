@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use crate::sign_bidirectional::PublishState;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -102,7 +103,7 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
@@ -125,7 +126,7 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
@@ -145,6 +146,20 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
+    }
+
+    pub fn publish_with_state(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        request: Arc<IndexedSignRequest>,
+        publish: &PublishState,
+    ) {
+        self.publish_signature(
+            public_key,
+            request,
+            publish.signature,
+            publish.participants.clone(),
+        );
     }
 }
 
@@ -194,8 +209,6 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
                 threshold_votes: Default::default(),
@@ -720,7 +733,6 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
@@ -774,13 +786,11 @@ mod tests {
         );
         let governance = watcher.governance().unwrap();
 
-        let running = |epoch, join_votes| RunningContractState {
+        let running = |epoch, leave_votes| RunningContractState {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes,
-            leave_votes: Default::default(),
+            leave_votes,
             threshold: 1,
             threshold_votes: Default::default(),
         };
@@ -865,8 +875,6 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),
@@ -899,8 +907,6 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),

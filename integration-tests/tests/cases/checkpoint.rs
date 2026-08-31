@@ -8,8 +8,12 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest};
+use mpc_primitives::{
+    Chain, ChainConfig as _, CheckpointDigest, IndexedSignRequest, SignArgs, SignId,
+};
 use near_sdk::AccountId;
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
 
@@ -276,4 +280,136 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     assert!(fresh_backlog.latest_checkpoint(chain).await.is_none());
     let persisted = fresh_storage.load_latest(chain).await.unwrap();
     assert!(persisted.is_none());
+}
+
+/// A reset must converge divergent nodes on byte-identical local state.
+///
+/// This is the property the canonical reset checkpoint buys. Every node
+/// rebuilds the same checkpoint from `(chain, height)` alone, so no node's
+/// pre-reset backlog can survive into the state it restarts from. A reset that
+/// merely rewound the cursor would leave each node holding whatever it had,
+/// and their first post-reset checkpoints would not agree.
+///
+/// The mesh is left empty throughout: no peer has ever held this checkpoint,
+/// so convergence must not depend on fetching it from one.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_reset_converges_divergent_nodes() {
+    let chain = Chain::Ethereum;
+    let interval = chain.checkpoint_interval().unwrap();
+    let resume_after = interval * 2;
+
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .with_mock_stream(chain, MockStream::default())
+        .await
+        .build()
+        .await;
+    network.wait_for_running().await;
+
+    // Diverge every node: a different pending request and a different cursor,
+    // which is exactly the state that makes post-reset digests disagree if a
+    // reset preserves it.
+    for (index, node) in network.nodes.iter().enumerate() {
+        let request = IndexedSignRequest::sign(
+            SignId::new([index as u8 + 1; 32]),
+            SignArgs {
+                entropy: [index as u8 + 1; 32],
+                epsilon: k256::Scalar::ONE,
+                payload: k256::Scalar::ONE,
+                path: "reset".to_string(),
+                key_version: 0,
+            },
+            chain,
+            0,
+        );
+        node.backlog.insert(Arc::new(request)).await;
+        node.backlog
+            .set_processed_block(chain, interval * (index as u64 + 3))
+            .await;
+    }
+
+    let digests_before: HashSet<[u8; 32]> = {
+        let mut digests = HashSet::new();
+        for node in &network.nodes {
+            digests.insert(node.backlog.checkpoint(chain).await.unwrap().digest());
+        }
+        digests
+    };
+    assert_eq!(
+        digests_before.len(),
+        network.nodes.len(),
+        "every node must produce a distinct checkpoint digest before reset"
+    );
+
+    // Governance settles the canonical reset checkpoint. Each node aligns
+    // against it with no peer reachable.
+    let settled = CheckpointDigest {
+        height: resume_after,
+        digest: mpc_primitives::reset_checkpoint_digest(chain, resume_after),
+    };
+    let my_account_id: AccountId = "aligning.near".parse().unwrap();
+    let node_client = NodeClient::new(&NodeClientOptions::default());
+
+    for node in &network.nodes {
+        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
+        let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+
+        let applied = tokio::time::timeout(
+            Duration::from_secs(5),
+            align_backlog_with_consensus(
+                chain,
+                &node.backlog,
+                &mut checkpoints_rx,
+                &mut mesh_rx,
+                &node_client,
+                &my_account_id,
+            ),
+        )
+        .await
+        .expect("a reset must not wait on peers");
+
+        assert_eq!(applied, Some(resume_after));
+    }
+
+    // Every node now holds the same checkpoint, byte for byte, with an empty
+    // backlog and the same cursor.
+    let mut checkpoints_after = Vec::new();
+    for node in &network.nodes {
+        checkpoints_after.push(
+            node.backlog
+                .latest_checkpoint(chain)
+                .await
+                .expect("every node should hold the reset checkpoint"),
+        );
+    }
+    assert_eq!(
+        checkpoints_after
+            .iter()
+            .map(|checkpoint| checkpoint.digest())
+            .collect::<HashSet<_>>(),
+        HashSet::from([mpc_primitives::reset_checkpoint_digest(chain, resume_after)]),
+        "all nodes must converge on the canonical reset checkpoint"
+    );
+    for checkpoint in &checkpoints_after {
+        assert_eq!(checkpoint.block_height, resume_after);
+        assert!(
+            checkpoint.pending_requests.is_empty(),
+            "a node's pre-reset backlog must not survive the reset"
+        );
+    }
+
+    // And the next checkpoint each produces agrees too, which is what lets
+    // consensus settle again after a reset.
+    let mut next_digests = HashSet::new();
+    for node in &network.nodes {
+        node.backlog
+            .set_processed_block(chain, resume_after + interval)
+            .await;
+        next_digests.insert(node.backlog.checkpoint(chain).await.unwrap().digest());
+    }
+    assert_eq!(
+        next_digests.len(),
+        1,
+        "post-reset checkpoints must agree across nodes"
+    );
 }

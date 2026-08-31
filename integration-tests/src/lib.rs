@@ -6,6 +6,7 @@ pub mod containers;
 pub mod eth;
 pub mod execute;
 pub mod local;
+pub mod midnight;
 pub mod mpc_fixture;
 pub mod utils;
 
@@ -18,17 +19,21 @@ use crate::containers::DockerClient;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
+use cait_sith::protocol::Participant;
 use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::EthConfig;
+use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::web::CheckpointResponse;
 use mpc_node::{logs, mesh, node_client, storage};
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -66,6 +71,7 @@ pub struct NodeConfig {
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
     pub canton: Option<CantonConfig>,
+    pub midnight: Option<MidnightConfig>,
 }
 
 impl Default for NodeConfig {
@@ -92,6 +98,7 @@ impl Default for NodeConfig {
             sol: None,
             hydration: None,
             canton: None,
+            midnight: None,
         }
     }
 }
@@ -377,8 +384,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.chain_id,
         )?;
         let contract_address =
-            eth::deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO)
-                .await?;
+            deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO).await?;
 
         let rpc_endpoint = if cfg!(feature = "docker-test") {
             sandbox.internal_http_endpoint.clone()
@@ -441,7 +447,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
         for (i, account) in spawner.accounts.iter().enumerate() {
-            let participant = cait_sith::protocol::Participant::from(i as u32);
+            let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
                 let mut secret_storage = storage::secret_storage::init(
                     None, // No GCP service for tests
@@ -512,10 +518,11 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
 
     if let Some(public_key) = spawner.pregenerated_keys.public_key() {
         // Use init_running to skip key generation
-        let participants =
-            mpc_contract::primitives::Participants::from(mpc_contract::primitives::Candidates {
+        let participants = mpc_contract::primitives::Participants::from(
+            mpc_contract::primitives::CandidatesView {
                 candidates: candidates.clone().into_iter().collect(),
-            });
+            },
+        );
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let near_pk = near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
@@ -649,7 +656,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let init_contract_start = std::time::Instant::now();
     if let Some(public_key) = spawner.pregenerated_keys.public_key() {
         // Use init_running to skip key generation
-        let candidates_struct = mpc_contract::primitives::Candidates {
+        let candidates_struct = mpc_contract::primitives::CandidatesView {
             candidates: candidates.clone().into_iter().collect(),
         };
         let participants = mpc_contract::primitives::Participants::from(candidates_struct);

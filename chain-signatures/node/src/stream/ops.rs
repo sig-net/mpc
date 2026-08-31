@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 
 use crate::respond_bidirectional::CompletedTx;
@@ -12,7 +14,7 @@ use mpc_primitives::{
 };
 
 pub(crate) async fn process_sign_request(
-    sign_request: IndexedSignRequest,
+    sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
 ) -> anyhow::Result<bool> {
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
@@ -34,7 +36,11 @@ pub(crate) async fn process_sign_request(
     }
 
     // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
-    let is_new = ctx.backlog.insert(sign_request.clone()).await.is_none();
+    let is_new = ctx
+        .backlog
+        .insert(Arc::clone(&sign_request))
+        .await
+        .is_none();
 
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
@@ -76,12 +82,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = sign_request.id;
-        ctx.rpc.publish_signature(
-            public_key,
-            sign_request,
-            publish.signature,
-            publish.participants,
-        );
+        ctx.rpc
+            .publish_with_state(public_key, sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }
@@ -177,7 +179,7 @@ async fn advance_bidirectional_to_execution(
 
     let tx_id = BidirectionalTxId(signed_tx_hash);
 
-    let bidirectional_tx = BidirectionalTx {
+    let bidirectional_tx = Arc::new(BidirectionalTx {
         id: tx_id,
         sender: event.sender,
         serialized_transaction: event.serialized_transaction.clone(),
@@ -195,7 +197,7 @@ async fn advance_bidirectional_to_execution(
         request_id: respond_event.request_id,
         from_address: **from_address,
         nonce,
-    };
+    });
 
     tracing::info!(
         ?sign_id,
@@ -296,12 +298,12 @@ pub async fn process_execution_confirmed(
         .backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match entry.request.kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx,
+        .and_then(|entry| match &entry.request.kind {
+            SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
             _ => None,
         });
 
-    let completed_tx = CompletedTx::new(pending_tx.clone());
+    let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
@@ -313,12 +315,13 @@ pub async fn process_execution_confirmed(
         }
     };
 
+    let sign_request = Arc::new(sign_request);
     let updated_tx = ctx
         .backlog
         .transition_to_bidirectional_response(
             pending_tx.source_chain,
             &unwatched_sign_id,
-            sign_request.clone(),
+            Arc::clone(&sign_request),
         )
         .await
         .with_context(|| {

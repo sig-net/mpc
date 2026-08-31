@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
+    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
@@ -20,10 +20,7 @@ use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use solana_transaction_status::{
-    EncodedConfirmedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock,
-    UiTransactionEncoding,
-};
+use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -46,7 +43,6 @@ const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
 
-/// Default retry strategy
 fn default_retry_strategy() -> RetryConfig {
     RetryConfig {
         min_delay: SOL_RPC_MIN_DELAY,
@@ -90,10 +86,12 @@ struct JsonRpcResponse<T> {
 #[derive(Clone)]
 pub struct SolanaClient {
     pub client: Arc<anchor_client::Client<Arc<Keypair>>>,
-    /// Retry strategy for RPC calls that are not part of catchup (e.g. get_slot, get_tx)
+    /// Retry strategy for RPC calls that are not part of catchup (e.g. get_slot_finalized)
     rpc_retry: RetryConfig,
     /// Retry strategy for RPC calls that are part of catchup (e.g. get_block, fetch_blocks, fetch_signatures_from_latest)
     catchup_retry: RetryConfig,
+    /// Shared 429 cooldown across all RPC call sites
+    shared_backoff: SharedBackoff,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
     pub rpc_ws_url: String,
@@ -122,6 +120,7 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             rpc_ws_url: sol.rpc_ws_url.clone(),
@@ -144,13 +143,14 @@ impl SolanaClient {
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
-            CommitmentConfig::confirmed(),
+            CommitmentConfig::finalized(),
         );
         let rpc_client = Arc::new(RpcClient::new(rpc_http_url.clone()));
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url,
             rpc_ws_url,
@@ -178,51 +178,40 @@ impl SolanaClient {
 
     pub fn block_fetch_config() -> RpcBlockConfig {
         RpcBlockConfig {
-            encoding: Some(UiTransactionEncoding::Json),
+            encoding: Some(UiTransactionEncoding::JsonParsed),
             transaction_details: Some(TransactionDetails::Full),
             rewards: Some(false),
-            commitment: Some(CommitmentConfig::confirmed()),
+            commitment: Some(CommitmentConfig::finalized()),
             max_supported_transaction_version: Some(0),
         }
     }
 
     pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot", {
-            self.rpc_client
-                .get_slot()
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        })
-    }
-
-    pub async fn get_tx(
-        &self,
-        signature: &Signature,
-    ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
-        let max_attempts = self.rpc_retry.max_times;
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.rpc_retry,
-            |attempt, err, sleep| {
-                tracing::warn!(
-                    operation = %signature,
-                    attempt,
-                    max_attempts,
-                    error = %err,
-                    retry_in = ?sleep,
-                    "get_tx failed, retrying"
-                );
-            },
+            self.shared_backoff,
+            "get_slot",
             {
                 self.rpc_client
-                    .get_transaction_with_config(
-                        signature,
-                        solana_client::rpc_config::RpcTransactionConfig {
-                            encoding: Some(UiTransactionEncoding::JsonParsed),
-                            commitment: Some(CommitmentConfig::confirmed()),
-                            max_supported_transaction_version: Some(0),
-                        },
-                    )
+                    .get_slot()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
+    }
+
+    /// Get the latest finalized slot from the Solana RPC.
+    /// This is used to determine the upper bound for catchup.
+    pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
+        retry_rpc_gated!(
+            SOL_RPC_TIMEOUT,
+            self.rpc_retry,
+            self.shared_backoff,
+            "get_slot_finalized",
+            {
+                self.rpc_client
+                    .get_slot_with_commitment(CommitmentConfig::finalized())
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
             }
@@ -232,9 +221,10 @@ impl SolanaClient {
     // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -262,9 +252,10 @@ impl SolanaClient {
         }
 
         let max_attempts = self.catchup_retry.max_times;
-        let res = retry_rpc!(
+        let res = retry_rpc_gated!(
             SOL_BATCH_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -331,9 +322,10 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
+            self.shared_backoff,
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
@@ -348,7 +340,7 @@ impl SolanaClient {
                     before,
                     until: None,
                     limit: Some(CATCHUP_PAGE_SIZE),
-                    commitment: Some(CommitmentConfig::confirmed()),
+                    commitment: Some(CommitmentConfig::finalized()),
                 };
                 self.rpc_client
                     .get_signatures_for_address_with_config(address, config)
@@ -625,18 +617,18 @@ mod tests {
     #[test]
     fn block_fetch_config_fields() {
         let config = SolanaClient::block_fetch_config();
-        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::JsonParsed));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|c| c.commitment),
-            Some(solana_sdk::commitment_config::CommitmentLevel::Confirmed)
+            Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
         );
         assert_eq!(config.max_supported_transaction_version, Some(0));
     }
 
     #[tokio::test]
-    async fn get_slot_returns_slot_on_200() {
+    async fn get_slot_finalized_returns_slot_on_200() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", "/")
@@ -647,11 +639,11 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        assert_eq!(client.get_slot().await.unwrap(), 42);
+        assert_eq!(client.get_slot_finalized().await.unwrap(), 42);
     }
 
     #[tokio::test]
-    async fn get_slot_retries_on_500_then_succeeds() {
+    async fn get_slot_finalized_retries_on_500_then_succeeds() {
         let mut server = mockito::Server::new_async().await;
 
         let _fail = server
@@ -671,11 +663,11 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        assert_eq!(client.get_slot().await.unwrap(), 7);
+        assert_eq!(client.get_slot_finalized().await.unwrap(), 7);
     }
 
     #[tokio::test]
-    async fn get_slot_exhausts_retries_on_persistent_500() {
+    async fn get_slot_finalized_exhausts_retries_on_persistent_500() {
         let mut server = mockito::Server::new_async().await;
 
         let _mock = server
@@ -686,60 +678,7 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        assert!(client.get_slot().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn get_tx_returns_transaction_on_200() {
-        let mut server = mockito::Server::new_async().await;
-        let sig = Signature::new_unique();
-
-        // JSON that mimics EncodedConfirmedTransactionWithStatusMeta
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "slot": 42,
-                "transaction": {
-                    "signatures": ["1111111111111111111111111111111111111111111111111111111111111111"],
-                    "message": {
-                        "accountKeys": [],
-                        "instructions": [],
-                        "recentBlockhash": "11111111111111111111111111111111"
-                    }
-                },
-                "meta": { "err": null, "fee": 5000, "preBalances": [], "postBalances": [], "status": {"Ok": null} }
-            }
-        });
-
-        let _mock = server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(response.to_string())
-            .create_async()
-            .await;
-
-        let client = test_client(&server.url());
-        let tx = client.get_tx(&sig).await.unwrap();
-        assert_eq!(tx.slot, 42);
-    }
-
-    #[tokio::test]
-    async fn get_tx_retries_on_failure() {
-        let mut server = mockito::Server::new_async().await;
-        let sig = Signature::new_unique();
-
-        let _mock_fail = server
-            .mock("POST", "/")
-            .with_status(500)
-            .expect(2) // Allow to fail completely to verify retry loop execution
-            .create_async()
-            .await;
-
-        let client = test_client(&server.url());
-        // Should error out.
-        assert!(client.get_tx(&sig).await.is_err());
+        assert!(client.get_slot_finalized().await.is_err());
     }
 
     #[tokio::test]

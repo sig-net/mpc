@@ -114,8 +114,6 @@ fn env() -> (Runtime, SyncEnv) {
                 epoch: 0,
                 public_key: *pk.as_affine(),
                 participants: participants.clone(),
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold_votes: Default::default(),
                 threshold,

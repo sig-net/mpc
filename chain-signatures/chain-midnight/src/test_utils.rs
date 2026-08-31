@@ -12,6 +12,41 @@ use midnight_storage::DefaultDB;
 
 use crate::reader::Node;
 
+pub(crate) fn notification_payload(
+    version: u8,
+    request_id: [u8; 32],
+    caller_address: [u8; 32],
+    requests_path: &[u8],
+) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
+    assert!(
+        requests_path.len() <= 4,
+        "notification path exceeds V1 capacity"
+    );
+    let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
+    payload[0] = version;
+    payload[1..33].copy_from_slice(&request_id);
+    payload[33..65].copy_from_slice(&caller_address);
+    payload[65] = requests_path.len() as u8;
+    payload[66..66 + requests_path.len()].copy_from_slice(requests_path);
+    payload
+}
+
+pub(crate) fn response_payload(
+    request_id: [u8; 32],
+    x: [u8; 32],
+    y: [u8; 32],
+    s: [u8; 32],
+    recovery_id: u8,
+) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
+    let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
+    payload[..32].copy_from_slice(&request_id);
+    payload[32..64].copy_from_slice(&x);
+    payload[64..96].copy_from_slice(&y);
+    payload[96..128].copy_from_slice(&s);
+    payload[128] = recovery_id;
+    payload
+}
+
 /// Trailing-zero trim, the form the state layer stores every atom in.
 pub(crate) fn trim(bytes: &[u8]) -> Vec<u8> {
     let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);

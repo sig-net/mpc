@@ -2,17 +2,18 @@ use crate::abi::ChainSignatures;
 use crate::client::{block_may_contain_logs, CatchupItem, CatchupIter, EthereumClient};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
-use crate::finalized_head::FinalizedHeadTracker;
+use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
 use crate::EthConfig;
+use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, Log};
+use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
-use mpc_utils::task::{retry_until_ok, retry_until_some, AbortOnDrop};
+use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -102,7 +103,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
 
     /// Spawn the background head watcher (`Finalized` in production, `Latest` in
     /// optimistic dev mode). Returns a guard whose drop aborts the task.
-    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> AbortOnDrop {
+    pub fn spawn_finalized_head_watcher(&self, cancel: CancellationToken) -> FinalizedHeadWatcher {
         self.finalized_head
             .spawn_watcher(self.client.clone(), cancel)
     }
@@ -221,7 +222,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         for request in indexed_requests {
             events_tx
                 .send(ChainEvent::SignRequest {
-                    request,
+                    request: Arc::new(request),
                     block_timestamp: Some(block_timestamp),
                 })
                 .await
@@ -315,32 +316,40 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         }
     }
 
-    /// The catchup-live anchor: the startup tip + 1 (exclusive catchup end and
-    /// first live block), retrying until the tip is available.
+    /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
+        let tag = if self.eth.optimistic_requests {
+            BlockNumberOrTag::Latest
+        } else {
+            BlockNumberOrTag::Finalized
+        };
         retry_until_some(
             cancel,
             Self::RETRY_DELAY,
-            "ethereum latest block",
-            || async { self.client.get_latest_block_number().await },
+            "ethereum startup head sampling",
+            || async { self.client.get_block(BlockId::Number(tag)).await },
         )
         .await
-        .map(|tip| tip.saturating_add(1))
+        .map(|block| block.header.number.saturating_add(1))
     }
 
     /// Wait until `next` is processable (the head covers it), returning the
     /// ready upper bound. Returns `None` on cancellation.
     async fn wait_processable_bound(
         &self,
+        watcher: &mut FinalizedHeadWatcher,
         next: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<u64>> {
         tokio::select! {
             _ = cancel.cancelled() => Ok(None),
-            res = self.finalized_head.wait_for(next) => {
-                res?;
-                Ok(Some(self.finalized_head.current()))
+            res = watcher.wait_for(next) => {
+                match res {
+                    Ok(head) => Ok(Some(head)),
+                    Err(_err) if cancel.is_cancelled() => Ok(None),
+                    Err(err) => Err(anyhow::anyhow!("head watcher exited: {err:?}")),
+                }
             }
         }
     }
@@ -391,7 +400,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         tracing::info!("ethereum indexer started");
 
         // Spawn the finalized head watcher.
-        let _finalized_watcher = self
+        let mut finalized_watcher = self
             .finalized_head
             .spawn_watcher(self.client.clone(), cancel.clone());
 
@@ -428,7 +437,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // Catchup: process all blocks up to the anchor, then emit a CatchupCompleted event.
         while next < anchor {
             // Wait for the next block to be processable
-            let Some(upper) = self.wait_processable_bound(next, &cancel).await? else {
+            let Some(upper) = self
+                .wait_processable_bound(&mut finalized_watcher, next, &cancel)
+                .await?
+            else {
                 return Ok(()); // cancelled while waiting
             };
             // Clamp the upper bound to the anchor so we don't process beyond it.
@@ -452,7 +464,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
         // Live tail: process each block as it becomes processable, waiting for the finalized head to reach it.
         loop {
-            let Some(upper) = self.wait_processable_bound(next, &cancel).await? else {
+            let Some(upper) = self
+                .wait_processable_bound(&mut finalized_watcher, next, &cancel)
+                .await?
+            else {
                 return Ok(()); // cancelled while waiting
             };
             self.process_range(&events_tx, next, upper + 1, &cancel)
@@ -478,6 +493,58 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn sample_anchor_fetches_finalized_head_directly() {
+        let mut server = Server::new_async().await;
+        let finalized_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 42).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        assert_eq!(
+            indexer.sample_anchor(&CancellationToken::new()).await,
+            Some(43)
+        );
+        finalized_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn sample_anchor_fetches_latest_head_in_optimistic_mode() {
+        let mut server = Server::new_async().await;
+        let latest_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["latest", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(2, 42).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder.eth.optimistic_requests = true;
+        let indexer = builder.build().await;
+
+        assert_eq!(
+            indexer.sample_anchor(&CancellationToken::new()).await,
+            Some(43)
+        );
+        latest_mock.assert_async().await;
+    }
 
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
@@ -859,32 +926,32 @@ mod tests {
     }
 
     /// Fixture for running the indexer in a test with a mock JSON-RPC server.
-    /// Holds the mock server, latest block, and other state for running the indexer in tests.
+    /// Holds the mock server, finalized block, and other state for running the indexer in tests.
     struct RunFixture {
         _server: mockito::ServerGuard,
-        latest: Arc<AtomicU64>,
+        finalized: Arc<AtomicU64>,
         cancel: CancellationToken,
         run_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
         events_rx: mpsc::Receiver<ChainEvent>,
     }
 
     impl RunFixture {
-        async fn spawn(processed: u64, latest: u64) -> Self {
+        async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
-            let latest = Arc::new(AtomicU64::new(latest));
+            let finalized = Arc::new(AtomicU64::new(finalized));
 
-            // Anchor sampling + live head polling.
+            // Anchor sampling + finalized head polling.
             server
                 .mock("POST", "/")
                 .match_body(Matcher::PartialJson(json!({
                     "method": "eth_getBlockByNumber",
-                    "params": ["latest", false]
+                    "params": ["finalized", false]
                 })))
                 .with_status(200)
                 .with_header("content-type", "application/json")
                 .with_body_from_request({
-                    let latest = latest.clone();
-                    move |req| block_reply(req, latest.load(Ordering::Relaxed))
+                    let finalized = finalized.clone();
+                    move |req| block_reply(req, finalized.load(Ordering::Relaxed))
                 })
                 .create_async()
                 .await;
@@ -933,7 +1000,7 @@ mod tests {
 
             Self {
                 _server: server,
-                latest,
+                finalized,
                 cancel,
                 run_handle,
                 events_rx,
@@ -982,7 +1049,7 @@ mod tests {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         let event = f.next_event().await;
         assert!(
             matches!(event, ChainEvent::Block(10)),
@@ -1009,8 +1076,7 @@ mod tests {
     async fn wait_processable_bound_waits_for_finalized_head() {
         // Non-optimistic mode: wait_processable_bound blocks on the cached finalized
         // head, so no RPC is needed.
-        let mut builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
-        builder.eth.optimistic_requests = false;
+        let builder = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1");
         let indexer = builder.build().await;
         let cancel = CancellationToken::new();
 
@@ -1020,8 +1086,11 @@ mod tests {
             head.set_head(100);
         });
 
+        let mut watcher = indexer
+            .finalized_head
+            .spawn_watcher(indexer.client.clone(), cancel.clone());
         let upper = indexer
-            .wait_processable_bound(50, &cancel)
+            .wait_processable_bound(&mut watcher, 50, &cancel)
             .await
             .expect("wait_processable_bound resolves once the head covers next");
         assert_eq!(upper, Some(100));
@@ -1032,13 +1101,13 @@ mod tests {
         let mut f = RunFixture::spawn(9, 9).await;
         assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
-        f.latest.store(10, Ordering::Relaxed);
+        f.finalized.store(10, Ordering::Relaxed);
         assert!(matches!(f.next_event().await, ChainEvent::Block(10)));
 
         f.cancel_and_join().await;
 
         // After cancellation, advancing the tip must not produce any more blocks.
-        f.latest.store(11, Ordering::Relaxed);
+        f.finalized.store(11, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(
             f.events_rx.try_recv().is_err(),
