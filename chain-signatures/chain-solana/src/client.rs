@@ -193,6 +193,8 @@ impl SolanaClient {
             self.shared_backoff,
             "get_slot",
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getSlot");
                 self.rpc_client
                     .get_slot()
                     .await
@@ -210,6 +212,8 @@ impl SolanaClient {
             self.shared_backoff,
             "get_slot_finalized",
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getSlot");
                 self.rpc_client
                     .get_slot_with_commitment(CommitmentConfig::finalized())
                     .await
@@ -237,6 +241,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getBlock(refetch)");
                 self.rpc_client
                     .get_block_with_config(slot, Self::block_fetch_config())
                     .await
@@ -267,6 +273,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc_n("getBlock(batch)", slots.len() as u64);
                 let mut requests = Vec::new();
                 for (i, &slot) in slots.iter().enumerate() {
                     let config = Self::block_fetch_config();
@@ -336,6 +344,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getSignaturesForAddress");
                 let config = GetConfirmedSignaturesForAddress2Config {
                     before,
                     until: None,
@@ -346,6 +356,11 @@ impl SolanaClient {
                     .get_signatures_for_address_with_config(address, config)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
+                    .inspect(|batch| {
+                        let _ = batch;
+                        #[cfg(feature = "bench")]
+                        crate::bench::inc_sig_page(batch.len() as u64);
+                    })
             }
         )
     }
@@ -426,6 +441,8 @@ impl SolanaClient {
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
         tracing::trace!(total_slots = slots.len(), "fetching blocks for slots...");
+        #[cfg(feature = "bench")]
+        let started_at = std::time::Instant::now();
         let slots_vec: Vec<u64> = slots.into_iter().collect();
         let chunks: Vec<Vec<u64>> = slots_vec
             .chunks(MAX_CHUNK_SIZE)
@@ -452,6 +469,9 @@ impl SolanaClient {
                 blocks_by_height.insert(slot, catchup_item);
             }
         }
+
+        #[cfg(feature = "bench")]
+        crate::bench::add_batch_fetch_time(started_at.elapsed());
 
         blocks_by_height
     }

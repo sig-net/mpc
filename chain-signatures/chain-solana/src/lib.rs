@@ -1,3 +1,5 @@
+#[cfg(feature = "bench")]
+pub mod bench;
 mod client;
 mod config;
 mod events;
