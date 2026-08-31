@@ -7,18 +7,15 @@ use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
-use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
-use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
-use mpc_primitives::SignCommand;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -124,30 +121,17 @@ pub(super) fn test_mock_network(
     })
 }
 
+/// Supervise one chain indexer per mock stream. `make_ctx` builds a fresh
+/// [`StreamContext`] per stream, so the caller decides what the streams share
+/// without every dependency travelling through this signature.
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
-    sign_tx: mpsc::Sender<SignCommand>,
-    rpc: RpcChannel,
-    backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: &watch::Receiver<MeshState>,
-    checkpoints_rx: mpc_node::types::CheckpointWatcher,
-    observe_lag: Option<std::time::Duration>,
+    make_ctx: impl Fn() -> StreamContext,
 ) {
     for stream in mock_streams {
-        let indexer = MockIndexer::from_stream(stream);
         tokio::spawn(run_supervised(
-            indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                NodeClient::new(&Default::default()),
-                checkpoints_rx.clone(),
-            )
-            .with_observe_lag(observe_lag),
+            MockIndexer::from_stream(stream),
+            make_ctx(),
             NoopChainTelemetry,
         ));
     }

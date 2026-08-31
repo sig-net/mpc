@@ -34,6 +34,7 @@ use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
@@ -601,16 +602,18 @@ impl MpcFixtureNodeBuilder {
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
-        fixture_tasks::start_mock_stream_tasks(
-            &flat_mock_streams,
-            sign_tx.clone(),
-            rpc_channel.clone(),
-            backlog.clone(),
-            context.contract_state.clone(),
-            &mesh_rx,
-            checkpoints_rx,
-            context.deliberator_observe_lag,
-        );
+        fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, || {
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                context.contract_state.clone(),
+                mesh_rx.clone(),
+                NodeClient::new(&Default::default()),
+                checkpoints_rx.clone(),
+            )
+            .with_observe_lag(context.deliberator_observe_lag)
+        });
 
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
