@@ -87,8 +87,8 @@ struct FixtureConfig {
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
 
-    /// Overrides the deliberator publish schedule's observe lag; `None` is production.
-    deliberator_observe_lag: Option<std::time::Duration>,
+    /// Overrides the publish failover schedule's observe lag; `None` is production.
+    observe_lag: Option<std::time::Duration>,
 }
 
 /// Context required to start a fixture node.
@@ -101,7 +101,7 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
-    deliberator_observe_lag: Option<std::time::Duration>,
+    observe_lag: Option<std::time::Duration>,
 
     #[allow(dead_code)]
     node_account_id: AccountId,
@@ -140,7 +140,7 @@ impl FixtureConfig {
             max_concurrent_generation: defaults.max_concurrent_generation,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
-            deliberator_observe_lag: None,
+            observe_lag: None,
             triple_timeout_ms: min_to_ms(10),
         }
     }
@@ -272,7 +272,7 @@ impl MpcFixtureBuilder {
                 redis_pool: redis_container.pool(),
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
-                deliberator_observe_lag: self.fixture_config.deliberator_observe_lag,
+                observe_lag: self.fixture_config.observe_lag,
                 node_account_id: node.participant_info.account_id.clone(),
             };
 
@@ -419,10 +419,10 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Pin the deliberator publish schedule's observe lag for every node, for tests
+    /// Pin the publish failover schedule's observe lag for every node, for tests
     /// that assert the failover itself rather than its production timing.
-    pub fn with_deliberator_observe_lag(mut self, lag: std::time::Duration) -> Self {
-        self.fixture_config.deliberator_observe_lag = Some(lag);
+    pub fn with_observe_lag(mut self, lag: std::time::Duration) -> Self {
+        self.fixture_config.observe_lag = Some(lag);
         self
     }
 
@@ -612,7 +612,7 @@ impl MpcFixtureNodeBuilder {
                 NodeClient::new(&Default::default()),
                 checkpoints_rx.clone(),
             )
-            .with_observe_lag(context.deliberator_observe_lag)
+            .with_observe_lag(context.observe_lag)
         });
 
         // handle outbox messages manually, we want them before they are

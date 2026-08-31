@@ -50,23 +50,22 @@ async fn test_sign() {
 }
 
 /// Pinned observe lag: fast, immune to chain finality constants changing, and far
-/// enough past in-process event propagation that no deliberator fires on the happy path.
+/// enough past in-process event propagation that no failover fires on the happy path.
 const TEST_OBSERVE_LAG: Duration = Duration::from_secs(5);
 
-/// Upper bound on any deliberator's delay, derived from the schedule so the control
+/// Upper bound on any node's failover delay, derived from the schedule so the control
 /// test cannot silently sleep through less than the real delay.
-fn max_deliberator_delay(network: &integration_tests::mpc_fixture::MpcFixture) -> Duration {
-    let deliberators = network.sorted_participants().len().saturating_sub(1);
-    mpc_node::protocol::deliberator_publish::max_deliberator_publish_delay(
+fn max_failover_delay(network: &integration_tests::mpc_fixture::MpcFixture) -> Duration {
+    mpc_node::protocol::publish_failover::max_publish_failover_delay(
         Chain::Solana,
-        deliberators,
+        network.sorted_participants().len(),
         Some(TEST_OBSERVE_LAG),
     )
 }
 
 /// Wait for `count` publishes across all nodes, keeping the chain moving.
 ///
-/// The deliberator sweep runs on block events, so a test that only slept would
+/// The failover sweep runs on block events, so a test that only slept would
 /// wait forever: it is the arrival of a block, not the passage of time, that lets
 /// a node conclude the proposer's response did not land. The first publish (the
 /// proposer's) is the timing anchor: deadlines start at marking, not submission.
@@ -98,10 +97,10 @@ async fn tick_blocks_for(network: &integration_tests::mpc_fixture::MpcFixture, d
     }
 }
 
-/// No respond event ever arrives, so a deliberator has to publish, or nobody answers.
+/// No respond event ever arrives, so the failover has to publish, or nobody answers.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_deliberator_publishes_when_the_response_never_lands() {
-    let network = deliberator_publish_fixture(RespondEvents::Dropped).await;
+async fn test_failover_publishes_when_the_response_never_lands() {
+    let network = publish_failover_fixture(RespondEvents::Dropped).await;
     network
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
@@ -110,31 +109,31 @@ async fn test_deliberator_publishes_when_the_response_never_lands() {
     wait_for_publishes(
         &network,
         2,
-        max_deliberator_delay(&network) + Duration::from_secs(5),
-        "deliberator publish",
+        max_failover_delay(&network) + Duration::from_secs(5),
+        "failover publish",
     )
     .await;
 }
 
-/// The control: an observed response stands the deliberators down, so one response total.
+/// The control: an observed response stands the failover down, so one response total.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_observed_response_stands_down_the_deliberators() {
-    let network = deliberator_publish_fixture(RespondEvents::Delivered).await;
+async fn test_observed_response_stands_down_failover() {
+    let network = publish_failover_fixture(RespondEvents::Delivered).await;
     network
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
 
-    // Outlast the longest delay a deliberator could have drawn from the anchor.
+    // Outlast the longest delay any node could have drawn from the anchor.
     wait_for_publishes(&network, 1, Duration::from_secs(60), "proposer publish").await;
     tick_blocks_for(
         &network,
-        max_deliberator_delay(&network) + Duration::from_secs(5),
+        max_failover_delay(&network) + Duration::from_secs(5),
     )
     .await;
     assert_eq!(
         network.publishes(),
         1,
-        "a deliberator published despite the response landing"
+        "a node published a failover response despite the response landing"
     );
 }
 
@@ -145,15 +144,15 @@ enum RespondEvents {
     Dropped,
 }
 
-/// Three nodes signing on Solana, deliberator schedule pinned to [`TEST_OBSERVE_LAG`].
-async fn deliberator_publish_fixture(
+/// Three nodes signing on Solana, failover schedule pinned to [`TEST_OBSERVE_LAG`].
+async fn publish_failover_fixture(
     responds: RespondEvents,
 ) -> integration_tests::mpc_fixture::MpcFixture {
     use integration_tests::mpc_fixture::mock_chain::EventDelivery;
     use mpc_primitives::ChainEvent;
 
     let mut builder = MpcFixtureBuilder::default()
-        .with_deliberator_observe_lag(TEST_OBSERVE_LAG)
+        .with_observe_lag(TEST_OBSERVE_LAG)
         .only_generate_signatures()
         .with_mock_stream(Chain::Solana, MockStream::default())
         .await;

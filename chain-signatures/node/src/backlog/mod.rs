@@ -290,7 +290,7 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
-        // Read-only scan; the deliberator sweep calls this on every block, so a
+        // Read-only scan; the publish failover sweep calls this on every block, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
 

@@ -7,8 +7,8 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
-    deliberator_publish_due, process_block_event, process_execution_confirmed,
-    process_respond_bidirectional_event, process_respond_event, process_sign_request,
+    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
+    process_respond_event, process_sign_request, publish_failover_due,
     requeue_pending_sign_requests, resume_pending_publish_requests,
 };
 use crate::types::CheckpointWatcher;
@@ -31,15 +31,16 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
-    /// Overrides the deliberator schedule's observe lag; `None` is production
+    /// Overrides the publish failover schedule's observe lag; `None` is production
     /// (chain finality plus a margin). Fixtures pin it.
     pub observe_lag: Option<Duration>,
-    /// Entries this node has already deliberator-published, so a sweep that runs
-    /// on every block fires each one once. Pruned against the pending set each
-    /// sweep, so an entry that leaves the backlog and returns is scheduled afresh.
-    /// Keyed by publish kind as well: the two legs of a bidirectional request
-    /// share a sign id and must not inherit each other's history.
-    pub(crate) deliberator_published: HashSet<(SignId, PublishKind)>,
+    /// Entries this node has already dispatched a publish for, whether from the
+    /// catchup resume or the failover sweep, so a sweep that runs on every block
+    /// fires each one once. Pruned against the pending set each sweep, so an entry
+    /// that leaves the backlog and returns is scheduled afresh. Keyed by publish
+    /// kind as well: the two legs of a bidirectional request share a sign id and
+    /// must not inherit each other's history.
+    pub(crate) published: HashSet<(SignId, PublishKind)>,
 }
 
 impl StreamContext {
@@ -62,11 +63,11 @@ impl StreamContext {
             checkpoints_rx,
             caught_up: false,
             observe_lag: None,
-            deliberator_published: HashSet::new(),
+            published: HashSet::new(),
         }
     }
 
-    /// Pin the deliberator publish schedule's observe lag, for fixtures that assert
+    /// Pin the publish failover schedule's observe lag, for fixtures that assert
     /// the failover itself rather than its production timing.
     pub fn with_observe_lag(mut self, lag: Option<Duration>) -> Self {
         self.observe_lag = lag;
@@ -144,7 +145,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             // Observing the chain through this block is the precondition for
             // concluding that the proposer's response did not land, so the sweep
             // rides the block stream rather than a timer of its own.
-            deliberator_publish_due(ctx, chain).await;
+            publish_failover_due(ctx, chain).await;
             process_block_event(chain, block, ctx, telemetry)
                 .await
                 .context("failed to process block event")?;

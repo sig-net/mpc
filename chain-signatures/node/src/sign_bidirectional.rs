@@ -18,7 +18,7 @@ pub struct PublishState {
     pub participants: Vec<Participant>,
     pub is_proposer: bool,
     /// Unix seconds at which this entry entered pending-publish, which is when
-    /// the proposer's publish was dispatched. Anchoring the deliberator schedule
+    /// the proposer's publish was dispatched. Anchoring the failover schedule
     /// here rather than at indexing keeps the observe window whole, since
     /// generation has already happened by this point, and lets the schedule
     /// survive a restart: an entry recovered from storage keeps its clock.
@@ -27,7 +27,7 @@ pub struct PublishState {
     /// over. Nothing prunes a pending-publish entry, so at upgrade this set is
     /// every request that never saw an indexed response, and a numeric default
     /// would put all of them past their deadline at once: the jitter cannot
-    /// spread deadlines that are already in the past, so every deliberator would
+    /// spread deadlines that are already in the past, so every node would
     /// fire on every one of them. Declining to fail over leaves exactly today's
     /// behaviour for that set, and only for one request lifetime.
     #[serde(default)]

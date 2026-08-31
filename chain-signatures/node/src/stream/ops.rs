@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::protocol::deliberator_publish::publish_deadline;
+use crate::protocol::publish_failover::publish_deadline;
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::PublishKind;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
@@ -27,7 +27,7 @@ pub(crate) async fn process_sign_request(
     // Reject malformed bidirectional requests at ingestion, running the same
     // deterministic derivations the respond event will need later. A request
     // admitted here but failing there can never advance: its entry sticks in
-    // pending-publish forever, and every deliberator publishes a leg-1 response
+    // pending-publish forever, and every node publishes a leg-1 response
     // whose second leg will never come.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
         event.validate().with_context(|| {
@@ -66,13 +66,18 @@ pub(crate) async fn requeue_pending_sign_requests(
     Ok(())
 }
 
-pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
+pub(crate) async fn resume_pending_publish_requests(ctx: &mut StreamContext, source_chain: Chain) {
     for (sign_request, publish) in ctx.backlog.publishable_requests(source_chain).await {
         if !publish.is_proposer {
             continue;
         }
 
         let sign_id = sign_request.id;
+        // Recorded so the failover sweep does not publish this entry a second time
+        // on the next block: it is already dispatched, and its deadline, anchored
+        // on a stamp from before the restart, is long past.
+        ctx.published
+            .insert((sign_id, PublishKind::of(&sign_request.kind)));
         ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
@@ -83,37 +88,34 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
 /// Runs on every block rather than on a timer: a chain observed through block N
 /// is exactly the state in which "the response did not land" is a conclusion
 /// rather than a guess, so a stream that is not delivering blocks holds fire
-/// instead of publishing blind. Only one of the `m` deliberators needs a healthy
+/// instead of publishing blind. Only one of the `m` participants needs a healthy
 /// stream for failover to happen.
-pub(crate) async fn deliberator_publish_due(ctx: &mut StreamContext, chain: Chain) {
+pub(crate) async fn publish_failover_due(ctx: &mut StreamContext, chain: Chain) {
     if !ctx.caught_up {
         return;
     }
 
     let publishable = ctx.backlog.publishable_requests(chain).await;
     if publishable.is_empty() {
-        ctx.deliberator_published.clear();
+        ctx.published.clear();
         return;
     }
 
     // Only worth building when something has fired: an entry that left the backlog
     // and came back is marked publishing afresh and must be scheduled afresh.
-    if !ctx.deliberator_published.is_empty() {
+    if !ctx.published.is_empty() {
         let live: HashSet<(SignId, PublishKind)> = publishable
             .iter()
             .map(|(request, _)| (request.id, PublishKind::of(&request.kind)))
             .collect();
-        ctx.deliberator_published.retain(|key| live.contains(key));
+        ctx.published.retain(|key| live.contains(key));
     }
 
     let me = ctx.contract_watcher.account_id().clone();
     let now = mpc_utils::time::current_unix_timestamp();
     for (request, publish) in &publishable {
-        if publish.is_proposer {
-            continue;
-        }
         let key = (request.id, PublishKind::of(&request.kind));
-        if ctx.deliberator_published.contains(&key) {
+        if ctx.published.contains(&key) {
             continue;
         }
         let Some(deadline) = publish_deadline(&request.id, publish, &me, chain, ctx.observe_lag)
@@ -124,12 +126,12 @@ pub(crate) async fn deliberator_publish_due(ctx: &mut StreamContext, chain: Chai
             continue;
         }
 
-        ctx.deliberator_published.insert(key);
+        ctx.published.insert(key);
         let sign_id = request.id;
         tracing::warn!(
             ?sign_id,
             %chain,
-            "proposer response not observed in time; publishing as deliberator"
+            "proposer response not observed in time; publishing failover response"
         );
         ctx.rpc.publish_with_state(Arc::clone(request), publish);
     }
@@ -196,7 +198,7 @@ async fn advance_bidirectional_to_execution(
     // without passing admission (checkpoint recovery restores them wholesale). One
     // that fails here fails identically on every node and on every replay, so it
     // can never advance: leaving it would park it in pending-publish forever, with
-    // every deliberator publishing a response that is already on chain.
+    // every node publishing a response that is already on chain.
     // Removing it is deterministic across the network, so checkpoints stay aligned.
     if let Err(err) = event.validate() {
         tracing::error!(

@@ -1,11 +1,11 @@
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
-pub mod deliberator_publish;
 pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
+pub mod publish_failover;
 pub mod request;
 pub mod signature;
 pub mod state;

@@ -1,4 +1,4 @@
-//! Deliberator publish: fail over the response publish when the proposer stays silent.
+//! Publish failover: republish a response the proposer never got on chain.
 //!
 //! Every participant stores the [`PublishState`] when it marks the entry
 //! publishing, so failover needs no protocol change, only someone acting on that
@@ -10,6 +10,13 @@
 //! the chain through block N is the precondition for concluding the proposer's
 //! response did not land, so the catch-up gate is structural rather than a flag
 //! that can drift: no blocks observed, no failover.
+//!
+//! Every participant is scheduled, the proposer included. Its own deadline is one
+//! observe lag away, by which point its response has either been observed, so the
+//! entry is gone and the sweep finds nothing, or it has not, and a second attempt
+//! is what we wanted anyway. Skipping it would buy nothing and would make the
+//! schedule depend on `is_proposer`, which is the writing node's local role and
+//! is replaced wholesale by whichever peer serves a checkpoint recovery.
 
 use crate::sign_bidirectional::PublishState;
 
@@ -19,10 +26,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 /// Duplicate responses per silent proposer that we are willing to pay for failover.
-const DELIBERATOR_DUPLICATE_RATE: f64 = 2.0;
+const FAILOVER_DUPLICATE_RATE: f64 = 2.0;
 
 /// Extra time beyond chain finality for a published response to be observed
-/// (submission, a few publish retries, indexer lag) before deliberators take over.
+/// (submission, a few publish retries, indexer lag) before the failover takes over.
 pub const DEFAULT_OBSERVE_MARGIN: Duration = Duration::from_secs(15);
 
 /// The lag from one node publishing a response until another node has observed it.
@@ -35,39 +42,40 @@ fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
     })
 }
 
-/// The longest a deliberator can wait before publishing, for fixtures that outlast
-/// the schedule without restating it.
+/// The longest any participant can wait before publishing, for fixtures that
+/// outlast the schedule without restating it.
 #[cfg(any(test, feature = "test-feature"))]
-pub fn max_deliberator_publish_delay(
+pub fn max_publish_failover_delay(
     chain: Chain,
-    deliberators: usize,
+    participants: usize,
     override_lag: Option<Duration>,
 ) -> Duration {
-    deliberator_publish_delay(deliberators, 1.0, observe_lag(chain, override_lag))
+    failover_delay(participants, 1.0, observe_lag(chain, override_lag))
 }
 
 /// This node's position in the failover schedule for one request: uniform in
 /// [0, 1) as a pure function of sign id and account id.
 ///
-/// Identical draws would put every deliberator on chain at once (`E[responses]`
+/// Identical draws would put every participant on chain at once (`E[responses]`
 /// of `m`, not `1 + d`); determinism is what lets the schedule survive restarts.
-fn deliberator_jitter(sign_id: &SignId, me: &AccountId) -> f64 {
+fn failover_jitter(sign_id: &SignId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();
     (sign_id.request_id, me.as_str()).hash(&mut hasher);
     // Top 53 bits: exact in an f64, so the result stays strictly below 1.
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// How long a non-proposer waits before publishing: `L + jitter * m*L/d`, for `L`
-/// the observe lag, `m` the number of deliberators and `d` [`DELIBERATOR_DUPLICATE_RATE`].
+/// How long a node waits before publishing: `L + jitter * m*L/d`, for `L` the
+/// observe lag, `m` the number of participants that could publish and `d`
+/// [`FAILOVER_DUPLICATE_RATE`].
 ///
 /// The `L` offset keeps the happy path at one response: a proposer that publishes
-/// is observed before the earliest deliberator can fire. The window prices failover:
+/// is observed before the earliest failover can fire. The window prices failover:
 /// the lowest draw publishes, and so does every draw within `L` of it, which over
-/// a window of `m*L/d` is `d` deliberators in expectation. Slow-finality chains fail
+/// a window of `m*L/d` is `d` nodes in expectation. Slow-finality chains fail
 /// over in tens of minutes; accepted, since the alternative is no response at all.
-fn deliberator_publish_delay(deliberators: usize, jitter: f64, lag: Duration) -> Duration {
-    let window = lag.mul_f64(deliberators as f64 / DELIBERATOR_DUPLICATE_RATE);
+fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
+    let window = lag.mul_f64(participants as f64 / FAILOVER_DUPLICATE_RATE);
     lag + window.mul_f64(jitter)
 }
 
@@ -81,10 +89,9 @@ pub(crate) fn publish_deadline(
     chain: Chain,
     override_lag: Option<Duration>,
 ) -> Option<u64> {
-    let deliberators = publish.participants.len().saturating_sub(1);
-    let delay = deliberator_publish_delay(
-        deliberators,
-        deliberator_jitter(sign_id, me),
+    let delay = failover_delay(
+        publish.participants.len(),
+        failover_jitter(sign_id, me),
         observe_lag(chain, override_lag),
     );
     Some(publish.publishing_since? + delay.as_secs())
@@ -119,16 +126,16 @@ mod tests {
     }
 
     #[test]
-    fn deliberator_jitter_is_deterministic_and_spread() {
+    fn failover_jitter_is_deterministic_and_spread() {
         let me = account("node0.near");
         let id = SignId::new([7u8; 32]);
-        assert_eq!(deliberator_jitter(&id, &me), deliberator_jitter(&id, &me));
+        assert_eq!(failover_jitter(&id, &me), failover_jitter(&id, &me));
 
         let mut draws: Vec<f64> = (0u8..20)
-            .map(|byte| deliberator_jitter(&SignId::new([byte; 32]), &me))
+            .map(|byte| failover_jitter(&SignId::new([byte; 32]), &me))
             .collect();
         draws.extend(
-            (0u8..20).map(|byte| deliberator_jitter(&id, &account(&format!("node{byte}.near")))),
+            (0u8..20).map(|byte| failover_jitter(&id, &account(&format!("node{byte}.near")))),
         );
         assert!(draws.iter().all(|draw| (0.0..1.0).contains(draw)));
         let first = draws[0];
