@@ -89,7 +89,7 @@ E1. Amortized ≈ 1 presignature consumed per settled signature.
 
 E2. ≈ 1 generation instance per request at a time. 
 
-Mechanisms striving towards these targets are deterministic proposer rotation, the posit round, and a backoff that pauses proposing when so many peers reject with "already generating" that no threshold set is left to work with.
+Mechanisms striving towards these targets are deterministic proposer rotation and the posit round.
 
 Duplicate instances, duplicate on-chain responses, and wasted rounds are correct but wasteful. The contract keeps no request state, so every response emits another event and the downstream consumer is the one that has to deduplicate (§1). Consequently, any mechanism that serves only E-properties may be lossy, heuristic, or deleted; it must be judged on cost, not correctness.
 
