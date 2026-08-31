@@ -289,7 +289,9 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
-        let pending = self.pending(&chain).write().await;
+        // Read-only scan; the backup sweep calls this every second per chain, so a
+        // write lock here would serialize against the signing hot path for nothing.
+        let pending = self.pending(&chain).read().await;
 
         let mut publishable: Vec<_> = pending
             .requests
