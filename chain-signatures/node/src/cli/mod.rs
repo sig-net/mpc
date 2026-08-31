@@ -507,9 +507,6 @@ struct ChainStack {
     configs: ChainConfigs,
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
-    // TODO(rpc-unification): move the 429 gate into a shared alloy transport
-    // layer so every request (incl. provider fillers and estimate calls)
-    // throttles structurally, then delete this CLI-level plumbing.
     gates: EnumMap<Chain, SharedBackoff>,
 }
 
@@ -519,6 +516,10 @@ impl ChainStack {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
         }
+    }
+
+    fn gate(&self, chain: Chain) -> SharedBackoff {
+        self.gates[chain].clone()
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -533,7 +534,7 @@ impl ChainStack {
             let client = Arc::new(publisher::EthClient::new(
                 eth,
                 telemetry,
-                self.gates[Chain::Ethereum].clone(),
+                self.gate(Chain::Ethereum),
             ));
             publishers.insert(Chain::Ethereum, client);
         }
