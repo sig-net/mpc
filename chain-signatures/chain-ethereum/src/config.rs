@@ -5,6 +5,24 @@ use reqwest::Url;
 use std::fmt;
 use std::time::Duration;
 
+/// Configuration for fetching historical blocks in batches.
+#[derive(Clone, Debug)]
+pub struct CatchupFetchConfig {
+    /// Blocks per catchup batch (`eth_getBlockByNumber` JSON-RPC batch)
+    pub block_batch_size: u64,
+    /// Catchup batch fetches kept in flight at once
+    pub fetch_concurrency: usize,
+}
+
+impl Default for CatchupFetchConfig {
+    fn default() -> Self {
+        Self {
+            block_batch_size: 32,
+            fetch_concurrency: 4,
+        }
+    }
+}
+
 /// Timeouts and retry budget for the read-side Ethereum RPC client.
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
@@ -16,6 +34,8 @@ pub struct RpcConfig {
     pub trace_timeout: Duration,
     /// Retry strategy shared by all RPC calls
     pub retry: RetryConfig,
+    /// Catchup block-fetch shape (batch size and fetch concurrency)
+    pub catchup: CatchupFetchConfig,
 }
 
 impl Default for RpcConfig {
@@ -30,6 +50,7 @@ impl Default for RpcConfig {
                 max_times: 5,
                 jitter: true,
             },
+            catchup: Default::default(),
         }
     }
 }
@@ -133,8 +154,6 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
-    /// Blocks per catchup batch (`eth_getBlockByNumber` JSON-RPC batch)
-    pub catchup_block_batch_size: u64,
     /// Consecutive `get_block(Finalized)` failures after which the finalized-head
     /// watcher escalates its retry warning (it never gives up)
     pub max_finalized_failures: u32,
@@ -150,7 +169,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            catchup_block_batch_size: 32,
             max_finalized_failures: 20,
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
