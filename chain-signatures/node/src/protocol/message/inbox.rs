@@ -226,14 +226,16 @@ impl MessageInbox {
 
             match decrypted {
                 Ok(batch) => batches.push(batch),
-                Err(err) => {
-                    if matches!(err, MessageError::UnknownParticipant(_)) {
-                        retry.push((encrypted, timestamp));
-                    } else {
-                        tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
-                    }
-                    continue;
+                // Sender is not in our participant map yet; keep the batch and
+                // retry once the map catches up.
+                Err(MessageError::UnknownParticipant(_)) => retry.push((encrypted, timestamp)),
+                // A batch we have already ingested, resent because the peer's
+                // outbox retried a send that had in fact landed. Dropping it is
+                // the dedup working, not a decryption or signature failure.
+                Err(MessageError::Idempotent) => {
+                    tracing::debug!("inbox: dropped duplicate message batch");
                 }
+                Err(err) => tracing::warn!(?err, "inbox: failed to decrypt/verify messages"),
             };
         }
 
