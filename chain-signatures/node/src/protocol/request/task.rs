@@ -106,7 +106,7 @@ impl GeneratingPhase {
             tokio::select! {
                 result = &mut generation => break result,
                 task_msg = mailbox.recv() => {
-                    Self::reject_late_propose(ctx, task_msg).await;
+                    Self::reject_late_propose(ctx, state, task_msg).await;
                 }
             }
         };
@@ -119,7 +119,11 @@ impl GeneratingPhase {
 
     /// Reject a `Propose` that arrives while we are already generating; drop
     /// stale Accept/Reject/Start messages.
-    async fn reject_late_propose(ctx: &SignTask, task_msg: SignPositMessage) {
+    async fn reject_late_propose(
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_msg: SignPositMessage,
+    ) {
         let SignPositMessage {
             presignature_id,
             round,
@@ -131,10 +135,18 @@ impl GeneratingPhase {
             return;
         }
         let me = ctx.governance.me;
+        let (reason, stale_round) = if state.round() > round {
+            (PositRejectReason::StaleRound, Some(state.round()))
+        } else {
+            state.record_peer_round(round);
+            (PositRejectReason::AlreadyGenerating, None)
+        };
         tracing::info!(
             sign_id = ?ctx.sign_id,
             ?from,
             round,
+            my_round = state.round(),
+            ?reason,
             "received Propose while already generating, rejecting"
         );
         ctx.msg
@@ -144,8 +156,8 @@ impl GeneratingPhase {
                 PositMessage {
                     id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
                     from: me,
-                    action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-                    stale_round: None,
+                    action: PositAction::RejectWithReason(reason),
+                    stale_round,
                 },
             )
             .await;
