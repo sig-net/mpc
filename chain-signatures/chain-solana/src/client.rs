@@ -475,10 +475,11 @@ impl ChainPublisher for SolanaClient {
             "Solana publish signature: dispatching request"
         );
 
+        let (event_authority, _) =
+            Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+
         match &action.request.kind {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
-                let (event_authority, _) =
-                    Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
                 let tx = program
                     .request()
                     .signer(self.payer.clone())
@@ -522,6 +523,8 @@ impl ChainPublisher for SolanaClient {
                     .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
                         responder: self.payer.pubkey(),
+                        event_authority,
+                        program: self.program_id,
                     })
                     .args(SolanaRespondBidirectional {
                         request_id: request_ids[0],
