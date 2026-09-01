@@ -1,5 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes};
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
@@ -81,6 +82,12 @@ pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
     fn epsilon(&self) -> anyhow::Result<Scalar>;
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
+
+    /// The deterministic derivations respond processing runs for every bidirectional
+    /// request. Shared between admission (reject before the backlog) and the respond
+    /// path's failure handling (quarantine): both must agree on what "can never
+    /// advance" means.
+    fn validate(&self) -> anyhow::Result<()>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -119,6 +126,19 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
 
     fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
         Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.serialized_transaction.is_empty(),
+            "empty serialized_transaction"
+        );
+        self.target_chain()
+            .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        self.epsilon().context("cannot derive epsilon")?;
+        validate_unsigned_transaction(&self.serialized_transaction)
+            .context("undecodable serialized_transaction")?;
+        Ok(())
     }
 }
 
@@ -184,6 +204,20 @@ pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Byt
     }
 
     Ok(result)
+}
+
+/// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
+/// real signature. Admission calls this so a transaction that cannot be signed at
+/// respond time is rejected before it enters the backlog; running the actual
+/// function (with a placeholder signature, whose bytes are only appended, never
+/// interpreted) is what keeps admission structurally equal to respond processing.
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+    let placeholder = Signature::new(
+        k256::ProjectivePoint::GENERATOR.to_affine(),
+        k256::Scalar::ONE,
+        0,
+    );
+    sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
 }
 
 pub fn sign_and_hash_transaction(
@@ -276,7 +310,14 @@ pub fn sign_and_hash_legacy_from_unsigned(
     for i in 0..6 {
         out.append_raw_field(rlp.at(i)?.as_raw());
     }
-    let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
+    // Checked: `chain_id` is attacker-controlled bytes (admission runs this decode
+    // on every observed request event), and 35 + 2 * chain_id overflows for ids
+    // near u64::MAX.
+    let v: u64 = chain_id
+        .unwrap_or(0)
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(35 + u64::from(y_parity)))
+        .ok_or_else(|| anyhow::anyhow!("legacy chain_id too large"))?;
     out.append_u64(v);
     out.append_uint_bytes(r);
     out.append_uint_bytes(s);

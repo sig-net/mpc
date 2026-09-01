@@ -8,9 +8,9 @@ use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
-    make_test_stream_context_with_generator_pk, make_test_stream_context_with_rpc, respond_event,
-    test_bidirectional_tx, test_canton_sign_bidirectional_request, test_indexed_request,
-    test_sign_args,
+    make_test_stream_context, make_test_stream_context_with_generator_pk,
+    make_test_stream_context_with_rpc, respond_event, test_bidirectional_tx,
+    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
 };
 use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
@@ -18,7 +18,7 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
+    ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind, Signature,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -422,7 +422,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 }
 
 #[tokio::test]
-async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
+async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([11u8; 32]);
     let args = SignArgs {
@@ -484,16 +484,16 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let err = process_respond_event(event, &ctx, public_key)
+    // An unknown target chain fails the same deterministic derivation on every
+    // node and every replay, so the entry is quarantined rather than errored:
+    // leaving it would park it in pending-publish with backups republishing it.
+    process_respond_event(event, &ctx, public_key)
         .await
-        .expect_err("invalid chain should fail");
-    // The underlying `UnknownCaip2Id` cause is carried in the error's source chain.
-    let cause = err
-        .chain()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(cause.contains("unknown CAIP-2 chain ID: not-a-chain"));
+        .expect("quarantining is not an error");
+    assert!(
+        ctx.backlog.get(Chain::Ethereum, &sign_id).await.is_none(),
+        "an entry with an unknown target chain must leave the backlog"
+    );
 }
 
 #[tokio::test]
@@ -528,17 +528,56 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
     assert!(err.to_string().contains("Unexpected sign request kind"));
 }
 
+/// Admission cannot be the only gate: checkpoint recovery restores backlog entries
+/// wholesale, so a poison entry can exist without ever passing admission. The
+/// respond path must then quarantine it (deterministically, on every node), or it
+/// parks in pending-publish forever with every backup's sweep republishing it.
 #[tokio::test]
-async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
+async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([13u8; 32]);
+    let sign_id = SignId::new([23u8; 32]);
+    let args = test_sign_args(23);
 
-    // A bidirectional request with an empty `serialized_transaction`. If accepted
-    // it would sit in the backlog and later panic in `sign_and_hash_transaction`
-    // (empty RLP) when the respond event advances it to execution.
-    let event = SignBidirectionalEvent {
+    // Inserted directly, as checkpoint recovery would: never passed admission.
+    backlog
+        .insert(test_indexed_request(
+            sign_id,
+            Chain::Solana,
+            args.clone(),
+            current_unix_timestamp(),
+            SignKind::SignBidirectional(bidirectional_event(vec![0xde, 0xad])),
+        ))
+        .await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let event = SignatureRespondedEvent {
+        request_id: sign_id.request_id,
+        signature,
+        chain: Chain::Solana,
+    };
+
+    let public_key = root_sk.public_key().into();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, _cp, _mesh, _rpc_rx) =
+        make_test_stream_context(backlog, sign_tx, true, public_key, 1);
+
+    process_respond_event(event, &ctx, public_key)
+        .await
+        .expect("quarantining is not an error");
+
+    assert!(
+        ctx.backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        "an entry that can never advance must leave the backlog"
+    );
+}
+
+/// A Solana-sourced bidirectional event targeting Ethereum; `serialized_transaction`
+/// is the part the admission tests vary.
+fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEvent {
+    SignBidirectionalEvent {
         sender: [0u8; 32],
-        serialized_transaction: vec![],
+        serialized_transaction,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: 0,
         deposit: 0,
@@ -550,7 +589,49 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
         chain_ctx: None,
         output_deserialization_schema: vec![],
         respond_serialization_schema: vec![],
-    };
+    }
+}
+
+/// A non-empty but undecodable transaction is the same poison pill as an empty one,
+/// with a worse blast radius: admitted, it signs, publishes leg 1, then fails
+/// deterministically in respond processing before the cancel, leaving the entry in
+/// pending-publish forever while every backup's sweep fires into a retry loop that
+/// nothing ends. Admission runs the same derivations respond processing will need.
+#[tokio::test]
+async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([14u8; 32]);
+
+    let event = bidirectional_event(vec![0xde, 0xad, 0xbe, 0xef]);
+    let request = test_indexed_request(
+        sign_id,
+        Chain::Solana,
+        test_sign_args(14),
+        current_unix_timestamp(),
+        SignKind::SignBidirectional(event),
+    );
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let err = process_sign_request(request, &ctx)
+        .await
+        .expect_err("undecodable serialized_transaction should be rejected at ingestion");
+    assert!(format!("{err:#}").contains("undecodable serialized_transaction"));
+    assert!(
+        backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        "rejected request must not be stored in the backlog"
+    );
+}
+
+#[tokio::test]
+async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([13u8; 32]);
+
+    // A bidirectional request with an empty `serialized_transaction`. If accepted
+    // it would sit in the backlog and later panic in `sign_and_hash_transaction`
+    // (empty RLP) when the respond event advances it to execution.
+    let event = bidirectional_event(vec![]);
     let request = test_indexed_request(
         sign_id,
         Chain::Solana,
@@ -564,7 +645,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     let err = process_sign_request(request, &ctx)
         .await
         .expect_err("empty serialized_transaction should be rejected at ingestion");
-    assert!(err.to_string().contains("empty serialized_transaction"));
+    assert!(format!("{err:#}").contains("empty serialized_transaction"));
 
     // The poison-pill request must not have entered the backlog.
     assert!(

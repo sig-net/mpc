@@ -125,7 +125,6 @@ impl RpcChannel {
 
     pub fn publish_signature(
         &self,
-        public_key: mpc_crypto::PublicKey,
         request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
@@ -135,7 +134,6 @@ impl RpcChannel {
             if let Err(err) = rpc
                 .tx
                 .send(RpcAction::Publish(PublishAction {
-                    public_key,
                     request,
                     signature,
                     participants,
@@ -148,18 +146,8 @@ impl RpcChannel {
         });
     }
 
-    pub fn publish_with_state(
-        &self,
-        public_key: mpc_crypto::PublicKey,
-        request: Arc<IndexedSignRequest>,
-        publish: &PublishState,
-    ) {
-        self.publish_signature(
-            public_key,
-            request,
-            publish.signature,
-            publish.participants.clone(),
-        );
+    pub fn publish_with_state(&self, request: Arc<IndexedSignRequest>, publish: &PublishState) {
+        self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 }
 

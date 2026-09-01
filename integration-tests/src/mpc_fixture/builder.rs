@@ -561,11 +561,14 @@ impl MpcFixtureNodeBuilder {
                 .run(config_rx.clone(), context.contract_state.clone()),
         );
 
+        let backlog = Backlog::new();
+
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),
             storage,
             channels,
             context.contract_state.clone(),
+            backlog.clone(),
         )
         .await;
 
@@ -582,8 +585,6 @@ impl MpcFixtureNodeBuilder {
             context.contract_state.clone(),
             mesh_rx.clone(),
         ));
-
-        let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         let (checkpoint_tx, checkpoints_rx) = watch::channel(None);

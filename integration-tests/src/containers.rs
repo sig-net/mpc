@@ -463,10 +463,22 @@ impl Redis {
 
         let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
 
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
+        // The port mapping can lag the container start when several containers come
+        // up at once (PortNotExposed), so give Docker a moment before giving up.
+        let host_port = {
+            let mut attempts = 0;
+            loop {
+                match container.get_host_port_ipv4(Self::DEFAULT_REDIS_PORT).await {
+                    Ok(port) => break port,
+                    Err(err) if attempts < 5 => {
+                        attempts += 1;
+                        tracing::warn!(?err, attempts, "redis port not mapped yet; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Err(err) => panic!("redis container port mapping failed: {err:?}"),
+                }
+            }
+        };
         let internal_address = format!("redis://127.0.0.1:{host_port}");
 
         Self::wait_for_host_port_readiness(&internal_address).await;
