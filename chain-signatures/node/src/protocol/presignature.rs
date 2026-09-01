@@ -438,10 +438,6 @@ impl PresignatureSpawner {
             self.triples.contains_reserved(id.pair_id).await
                 || self.triples.contains(id.pair_id).await
         } {
-            // We do not hold the proposed triple pair: it has not reached us
-            // yet, or we already spent it. Rejecting is the designed answer
-            // here and the proposer retries with another pair, so this is a
-            // normal outcome rather than a fault.
             tracing::debug!(
                 ?id,
                 ?from,
