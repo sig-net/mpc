@@ -103,25 +103,15 @@ impl Default for NodeConfig {
     }
 }
 
-pub enum Nodes {
-    Local {
-        next_id: usize,
-        ctx: Context,
-        nodes: Vec<local::Node>,
-    },
-    Docker {
-        next_id: usize,
-        ctx: Context,
-        nodes: Vec<containers::Node>,
-    },
+pub struct Nodes {
+    next_id: usize,
+    ctx: Context,
+    nodes: Vec<local::Node>,
 }
 
 impl Nodes {
     pub fn len(&self) -> usize {
-        match self {
-            Nodes::Local { nodes, .. } => nodes.len(),
-            Nodes::Docker { nodes, .. } => nodes.len(),
-        }
+        self.nodes.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -129,31 +119,19 @@ impl Nodes {
     }
 
     pub fn ctx(&self) -> &Context {
-        match self {
-            Nodes::Local { ctx, .. } => ctx,
-            Nodes::Docker { ctx, .. } => ctx,
-        }
+        &self.ctx
     }
 
     pub fn url(&self, id: usize) -> &str {
-        match self {
-            Nodes::Local { nodes, .. } => &nodes[id].address,
-            Nodes::Docker { nodes, .. } => &nodes[id].address,
-        }
+        &self.nodes[id].address
     }
 
     pub fn account_id(&self, id: usize) -> &AccountId {
-        match self {
-            Nodes::Local { nodes, .. } => nodes[id].account.id(),
-            Nodes::Docker { nodes, .. } => nodes[id].account.id(),
-        }
+        self.nodes[id].account.id()
     }
 
     pub fn near_accounts(&self) -> Vec<&Account> {
-        match self {
-            Nodes::Local { nodes, .. } => nodes.iter().map(|node| &node.account).collect(),
-            Nodes::Docker { nodes, .. } => nodes.iter().map(|node| &node.account).collect(),
-        }
+        self.nodes.iter().map(|node| &node.account).collect()
     }
 
     pub async fn start_node(
@@ -162,45 +140,19 @@ impl Nodes {
         new_account: &Account,
     ) -> anyhow::Result<usize> {
         tracing::info!(id = %new_account.id(), "adding one more node");
-        match self {
-            Nodes::Local {
-                next_id,
-                ctx,
-                nodes,
-            } => {
-                nodes.push(local::Node::run(ctx, cfg, new_account).await?);
-                *next_id += 1;
-                Ok(nodes.len() - 1)
-            }
-            Nodes::Docker {
-                next_id,
-                ctx,
-                nodes,
-            } => {
-                nodes.push(containers::Node::run(ctx, cfg, new_account).await?);
-                *next_id += 1;
-                Ok(nodes.len() - 1)
-            }
-        }
+        self.nodes
+            .push(local::Node::run(&self.ctx, cfg, new_account).await?);
+        self.next_id += 1;
+        Ok(self.nodes.len() - 1)
     }
 
     pub async fn kill_node(&mut self, account_id: &AccountId) -> NodeEnvConfig {
-        let killed_node_config = match self {
-            Nodes::Local { nodes, .. } => {
-                let index = nodes
-                    .iter()
-                    .position(|node| node.account.id() == account_id)
-                    .unwrap();
-                nodes.remove(index).kill()
-            }
-            Nodes::Docker { nodes, .. } => {
-                let index = nodes
-                    .iter()
-                    .position(|node| node.account.id() == account_id)
-                    .unwrap();
-                nodes.remove(index).kill().await
-            }
-        };
+        let index = self
+            .nodes
+            .iter()
+            .position(|node| node.account.id() == account_id)
+            .unwrap();
+        let killed_node_config = self.nodes.remove(index).kill();
 
         // wait for the node to be removed from the network
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -209,54 +161,16 @@ impl Nodes {
     }
 
     pub fn kill_all(&mut self) {
-        match self {
-            Nodes::Local { nodes, .. } => {
-                for node in nodes.drain(..) {
-                    node.kill();
-                }
-            }
-            Nodes::Docker { nodes, .. } => {
-                let handles = nodes
-                    .drain(..)
-                    .map(|node| {
-                        std::thread::spawn(move || {
-                            let runtime = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .expect("failed to build runtime for docker node cleanup");
-
-                            let _ = runtime.block_on(node.kill());
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                for handle in handles {
-                    let _ = handle.join();
-                }
-            }
+        for node in self.nodes.drain(..) {
+            node.kill();
         }
     }
 
     pub async fn restart_node(&mut self, config: NodeEnvConfig) -> anyhow::Result<()> {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
-        match self {
-            Nodes::Local {
-                next_id,
-                ctx,
-                nodes,
-            } => {
-                nodes.push(local::Node::spawn(ctx, config).await?);
-                *next_id += 1;
-            }
-            Nodes::Docker {
-                next_id,
-                ctx,
-                nodes,
-            } => {
-                nodes.push(containers::Node::spawn(ctx, config).await?);
-                *next_id += 1;
-            }
-        }
+        self.nodes
+            .push(local::Node::spawn(&self.ctx, config).await?);
+        self.next_id += 1;
         // wait for the node to be added to the network
         tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -265,21 +179,9 @@ impl Nodes {
 
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
         let mut gcp_services = Vec::new();
-        match self {
-            Nodes::Local { nodes, .. } => {
-                for node in nodes {
-                    gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
-                    );
-                }
-            }
-            Nodes::Docker { nodes, .. } => {
-                for node in nodes {
-                    gcp_services.push(
-                        GcpService::init(node.account.id(), &self.ctx().storage_options).await?,
-                    );
-                }
-            }
+        for node in &self.nodes {
+            gcp_services
+                .push(GcpService::init(node.account.id(), &self.ctx.storage_options).await?);
         }
         Ok(gcp_services)
     }
@@ -386,11 +288,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         let contract_address =
             deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO).await?;
 
-        let rpc_endpoint = if cfg!(feature = "docker-test") {
-            sandbox.internal_http_endpoint.clone()
-        } else {
-            sandbox.external_http_endpoint.clone()
-        };
+        let rpc_endpoint = sandbox.external_http_endpoint.clone();
 
         let contract_address_hex = hex::encode(contract_address);
         spawner.cfg.eth = Some(EthConfig {
@@ -484,81 +382,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         mesh_options,
         message_options,
         ethereum,
-    })
-}
-
-pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
-    let ctx = setup(spawner).await?;
-    let cfg = &spawner.cfg;
-
-    let node_futures = spawner
-        .accounts
-        .iter()
-        .map(|account| containers::Node::run(&ctx, cfg, account));
-    let nodes = futures::future::join_all(node_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let candidates: HashMap<AccountId, CandidateInfo> = spawner
-        .accounts
-        .iter()
-        .zip(&nodes)
-        .map(|(account, node)| {
-            (
-                account.id().clone(),
-                CandidateInfo {
-                    account_id: account.id().as_str().parse().unwrap(),
-                    url: node.address.clone(),
-                    cipher_pk: node.cipher_sk.public_key().to_bytes(),
-                    sign_pk: node.sign_sk.public_key().to_string().parse().unwrap(),
-                },
-            )
-        })
-        .collect();
-
-    if let Some(public_key) = spawner.pregenerated_keys.public_key() {
-        // Use init_running to skip key generation
-        let participants = mpc_contract::primitives::Participants::from(
-            mpc_contract::primitives::CandidatesView {
-                candidates: candidates.clone().into_iter().collect(),
-            },
-        );
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
-        let near_pk = near_crypto::PublicKey::SECP256K1(
-            near_crypto::Secp256K1PublicKey::try_from(
-                &public_key.to_encoded_point(false).as_bytes()[1..65],
-            )
-            .unwrap(),
-        );
-        ctx.mpc_contract
-            .call("init_running")
-            .args_json(json!({
-                "epoch": 0,
-                "participants": participants,
-                "threshold": cfg.threshold,
-                "public_key": near_pk,
-            }))
-            .transact()
-            .await?
-            .into_result()?;
-        tracing::info!("contract initialized with pregenerated keys (skipped keygen)");
-    } else {
-        ctx.mpc_contract
-            .call("init")
-            .args_json(json!({
-                "threshold": cfg.threshold,
-                "candidates": candidates
-            }))
-            .transact()
-            .await?
-            .into_result()?;
-        tracing::info!("contract initialized, will generate keys...");
-    }
-
-    Ok(Nodes::Docker {
-        next_id: nodes.len(),
-        ctx,
-        nodes,
     })
 }
 
@@ -697,7 +520,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         "governance contract initialized"
     );
 
-    Ok(Nodes::Local {
+    Ok(Nodes {
         next_id: nodes.len(),
         ctx,
         nodes,
@@ -705,17 +528,9 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
 }
 
 pub async fn run(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
-    #[cfg(feature = "docker-test")]
-    return docker(spawner).await;
-
-    #[cfg(not(feature = "docker-test"))]
-    return host(spawner).await;
+    host(spawner).await
 }
 
 pub async fn dry_run(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
-    #[cfg(feature = "docker-test")]
-    unimplemented!("dry_run only works with native node");
-
-    #[cfg(not(feature = "docker-test"))]
-    return dry_host(spawner).await;
+    dry_host(spawner).await
 }
