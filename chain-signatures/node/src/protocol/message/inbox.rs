@@ -230,8 +230,7 @@ impl MessageInbox {
                 // retry once the map catches up.
                 Err(MessageError::UnknownParticipant(_)) => retry.push((encrypted, timestamp)),
                 // A batch we have already ingested, resent because the peer's
-                // outbox retried a send that had in fact landed. Dropping it is
-                // the dedup working, not a decryption or signature failure.
+                // outbox retried a send that had in fact landed. 
                 Err(MessageError::Idempotent) => {
                     tracing::debug!("inbox: dropped duplicate message batch");
                 }
