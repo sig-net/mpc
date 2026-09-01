@@ -348,6 +348,36 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
+                            // A MissingArtifact reject means that holder never stored the
+                            // presignature: drop it, or we re-propose an unusable one forever.
+                            for (&peer, _) in counter.rejects.iter().filter(|(_, reason)| {
+                                matches!(reason, PositRejectReason::MissingArtifact)
+                            }) {
+                                match ctx
+                                    .presignatures
+                                    .remove_holder_and_prune(
+                                        peer,
+                                        ctx.governance.threshold,
+                                        &[presignature_id],
+                                    )
+                                    .await
+                                {
+                                    Ok((removed, _)) => tracing::warn!(
+                                        ?sign_id,
+                                        presignature_id,
+                                        ?peer,
+                                        pruned = !removed.is_empty(),
+                                        "dropped stale presignature holder"
+                                    ),
+                                    Err(err) => tracing::warn!(
+                                        ?sign_id,
+                                        presignature_id,
+                                        ?peer,
+                                        ?err,
+                                        "failed to drop stale presignature holder"
+                                    ),
+                                }
+                            }
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
