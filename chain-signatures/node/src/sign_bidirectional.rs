@@ -1,5 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes};
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
@@ -81,6 +82,12 @@ pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
     fn epsilon(&self) -> anyhow::Result<Scalar>;
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
+
+    /// The deterministic derivations respond processing runs for every bidirectional
+    /// request. Shared between admission (reject before the backlog) and the respond
+    /// path's failure handling (quarantine): both must agree on what "can never
+    /// advance" means.
+    fn validate(&self) -> anyhow::Result<()>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -119,6 +126,19 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
 
     fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
         Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.serialized_transaction.is_empty(),
+            "empty serialized_transaction"
+        );
+        self.target_chain()
+            .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        self.epsilon().context("cannot derive epsilon")?;
+        validate_unsigned_transaction(&self.serialized_transaction)
+            .context("undecodable serialized_transaction")?;
+        Ok(())
     }
 }
 
@@ -191,7 +211,7 @@ pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Byt
 /// respond time is rejected before it enters the backlog; running the actual
 /// function (with a placeholder signature, whose bytes are only appended, never
 /// interpreted) is what keeps admission structurally equal to respond processing.
-pub fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
