@@ -678,17 +678,15 @@ impl RpcHandles {
         stack: &ChainStack,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
-        // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
-        // TODO: two connection are negligible here, but consider sharing a single client if necessary.
+        let near_rpc = near_fetch::Client::new(near_rpc_url);
         let near_client = NearClient::new(
-            near_rpc_url,
+            near_rpc.clone(),
             mpc_contract_id,
             signer.clone(),
             publisher_telemetry,
         );
         let near_governance_client = NearGovernanceClient::new(
-            near_rpc_url,
+            near_rpc,
             my_address,
             &network.sign_sk,
             &network.cipher_sk,
@@ -1283,8 +1281,9 @@ mod tests {
             _ => unreachable!(),
         };
         // Never dialed: publishers() only stores the client in the registry.
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
         let near = NearClient::new(
-            "http://127.0.0.1:1",
+            near,
             &account_id,
             signer,
             Arc::new(NodeTelemetry::new(Chain::NEAR)),

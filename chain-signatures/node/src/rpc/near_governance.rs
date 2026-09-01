@@ -49,7 +49,7 @@ pub struct NearGovernanceClient {
 
 impl NearGovernanceClient {
     pub fn new(
-        near_rpc: &str,
+        client: NearFetchClient,
         my_addr: &Url,
         sign_sk: &near_crypto::SecretKey,
         cipher_sk: &hpke::SecretKey,
@@ -57,7 +57,7 @@ impl NearGovernanceClient {
         signer: InMemorySigner,
     ) -> Self {
         Self {
-            client: NearFetchClient::new(near_rpc),
+            client,
             contract_id: contract_id.clone(),
             my_addr: my_addr.clone(),
             signer,

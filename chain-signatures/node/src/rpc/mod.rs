@@ -1111,14 +1111,9 @@ mod tests {
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
         let contract_id: AccountId = "contract.testnet".parse().unwrap();
-        let near = NearGovernanceClient::new(
-            &server.url(),
-            &my_addr,
-            &sign_sk,
-            &cipher_sk,
-            &contract_id,
-            signer,
-        );
+        let near = near_fetch::Client::new(&server.url());
+        let near =
+            NearGovernanceClient::new(near, &my_addr, &sign_sk, &cipher_sk, &contract_id, signer);
 
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
