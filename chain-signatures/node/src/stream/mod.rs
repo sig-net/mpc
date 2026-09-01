@@ -13,11 +13,9 @@ use crate::stream::ops::{
 };
 use crate::types::CheckpointWatcher;
 
-use crate::rpc::PublishKind;
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
-use mpc_primitives::{Chain, ChainEvent, SignCommand, SignId};
-use std::collections::HashSet;
+use mpc_primitives::{Chain, ChainEvent, SignCommand};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -34,11 +32,6 @@ pub struct StreamContext {
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
     /// pin it.
     pub observe_lag: Option<Duration>,
-    /// Entries this node has dispatched a publish for, from the catchup resume or
-    /// the failover sweep, so a per-block sweep fires each one once. Pruned against
-    /// the pending set each sweep, so an entry that leaves and returns is scheduled
-    /// afresh. Keyed by publish kind too: the two legs share a sign id.
-    pub(crate) published: HashSet<(SignId, PublishKind)>,
 }
 
 impl StreamContext {
@@ -61,7 +54,6 @@ impl StreamContext {
             checkpoints_rx,
             caught_up: false,
             observe_lag: None,
-            published: HashSet::new(),
         }
     }
 
@@ -140,7 +132,6 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
-            // A block observed is what licenses concluding the response did not land.
             publish_failover_due(ctx, chain).await;
             process_block_event(chain, block, ctx, telemetry)
                 .await

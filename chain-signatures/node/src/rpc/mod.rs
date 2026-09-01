@@ -50,9 +50,10 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
 };
 
 /// Which response a publish carries. The two legs of a bidirectional request
-/// share a sign id, so this is what keeps them apart wherever a publish is keyed.
+/// share a sign id, so this is what keeps the dispatch loop's in-flight set from
+/// treating a second leg as a duplicate of its first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PublishKind {
+enum PublishKind {
     /// The signed transaction (an ordinary request's only response, or leg 1).
     Response,
     /// The signed execution outcome (leg 2).
@@ -60,7 +61,7 @@ pub enum PublishKind {
 }
 
 impl PublishKind {
-    pub fn of(kind: &SignKind) -> Self {
+    fn of(kind: &SignKind) -> Self {
         match kind {
             SignKind::Sign | SignKind::SignBidirectional(_) => PublishKind::Response,
             SignKind::RespondBidirectional(_) => PublishKind::BidirectionalResponse,

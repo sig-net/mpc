@@ -17,15 +17,13 @@ pub struct PublishState {
     pub signature: Signature,
     pub participants: Vec<Participant>,
     pub is_proposer: bool,
-    /// Unix seconds at which this entry entered pending-publish, which is when the
-    /// proposer's publish was dispatched. Anchoring the failover schedule here
-    /// rather than at indexing keeps the observe window whole and lets a recovered
-    /// entry keep its clock across a restart.
+    /// Unix seconds at which this entry entered pending-publish on this node.
+    /// On the proposer this is when it dispatched its publish and elsewhere is
+    /// when that node finished generation.
     ///
-    /// `None` on entries written before this field existed, which never fail over.
-    /// Nothing prunes pending-publish, so at upgrade that set is every request
-    /// that never saw a response, and a numeric default would put all of them past
-    /// their deadline at once: jitter cannot spread deadlines already in the past.
+    /// `None` on entries written before this field existed, which never fail over:
+    /// a numeric default would put every entry already stuck in pending-publish
+    /// past its deadline at once, and jitter cannot spread deadlines in the past.
     #[serde(default)]
     pub publishing_since: Option<u64>,
 }

@@ -4,9 +4,12 @@
 //! publishing. The schedule is a pure function of that entry, its stamp plus a
 //! per-node jitter, so a restart does not restart the clock.
 //!
-//! The sweep lives in the chain stream, on block events: having observed the
-//! chain through block N is what licenses concluding the response did not land,
-//! so the catch-up gate is structural rather than a flag that can drift.
+//! The sweep lives in the chain stream on block events, gated on a completed
+//! catchup.
+//!
+//! The `1 + d` cost assumes the failover response lands, so the nodes still
+//! waiting observe it and drop their entries. If none can land, all `m` fire, once
+//! each, spread over the window.
 //!
 //! The proposer is scheduled too. Its own deadline is one observe lag away, by
 //! which point its response is either observed, so the entry is gone, or it is
@@ -30,7 +33,7 @@ pub const DEFAULT_OBSERVE_MARGIN: Duration = Duration::from_secs(15);
 /// The lag from one node publishing a response until another has observed it.
 /// `None` in production, giving chain finality plus the margin; a fixture pins it
 /// so its timing does not move when a finality constant does.
-fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
+pub(crate) fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
     override_lag.unwrap_or_else(|| {
         Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
     })
@@ -76,13 +79,12 @@ pub(crate) fn publish_deadline(
     sign_id: &SignId,
     publish: &PublishState,
     me: &AccountId,
-    chain: Chain,
-    override_lag: Option<Duration>,
+    lag: Duration,
 ) -> Option<u64> {
     let delay = failover_delay(
         publish.participants.len(),
         failover_jitter(sign_id, me),
-        observe_lag(chain, override_lag),
+        lag,
     );
     Some(publish.publishing_since? + delay.as_secs())
 }
@@ -142,7 +144,12 @@ mod tests {
         let me = account("node0.near");
 
         let deadline = |since, who: &AccountId| {
-            publish_deadline(&sign_id, &publish_state(3, since), who, Chain::Solana, LAG)
+            publish_deadline(
+                &sign_id,
+                &publish_state(3, since),
+                who,
+                observe_lag(Chain::Solana, LAG),
+            )
         };
 
         let at_zero = deadline(Some(0), &me).expect("a stamped entry has a deadline");

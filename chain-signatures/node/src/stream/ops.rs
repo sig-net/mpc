@@ -1,11 +1,9 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::protocol::publish_failover::publish_deadline;
+use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::CompletedTx;
-use crate::rpc::PublishKind;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
@@ -66,17 +64,21 @@ pub(crate) async fn requeue_pending_sign_requests(
     Ok(())
 }
 
-pub(crate) async fn resume_pending_publish_requests(ctx: &mut StreamContext, source_chain: Chain) {
-    for (sign_request, publish) in ctx.backlog.publishable_requests(source_chain).await {
+pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
+    for (sign_request, publish, _dispatched) in ctx.backlog.publishable_requests(source_chain).await
+    {
         if !publish.is_proposer {
             continue;
         }
 
         let sign_id = sign_request.id;
-        // Recorded so the sweep does not republish it on the next block: its
-        // deadline, anchored before the restart, is long past.
-        ctx.published
-            .insert((sign_id, PublishKind::of(&sign_request.kind)));
+        // This is the proposer's only retry for a publish that reported success but
+        // never landed, so it republishes even if it already dispatched one. Marking
+        // stops the sweep from putting a second copy on chain on the next block: the
+        // deadline was anchored before the restart, so it is already past.
+        ctx.backlog
+            .mark_publish_dispatched(source_chain, &sign_id)
+            .await;
         ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
@@ -85,50 +87,35 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &mut StreamContext, sou
 /// Publish entries whose proposer stayed silent past this node's deadline.
 ///
 /// Only one of the `m` participants needs a healthy stream for failover to happen.
-pub(crate) async fn publish_failover_due(ctx: &mut StreamContext, chain: Chain) {
+pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
     if !ctx.caught_up {
         return;
     }
-
-    let publishable = ctx.backlog.publishable_requests(chain).await;
-    if publishable.is_empty() {
-        ctx.published.clear();
-        return;
-    }
-
-    // Only worth building when something has fired: an entry that left the backlog
-    // and came back is marked publishing afresh and must be scheduled afresh.
-    if !ctx.published.is_empty() {
-        let live: HashSet<(SignId, PublishKind)> = publishable
-            .iter()
-            .map(|(request, _)| (request.id, PublishKind::of(&request.kind)))
-            .collect();
-        ctx.published.retain(|key| live.contains(key));
-    }
+    let lag = observe_lag(chain, ctx.observe_lag);
 
     let me = ctx.contract_watcher.account_id().clone();
     let now = mpc_utils::time::current_unix_timestamp();
-    for (request, publish) in &publishable {
-        let key = (request.id, PublishKind::of(&request.kind));
-        if ctx.published.contains(&key) {
+    for (request, publish, dispatched) in ctx.backlog.publishable_requests(chain).await {
+        if dispatched {
             continue;
         }
-        let Some(deadline) = publish_deadline(&request.id, publish, &me, chain, ctx.observe_lag)
-        else {
+        let Some(deadline) = publish_deadline(&request.id, &publish, &me, lag) else {
             continue;
         };
         if now < deadline {
             continue;
         }
-
-        ctx.published.insert(key);
         let sign_id = request.id;
+        if !ctx.backlog.mark_publish_dispatched(chain, &sign_id).await {
+            continue;
+        }
+
         tracing::warn!(
             ?sign_id,
             %chain,
             "proposer response not observed in time; publishing failover response"
         );
-        ctx.rpc.publish_with_state(Arc::clone(request), publish);
+        ctx.rpc.publish_with_state(request, &publish);
     }
 }
 

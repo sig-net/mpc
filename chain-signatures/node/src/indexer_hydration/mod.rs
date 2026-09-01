@@ -656,7 +656,7 @@ pub async fn run<T: ChainTelemetry>(
                 }
             }
 
-            crate::stream::ops::publish_failover_due(&mut ctx, Chain::Hydration).await;
+            crate::stream::ops::publish_failover_due(&ctx, Chain::Hydration).await;
             telemetry.block_indexed(number.into());
         }
 

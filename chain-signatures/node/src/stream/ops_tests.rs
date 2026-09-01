@@ -1372,8 +1372,9 @@ async fn live_block_votes_for_checkpoint() {
         .is_err());
 }
 
-/// The sweep fires each entry once, and the two legs share a sign id, so only the
-/// publish kind in the key keeps a fired first leg from suppressing the second.
+/// The sweep fires each entry once, and the two legs share a sign id, so only
+/// clearing the dispatch flag on re-entry keeps a fired leg 1 from suppressing
+/// leg 2.
 #[tokio::test]
 async fn publish_failover_fires_once_per_leg() {
     let backlog = Backlog::new();
@@ -1407,20 +1408,22 @@ async fn publish_failover_fires_once_per_leg() {
         .await;
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
         backlog.clone(),
         sign_tx,
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
+    // No observe lag: this test is about the once-per-leg property, not the gate.
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
 
-    publish_failover_due(&mut ctx, Chain::Solana).await;
+    publish_failover_due(&ctx, Chain::Solana).await;
     assert!(
         next_publish(&mut rpc_rx).await.is_some(),
         "leg 1 publishes once past its deadline"
     );
 
-    publish_failover_due(&mut ctx, Chain::Solana).await;
+    publish_failover_due(&ctx, Chain::Solana).await;
     assert!(
         next_publish(&mut rpc_rx).await.is_none(),
         "the same entry does not fire twice"
@@ -1454,10 +1457,10 @@ async fn publish_failover_fires_once_per_leg() {
         )
         .await;
 
-    publish_failover_due(&mut ctx, Chain::Solana).await;
+    publish_failover_due(&ctx, Chain::Solana).await;
     assert!(
         next_publish(&mut rpc_rx).await.is_some(),
-        "leg 2 fires on its own key, not leg 1's history"
+        "leg 2 fires on its own episode, not leg 1's history"
     );
 }
 
@@ -1507,22 +1510,84 @@ async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
         .await;
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
         backlog.clone(),
         sign_tx,
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
 
-    resume_pending_publish_requests(&mut ctx, Chain::Solana).await;
+    resume_pending_publish_requests(&ctx, Chain::Solana).await;
     assert!(
         next_publish(&mut rpc_rx).await.is_some(),
         "the proposer republishes on catchup"
     );
 
-    publish_failover_due(&mut ctx, Chain::Solana).await;
+    publish_failover_due(&ctx, Chain::Solana).await;
     assert!(
         next_publish(&mut rpc_rx).await.is_none(),
         "the sweep must not republish what the resume already dispatched"
+    );
+}
+
+/// Put an entry in pending-publish with a deadline in the past, whatever the draw.
+async fn insert_publishable(backlog: &Backlog, seed: u8) {
+    let sign_id = mpc_primitives::SignId::new([seed; 32]);
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign(
+            sign_id,
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+        )))
+        .await;
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
+                    signature: Signature::new(
+                        ProjectivePoint::GENERATOR.to_affine(),
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: false,
+                    publishing_since: Some(0),
+                }),
+            },
+        )
+        .await;
+}
+
+/// The deadline being past is not enough: a node that has not caught up is not
+/// reading its chain, so it holds fire rather than guessing.
+#[tokio::test]
+async fn publish_failover_needs_catchup() {
+    let backlog = Backlog::new();
+    insert_publishable(&backlog, 23).await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        false,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    ctx.observe_lag = Some(Duration::ZERO);
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "a node that has not caught up does not fail over"
+    );
+
+    ctx.caught_up = true;
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "the deadline was past all along; catchup is what held it back"
     );
 }
