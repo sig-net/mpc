@@ -43,6 +43,8 @@ impl Output {
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
         // FAB uses Midnight schema capacities and Compact layout, unlike the shared ABI/Borsh encoders.
+        // TODO: Extract FAB serialization when another execution target needs to respond to
+        // Midnight. See https://github.com/sig-net/mpc/issues/1196.
         if format == SerDeserFormat::Fab {
             return midnight::serialize(self, schema_json_bytes);
         }
