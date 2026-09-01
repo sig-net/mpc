@@ -6,11 +6,12 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
 
+use anyhow::Context as _;
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
-    SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PublicKey,
+    SignId, SignKind, Signature,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -761,6 +762,26 @@ impl BacklogEntry {
 
     pub fn sign_id(&self) -> SignId {
         self.request.id
+    }
+
+    /// Check that a respond event's signature is the one this entry asked for.
+    pub fn verify_signature(
+        &self,
+        root_public_key: PublicKey,
+        signature: &Signature,
+    ) -> anyhow::Result<()> {
+        mpc_crypto::verify_signature(
+            root_public_key,
+            self.request.args.epsilon,
+            self.request.args.payload,
+            signature,
+        )
+        .with_context(|| {
+            format!(
+                "respond event carried invalid signature for sign id {:?}",
+                self.sign_id()
+            )
+        })
     }
 
     /// Get the request ID for this transaction

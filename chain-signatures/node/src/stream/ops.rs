@@ -9,7 +9,7 @@ use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     SignatureRespondedEvent,
 };
 
@@ -28,7 +28,7 @@ pub(crate) async fn process_sign_request(
     // duplicate-publish retry loop that no cancellation ever ends, because the
     // failing respond processing is where the cancel lives.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
-        validate_bidirectional_event(event).with_context(|| {
+        event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
         })?;
     }
@@ -43,26 +43,6 @@ pub(crate) async fn process_sign_request(
     ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
 
     Ok(is_new)
-}
-
-/// The deterministic derivations respond processing runs for every bidirectional
-/// request. Shared between admission (reject before the backlog) and the respond
-/// path's failure handling (quarantine, see `process_respond_event`): both must
-/// agree on what "can never advance" means.
-fn validate_bidirectional_event(
-    event: &mpc_primitives::SignBidirectionalEvent,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !event.serialized_transaction.is_empty(),
-        "empty serialized_transaction"
-    );
-    event
-        .target_chain()
-        .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
-    event.epsilon().context("cannot derive epsilon")?;
-    crate::sign_bidirectional::validate_unsigned_transaction(&event.serialized_transaction)
-        .context("undecodable serialized_transaction")?;
-    Ok(())
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -96,21 +76,6 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
     }
 }
 
-fn verify_entry_signature(
-    root_public_key: mpc_primitives::PublicKey,
-    entry: &crate::backlog::BacklogEntry,
-    signature: &Signature,
-    sign_id: SignId,
-) -> anyhow::Result<()> {
-    mpc_crypto::verify_signature(
-        root_public_key,
-        entry.request.args.epsilon,
-        entry.request.args.payload,
-        signature,
-    )
-    .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))
-}
-
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     ctx: &StreamContext,
@@ -127,7 +92,7 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    verify_entry_signature(root_pk, &entry, &respond_event.signature, sign_id)?;
+    entry.verify_signature(root_pk, &respond_event.signature)?;
 
     match &entry.request.kind {
         SignKind::Sign => {
@@ -174,7 +139,7 @@ async fn advance_bidirectional_to_execution(
     // can never advance: leaving it would park it in pending-publish forever, with
     // every backup's sweep republishing a response that is already on chain.
     // Removing it is deterministic across the network, so checkpoints stay aligned.
-    if let Err(err) = validate_bidirectional_event(event) {
+    if let Err(err) = event.validate() {
         tracing::error!(
             ?sign_id,
             ?source_chain,
@@ -271,7 +236,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         );
     }
 
-    verify_entry_signature(root_pk, &entry, &event.signature, sign_id)?;
+    entry.verify_signature(root_pk, &event.signature)?;
 
     if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
