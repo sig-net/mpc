@@ -151,6 +151,9 @@ pub struct SignatureSpawner {
     rpc: RpcChannel,
     backlog: Backlog,
     node_account_id: near_account_id::AccountId,
+    /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
+    /// before we use it again. See `SignTask::desynced_peer_tx`.
+    desynced_peer_tx: mpsc::Sender<Participant>,
 }
 
 impl SignatureSpawner {
@@ -238,6 +241,7 @@ impl SignatureSpawner {
             round,
             limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
+            desynced_peer_tx: self.desynced_peer_tx.clone(),
         };
 
         // Spawn the async task with organizing loop
@@ -485,6 +489,7 @@ impl SignatureSpawnerTask {
         msg_channel: MessageChannel,
         rpc_channel: RpcChannel,
         backlog: Backlog,
+        desynced_peer_tx: mpsc::Sender<Participant>,
     ) -> Self {
         let delay_monitor = DelayMonitor::spawn();
         let spawner = SignatureSpawner {
@@ -501,6 +506,7 @@ impl SignatureSpawnerTask {
             rpc: rpc_channel,
             backlog,
             node_account_id: my_account_id,
+            desynced_peer_tx,
         };
 
         Self {
@@ -565,6 +571,7 @@ mod tests {
             participants.clone(),
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (desynced_peer_tx, _desynced_peer_rx) = mpsc::channel(1);
 
         let delay_monitor = DelayMonitor::spawn();
         let mut spawner = SignatureSpawner {
@@ -581,6 +588,7 @@ mod tests {
             rpc: rpc_channel,
             backlog: Backlog::new(),
             node_account_id: account_id,
+            desynced_peer_tx,
         };
 
         let cfg = ProtocolConfig::default();

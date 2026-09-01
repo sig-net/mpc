@@ -348,6 +348,24 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
+                            // A MissingArtifact reject means that holder never stored the
+                            // presignature, so our holder list for it is stale. State sync
+                            // owns holder lists, so put the peer back through it.
+                            for (peer, _) in counter
+                                .rejects
+                                .iter()
+                                .filter(|(_, reason)| {
+                                    matches!(reason, PositRejectReason::MissingArtifact)
+                                })
+                            {
+                                if ctx.desynced_peer_tx.try_send(*peer).is_err() {
+                                    tracing::warn!(
+                                        ?sign_id,
+                                        ?peer,
+                                        "could not report desynced peer to mesh"
+                                    );
+                                }
+                            }
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
@@ -488,6 +506,7 @@ pub(crate) mod tests {
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (desynced_peer_tx, _desynced_peer_rx) = mpsc::channel(1);
 
         let ctx = SignTask {
             governance,
@@ -501,6 +520,7 @@ pub(crate) mod tests {
             round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,
+            desynced_peer_tx,
         };
 
         let request = IndexedSignRequest::new(

@@ -40,6 +40,7 @@ pub struct Mesh {
     state_tx: watch::Sender<MeshState>,
     state_rx: watch::Receiver<MeshState>,
     synced_peer_rx: mpsc::Receiver<Participant>,
+    desynced_peer_rx: mpsc::Receiver<Participant>,
     my_id: AccountId,
     me: Option<Participant>,
 }
@@ -50,6 +51,7 @@ impl Mesh {
         options: Options,
         my_id: &AccountId,
         synced_peer_rx: mpsc::Receiver<Participant>,
+        desynced_peer_rx: mpsc::Receiver<Participant>,
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
@@ -59,6 +61,7 @@ impl Mesh {
             state_tx,
             state_rx,
             synced_peer_rx,
+            desynced_peer_rx,
             my_id: my_id.clone(),
             me: None,
         }
@@ -118,6 +121,13 @@ impl Mesh {
                         continue;
                     }
                     self.connections.report_node_synced(participant).await;
+                }
+                Some(participant) = self.desynced_peer_rx.recv() => {
+                    if self.me == Some(participant) {
+                        tracing::warn!(?participant, "ignoring self desync report");
+                        continue;
+                    }
+                    self.connections.report_node_desynced(participant).await;
                 }
             }
         }
@@ -252,6 +262,7 @@ mod tests {
         );
 
         let (sync_tx, sync_rx) = mpsc::channel(16);
+        let (_desync_tx, desync_rx) = mpsc::channel(16);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
@@ -259,6 +270,7 @@ mod tests {
             },
             &node_id,
             sync_rx,
+            desync_rx,
         );
 
         let mut mesh_state = mesh.watch();
@@ -340,6 +352,7 @@ mod tests {
         );
 
         let (sync_tx, synced_peer_rx) = mpsc::channel(100);
+        let (_desync_tx, desync_rx) = mpsc::channel(100);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
@@ -347,6 +360,7 @@ mod tests {
             },
             &node_id,
             synced_peer_rx,
+            desync_rx,
         );
         let mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));

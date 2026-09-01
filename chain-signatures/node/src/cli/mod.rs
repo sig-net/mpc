@@ -290,6 +290,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 synced_peer_tx,
+                desynced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
@@ -357,6 +358,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 rpc_channel.clone(),
                 backlog.clone(),
+                desynced_peer_tx,
             )
             .await;
 
@@ -637,6 +639,7 @@ struct MeshHandles {
     contract_watcher: ContractStateWatcher,
     contract_state_tx: watch::Sender<Option<ProtocolState>>,
     synced_peer_tx: mpsc::Sender<Participant>,
+    desynced_peer_tx: mpsc::Sender<Participant>,
 }
 
 impl MeshHandles {
@@ -647,7 +650,14 @@ impl MeshHandles {
     ) -> Self {
         let node_client = NodeClient::new(&message_options);
         let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, synced_peer_rx);
+        let (desynced_peer_tx, desynced_peer_rx) = SyncTask::synced_nodes_channel();
+        let mesh = Mesh::new(
+            &node_client,
+            mesh_options,
+            account_id,
+            synced_peer_rx,
+            desynced_peer_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -657,6 +667,7 @@ impl MeshHandles {
             contract_watcher,
             contract_state_tx,
             synced_peer_tx,
+            desynced_peer_tx,
         }
     }
 }
@@ -765,6 +776,7 @@ impl ProtocolHandles {
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
         backlog: Backlog,
+        desynced_peer_tx: mpsc::Sender<Participant>,
     ) -> Self {
         let config = Config::new(LocalConfig {
             over: override_config.unwrap_or_default(),
@@ -791,6 +803,7 @@ impl ProtocolHandles {
             message_channel.clone(),
             rpc_channel,
             backlog,
+            desynced_peer_tx,
         );
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
