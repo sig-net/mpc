@@ -18,6 +18,7 @@ use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
+use mpc_primitives::SANDBOX_VERSION;
 
 thread_local! {
     static THREAD_NETWORK_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -60,7 +61,6 @@ fn thread_network_name(docker: &DockerClient) -> String {
 
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
-
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -169,6 +169,7 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    pub use_midnight: bool,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -210,6 +211,7 @@ impl Default for ClusterSpawner {
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
+            use_midnight: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -308,6 +310,7 @@ impl ClusterSpawner {
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
+                indexer: Default::default(),
             });
         }
         self
@@ -336,6 +339,11 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    pub fn midnight(mut self) -> Self {
+        self.use_midnight = true;
         self
     }
 
@@ -490,6 +498,21 @@ impl IntoFuture for ClusterSpawner {
                 self.canton = Some(sandbox);
             }
 
+            let midnight = if self.use_midnight {
+                let root_public_key = self
+                    .pregenerated_keys
+                    .public_key()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "Midnight real-stack tests require pregenerated MPC keys so the caller response key exists before node startup"
+                    ))?;
+                let midnight =
+                    crate::midnight::MidnightContext::run(&self, root_public_key).await?;
+                self.cfg.midnight = Some(midnight.config.clone());
+                Some(midnight)
+            } else {
+                None
+            };
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -503,6 +526,7 @@ impl IntoFuture for ClusterSpawner {
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),
+                midnight,
                 nodes,
             };
 
@@ -523,7 +547,7 @@ impl IntoFuture for ClusterSpawner {
 async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
     let mut last_err = None;
     for attempt in 1..=5 {
-        match near_workspaces::sandbox().await {
+        match near_workspaces::sandbox_with_version(SANDBOX_VERSION).await {
             Ok(worker) => return Ok(worker),
             Err(e) => {
                 tracing::warn!(

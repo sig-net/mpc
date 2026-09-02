@@ -3,20 +3,23 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
     test_rpc_channel, test_sign_args,
 };
-use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
 };
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -91,7 +94,7 @@ async fn test_stream_handles_sign_and_respond() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: request.clone(),
+            request: Arc::new(request),
             block_timestamp: None,
         }),
         Some(ChainEvent::Respond(sig_responded)),
@@ -148,10 +151,10 @@ async fn test_stream_handles_sign_and_respond() {
 }
 
 /// Build a `SignKind::SignBidirectional` request from Solana to Ethereum.
-/// Returns `(IndexedSignRequest, SignArgs, SecretKey)`
+/// Returns `(Arc<IndexedSignRequest>, SignArgs, SecretKey)`
 fn build_solana_to_ethereum_bidirectional_request(
     seed: u8,
-) -> (IndexedSignRequest, SignArgs, k256::SecretKey) {
+) -> (Arc<IndexedSignRequest>, SignArgs, k256::SecretKey) {
     use mpc_primitives::SignBidirectionalEvent as SBE;
 
     let sign_id = SignId::new([seed; 32]);
@@ -195,7 +198,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     );
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    (request, args, root_sk)
+    (Arc::new(request), args, root_sk)
 }
 
 /// Receiving a `ChainEvent::SignRequest` with a bidirectional event should
@@ -209,7 +212,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: request.clone(),
+            request: Arc::clone(&request),
             block_timestamp: None,
         }),
         None,
@@ -270,8 +273,6 @@ async fn test_bidirectional_sign_request_enqueues_command() {
 /// the target chain.
 #[tokio::test]
 async fn test_respond_event_advances_to_pending_execution() {
-    use crate::sign_bidirectional::{PublishState, SignStatus};
-
     let backlog = Backlog::new();
     let (request, args, root_sk) = build_solana_to_ethereum_bidirectional_request(7);
     let sign_id = request.id;
@@ -286,11 +287,7 @@ async fn test_respond_event_advances_to_pending_execution() {
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: PublishState {
-                    signature: mpc_sig,
-                    participants: vec![],
-                    is_proposer: true,
-                },
+                publish: Arc::new(PublishState::new(mpc_sig, vec![], true)),
             },
         )
         .await;
@@ -370,7 +367,9 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     // Register an execution watcher for the derived bidirectional tx on the target chain (Ethereum)
     let tx = test_bidirectional_tx(seed, Chain::Solana, Chain::Ethereum);
     let tx_id = tx.id;
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+    backlog
+        .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+        .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
     let ctx = crate::stream::test_utils::make_test_stream_context_with_generator_pk(
@@ -401,7 +400,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
                 req.id, sign_id,
                 "follow-up request should reuse the sign id"
             );
-            match req.kind {
+            match &req.kind {
                 SignKind::RespondBidirectional(rb) => {
                     assert_eq!(rb.tx_id, tx_id, "tx_id should match the watched tx");
                     assert_eq!(
@@ -433,17 +432,18 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let args = test_sign_args(9);
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             args.clone(),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
-        .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+        .await
+        .unwrap();
+    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
@@ -479,23 +479,24 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let replayed_timestamp = recovered_timestamp.saturating_add(1);
 
     seeded_backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             args.clone(),
             Chain::Ethereum,
             recovered_timestamp,
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
-        .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+        .await
+        .unwrap();
+    seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
     let replacement =
         IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
     let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
-            request: replacement,
+            request: Arc::new(replacement),
             block_timestamp: None,
         }),
         Some(ChainEvent::CatchupCompleted),
@@ -541,23 +542,23 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
 
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             test_sign_args(9),
             Chain::Solana,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     backlog
         .set_status(
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+                publish: Arc::new(PublishState::new(
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
-                    is_proposer: true,
-                },
+                    vec![Participant::from(0u32)],
+                    true,
+                )),
             },
         )
         .await;
@@ -607,6 +608,12 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, signature);
         }
+        RpcAction::VoteCheckpoint { checkpoint, .. } => {
+            panic!("unexpected checkpoint vote: {checkpoint:?}");
+        }
+        RpcAction::AbortCheckpoints(chain) => {
+            panic!("unexpected chain abort: {chain:?}");
+        }
     }
 
     run_handle.abort();
@@ -614,30 +621,28 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 
 #[tokio::test]
 async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
-    use crate::sign_bidirectional::SignStatus;
-
     let backlog = Backlog::new();
     let sign_id = SignId::new([78u8; 32]);
     let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
 
     backlog
-        .insert(IndexedSignRequest::sign(
+        .insert(Arc::new(IndexedSignRequest::sign(
             sign_id,
             test_sign_args(10),
             Chain::Solana,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     backlog
         .set_status(
             Chain::Solana,
             &sign_id,
             SignStatus::PendingPublish {
-                publish: crate::sign_bidirectional::PublishState {
+                publish: Arc::new(PublishState::new(
                     signature,
-                    participants: vec![cait_sith::protocol::Participant::from(0u32)],
-                    is_proposer: false,
-                },
+                    vec![Participant::from(0u32)],
+                    false,
+                )),
             },
         )
         .await;

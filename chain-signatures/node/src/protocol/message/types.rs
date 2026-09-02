@@ -36,6 +36,10 @@ pub struct PositMessage {
     pub id: PositProtocolId,
     pub from: Participant,
     pub action: PositAction,
+    /// The rejector's own round, set only alongside a `StaleRound` reject so
+    /// the sender can catch up in one bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_round: Option<Round>,
 }
 
 impl PositMessage {

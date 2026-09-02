@@ -46,11 +46,11 @@ jobs:
           dpm install 3.5.1
           dpm --version
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js
@@ -59,6 +59,12 @@ jobs:
           node-version: '18'
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -122,12 +128,18 @@ jobs:
           dpm install 3.5.1
           dpm --version
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
       - name: Install Node.js
         uses: actions/setup-node@v4

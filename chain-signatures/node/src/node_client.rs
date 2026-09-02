@@ -2,7 +2,7 @@ use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
-use crate::web::{StateView, StatusResponse};
+use crate::web::{CheckpointResponse, StateView, StatusResponse};
 
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -66,12 +66,28 @@ pub enum RequestError {
     MalformedResponse(Utf8Error),
     #[error("io error: {0}")]
     Conversion(String),
+    #[error("peer returned checkpoint version {0}")]
+    MismatchCheckpointVersion(u64),
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeClient {
     http: reqwest::Client,
     options: Options,
+}
+
+fn check_checkpoint_version(version: u64) -> Result<(), RequestError> {
+    if version != crate::CHECKPOINT_VERSION {
+        return Err(RequestError::MismatchCheckpointVersion(version));
+    }
+    Ok(())
+}
+
+fn decode_checkpoint_response(body: &[u8]) -> Result<CheckpointResponse, RequestError> {
+    let resp: CheckpointResponse =
+        ciborium::from_reader(body).map_err(|err| RequestError::Conversion(err.to_string()))?;
+    check_checkpoint_version(resp.version)?;
+    Ok(resp)
 }
 
 impl NodeClient {
@@ -261,8 +277,8 @@ impl NodeClient {
         let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
 
         if status.is_success() {
-            ciborium::from_reader(body.as_ref())
-                .map_err(|err| RequestError::Conversion(err.to_string()))
+            let response = decode_checkpoint_response(body.as_ref())?;
+            Ok(response.checkpoints)
         } else {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
             Err(RequestError::Unsuccessful(status, resp.into(), request_id))
@@ -295,12 +311,86 @@ impl NodeClient {
         let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
 
         if status.is_success() {
-            let checkpoints: HashMap<Chain, Checkpoint> = ciborium::from_reader(body.as_ref())
-                .map_err(|err| RequestError::Conversion(err.to_string()))?;
-            Ok(checkpoints.get(&chain).cloned())
+            let response = decode_checkpoint_response(body.as_ref())?;
+            Ok(response.checkpoints.get(&chain).cloned())
         } else {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
             Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_versioned_checkpoint_responses_decode() {
+        let mut checkpoints = HashMap::new();
+        checkpoints.insert(Chain::Ethereum, Checkpoint::empty(Chain::Ethereum));
+
+        let versioned = CheckpointResponse {
+            version: crate::CHECKPOINT_VERSION,
+            checkpoints: checkpoints.clone(),
+        };
+        let mut versioned_body = Vec::new();
+        ciborium::into_writer(&versioned, &mut versioned_body).unwrap();
+        assert_eq!(
+            decode_checkpoint_response(&versioned_body).unwrap().version,
+            crate::CHECKPOINT_VERSION
+        );
+
+        #[derive(serde::Serialize)]
+        struct MissingVersionResponse {
+            checkpoints: HashMap<Chain, Checkpoint>,
+        }
+
+        let mut missing_version_body = Vec::new();
+        ciborium::into_writer(
+            &MissingVersionResponse { checkpoints },
+            &mut missing_version_body,
+        )
+        .unwrap();
+
+        let decoded_missing = decode_checkpoint_response(&missing_version_body).unwrap();
+        assert_eq!(decoded_missing.version, 0);
+
+        let mut legacy_body = Vec::new();
+        ciborium::into_writer(&HashMap::<Chain, Checkpoint>::new(), &mut legacy_body).unwrap();
+        assert!(decode_checkpoint_response(&legacy_body).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_checkpoint_reports_newer_version() {
+        let mut server = mockito::Server::new_async().await;
+        let response = CheckpointResponse {
+            version: crate::CHECKPOINT_VERSION + 1,
+            checkpoints: HashMap::new(),
+        };
+        let mut body = Vec::new();
+        ciborium::into_writer(&response, &mut body).unwrap();
+        let mock = server
+            .mock("GET", "/checkpoint")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/cbor")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = NodeClient::new(&Options::default());
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.fetch_checkpoint_by_digest(server.url(), Chain::Ethereum, [0u8; 32]),
+        )
+        .await
+        .expect("newer checkpoint version should not stall");
+
+        assert!(matches!(
+            result,
+            Err(RequestError::MismatchCheckpointVersion(version))
+                if version == crate::CHECKPOINT_VERSION + 1
+        ));
+        mock.assert_async().await;
     }
 }

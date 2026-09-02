@@ -1,6 +1,6 @@
 use crate::config::HydrationConfig;
 
-use alloy_sol_types::SolValue;
+use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Context as _, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -14,12 +14,14 @@ use mpc_primitives::{
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
+use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
+use std::sync::Arc;
 use std::time::Duration;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::blocks::Block;
@@ -296,14 +298,6 @@ pub fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
-fn current_unix_timestamp() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
-}
-
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -459,7 +453,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
             if let Some(sign_request) = event.generate_sign_request(entropy) {
                 events_tx
                     .send(ChainEvent::SignRequest {
-                        request: sign_request,
+                        request: Arc::new(sign_request),
                         block_timestamp: None,
                     })
                     .await?;
@@ -499,7 +493,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
             if let Some(sign_request) = event.generate_sign_request(entropy) {
                 events_tx
                     .send(ChainEvent::SignRequest {
-                        request: sign_request,
+                        request: Arc::new(sign_request),
                         block_timestamp: None,
                     })
                     .await?;

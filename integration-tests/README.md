@@ -16,7 +16,7 @@ curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
 ```bash
 rustup target add wasm32-unknown-unknown
 # Or, if forced by a rust-toolchain file:
-rustup target add wasm32-unknown-unknown --toolchain 1.81.0
+rustup target add wasm32-unknown-unknown --toolchain 1.93.0
 ```
 
 3. Install [just](https://just.systems/man/en/packages.html):
@@ -61,6 +61,37 @@ just to test_basic_action helios=1.  # run specific test with Helios
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
+
+### Midnight real-stack test
+
+The Midnight real-stack test exercises the complete Midnight → Ethereum → Midnight response lifecycle. It starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so it is ignored by default and must be selected explicitly.
+
+In addition to the prerequisites above, it requires:
+
+- Docker
+- [Node.js](https://nodejs.org/) 22.13 or newer
+- [cargo-near](https://github.com/near/cargo-near)
+- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/midnight.yml) for the pinned Linux installation
+
+From the repository root, prepare the TypeScript publisher and test caller:
+
+```bash
+cd chain-signatures/midnight-publisher-ts
+npm ci
+npm run build
+npm run compile:real-stack-caller
+npm run typecheck:real-stack
+cd ../..
+```
+
+Build the MPC contract and host node, then run the ignored test:
+
+```bash
+./setup.sh
+cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+```
+
+The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
 
 ## Logging and Tracing
 We have three types of logging available:

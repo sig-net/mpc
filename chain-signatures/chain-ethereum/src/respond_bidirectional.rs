@@ -1,5 +1,7 @@
+mod midnight;
+
+use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::{Bytes, I256, U256};
-use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
@@ -40,6 +42,12 @@ impl Output {
         format: SerDeserFormat,
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
+        // FAB uses Midnight schema capacities and Compact layout, unlike the shared ABI/Borsh encoders.
+        // TODO: Extract FAB serialization when another execution target needs to respond to
+        // Midnight. See https://github.com/sig-net/mpc/issues/1196.
+        if format == SerDeserFormat::Fab {
+            return midnight::serialize(self, schema_json_bytes);
+        }
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
         let data = if self.is_contract_call() {
@@ -51,6 +59,7 @@ impl Output {
         match format {
             SerDeserFormat::Abi => encode_abi(data, &schema),
             SerDeserFormat::Borsh => encode_borsh(data, &schema),
+            SerDeserFormat::Fab => unreachable!(),
         }
     }
 }
@@ -75,8 +84,7 @@ impl TransactionOutput {
     }
 
     pub fn from_call_result(schema_json: &[u8], call_result: &Bytes) -> anyhow::Result<Self> {
-        let schema: Vec<AbiField> = serde_json::from_slice(schema_json)
-            .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
+        let schema = parse_output_schema_fields(schema_json)?;
 
         let types: Vec<DynSolType> = schema
             .iter()
@@ -108,23 +116,50 @@ impl TransactionOutput {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum TraceOutput {
+    NotTraced,
+    Output(Bytes),
+    NoReturnData,
+}
+
 /// Decode a transaction's output and re-serialize it for the respond chain.
 ///
-/// `trace_output` is the `debug_traceTransaction` return data, required when
-/// `is_contract_call` is true.
+/// Contract calls require a `debug_traceTransaction` result. Void-returning
+/// calls may have no return data; in that case, this follows the existing
+/// plain-transfer behavior and synthesizes response defaults from
+/// `respond_serialization_schema` (for example, `bool true`).
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
-    trace_output: Option<&Bytes>,
+    trace_output: TraceOutput,
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
         SerDeserFormat::Abi if is_contract_call => {
-            let trace_output = trace_output.ok_or_else(|| {
-                anyhow::anyhow!("contract-call output extraction requires trace output")
-            })?;
-            TransactionOutput::from_call_result(output_deserialization_schema, trace_output)?
+            let expects_no_output = output_schema_is_empty(output_deserialization_schema)?;
+            match trace_output {
+                TraceOutput::Output(trace_output) if trace_output.is_empty() && expects_no_output => {
+                    TransactionOutput::non_contract_call_output()
+                }
+                TraceOutput::Output(_) if expects_no_output => anyhow::bail!(
+                    "contract-call trace returned output but output schema declares no return values"
+                ),
+                TraceOutput::Output(trace_output) => TransactionOutput::from_call_result(
+                    output_deserialization_schema,
+                    &trace_output,
+                )?,
+                TraceOutput::NoReturnData if expects_no_output => {
+                    TransactionOutput::non_contract_call_output()
+                }
+                TraceOutput::NoReturnData => {
+                    anyhow::bail!("contract-call trace has no return data for non-empty output schema")
+                }
+                TraceOutput::NotTraced => {
+                    anyhow::bail!("contract-call output extraction requires trace output")
+                }
+            }
         }
         _ => TransactionOutput::non_contract_call_output(),
     };
@@ -132,6 +167,10 @@ pub fn build_serialized_output(
     transaction_output
         .output
         .serialize(respond_serialization_format, respond_serialization_schema)
+}
+
+fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
+    Ok(schema_json.is_empty() || parse_output_schema_fields(schema_json)?.is_empty())
 }
 
 fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
@@ -149,10 +188,9 @@ fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
 }
 
 fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
-    assert!(
-        schema.len() == 1,
-        "borsh schema must have exactly one field"
-    );
+    if schema.len() != 1 {
+        anyhow::bail!("borsh schema must have exactly one field");
+    }
     let val = data
         .fields
         .get(&schema[0].name)
@@ -228,6 +266,11 @@ fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 
+fn parse_output_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
+    serde_json::from_slice(schema_json_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))
+}
+
 /// Parse a schema JSON describing the response shape. Accepts a JSON array of
 /// `{name, type}` objects (canonical form), a single object (treated as a
 /// one-field schema), or a bare string (treated as a single typed field with
@@ -295,6 +338,78 @@ mod tests {
         Bytes::from(buf.to_vec())
     }
 
+    fn abi_bool(value: bool) -> Bytes {
+        abi_uint256(u64::from(value))
+    }
+
+    #[test]
+    fn all_response_formats_share_evm_decode_acceptance() {
+        let output_schema = br#"[{"name":"message","type":"string"}]"#;
+        let trace = Bytes::from(
+            DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
+        );
+
+        let abi_result = build_serialized_output(
+            true,
+            output_schema,
+            TraceOutput::Output(trace.clone()),
+            SerDeserFormat::Abi,
+            output_schema,
+        );
+        let fab_result = build_serialized_output(
+            true,
+            output_schema,
+            TraceOutput::Output(trace),
+            SerDeserFormat::Fab,
+            br#"[{"name":"message","type":"string","maxBytes":32}]"#,
+        );
+
+        assert_eq!(abi_result.is_ok(), fab_result.is_ok());
+    }
+
+    #[test]
+    fn build_serialized_output_fab_contract_bool() {
+        let bool_schema = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            bool_schema,
+            TraceOutput::Output(abi_bool(true)),
+            SerDeserFormat::Fab,
+            bool_schema,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
+    }
+
+    #[test]
+    fn build_serialized_output_fab_non_contract_default_skips_output_schema() {
+        let out = build_serialized_output(
+            false,
+            b"not JSON",
+            TraceOutput::NotTraced,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
+    }
+
+    #[test]
+    fn build_serialized_output_fab_void_call_uses_default() {
+        let out = build_serialized_output(
+            true,
+            b"[]",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
+    }
+
     #[test]
     fn build_serialized_output_decodes_contract_call() {
         // A contract-call tx whose function returned `uint256` 12345; `trace`
@@ -303,7 +418,7 @@ mod tests {
         let out = build_serialized_output(
             true,
             UINT256_SCHEMA,
-            Some(&trace),
+            TraceOutput::Output(trace.clone()),
             SerDeserFormat::Abi,
             UINT256_SCHEMA,
         )
@@ -315,9 +430,14 @@ mod tests {
     fn build_serialized_output_non_contract_call_uses_defaults() {
         // `default_output_for_non_contract_call` only supports `bool`/`string`.
         let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
-        let out =
-            build_serialized_output(false, bool_schema, None, SerDeserFormat::Abi, bool_schema)
-                .unwrap();
+        let out = build_serialized_output(
+            false,
+            bool_schema,
+            TraceOutput::NotTraced,
+            SerDeserFormat::Abi,
+            bool_schema,
+        )
+        .unwrap();
         // A plain transfer synthesizes a default: bool -> true, ABI-encoded as
         // a 32-byte word.
         let mut expected = vec![0u8; 32];
@@ -330,7 +450,7 @@ mod tests {
         let err = build_serialized_output(
             true,
             UINT256_SCHEMA,
-            None,
+            TraceOutput::NotTraced,
             SerDeserFormat::Abi,
             UINT256_SCHEMA,
         );
@@ -338,5 +458,122 @@ mod tests {
             err.is_err(),
             "contract call without trace output must error"
         );
+    }
+
+    #[test]
+    fn build_serialized_output_accepts_missing_trace_output_for_empty_schema() {
+        let empty_schema = b"[]";
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            empty_schema,
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Abi,
+            bool_schema,
+        )
+        .unwrap();
+        let mut expected = vec![0u8; 32];
+        expected[31] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn build_serialized_output_accepts_missing_trace_output_for_empty_schema_bytes() {
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Abi,
+            bool_schema,
+        )
+        .unwrap();
+        let mut expected = vec![0u8; 32];
+        expected[31] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn build_serialized_output_void_return_borsh_response() {
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Borsh,
+            bool_schema,
+        )
+        .unwrap();
+        assert_eq!(out, vec![1u8]);
+    }
+
+    #[test]
+    fn build_serialized_output_accepts_explicit_empty_trace_output_for_empty_schema() {
+        let trace = Bytes::default();
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::Output(trace),
+            SerDeserFormat::Abi,
+            bool_schema,
+        )
+        .unwrap();
+        let mut expected = vec![0u8; 32];
+        expected[31] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn build_serialized_output_rejects_missing_trace_output_for_non_empty_schema() {
+        let err = build_serialized_output(
+            true,
+            UINT256_SCHEMA,
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Abi,
+            UINT256_SCHEMA,
+        )
+        .expect_err("missing trace output should fail for non-empty schema");
+        assert!(format!("{err}").contains("no return data for non-empty output schema"));
+    }
+
+    #[test]
+    fn build_serialized_output_rejects_empty_borsh_response_schema() {
+        let err = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Borsh,
+            b"[]",
+        )
+        .expect_err("empty borsh response schema should fail");
+        assert!(format!("{err}").contains("borsh schema must have exactly one field"));
+    }
+
+    #[test]
+    fn build_serialized_output_rejects_empty_byte_response_schema() {
+        let err = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Abi,
+            b"",
+        )
+        .expect_err("empty response schema bytes should fail");
+        assert!(format!("{err}").contains("schema JSON parse failed"));
+    }
+
+    #[test]
+    fn build_serialized_output_rejects_output_when_schema_declares_no_values() {
+        let trace = abi_uint256(1);
+        let err = build_serialized_output(
+            true,
+            b"",
+            TraceOutput::Output(trace),
+            SerDeserFormat::Abi,
+            UINT256_SCHEMA,
+        )
+        .expect_err("output with an empty output schema should fail");
+        assert!(format!("{err}").contains("schema declares no return values"));
     }
 }

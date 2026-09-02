@@ -32,8 +32,8 @@ config, not constructed by hand.
 | `network`                 | `NETWORK`           | no        | default `sepolia` |
 | `consensus_rpc_http_url`  | —                   | helios     | CL RPC for the light-client backend |
 | `helios_data_dir`         | —                   | helios     | where Helios stores its synced state |
-| `refresh_finalized_interval` | —                | no        | blocks between finalized-head polls |
-| `optimistic_requests`     | `OPTIMISTIC`        | no        | default on; set `0` to disable optimistic requests and exercise per-block `wait_for_finalized_block` polling |
+| `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
+| `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
 | `light_client`            | —                   | no        | set `true` to select the Helios backend (`helios` feature required) |
 
 ## Benchmarking catchup
@@ -72,6 +72,38 @@ RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
 ```
 
+### Reference numbers
+
+Current catchup baseline for a 100-block catchup over an already-finalized
+range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
+`REFRESH_FINALIZED_INTERVAL`).
+
+#### Provider cost
+
+> NOTE: Using Alchemy CU scheme, but per-request method weights are similar across providers, so these are a reasonable cost estimates in general
+
+| method | calls | compute CU | throughput CU |
+|---|---|---|---|
+| `eth_getBlockByNumber(Finalized)` | 1 | 20 | 20 |
+| `eth_getBlockByNumber(batch)` | 100 | 2000 | 2000 |
+| `eth_getLogs(batch)` | 9 | 540 | 540 |
+| **total (100 blocks)** | **110** | **2560** | **2560** |
+
+#### Speed (reference snapshot)
+
+| metric | local eRPC | Alchemy (cold) |
+|---|---|---|
+| catchup wall time | 0.15 s | 1.12 s |
+| blocks/s | 668 | 89 |
+| `eth_getBlockByNumber(Finalized)` | 1 | 1 |
+| `eth_getBlockByNumber(batch)` | 100 | 100 |
+| `eth_getLogs(batch)` | 9 | 9 |
+| `batch_fetch_ms` | 132 | 1115 |
+| `process_ms` | 18 | 4 |
+
+> NOTE: Wall-clock figures are a reference snapshot (endpoint tier, latency, and
+> load dependent), not a guarantee.
+
 ### Watchers benchmark
 
 `examples/bench_watchers.rs` drives `EthereumIndexer` over a fixed historical
@@ -97,7 +129,7 @@ cargo run --example bench_watchers --features bench
 | `END`            | yes       | exclusive end of the range |
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
 | `NETWORK`        | no        | default `sepolia` |
-| `OPTIMISTIC`     | no        | `1` (default) enables optimistic requests; `0` exercises finality polling |
+| `OPTIMISTIC`     | no        | `0` (default, production) waits for finality via the watcher; `1` enables the demo/soft-tip path |
 | `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `50`) |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 

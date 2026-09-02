@@ -6,7 +6,6 @@ description = "Hydration chain integration for MPC"
 
 [dependencies]
 alloy.workspace = true
-alloy-sol-types.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
@@ -16,6 +15,7 @@ k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 parity-scale-codec = { version = "3", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

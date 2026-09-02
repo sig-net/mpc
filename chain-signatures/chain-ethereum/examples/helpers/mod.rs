@@ -4,8 +4,10 @@ use anyhow::anyhow;
 use futures_util::StreamExt;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
+    utils::{retry::SharedBackoff, stream::chain_event_channel},
+    MockStateManager, NoopChainTelemetry,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Read a required environment variable, erroring if it's not set.
 pub fn opt_env(name: &str) -> anyhow::Result<String> {
@@ -36,7 +38,8 @@ pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 }
 
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
-/// (`RPC_URL`, `CONTRACT_ADDRESS`, `NETWORK`, `OPTIMISTIC`).
+/// (`RPC_URL`, `CONTRACT_ADDRESS`, `NETWORK`, `OPTIMISTIC`,
+/// `REFRESH_FINALIZED_INTERVAL`).
 pub fn make_config() -> anyhow::Result<EthConfig> {
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
@@ -52,8 +55,10 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
             .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
         network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
         helios_data_path: "/tmp/helios-bench".to_string(),
-        refresh_finalized_interval: 1,
-        optimistic_requests: env_bool("OPTIMISTIC", true)?,
+        // Production finality-watch cadence; The watcher drives finality in OPTIMISTIC=0 mode.
+        refresh_finalized_interval: env_u64("REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
+        // Default to the production (non-optimistic) path;
+        optimistic_requests: env_bool("OPTIMISTIC", false)?,
         light_client: false,
         rpc: Default::default(),
         gas: Default::default(),
@@ -83,8 +88,14 @@ pub async fn run_catchup(
     end: u64,
     label: &'static str,
 ) -> anyhow::Result<u64> {
-    let indexer = EthereumIndexer::new(config, state, NoopChainTelemetry).await?;
+    let indexer =
+        EthereumIndexer::new(config, state, NoopChainTelemetry, SharedBackoff::new()).await?;
     let (events_tx, mut events_rx) = chain_event_channel();
+
+    // Maintain the finalized head the same way `run()` does, so OPTIMISTIC=0
+    // (the default) exercises the production finality-watch path.
+    let cancel = CancellationToken::new();
+    let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
 
     tracing::info!("{label}: starting catchup ending at {end}");
 
@@ -101,6 +112,8 @@ pub async fn run_catchup(
         indexer.process_catchup_item(&events_tx, &block).await?;
         count += 1;
     }
+
+    cancel.cancel();
 
     // Fires the final `report_metrics("catchup_completed")` log under `bench`.
     #[cfg(feature = "bench")]

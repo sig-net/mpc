@@ -4,7 +4,7 @@ use alloy::consensus::SignableTransaction;
 use alloy::consensus::TxEip1559;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
-use alloy_sol_types::SolValue;
+use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::Scalar;
 use mpc_chain_integration_core::utils::hashing::hash_payload;

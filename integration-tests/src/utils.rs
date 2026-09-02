@@ -6,8 +6,11 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
-use std::collections::HashSet;
 use std::sync::{Mutex, Once};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use tracing_subscriber::EnvFilter;
 
 /// Tracks ports already handed out by `pick_unused_port` within this process
@@ -123,6 +126,63 @@ pub async fn vote_leave(
     Ok(())
 }
 
+/// Send `vote_threshold` for every participant and verify the contract
+/// transitions into resharing with the new threshold.
+pub async fn vote_threshold(
+    accounts: &[&Account],
+    mpc_contract: &AccountId,
+    new_threshold: u64,
+) -> anyhow::Result<()> {
+    let vote_futures = accounts.iter().map(|account| {
+        tracing::info!(
+            "{} voting for new threshold {}",
+            account.id(),
+            new_threshold
+        );
+        account
+            .call(mpc_contract, "vote_threshold")
+            .args_json(serde_json::json!({
+                "new_threshold": new_threshold
+            }))
+            .transact()
+    });
+
+    let mut started_resharing = false;
+    let mut errs = Vec::new();
+    for result in futures::future::join_all(vote_futures).await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                errs.push(anyhow::anyhow!("workspaces/rpc failed: {err:?}"));
+                continue;
+            }
+        };
+
+        if !outcome.failures().is_empty() {
+            errs.push(anyhow::anyhow!(
+                "contract(vote_threshold) failure: {:?}",
+                outcome.failures()
+            ))
+        } else {
+            started_resharing = started_resharing || outcome.json::<bool>().unwrap_or(false);
+        }
+    }
+
+    if !errs.is_empty() {
+        let err = format!("failed to vote_threshold: {errs:#?}");
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    if !started_resharing {
+        let err = "failed to vote_threshold: network did not start resharing";
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    Ok(())
+}
+
 pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
 where
     Uri: TryFrom<U>,
@@ -180,8 +240,44 @@ fn reserve_port_block(start: u16, len: usize) -> bool {
     true
 }
 
-/// Request an unused port from the OS, guaranteed unique within this process.
+/// Returns the range of ports allocated to this process's slice of the port range.
+/// This ensures that each process gets a unique subset of the port range, preventing conflicts between parallel test processes.
+fn process_port_slice() -> std::ops::RangeInclusive<u16> {
+    const SLICE_LEN: u16 = 160;
+    const NUM_SLICES: u32 = 100;
+    const BASE: u16 = 16_000;
+
+    // Use the process ID and the NEXTEST_RUN_ID environment variable to determine a unique slice for this process.
+    let pid = std::process::id();
+    let execution_id = std::env::var("NEXTEST_RUN_ID")
+        .ok()
+        .and_then(|id| id.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let unique_id = (pid ^ execution_id) % NUM_SLICES;
+    let start = BASE + (unique_id as u16) * SLICE_LEN;
+    start..=start + SLICE_LEN - 1
+}
+
+/// Request an unused port, guaranteed unique within this process and
+/// allocated from this process's slice of the port range.
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
+    let slice = process_port_slice();
+    let (lo, hi) = (*slice.start(), *slice.end());
+    let span = (hi - lo) as u32;
+    let offset = rand::thread_rng().gen_range(0..=span);
+
+    for i in 0..=span {
+        // reserve_port_block checks both the in-process dedup set and that the
+        // port is actually bindable right now.
+        let port = lo + ((offset + i) % (span + 1)) as u16;
+        if reserve_port_block(port, 1) {
+            return Ok(port);
+        }
+    }
+
+    // Slice exhausted: fall back to an OS-assigned ephemeral port with the
+    // original drop-and-dedup behavior.
     // Port 0 means the OS gives us an unused port.
     // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
     // allow inbound connections on macOS.
@@ -239,17 +335,40 @@ pub async fn pick_preferred_or_unused_port(preferred: u16) -> u16 {
     pick_preferred_or_unused_port_block(preferred, 1).await
 }
 
-pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
-        loop {
-            match get(addr).await {
-                Ok(status) if status == StatusCode::OK => break,
-                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+/// Wait until the node's web server answers `GET /` with 200.
+pub async fn ping_until_ok(
+    process: &mut async_process::Child,
+    addr: &str,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        match process.try_status() {
+            Ok(Some(status)) => {
+                anyhow::bail!(
+                    "node process exited with {status} while waiting for its web server on {addr}"
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                anyhow::bail!("failed to check node process status while pinging {addr}: {err}");
             }
         }
-    })
-    .await?;
-    Ok(())
+
+        if let Ok(status) = get(addr).await {
+            if status == StatusCode::OK {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "node web server on {addr} did not respond within {timeout}s \
+                 (process still running; likely failed to bind its web port)"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 // Account with short name for testing

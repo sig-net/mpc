@@ -1,5 +1,6 @@
 pub mod config;
 pub mod errors;
+mod migration;
 pub mod primitives;
 pub mod state;
 pub mod update;
@@ -12,31 +13,35 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon_checkpoint, derive_epsilon_near, derive_key, kdf::check_ec_signature,
-    near_public_key_to_affine_point, ScalarExt as _,
+    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
+    ScalarExt as _,
 };
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature, LATEST_MPC_KEY_VERSION};
-use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
+use mpc_primitives::ConsensusCheckpointDigest;
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
-    PromiseError, PublicKey,
+    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes, Read,
-    SignPoll, SignRequest, SignedCheckpoint, StorageKey, View, Votes, YieldIndex,
+    CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
+    InternalSignRequest, Participants, PendingRequest, PkVotes, Read, SignPoll, SignRequest,
+    StorageKey, View, Votes, YieldIndex,
 };
+use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
+use crate::primitives::ThresholdVotes;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
 pub use state::{
-    InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
+    InitializingContractState, InitializingContractStateView, ProtocolContractState,
+    ProtocolContractStateView, ResharingContractState, RunningContractState,
+    RunningContractStateView,
 };
 
 const GAS_FOR_SIGN_CALL: Gas = Gas::from_tgas(50);
@@ -56,73 +61,32 @@ const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
 // Maximum number of concurrent requests
 const MAX_CONCURRENT_REQUESTS: u32 = 128;
 
-#[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
-pub enum VersionedMpcContract {
-    V0(MpcContract),
-}
+/// Maximum accepted byte length for a candidate node URL.
+pub const MAX_JOIN_URL_LEN: usize = 2048;
 
-impl Default for VersionedMpcContract {
-    fn default() -> Self {
-        env::panic_str("Calling default not allowed.");
-    }
-}
+/// Fixed anti-spam deposit required to join as a candidate.
+pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[near(contract_state)]
+#[derive(Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, SignedCheckpoint>,
+    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    checkpoint_votes: CheckpointVotes,
 }
 
-impl MpcContract {
-    fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
-        self.pending_requests.insert(
-            sign_id,
-            PendingRequest {
-                payload,
-                epsilon,
-                index: None,
-            },
-        );
-    }
-
-    fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
-        if let Some(request) = self.pending_requests.get_mut(sign_id) {
-            request.index = Some(YieldIndex { data_id });
-        }
-    }
-
-    fn remove_request(&mut self, sign_id: &SignId) -> Result<PendingRequest, Error> {
-        self.pending_requests
-            .remove(sign_id)
-            .ok_or(InvalidParameters::RequestNotFound.into())
-    }
-
-    pub fn init(
-        threshold: usize,
-        candidates: BTreeMap<AccountId, CandidateInfo>,
-        config: Option<Config>,
-    ) -> Self {
-        MpcContract {
-            protocol_state: ProtocolContractState::Initializing(InitializingContractState {
-                candidates: Candidates { candidates },
-                threshold,
-                pk_votes: PkVotes::new(),
-            }),
-            pending_requests: IterableMap::new(StorageKey::PendingRequests),
-            proposed_updates: ProposedUpdates::default(),
-            config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-        }
+impl Default for MpcContract {
+    fn default() -> Self {
+        env::panic_str("Calling default not allowed.");
     }
 }
 
 // User contract API
-#[near_bindgen]
-impl VersionedMpcContract {
+#[near]
+impl MpcContract {
     /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
     /// we ask for a small deposit for each signature request.
@@ -195,7 +159,7 @@ impl VersionedMpcContract {
     /// This is the root public key combined from all the public keys of the participants.
     #[handle_result]
     pub fn public_key(&self) -> Result<PublicKey, Error> {
-        match self.state() {
+        match self.state_ref() {
             ProtocolContractState::Running(state) => Ok(state.public_key.clone()),
             ProtocolContractState::Resharing(state) => Ok(state.public_key.clone()),
             _ => Err(InvalidState::ProtocolStateNotRunningOrResharing.into()),
@@ -247,8 +211,8 @@ impl VersionedMpcContract {
 }
 
 // Node API
-#[near_bindgen]
-impl VersionedMpcContract {
+#[near]
+impl MpcContract {
     #[handle_result]
     pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
@@ -291,10 +255,11 @@ impl VersionedMpcContract {
             return Err(RespondError::InvalidSignature.into());
         }
 
-        env::promise_yield_resume(&index.data_id, &serde_json::to_vec(&signature).unwrap());
+        env::promise_yield_resume(&index.data_id, serde_json::to_vec(&signature).unwrap());
         Ok(())
     }
 
+    #[payable]
     #[handle_result]
     pub fn join(
         &mut self,
@@ -302,6 +267,22 @@ impl VersionedMpcContract {
         cipher_pk: primitives::hpke::PublicKey,
         sign_pk: PublicKey,
     ) -> Result<(), Error> {
+        let url_len = url.len();
+        if url_len > MAX_JOIN_URL_LEN {
+            return Err(JoinError::UrlTooLong.message(format!(
+                "Provided {}, maximum {}",
+                url_len, MAX_JOIN_URL_LEN,
+            )));
+        }
+        let deposit = env::attached_deposit();
+        if deposit < REQUIRED_JOIN_DEPOSIT {
+            return Err(InvalidParameters::InsufficientDeposit.message(format!(
+                "Attached {}, Required {}",
+                deposit.as_yoctonear(),
+                REQUIRED_JOIN_DEPOSIT.as_yoctonear(),
+            )));
+        }
+
         log!(
             "join: signer={}, url={}, cipher_pk={:?}, sign_pk={:?}",
             env::signer_account_id(),
@@ -319,6 +300,13 @@ impl VersionedMpcContract {
                 let signer_account_id = env::signer_account_id();
                 if participants.contains_key(&signer_account_id) {
                     return Err(JoinError::JoinAlreadyParticipant.into());
+                }
+                if let Some(diff) = deposit.checked_sub(REQUIRED_JOIN_DEPOSIT) {
+                    if diff > NearToken::from_yoctonear(0) {
+                        Promise::new(signer_account_id.clone())
+                            .transfer(diff)
+                            .detach();
+                    }
                 }
                 candidates.insert(
                     signer_account_id.clone(),
@@ -390,6 +378,7 @@ impl VersionedMpcContract {
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
                     new_participants.insert(candidate, candidate_info.clone().into());
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
@@ -424,6 +413,7 @@ impl VersionedMpcContract {
                 participants,
                 threshold,
                 public_key,
+                candidates,
                 leave_votes,
                 ..
             }) => {
@@ -438,12 +428,73 @@ impl VersionedMpcContract {
                 if voted.len() >= *threshold {
                     let mut new_participants = participants.clone();
                     new_participants.remove(&kick);
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
                         threshold: *threshold,
                         new_threshold: compute_threshold(new_participants.len()),
                         new_participants,
+                        public_key: public_key.clone(),
+                        finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
+    /// Vote to change the running threshold without otherwise modifying the
+    /// participant set. Each participant backs at most one proposed threshold
+    /// at a time (casting a new vote removes any prior vote). The first
+    /// proposed threshold to reach the current `threshold` triggers a resharing
+    /// whose `new_threshold` is the proposed value. Voting for the same
+    /// threshold as the current one in the network will remove a prior vote.
+    #[handle_result]
+    pub fn vote_threshold(&mut self, new_threshold: usize) -> Result<bool, Error> {
+        log!(
+            "vote_threshold: signer={}, new_threshold={}",
+            env::signer_account_id(),
+            new_threshold
+        );
+        let voter = self.voter()?;
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                epoch,
+                participants,
+                threshold,
+                public_key,
+                candidates,
+                threshold_votes,
+                ..
+            }) => {
+                // same threshold removes prior vote
+                if new_threshold == *threshold {
+                    threshold_votes.remove(&voter);
+                    return Ok(false);
+                }
+
+                let participants_len = participants.len();
+                let min_threshold = compute_threshold(participants_len);
+                let max_threshold = participants_len.saturating_sub(1);
+                if new_threshold < min_threshold || new_threshold > max_threshold {
+                    return Err(VoteError::ThresholdOutOfRange.into());
+                }
+                if threshold_votes.vote(new_threshold, voter) >= *threshold {
+                    // Same participants, different threshold; the resharing
+                    // protocol re-shares the key with a new threshold.
+                    candidates.clear();
+                    *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
+                        old_epoch: *epoch,
+                        old_participants: participants.clone(),
+                        threshold: *threshold,
+                        new_threshold,
+                        new_participants: participants.clone(),
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -475,14 +526,17 @@ impl VersionedMpcContract {
                 let voted = pk_votes.entry(public_key.clone());
                 voted.insert(voter);
                 if voted.len() >= *threshold {
+                    let participants = Participants::from(&*candidates);
+                    candidates.clear();
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: 0,
-                        participants: candidates.clone().into(),
+                        participants,
                         threshold: *threshold,
                         public_key,
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -529,6 +583,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -570,6 +625,7 @@ impl VersionedMpcContract {
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
+                        threshold_votes: ThresholdVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -610,7 +666,7 @@ impl VersionedMpcContract {
         // Refund the difference if the propser attached more than required.
         if let Some(diff) = attached.checked_sub(required) {
             if diff > NearToken::from_yoctonear(0) {
-                Promise::new(proposer).transfer(diff);
+                Promise::new(proposer).transfer(diff).detach();
             }
         }
 
@@ -649,8 +705,8 @@ impl VersionedMpcContract {
 }
 
 // Contract developer helper API
-#[near_bindgen]
-impl VersionedMpcContract {
+#[near]
+impl MpcContract {
     #[handle_result]
     #[init]
     pub fn init(
@@ -670,7 +726,23 @@ impl VersionedMpcContract {
             return Err(InitError::ThresholdTooHigh.into());
         }
 
-        Ok(Self::V0(MpcContract::init(threshold, candidates, config)))
+        let mut stored_candidates = Candidates::new();
+        for (account_id, info) in candidates {
+            stored_candidates.insert(account_id, info);
+        }
+
+        Ok(Self {
+            protocol_state: ProtocolContractState::Initializing(InitializingContractState {
+                candidates: stored_candidates,
+                threshold,
+                pk_votes: PkVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: config.unwrap_or_default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        })
     }
 
     // This function can be used to transfer the MPC network to a new contract.
@@ -683,7 +755,7 @@ impl VersionedMpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
-        checkpoints: Option<BTreeMap<Chain, SignedCheckpoint>>,
+        checkpoints: Option<BTreeMap<Chain, ConsensusCheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
@@ -700,14 +772,14 @@ impl VersionedMpcContract {
             return Err(InitError::ThresholdTooHigh.into());
         }
 
-        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpoints);
+        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
         if let Some(checkpoints) = checkpoints {
             for (chain, checkpoint) in checkpoints {
                 latest_checkpoints.insert(chain, checkpoint);
             }
         }
 
-        Ok(Self::V0(MpcContract {
+        Ok(Self {
             protocol_state: ProtocolContractState::Running(RunningContractState {
                 epoch,
                 participants,
@@ -716,12 +788,14 @@ impl VersionedMpcContract {
                 candidates: Candidates::new(),
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
             latest_checkpoints,
-        }))
+            checkpoint_votes: CheckpointVotes::new(),
+        })
     }
 
     /// This will be called internally by the contract to migrate the state when a new contract
@@ -734,80 +808,50 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        #[derive(BorshDeserialize)]
-        struct OldMpcContract {
-            protocol_state: ProtocolContractState,
-            pending_requests: IterableMap<SignId, PendingRequest>,
-            proposed_updates: ProposedUpdates,
-            config: Config,
-        }
-
-        #[derive(BorshDeserialize)]
-        enum VersionedOldMpcContract {
-            V0(OldMpcContract),
-        }
-
         let state_bytes =
             env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
-
-        // 1. Try deserializing into the current VersionedMpcContract (idempotent path)
-        if let Ok(new_contract) = VersionedMpcContract::try_from_slice(&state_bytes) {
-            log!("No migration needed: already deserialized into current VersionedMpcContract");
-            return Ok(new_contract);
-        }
-
-        // 2. Try deserializing as VersionedOldMpcContract
-        if let Ok(VersionedOldMpcContract::V0(old_contract)) =
-            VersionedOldMpcContract::try_from_slice(&state_bytes)
-        {
-            log!("Migrating from VersionedOldMpcContract to VersionedMpcContract");
-            let new_contract = MpcContract {
-                protocol_state: old_contract.protocol_state,
-                pending_requests: old_contract.pending_requests,
-                proposed_updates: old_contract.proposed_updates,
-                config: old_contract.config,
-                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-            };
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        // 3. Try deserializing as OldMpcContract directly (older unversioned state)
-        if let Ok(old_contract) = OldMpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating from OldMpcContract directly to VersionedMpcContract");
-            let new_contract = MpcContract {
-                protocol_state: old_contract.protocol_state,
-                pending_requests: old_contract.pending_requests,
-                proposed_updates: old_contract.proposed_updates,
-                config: old_contract.config,
-                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-            };
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        // 4. Try deserializing as current MpcContract directly (just in case)
-        if let Ok(new_contract) = MpcContract::try_from_slice(&state_bytes) {
-            log!("Migrating from MpcContract directly to VersionedMpcContract");
-            return Ok(VersionedMpcContract::V0(new_contract));
-        }
-
-        Err(InvalidState::ContractStateIsMissing
-            .message("Failed to deserialize state into any known contract format"))
+        migration::migrate(&state_bytes)
     }
 
-    pub fn state(&self) -> &ProtocolContractState {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.protocol_state,
+    pub fn state(&self) -> ProtocolContractStateView {
+        match self.state_ref() {
+            ProtocolContractState::NotInitialized => ProtocolContractStateView::NotInitialized,
+            ProtocolContractState::Initializing(state) => {
+                ProtocolContractStateView::Initializing(state.into())
+            }
+            ProtocolContractState::Running(state) => {
+                ProtocolContractStateView::Running(state.into())
+            }
+            ProtocolContractState::Resharing(state) => {
+                ProtocolContractStateView::Resharing(state.clone())
+            }
         }
     }
 
     pub fn config(&self) -> &Config {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.config,
-        }
+        &self.config
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&SignedCheckpoint> {
-        self.checkpoints().get(&chain)
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
+        self.latest_checkpoints().get(&chain)
+    }
+
+    /// Returns information and admission votes for a running candidate.
+    pub fn candidate_info(&self, account_id: AccountId) -> Option<CandidateEntry> {
+        match self.state_ref() {
+            ProtocolContractState::Running(state) => {
+                state.candidates.get(&account_id).cloned().map(|info| {
+                    let join_votes = state
+                        .join_votes
+                        .votes
+                        .get(&account_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    CandidateEntry { info, join_votes }
+                })
+            }
+            _ => None,
+        }
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -815,14 +859,12 @@ impl VersionedMpcContract {
 
         for read in reads {
             let view = match read {
-                Read::State => View::State(self.state().clone()),
+                Read::State => View::State(self.state()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
                         .into_iter()
-                        .filter_map(|chain| {
-                            self.checkpoints().get(&chain).map(|cp| (chain, cp.clone()))
-                        })
+                        .filter_map(|chain| self.latest_checkpoint(chain).map(|cp| (chain, *cp)))
                         .collect(),
                 ),
             };
@@ -832,52 +874,95 @@ impl VersionedMpcContract {
         views
     }
 
+    /// Vote for a checkpoint digest.
+    ///
+    /// Checkpoints are ordered by `(chain, height)`. The latest checkpoint is
+    /// advanced only after votes from at least the protocol threshold of
+    /// participants have been collected.
+    ///
+    /// The submitted checkpoint is handled as follows:
+    ///
+    /// - If the contract already has a checkpoint at a greater height, the
+    ///   request is rejected with [`CheckpointError::CheckpointBehind`]. No
+    ///   vote is recorded or removed.
+    /// - If the contract already has a checkpoint at the same height with the
+    ///   same digest, the request is an idempotent no-op. No vote is recorded
+    ///   or removed.
+    /// - If the contract already has a checkpoint at the same height with a
+    ///   different digest, the request is rejected as conflicting.
+    /// - If the submitted height is greater than the current checkpoint, the
+    ///   caller votes for the submitted digest. Competing digests at the same
+    ///   unfinalized height may retain overlapping voters.
+    /// - If the resulting vote count is below the threshold, the vote remains
+    ///   stored and the latest checkpoint is unchanged.
+    /// - If the resulting vote count reaches the threshold, the submitted
+    ///   checkpoint becomes the latest checkpoint. Votes for that chain at
+    ///   this height or any lower height are removed; votes for higher heights
+    ///   are retained.
+    ///
+    /// The return value is `Ok(true)` when the submitted checkpoint is already
+    /// settled at the same height or becomes settled during this call. It is
+    /// `Ok(false)` when the vote was recorded but more votes are still
+    /// required.
+    ///
+    /// Returns an error if the protocol is not running, the caller is not an
+    /// eligible participant, the submitted checkpoint is behind the latest
+    /// checkpoint, or the caller submits a different digest for an already
+    /// finalized height.
     #[handle_result]
-    pub fn respond_checkpoint(
+    pub fn vote_checkpoint(
         &mut self,
         checkpoint: ConsensusCheckpointDigest,
-        signature: Signature,
-    ) -> Result<(), Error> {
-        let protocol_state = self.state();
-        if !matches!(protocol_state, ProtocolContractState::Running(_)) {
-            return Err(InvalidState::ProtocolStateNotRunning.into());
-        }
+    ) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        let threshold = match self.state_ref() {
+            ProtocolContractState::Running(state) => state.threshold,
+            _ => return Err(InvalidState::ProtocolStateNotRunning.into()),
+        };
 
-        let root_pk = near_public_key_to_affine_point(self.public_key()?);
-        let epsilon = derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
-        let expected_public_key = derive_key(root_pk, epsilon);
-        if check_ec_signature(
-            &expected_public_key,
-            &signature.big_r,
-            &signature.s,
-            checkpoint.sign_payload_scalar(),
-            signature.recovery_id,
-        )
-        .is_err()
-        {
-            return Err(CheckpointError::InvalidSignature.into());
-        }
-
-        if let Some(existing) = self.checkpoints().get(&checkpoint.chain) {
-            if existing.checkpoint.height > checkpoint.height {
-                return Ok(());
+        if let Some(existing) = self.latest_checkpoint(checkpoint.chain) {
+            if existing.height > checkpoint.height {
+                // checkpoint is behind, reject.
+                return Err(CheckpointError::CheckpointBehind.into());
             }
-
-            if existing.checkpoint.height == checkpoint.height
-                && existing.checkpoint.digest != checkpoint.digest
-            {
+            if existing.height == checkpoint.height {
+                if existing.digest == checkpoint.digest {
+                    // checkpoint is already settled, no-op.
+                    return Ok(true);
+                }
                 return Err(CheckpointError::ConflictingCheckpoint.into());
             }
         }
 
-        self.update_checkpoint(vec![(
-            checkpoint.chain,
-            SignedCheckpoint {
-                checkpoint,
-                signature,
-            },
-        )]);
-        Ok(())
+        let vote_count = {
+            let checkpoint_votes = self.checkpoint_votes_mut();
+            let voters = checkpoint_votes.entry(checkpoint);
+            voters.insert(voter);
+            voters.len()
+        };
+
+        if vote_count < threshold {
+            return Ok(false);
+        }
+        self.insert_checkpoint(checkpoint.chain, checkpoint);
+
+        // Remove stale votes where candidate checkpoint is less than or equal to
+        // this voted in consensus checkpoint.
+        self.checkpoint_votes_mut().votes.retain(|candidate, _| {
+            candidate.chain != checkpoint.chain || candidate.height > checkpoint.height
+        });
+        Ok(true)
+    }
+
+    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
+        let votes = &self.checkpoint_votes;
+
+        votes
+            .votes
+            .iter()
+            .filter(|(checkpoint, _)| checkpoint.chain == chain)
+            .map(|(checkpoint, voters)| (*checkpoint, voters.len()))
+            .collect()
     }
 
     pub fn system_load(&self) -> u32 {
@@ -888,15 +973,11 @@ impl VersionedMpcContract {
     }
 
     pub fn pending_requests(&self) -> u32 {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.len(),
-        }
+        self.pending_requests.len()
     }
 
     pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.iter().collect(),
-        }
+        self.pending_requests.iter().collect()
     }
 
     // contract version
@@ -908,7 +989,7 @@ impl VersionedMpcContract {
     pub fn sign_helper(&mut self, request: InternalSignRequest) {
         let yield_promise = env::promise_yield_create(
             "clear_state_on_finish",
-            &serde_json::to_vec(&(&request,)).unwrap(),
+            serde_json::to_vec(&(&request,)).unwrap(),
             CLEAR_STATE_ON_FINISH_CALL_GAS,
             GasWeight(0),
             DATA_ID_REGISTER,
@@ -932,7 +1013,7 @@ impl VersionedMpcContract {
             yield_promise,
             env::current_account_id(),
             "return_signature_on_finish",
-            &[],
+            [],
             NearToken::from_near(0),
             RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
         );
@@ -960,7 +1041,7 @@ impl VersionedMpcContract {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
-        Promise::new(to).transfer(amount);
+        Promise::new(to).transfer(amount).detach();
     }
 
     fn refund_on_success(request: &InternalSignRequest) {
@@ -970,7 +1051,7 @@ impl VersionedMpcContract {
             if diff > NearToken::from_yoctonear(0) {
                 let to = request.requester.clone();
                 log!("refund more than required deposit {diff} to {to}");
-                Promise::new(to).transfer(diff);
+                Promise::new(to).transfer(diff).detach();
             }
         }
     }
@@ -1005,75 +1086,71 @@ impl VersionedMpcContract {
 
     #[private]
     pub fn update_config(&mut self, config: Config) {
-        match self {
-            Self::V0(mpc_contract) => {
-                mpc_contract.config = config;
-            }
-        }
+        self.config = config;
     }
 
     fn mutable_state(&mut self) -> &mut ProtocolContractState {
-        match self {
-            Self::V0(ref mut mpc_contract) => &mut mpc_contract.protocol_state,
-        }
+        &mut self.protocol_state
+    }
+
+    fn state_ref(&self) -> &ProtocolContractState {
+        &self.protocol_state
     }
 
     fn contains_request(&self, id: &SignId) -> bool {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.contains_key(id),
-        }
+        self.pending_requests.contains_key(id)
     }
 
-    fn lock_request(&mut self, id: SignId, payload: Scalar, epsilon: Scalar) {
-        match self {
-            Self::V0(ref mut mpc_contract) => mpc_contract.lock_request(id, payload, epsilon),
-        }
+    fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
+        self.pending_requests.insert(
+            sign_id,
+            PendingRequest {
+                payload,
+                epsilon,
+                index: None,
+            },
+        );
     }
 
     fn get_request(&self, id: &SignId) -> Option<&PendingRequest> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.pending_requests.get(id),
-        }
+        self.pending_requests.get(id)
     }
 
     fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.set_request_yield(sign_id, data_id),
+        if let Some(request) = self.pending_requests.get_mut(sign_id) {
+            request.index = Some(YieldIndex { data_id });
         }
     }
 
-    fn remove_request(&mut self, id: &SignId) -> Result<PendingRequest, Error> {
-        match self {
-            Self::V0(mpc_contract) => mpc_contract.remove_request(id),
-        }
+    fn remove_request(&mut self, sign_id: &SignId) -> Result<PendingRequest, Error> {
+        self.pending_requests
+            .remove(sign_id)
+            .ok_or(InvalidParameters::RequestNotFound.into())
     }
 
     fn threshold(&self) -> Result<usize, Error> {
-        match self {
-            Self::V0(contract) => match &contract.protocol_state {
+        {
+            match &self.protocol_state {
                 ProtocolContractState::Initializing(state) => Ok(state.threshold),
                 ProtocolContractState::Running(state) => Ok(state.threshold),
                 ProtocolContractState::Resharing(state) => Ok(state.threshold),
                 ProtocolContractState::NotInitialized => {
-                    Err(InvalidState::UnexpectedProtocolState
-                        .message(contract.protocol_state.name()))
+                    Err(InvalidState::UnexpectedProtocolState.message(self.protocol_state.name()))
                 }
-            },
+            }
         }
     }
 
     fn proposed_updates(&mut self) -> &mut ProposedUpdates {
-        match self {
-            Self::V0(contract) => &mut contract.proposed_updates,
-        }
+        &mut self.proposed_updates
     }
 
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
     /// If we are not a participant, return an error.
     fn voter(&self) -> Result<AccountId, Error> {
         let voter = env::signer_account_id();
-        match self {
-            Self::V0(contract) => match &contract.protocol_state {
+        {
+            match &self.protocol_state {
                 ProtocolContractState::Initializing(state) => {
                     if !state.candidates.contains_key(&voter) {
                         return Err(VoteError::VoterNotParticipant.into());
@@ -1090,50 +1167,82 @@ impl VersionedMpcContract {
                     }
                 }
                 ProtocolContractState::NotInitialized => {
-                    return Err(InvalidState::UnexpectedProtocolState
-                        .message(contract.protocol_state.name()));
+                    return Err(
+                        InvalidState::UnexpectedProtocolState.message(self.protocol_state.name())
+                    );
                 }
-            },
+            }
         }
         Ok(voter)
     }
 
-    fn checkpoints(&self) -> &IterableMap<Chain, SignedCheckpoint> {
-        match self {
-            Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
-        }
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
+        &self.latest_checkpoints
     }
 
-    fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
-        match self {
-            Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
-        }
+    fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
+        self.latest_checkpoints.insert(chain, checkpoint);
     }
 
+    fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
+        &mut self.checkpoint_votes
+    }
+
+    /// Settle each chain's *canonical reset checkpoint*: the one asserting an
+    /// empty backlog just before `height`.
+    ///
+    /// Its digest is derived from `(chain, height - 1)` alone, so every node
+    /// can rebuild it locally and regress onto it through the ordinary
+    /// divergence path. Votes for the chain are dropped, since they describe
+    /// the abandoned history.
+    ///
+    /// `height` is inclusive: indexing resumes at `height` itself.
+    ///
+    /// The resulting checkpoint is deliberately indistinguishable from one the
+    /// network settled with an empty backlog at the same height, because it
+    /// describes the same state. What makes a reset recognisable is the event
+    /// logged here, not the state it leaves behind.
+    ///
+    /// Callable only by the contract account itself.
     #[private]
-    pub fn update_checkpoint(&mut self, checkpoints: Vec<(Chain, SignedCheckpoint)>) {
-        for (chain, signed_checkpoint) in checkpoints {
-            self.mutable_checkpoints().insert(chain, signed_checkpoint);
+    pub fn reset_checkpoints(&mut self, resets: Vec<CheckpointReset>) {
+        let mut chains = HashSet::new();
+        for CheckpointReset { chain, height } in resets {
+            let resume_after = height.saturating_sub(1);
+            chains.insert(chain);
+            self.insert_checkpoint(
+                chain,
+                ConsensusCheckpointDigest::new(
+                    chain,
+                    resume_after,
+                    mpc_primitives::reset_checkpoint_digest(chain, resume_after),
+                ),
+            );
+            env::log_str(
+                &serde_json::json!({
+                    "event": "checkpoint_reset",
+                    "chain": chain,
+                    "height": height,
+                    "resume_after": resume_after,
+                })
+                .to_string(),
+            );
         }
-    }
-
-    #[private]
-    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
-        for chain in chains {
-            self.mutable_checkpoints().remove(&chain);
-        }
+        self.checkpoint_votes_mut()
+            .votes
+            .retain(|checkpoint, _| !chains.contains(&checkpoint.chain));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::borsh::BorshSerialize;
+    use near_sdk::borsh::{self, BorshSerialize};
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
 
     #[derive(BorshSerialize)]
-    struct OldMpcContractTest {
+    struct OldMpcContract {
         protocol_state: ProtocolContractState,
         pending_requests: IterableMap<SignId, PendingRequest>,
         proposed_updates: ProposedUpdates,
@@ -1141,8 +1250,8 @@ mod tests {
     }
 
     #[derive(BorshSerialize)]
-    enum VersionedOldMpcContractTest {
-        V0(OldMpcContractTest),
+    enum VersionedOldMpcContract {
+        V0(OldMpcContract),
     }
 
     #[derive(BorshSerialize)]
@@ -1152,21 +1261,24 @@ mod tests {
     }
 
     // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
-    // `LatestCheckpoints` is split into a vector of iterable keys under
+    // `LatestCheckpointDigests` is split into a vector of iterable keys under
     // `<prefix>v` and a lookup map under `<prefix>m`.
     fn latest_checkpoints_map_prefix() -> Vec<u8> {
         let mut prefix = Vec::new();
-        StorageKey::LatestCheckpoints
+        StorageKey::LatestCheckpointDigests
             .serialize(&mut prefix)
             .unwrap();
         [prefix.as_slice(), b"m"].concat()
     }
 
     // Seed only the lookup-map entry and intentionally do not seed the vector
-    // key entry. This reproduces the observed devnet state where
+    // key entry. This reproduces the observed deployed state where
     // `latest_checkpoint(chain)` works because it uses `.get()`, while
     // `IterableMap::iter()` returns no checkpoints.
-    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: SignedCheckpoint) {
+    fn seed_checkpoint_lookup_without_iterable_key(
+        chain: Chain,
+        checkpoint: ConsensusCheckpointDigest,
+    ) {
         let mut key_bytes = latest_checkpoints_map_prefix();
         chain.serialize(&mut key_bytes).unwrap();
         let storage_key = env::sha256_array(&key_bytes);
@@ -1187,18 +1299,18 @@ mod tests {
         testing_env!(context);
 
         // 1. Serialize and write the OLD contract state to storage
-        let old_contract = OldMpcContractTest {
+        let old_contract = OldMpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
         };
-        let versioned_old = VersionedOldMpcContractTest::V0(old_contract);
+        let versioned_old = VersionedOldMpcContract::V0(old_contract);
         let old_bytes = borsh::to_vec(&versioned_old).unwrap();
         env::storage_write(b"STATE", &old_bytes);
 
         // 2. Call migrate for the first time
-        let migrated_res = VersionedMpcContract::migrate();
+        let migrated_res = MpcContract::migrate();
         assert!(
             migrated_res.is_ok(),
             "First migrate failed: {:?}",
@@ -1211,14 +1323,10 @@ mod tests {
         env::storage_write(b"STATE", &migrated_bytes);
 
         // Verify the migrated state has latest_checkpoints initialized
-        match &migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-            }
-        }
+        assert!(migrated.latest_checkpoints.is_empty());
 
         // 3. Call migrate for the second time (idempotent check)
-        let second_migrated_res = VersionedMpcContract::migrate();
+        let second_migrated_res = MpcContract::migrate();
         assert!(
             second_migrated_res.is_ok(),
             "Second migrate (idempotent) failed: {:?}",
@@ -1227,11 +1335,7 @@ mod tests {
         let second_migrated = second_migrated_res.unwrap();
 
         // Verify the second migrated state matches
-        match &second_migrated {
-            VersionedMpcContract::V0(contract) => {
-                assert!(contract.latest_checkpoints.is_empty());
-            }
-        }
+        assert!(second_migrated.latest_checkpoints.is_empty());
     }
 
     #[test]
@@ -1242,26 +1346,18 @@ mod tests {
         testing_env!(context);
 
         let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
-        let signed_checkpoint = SignedCheckpoint {
-            checkpoint,
-            signature: Signature {
-                big_r: k256::AffinePoint::GENERATOR,
-                s: Scalar::ONE,
-                recovery_id: 0,
-            },
-        };
-
-        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, signed_checkpoint.clone());
+        seed_checkpoint_lookup_without_iterable_key(Chain::Solana, checkpoint);
 
         // Construct a contract whose `latest_checkpoints` map points at the
         // seeded storage. The map itself has an empty iterable key vector.
-        let contract = VersionedMpcContract::V0(MpcContract {
+        let contract = MpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
-        });
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
 
         // Prove the test setup matches production: direct lookup sees the
         // checkpoint, but iteration over the same map does not.
@@ -1270,7 +1366,7 @@ mod tests {
             "direct checkpoint lookup should reproduce production .get() behavior"
         );
         assert!(
-            contract.checkpoints().iter().next().is_none(),
+            contract.latest_checkpoints().iter().next().is_none(),
             "test setup should reproduce the broken iterable index"
         );
 
@@ -1288,7 +1384,180 @@ mod tests {
         let stored = checkpoints
             .get(&Chain::Solana)
             .expect("read(Checkpoints) should not rely on IterableMap::iter()");
-        assert_eq!(stored.checkpoint.height, checkpoint.height);
-        assert_eq!(stored.checkpoint.digest, checkpoint.digest);
+        assert_eq!(stored.height, checkpoint.height);
+        assert_eq!(stored.digest, checkpoint.digest);
+    }
+
+    // A Running-state contract with `alice.near` as sole participant, so that
+    // `vote_checkpoint` gets past the voter and protocol-state checks.
+    fn running_contract(threshold: usize) -> MpcContract {
+        use std::str::FromStr;
+
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id("alice.near".parse().unwrap())
+            .build());
+
+        let public_key =
+            PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae").unwrap();
+        let alice: AccountId = "alice.near".parse().unwrap();
+        let mut participants = Participants::new();
+        participants.insert(
+            alice.clone(),
+            primitives::ParticipantInfo {
+                account_id: alice,
+                url: "https://alice.example".to_owned(),
+                cipher_pk: [7; 32],
+                sign_pk: public_key.clone(),
+            },
+        );
+
+        MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 0,
+                participants,
+                threshold,
+                public_key,
+                candidates: Candidates::new(),
+                join_votes: Votes::new(),
+                leave_votes: Votes::new(),
+                threshold_votes: ThresholdVotes::new(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        }
+    }
+
+    #[test]
+    fn reset_settles_the_canonical_checkpoint_and_clears_votes() {
+        let mut contract = MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
+
+        let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
+
+        contract.insert_checkpoint(Chain::Solana, solana_checkpoint);
+        contract
+            .checkpoint_votes_mut()
+            .entry(solana_checkpoint)
+            .insert("voter.near".parse().unwrap());
+        contract
+            .checkpoint_votes_mut()
+            .entry(ethereum_checkpoint)
+            .insert("voter.near".parse().unwrap());
+
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: 6,
+        }]);
+
+        // `height` is inclusive: indexing resumes at 6 itself, whose empty
+        // checkpoint lives at 5.
+        // The reset is an ordinary settled checkpoint whose digest is derived
+        // from the pair, which is what every node re-derives locally.
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&ConsensusCheckpointDigest::new(
+                Chain::Solana,
+                5,
+                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 5),
+            ))
+        );
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+        assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+
+        // Reissuable, including backwards — it's just another settled checkpoint.
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: 31,
+        }]);
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&ConsensusCheckpointDigest::new(
+                Chain::Solana,
+                30,
+                mpc_primitives::reset_checkpoint_digest(Chain::Solana, 30),
+            ))
+        );
+    }
+
+    #[test]
+    fn reset_height_is_a_vote_floor_without_extra_logic() {
+        let resume_at_height = 101;
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: resume_at_height,
+        }]);
+
+        // Below the reset height the ordinary "behind" rule already rejects.
+        let behind = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
+        assert!(contract
+            .vote_checkpoint(behind)
+            .unwrap_err()
+            .to_string()
+            .contains(&CheckpointError::CheckpointBehind.to_string()));
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
+
+        // Re-submitting the reset checkpoint itself is an idempotent no-op,
+        // which is what lets nodes confirm it rather than fight over it.
+        let reset = ConsensusCheckpointDigest::new(
+            Chain::Solana,
+            resume_at_height - 1,
+            mpc_primitives::reset_checkpoint_digest(Chain::Solana, resume_at_height - 1),
+        );
+        assert!(contract.vote_checkpoint(reset).unwrap());
+
+        // A competing digest at the reset height is a conflict, not a silent
+        // overwrite of the state the network was told to restart from.
+        let conflicting =
+            ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
+        assert!(contract
+            .vote_checkpoint(conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
+
+        // Above it, voting resumes normally and settles past the reset.
+        let above = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
+        assert!(contract.vote_checkpoint(above).unwrap());
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&above),
+            "a settled checkpoint replaces the reset checkpoint"
+        );
+    }
+
+    #[test]
+    fn reset_logs_the_event_that_identifies_it() {
+        let resume_at_height = 101;
+        let mut contract = running_contract(1);
+        contract.reset_checkpoints(vec![CheckpointReset {
+            chain: Chain::Solana,
+            height: resume_at_height,
+        }]);
+
+        // The settled checkpoint is deliberately indistinguishable from an
+        // ordinary empty-backlog one, so this log is the only record that a
+        // reset happened. Operators and indexers read it, hence the assertion.
+        let logs = near_sdk::test_utils::get_logs();
+        let event = logs
+            .iter()
+            .find(|line| line.contains("checkpoint_reset"))
+            .expect("a reset must log an event identifying it");
+        let event: serde_json::Value = serde_json::from_str(event).expect("event must be JSON");
+        assert_eq!(event["event"], "checkpoint_reset");
+        assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
+        assert_eq!(event["height"], resume_at_height);
+        assert_eq!(event["resume_after"], resume_at_height - 1);
     }
 }

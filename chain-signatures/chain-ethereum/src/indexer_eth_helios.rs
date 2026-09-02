@@ -1,8 +1,9 @@
+use crate::client::logs_filter;
 use crate::{EthConfig, MaybeBlock};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
-use alloy::rpc::types::{Filter, Log, TransactionRequest};
+use alloy::rpc::types::{Log, TransactionRequest};
 use futures_util::future::join_all;
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
@@ -175,7 +176,7 @@ impl HeliosEthereumClient {
     pub async fn trace_transaction_output(
         &self,
         tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Bytes> {
+    ) -> anyhow::Result<Option<Bytes>> {
         tracing::warn!(
             ?tx_hash,
             "debug_traceTransaction is not supported by Helios; refusing to fall back to eth_call"
@@ -230,20 +231,6 @@ impl HeliosEthereumClient {
             anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
         })
     }
-}
-
-/// Build an alloy [`Filter`] scoped to a single `address` and one block,
-/// mirroring the direct-RPC `logs_filter_object`.
-///
-/// - `BlockId::Hash` → `Filter::AtBlockHash(hash)` (pins to the exact block).
-/// - `BlockId::Number(tag)` → `Filter::Range { from = to = tag }`.
-fn logs_filter(address: Address, block_id: BlockId) -> Filter {
-    let mut filter = Filter::new().address(address);
-    filter = match block_id {
-        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
-        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
-    };
-    filter
 }
 
 pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient> {

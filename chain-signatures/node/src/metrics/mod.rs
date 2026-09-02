@@ -207,7 +207,7 @@ impl LatencyStart for Instant {
 
 impl LatencyStart for u64 {
     fn elapsed_seconds(&self) -> f64 {
-        crate::util::unix_elapsed(*self).as_secs_f64()
+        mpc_utils::time::unix_elapsed(*self).as_secs_f64()
     }
 }
 

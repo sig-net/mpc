@@ -13,6 +13,7 @@ use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
     SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
+use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
 
 /// Whether a transaction's calldata represents a contract call.
@@ -135,7 +136,16 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let tx_hash = log.transaction_hash.unwrap_or_default();
     let entropy = tx_hash;
 
-    let sign_id = SignId::new(event.generate_request_id());
+    let sign_id = SignId::new(generate_request_id(
+        event.requester,
+        &event.payload_hash,
+        &event.path,
+        event.key_version,
+        event.chain_id,
+        &event.algo,
+        &event.dest,
+        &event.params,
+    ));
     tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
@@ -148,7 +158,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
             key_version: event.key_version,
         },
         Chain::Ethereum,
-        crate::util::current_unix_timestamp(),
+        current_unix_timestamp(),
     ))
 }
 
@@ -199,25 +209,32 @@ struct SignatureRequestedEvent {
     params: String,
 }
 
-impl SignatureRequestedEvent {
-    fn encode_abi(&self) -> Vec<u8> {
-        let signature_requested_event_encoding = SignatureRequestedEncoding {
-            sender: self.requester,
-            payload: self.payload_hash.into(),
-            path: self.path.clone(),
-            keyVersion: self.key_version,
-            chainId: self.chain_id,
-            algo: self.algo.clone(),
-            dest: self.dest.clone(),
-            params: self.params.clone(),
-        };
-        signature_requested_event_encoding.encode_data()
+/// Derive the `request_id` identifying a sign request: `keccak256` over the
+/// ABI encoding of the [`SignatureRequestedEncoding`] event fields. The
+/// contract never computes this itself (must be calculated off-chain)
+#[allow(clippy::too_many_arguments)]
+pub fn generate_request_id(
+    sender: Address,
+    payload: &[u8; 32],
+    path: &str,
+    key_version: u32,
+    chain_id: U256,
+    algo: &str,
+    dest: &str,
+    params: &str,
+) -> [u8; 32] {
+    let encoded = SignatureRequestedEncoding {
+        sender,
+        payload: (*payload).into(),
+        path: path.to_string(),
+        keyVersion: key_version,
+        chainId: chain_id,
+        algo: algo.to_string(),
+        dest: dest.to_string(),
+        params: params.to_string(),
     }
-
-    pub fn generate_request_id(&self) -> [u8; 32] {
-        let abi_encoded = self.encode_abi();
-        alloy::primitives::keccak256(abi_encoded).into()
-    }
+    .encode_data();
+    alloy::primitives::keccak256(encoded).into()
 }
 
 #[cfg(test)]
@@ -295,7 +312,44 @@ mod tests {
             params: event.params.clone(),
         };
         let expected: [u8; 32] = alloy::primitives::keccak256(encoding.encode_data()).into();
-        assert_eq!(parsed.generate_request_id(), expected);
+        assert_eq!(
+            generate_request_id(
+                parsed.requester,
+                &parsed.payload_hash,
+                &parsed.path,
+                parsed.key_version,
+                parsed.chain_id,
+                &parsed.algo,
+                &parsed.dest,
+                &parsed.params,
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn generate_request_id_matches_legacy_ethabi_golden() {
+        // Pinned to the historical off-chain derivation (legacy ethabi
+        // golden, ported from integration-tests); the contract computes no
+        // request id itself.
+        let id = generate_request_id(
+            Address::ZERO,
+            &[0x42; 32],
+            "test-path",
+            7,
+            U256::from(31337_u64),
+            "secp256k1",
+            "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+            "{}",
+        );
+        assert_eq!(
+            id,
+            [
+                0x33, 0xda, 0x60, 0xf7, 0x1a, 0x38, 0x66, 0xe6, 0xb6, 0x32, 0xc9, 0xbb, 0xc2, 0x17,
+                0x01, 0x72, 0x03, 0x80, 0x0f, 0x86, 0x36, 0x52, 0xbf, 0x49, 0xd8, 0xeb, 0xa6, 0x3d,
+                0xb9, 0x77, 0xd9, 0x1c,
+            ]
+        );
     }
 
     fn responded_log(request_id: [u8; 32], data: Vec<u8>) -> Log {

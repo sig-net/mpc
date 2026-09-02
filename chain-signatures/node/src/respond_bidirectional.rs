@@ -3,21 +3,34 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, Chain, IndexedSignRequest, RespondBidirectionalSerializedOutput,
-    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
+    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
+use mpc_utils::time::current_unix_timestamp;
+use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
+
+fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
+    match chain {
+        Chain::Solana => Ok(SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Hydration => Ok(HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Canton => Ok(CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        Chain::Midnight => Ok(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH.to_string()),
+        _ => anyhow::bail!("Unsupported chain: {}", chain),
+    }
+}
 
 pub struct CompletedTx {
-    tx: BidirectionalTx,
+    tx: Arc<BidirectionalTx>,
 }
 
 impl CompletedTx {
-    pub fn new(tx: BidirectionalTx) -> Self {
+    pub fn new(tx: Arc<BidirectionalTx>) -> Self {
         Self { tx }
     }
 
@@ -54,6 +67,10 @@ impl CompletedTx {
                 output.extend_from_slice(&borsh_data);
                 Bytes::from(output).into()
             }
+            SerDeserFormat::Fab => {
+                output.push(1);
+                Bytes::from(output).into()
+            }
             SerDeserFormat::Abi => {
                 // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
                 let abi_encoded = [0u8; 32];
@@ -88,12 +105,7 @@ impl CompletedTx {
         let Some(payload) = Scalar::from_bytes(message) else {
             anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = match chain {
-            Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
-            _ => anyhow::bail!("Unsupported chain: {}", chain),
-        };
+        let path = respond_bidirectional_path(chain)?;
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
@@ -106,7 +118,7 @@ impl CompletedTx {
                 key_version: self.tx.key_version,
             },
             chain,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
@@ -137,8 +149,8 @@ mod tests {
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
     /// Sample tx with a Solana source chain, required by `epsilon`/path derivation.
-    fn sample_bidirectional_tx() -> BidirectionalTx {
-        BidirectionalTx {
+    fn sample_bidirectional_tx() -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
             id: BidirectionalTxId(B256::repeat_byte(0xab).0),
             sender: [0x11; 32],
             serialized_transaction: Vec::new(),
@@ -156,7 +168,7 @@ mod tests {
             request_id: [0x22; 32],
             from_address: **Address::ZERO,
             nonce: 0,
-        }
+        })
     }
 
     #[tokio::test]
@@ -185,6 +197,16 @@ mod tests {
         expected.extend_from_slice(&[0u8; 32]);
         *expected.last_mut().unwrap() = 1;
         assert_eq!(respond.output, expected);
+
+        // Midnight (FAB).
+        let fab = completed
+            .create_failed_sign_request(Chain::Midnight, None)
+            .await
+            .unwrap();
+        let SignKind::RespondBidirectional(respond) = fab.kind else {
+            panic!("expected RespondBidirectional kind");
+        };
+        assert_eq!(respond.output, hex::decode("deadbeef01").unwrap());
     }
 
     #[test]

@@ -16,7 +16,8 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{IndexedSignRequest, SignKind};
+use mpc_primitives::IndexedSignRequest;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -49,7 +50,7 @@ pub(crate) struct SignGenerator {
     participants: Vec<Participant>,
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    request: IndexedSignRequest,
+    request: Arc<IndexedSignRequest>,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
@@ -66,7 +67,7 @@ impl SignGenerator {
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -285,21 +286,19 @@ impl SignGenerator {
                         ctx.governance.public_key,
                         &self.request,
                         &output,
-                        self.participants.clone(),
+                        &self.participants,
                         is_proposer,
                     ) {
-                        if !matches!(self.request.kind, SignKind::Checkpoint(_)) {
-                            if let Err(err) = ctx
-                                .backlog
-                                .mark_publishing(self.request.chain, &sign_id, publish)
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?err,
-                                    "failed to mark publishing for sign request"
-                                );
-                            }
+                        if let Err(err) = ctx
+                            .backlog
+                            .mark_publishing(self.request.chain, &sign_id, Arc::clone(&publish))
+                            .await
+                        {
+                            tracing::warn!(
+                                ?sign_id,
+                                ?err,
+                                "failed to mark publishing for sign request"
+                            );
                         }
                     }
 
@@ -307,7 +306,7 @@ impl SignGenerator {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
                         ctx.rpc.publish(
                             ctx.governance.public_key,
-                            self.request.clone(),
+                            Arc::clone(&self.request),
                             output,
                             self.participants.clone(),
                         );
@@ -343,9 +342,9 @@ fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
     request: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
-    participants: Vec<Participant>,
+    participants: &[Participant],
     is_proposer: bool,
-) -> Option<PublishState> {
+) -> Option<Arc<PublishState>> {
     let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
     let signature = mpc_crypto::reconstruct_signature(
         &expected_public_key,
@@ -354,13 +353,9 @@ fn build_publish_state(
         request.args.payload,
     )
     .ok()?;
-    let publish = PublishState {
-        signature,
-        participants,
-        is_proposer,
-    };
+    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
 
-    Some(publish)
+    Some(Arc::new(publish))
 }
 
 impl Drop for SignGenerator {

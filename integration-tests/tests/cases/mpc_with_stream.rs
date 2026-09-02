@@ -38,34 +38,137 @@ async fn test_sign() {
         .process_sign_requests(Chain::Solana, &[sign_request(0)])
         .await;
 
-    let timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
-    let actions = loop {
-        let rpc_actions = network.output.rpc_actions.lock().await;
-        let filtered_actions: Vec<_> = rpc_actions
-            .iter()
-            .filter(|action| !action.contains("kind: Checkpoint"))
-            .cloned()
-            .collect();
-        if !filtered_actions.is_empty() {
-            break filtered_actions;
-        }
-        if start.elapsed() > timeout {
-            drop(rpc_actions);
-            network.print_actions().await;
-            panic!(
-                "timed out waiting for 1 signature, got {}",
-                filtered_actions.len()
-            );
-        }
-        drop(rpc_actions);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let actions = network
+        .assert_publish_actions(1, Duration::from_secs(10))
+        .await;
+
     let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
     );
+}
+
+/// Pinned observe lag: fast, immune to finality constants changing, and far enough
+/// past in-process event propagation that no failover fires on the happy path.
+const TEST_OBSERVE_LAG: Duration = Duration::from_secs(5);
+
+/// Upper bound on any node's failover delay, derived from the schedule so the
+/// control test cannot silently sleep through less than the real delay.
+fn max_failover_delay(network: &integration_tests::mpc_fixture::MpcFixture) -> Duration {
+    mpc_node::protocol::publish_failover::max_publish_failover_delay(
+        Chain::Solana,
+        network.sorted_participants().len(),
+        Some(TEST_OBSERVE_LAG),
+    )
+}
+
+/// Wait for `count` publishes across all nodes, keeping the chain moving.
+///
+/// The sweep runs on block events, so a test that only slept would wait forever.
+/// The first publish (the proposer's) is the timing anchor: deadlines start at
+/// marking, not submission.
+async fn wait_for_publishes(
+    network: &integration_tests::mpc_fixture::MpcFixture,
+    count: usize,
+    timeout: Duration,
+    what: &str,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    while network.publishes() < count {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: expected {count} publishes, saw {} within {timeout:?}",
+            network.publishes()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        network.tick_block(Chain::Solana).await;
+    }
+}
+
+/// Keep the chain moving for `duration`, so work riding the block stream has every
+/// chance to run before a test concludes it did not.
+async fn tick_blocks_for(network: &integration_tests::mpc_fixture::MpcFixture, duration: Duration) {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        network.tick_block(Chain::Solana).await;
+    }
+}
+
+/// No respond event ever arrives, so the failover has to publish, or nobody answers.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_failover_publishes_when_the_response_never_lands() {
+    let network = publish_failover_fixture(RespondEvents::Dropped).await;
+    network
+        .process_sign_requests(Chain::Solana, &[sign_request(0)])
+        .await;
+
+    wait_for_publishes(&network, 1, Duration::from_secs(60), "proposer publish").await;
+    wait_for_publishes(
+        &network,
+        2,
+        max_failover_delay(&network) + Duration::from_secs(5),
+        "failover publish",
+    )
+    .await;
+}
+
+/// The control: an observed response stands the failover down, so one response total.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_observed_response_stands_down_failover() {
+    let network = publish_failover_fixture(RespondEvents::Delivered).await;
+    network
+        .process_sign_requests(Chain::Solana, &[sign_request(0)])
+        .await;
+
+    // Outlast the longest delay any node could have drawn from the anchor.
+    wait_for_publishes(&network, 1, Duration::from_secs(60), "proposer publish").await;
+    tick_blocks_for(
+        &network,
+        max_failover_delay(&network) + Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        network.publishes(),
+        1,
+        "a node published a failover response despite the response landing"
+    );
+}
+
+/// `Dropped` withholds respond events from every node: what a proposer dying before
+/// its response lands looks like to the others.
+enum RespondEvents {
+    Delivered,
+    Dropped,
+}
+
+/// Three nodes signing on Solana, failover schedule pinned to [`TEST_OBSERVE_LAG`].
+async fn publish_failover_fixture(
+    responds: RespondEvents,
+) -> integration_tests::mpc_fixture::MpcFixture {
+    use integration_tests::mpc_fixture::mock_chain::EventDelivery;
+    use mpc_primitives::ChainEvent;
+
+    let mut builder = MpcFixtureBuilder::default()
+        .with_observe_lag(TEST_OBSERVE_LAG)
+        .only_generate_signatures()
+        .with_mock_stream(Chain::Solana, MockStream::default())
+        .await;
+
+    if matches!(responds, RespondEvents::Dropped) {
+        for node_idx in 0..3 {
+            builder = builder.with_chain_event_filter(
+                node_idx,
+                Box::new(|event: &ChainEvent| match event {
+                    ChainEvent::Respond(_) => EventDelivery::Drop,
+                    _ => EventDelivery::Deliver,
+                }),
+            );
+        }
+    }
+
+    builder.build().await
 }
 
 /// Common checker function called with different parameters in test cases below.
@@ -119,29 +222,10 @@ async fn check_channel_contention(
     }
 
     let timeout = Duration::from_secs(150);
-    let start = std::time::Instant::now();
-    let actions = loop {
-        let rpc_actions = network.output.rpc_actions.lock().await;
-        let filtered_actions: Vec<_> = rpc_actions
-            .iter()
-            .filter(|action| !action.contains("kind: Checkpoint"))
-            .cloned()
-            .collect();
-        if filtered_actions.len() >= expected_signatures {
-            break filtered_actions;
-        }
-        if start.elapsed() > timeout {
-            drop(rpc_actions);
-            network.print_actions().await;
-            panic!(
-                "timed out waiting for {} signatures, got {}",
-                expected_signatures,
-                filtered_actions.len()
-            );
-        }
-        drop(rpc_actions);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let actions = network
+        .assert_publish_actions(expected_signatures, timeout)
+        .await;
+
     let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
@@ -161,9 +245,59 @@ async fn test_channel_contention_multiple_blocks_at_once() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_multiple_blocks_at_once_delayed() {
-    // TODO: delay should be > ORGANIZE_POSIT_TIMEOUT but right now the system can't handle it
+    // Half the organize/posit timeout, so no node reaches its round deadline
+    // before the last one has observed the block.
     let delay = mpc_node::protocol::request::organize_posit_timeout() / 2;
     check_channel_contention(5, 10, 50, Some(delay)).await;
+}
+
+/// A request must settle even when nodes permanently disagree about who is
+/// active.
+///
+/// Every node hides one peer — its successor in participant order — for the
+/// whole run. Each node's active set therefore still holds `threshold`
+/// participants (itself plus three peers), so `wait_for_active_participants`
+/// never blocks and any stall here is attributable to proposer election alone.
+///
+/// The invariant under test: nodes must agree on the proposer, and on the round
+/// they are in, regardless of their local active sets. An election that derives
+/// either from the local active set breaks this — disagreeing views put nodes on
+/// different rounds, proposals then arrive as future-round messages and are
+/// buffered instead of accepted, accepts never reach `threshold`, and the
+/// request never settles.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_divergent_active_views_still_converge() {
+    let num_nodes = 5;
+    let threshold = 4;
+    let network = MpcFixtureBuilder::new(num_nodes, threshold)
+        .only_generate_signatures()
+        .with_mock_stream(Chain::Solana, MockStream::default())
+        .await
+        .build()
+        .await;
+
+    let participants = network.sorted_participants();
+    for node in network.nodes.iter() {
+        let index = participants
+            .iter()
+            .position(|p| *p == node.me)
+            .expect("node is a participant");
+        let hidden = participants[(index + 1) % participants.len()];
+        let mut view = node.mesh.borrow().clone();
+        view.remove(hidden);
+        // Must not be silently dropped: without the divergent views installed
+        // the request settles trivially and the test proves nothing.
+        node.mesh.send(view).expect("mesh receivers are alive");
+    }
+
+    network
+        .process_sign_requests(Chain::Solana, &[sign_request(0)])
+        .await;
+
+    // The request is settled once a publish action appears.
+    network
+        .assert_publish_actions(1, Duration::from_secs(90))
+        .await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -213,7 +347,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     use mpc_primitives::ChainEvent;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     #[derive(Default, Clone, Debug)]
     struct MessageCounts {
@@ -221,13 +355,21 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         signature: usize,
     }
 
+    /// Tracks the number of posit and signature messages observed for each participant and sign request.
     #[derive(Default)]
     struct SignatureTracker {
+        /// Keyed by (participant, sign_id) to count messages per participant and request.
         counts: Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        /// Notifies when a posit message has been observed, so the test can wait for it.
+        posit_delivered: Arc<Notify>,
     }
 
     impl CollectMessages for SignatureTracker {
-        fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
+        /// Observes messages and counts posit and signature messages per participant and sign request.
+        fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
+            if !passed_filter {
+                return;
+            }
             let SendMessage { message, from, .. } = msg;
             match message {
                 Message::Posit(posit_msg) => {
@@ -238,6 +380,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
                             .entry((*from, sign_id))
                             .or_default()
                             .posit += 1;
+                        self.posit_delivered.notify_one();
                     }
                 }
                 Message::Signature(sig_msg) => {
@@ -254,6 +397,31 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         fn print_summary(&self) {}
     }
 
+    /// Waits for a posit message from a specific participant and sign request to be observed, or times out.
+    async fn wait_for_delivered_posit(
+        counts: &Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        posit_delivered: &Notify,
+        from: Participant,
+        id: SignId,
+        timeout: Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if counts
+                    .lock()
+                    .unwrap()
+                    .get(&(from, id))
+                    .is_some_and(|c| c.posit > 0)
+                {
+                    return;
+                }
+                posit_delivered.notified().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     let node_0 = Participant::from(0);
     let node_1 = Participant::from(1);
     let node_2 = Participant::from(2);
@@ -263,6 +431,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let tracker = SignatureTracker::default();
     let tracker_counts = Arc::clone(&tracker.counts);
+    let posit_delivered = Arc::clone(&tracker.posit_delivered);
 
     let mut builder = MpcFixtureBuilder::new(3, 2)
         .only_generate_signatures()
@@ -307,9 +476,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let network = builder.build().await;
 
+    // Timeout for each request to complete, after which we assume a clog has occurred.
     let per_request_timeout = Duration::from_secs(60);
+    // Time we wait for a stale posit to be observed from node 2, after which we continue sending requests.
+    let stale_posit_timeout = Duration::from_secs(30);
 
-    // Send requests with delays so the stale task has time to send proposals.
     let mut completed = 0u32;
     for seed in 0..20 {
         network
@@ -332,7 +503,21 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // If we dropped the respond event and this is the bad request, wait for node 2 to propose a stale posit.
+        if drop_respond_event && seed == bad_request_seed {
+            assert!(
+                wait_for_delivered_posit(
+                    &tracker_counts,
+                    &posit_delivered,
+                    node_2,
+                    bad_sign_id,
+                    stale_posit_timeout,
+                )
+                .await,
+                "node 2's stale task never proposed for {bad_sign_id:?} \
+                 within {stale_posit_timeout:?}"
+            );
+        }
     }
 
     if drop_respond_event {

@@ -1,10 +1,10 @@
 //! Per-request driver: the `SignPhase` state machine and the `SignTask` that owns it.
 
+use super::mailbox::PositMailbox;
 use super::metrics::PhaseDurations;
 use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
-use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 /// Generating phase — see [`SignPhase::Generating`].
@@ -35,12 +35,12 @@ impl SignPhase {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
     ) -> SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
-            SignPhase::Posit(phase) => phase.advance(ctx, state, posit_queue).await,
-            SignPhase::Generating(phase) => phase.advance(ctx, state, posit_queue).await,
+            SignPhase::Posit(phase) => phase.advance(ctx, state, mailbox).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, mailbox).await,
             SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
@@ -51,11 +51,8 @@ impl GeneratingPhase {
         &mut self,
         ctx: &SignTask,
         state: &mut SignState,
-        posit_queue: &SignPositWorkQueue,
+        mailbox: &PositMailbox,
     ) -> SignPhase {
-        // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing_until = None;
-
         let sign_id = ctx.sign_id;
 
         tracing::info!(
@@ -86,7 +83,7 @@ impl GeneratingPhase {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            state.request().clone(),
+            Arc::clone(&state.request),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -108,8 +105,8 @@ impl GeneratingPhase {
         let result = loop {
             tokio::select! {
                 result = &mut generation => break result,
-                task_msg = posit_queue.recv() => {
-                    Self::reject_late_propose(ctx, task_msg).await;
+                task_msg = mailbox.recv() => {
+                    Self::reject_late_propose(ctx, state, task_msg).await;
                 }
             }
         };
@@ -122,21 +119,34 @@ impl GeneratingPhase {
 
     /// Reject a `Propose` that arrives while we are already generating; drop
     /// stale Accept/Reject/Start messages.
-    async fn reject_late_propose(ctx: &SignTask, task_msg: SignTaskMessage) {
-        let SignTaskMessage::PositMessage {
+    async fn reject_late_propose(
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_msg: SignPositMessage,
+    ) {
+        let SignPositMessage {
             presignature_id,
             round,
             from,
             action,
+            ..
         } = task_msg;
         if !matches!(action, PositAction::Propose) {
             return;
         }
         let me = ctx.governance.me;
+        let (reason, stale_round) = if state.round() > round {
+            (PositRejectReason::StaleRound, Some(state.round()))
+        } else {
+            state.record_peer_round(round);
+            (PositRejectReason::AlreadyGenerating, None)
+        };
         tracing::info!(
             sign_id = ?ctx.sign_id,
             ?from,
             round,
+            my_round = state.round(),
+            ?reason,
             "received Propose while already generating, rejecting"
         );
         ctx.msg
@@ -146,7 +156,8 @@ impl GeneratingPhase {
                 PositMessage {
                     id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
                     from: me,
-                    action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+                    action: PositAction::RejectWithReason(reason),
+                    stale_round,
                 },
             )
             .await;
@@ -163,6 +174,8 @@ pub struct SignTask {
     pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     pub is_proposer: Arc<AtomicBool>,
+    /// Posit round, shared with `SignEntry` so it survives a respawn.
+    pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,
     pub node_account_id: near_account_id::AccountId,
 }
@@ -171,14 +184,14 @@ impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         mesh_state: watch::Receiver<MeshState>,
-        posit_queue: Arc<SignPositWorkQueue>,
+        mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(request, mesh_state);
+        let mut state = SignState::new(request, mesh_state, Arc::clone(&self.round));
         let mut phase = SignPhase::Organizing(OrganizingPhase);
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
@@ -193,7 +206,7 @@ impl SignTask {
                 SignPhase::Complete(_) => None,
             };
 
-            let new_phase = phase.advance(&mut self, &mut state, &posit_queue).await;
+            let new_phase = phase.advance(&mut self, &mut state, &mailbox).await;
             if let Some(step) = current_phase_step {
                 durations.add(step, phase_start.elapsed());
                 if matches!(&new_phase, SignPhase::Organizing(_)) {
@@ -225,5 +238,66 @@ impl SignTask {
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::posit::tests::{sent_posit, setup};
+    use super::*;
+
+    fn propose(from: Participant, round: usize) -> SignPositMessage {
+        SignPositMessage {
+            presignature_id: 42,
+            round,
+            from,
+            action: PositAction::Propose,
+            stale_round: None,
+        }
+    }
+
+    /// A behind peer is answered the way every other phase answers one, with
+    /// StaleRound carrying our round, so it catches up in a single bump.
+    #[tokio::test]
+    async fn late_propose_from_behind_peer_carries_our_round() {
+        let me = Participant::from(0);
+        let behind = Participant::from(1);
+        let mut t = setup(me, behind, 2);
+        t.state.set_round(5);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(behind, 2)).await;
+
+        let (round, action, stale_round) = sent_posit(&mut t.outbox, me, behind);
+        // The id echoes the rejected round; ours rides in `stale_round`.
+        assert_eq!(round, 2);
+        assert!(matches!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound)
+        ));
+        assert_eq!(stale_round, Some(5));
+        assert_eq!(t.state.round(), 5);
+    }
+
+    /// An ahead peer's round is recorded, so the reorganize after a failed
+    /// generation lands on it instead of climbing one round at a time.
+    #[tokio::test]
+    async fn late_propose_from_ahead_peer_is_recorded() {
+        let me = Participant::from(0);
+        let ahead = Participant::from(1);
+        let mut t = setup(me, ahead, 2);
+        t.state.set_round(3);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(ahead, 12)).await;
+
+        let (_, action, stale_round) = sent_posit(&mut t.outbox, me, ahead);
+        assert!(matches!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
+        ));
+        assert_eq!(stale_round, None);
+
+        // Caught up in one bump: max(3 + 1, 12) = 12.
+        t.state.reorganize("generation failed");
+        assert_eq!(t.state.round(), 12);
     }
 }

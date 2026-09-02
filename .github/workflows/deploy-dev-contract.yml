@@ -25,12 +25,18 @@ jobs:
       - name: Install near-cli
         run: 'npm install -g near-cli'
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -41,5 +47,5 @@ jobs:
       - name: Build & Deploy Dev Contract
         run: |
           ./build-contract.sh
-          (yes || true) | near deploy dev.sig-net.testnet target/wasm32-unknown-unknown/release/mpc_contract.wasm
+          (yes || true) | near deploy dev.sig-net.testnet target/near/mpc_contract/mpc_contract.wasm
           near call dev.sig-net.testnet migrate '{}' --accountId dev.sig-net.testnet --gas 300000000000000

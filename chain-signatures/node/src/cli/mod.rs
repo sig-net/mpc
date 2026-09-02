@@ -22,7 +22,10 @@ use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::{logs, storage, web};
-pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
+pub use args::{
+    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
+    solana::SolArgs,
+};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
@@ -33,7 +36,8 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
-use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
@@ -92,6 +96,9 @@ pub enum Cli {
         /// Canton Indexer options
         #[clap(flatten)]
         canton: CantonArgs,
+        /// Midnight Indexer options
+        #[clap(flatten)]
+        midnight: MidnightArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: mpc_chain_near::Options,
@@ -136,6 +143,7 @@ impl Cli {
                 sol,
                 hydration,
                 canton,
+                midnight,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -184,6 +192,7 @@ impl Cli {
                 args.extend(sol.into_str_args());
                 args.extend(hydration.into_str_args());
                 args.extend(canton.into_str_args());
+                args.extend(midnight.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -209,6 +218,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sol,
             hydration,
             canton,
+            midnight,
             indexer_options,
             my_address,
             storage_options,
@@ -240,8 +250,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
             crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
-            // SignCommand channel: chain sign events (requests, completions,
-            // chain aborts) from the indexers/streams into the SignatureSpawner.
+            // SignCommand channel: sign requests and completions from the
+            // indexers/streams into the SignatureSpawner.
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
 
             let StorageHandles {
@@ -282,9 +292,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton)?;
+            let stack = ChainStack::new(ChainConfigs::from_args(
+                eth, sol, hydration, canton, midnight,
+            )?);
             let network = NetworkConfig { cipher_sk, sign_sk };
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
 
             let RpcHandles {
                 near_client,
@@ -297,7 +312,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &network,
                 &mpc_contract_id,
                 signer,
-                &chains,
+                &stack,
             )
             .await;
 
@@ -318,7 +333,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &cipher_pk_hex,
                 &network,
                 &near_client,
-                &chains,
+                &stack.configs,
             );
 
             let ProtocolHandles {
@@ -370,7 +385,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             spawn_indexers(
-                chains,
+                stack,
                 sign_tx,
                 rpc_channel.clone(),
                 backlog.clone(),
@@ -466,6 +481,7 @@ struct ChainConfigs {
     sol: Option<SolConfig>,
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
+    midnight: Option<MidnightConfig>,
 }
 
 impl ChainConfigs {
@@ -474,13 +490,36 @@ impl ChainConfigs {
         sol: SolArgs,
         hydration: HydrationArgs,
         canton: CantonArgs,
+        midnight: MidnightArgs,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             eth: eth.into_config()?,
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
+            midnight: midnight.into_config()?,
         })
+    }
+}
+
+/// Per-chain configs paired with runtime RPC state, built once at startup.
+struct ChainStack {
+    configs: ChainConfigs,
+    /// One 429 cooldown gate per chain, shared by that chain's indexer and
+    /// publisher (they hit the same RPC endpoint).
+    gates: EnumMap<Chain, SharedBackoff>,
+}
+
+impl ChainStack {
+    fn new(configs: ChainConfigs) -> Self {
+        Self {
+            configs,
+            gates: EnumMap::from_fn(|_| SharedBackoff::new()),
+        }
+    }
+
+    fn gate(&self, chain: Chain) -> SharedBackoff {
+        self.gates[chain].clone()
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -490,17 +529,21 @@ impl ChainConfigs {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
-        if let Some(eth) = &self.eth {
+        if let Some(eth) = &self.configs.eth {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Ethereum));
-            let client = Arc::new(publisher::EthClient::new(eth, telemetry));
+            let client = Arc::new(publisher::EthClient::new(
+                eth,
+                telemetry,
+                self.gate(Chain::Ethereum),
+            ));
             publishers.insert(Chain::Ethereum, client);
         }
-        if let Some(sol) = &self.sol {
+        if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
             let client = Arc::new(SolanaClient::from_config(sol, telemetry));
             publishers.insert(Chain::Solana, client);
         }
-        if let Some(hydration) = &self.hydration {
+        if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
@@ -509,13 +552,22 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
             }
         }
-        if let Some(canton) = &self.canton {
+        if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
             match CantonClient::new(canton, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
+            }
+        }
+        if let Some(midnight) = &self.configs.midnight {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
+            match MidnightPublisher::connect(midnight, telemetry).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Midnight, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
             }
         }
 
@@ -558,6 +610,7 @@ fn log_startup(
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
+        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -622,27 +675,25 @@ impl RpcHandles {
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
-        chains: &ChainConfigs,
+        stack: &ChainStack,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
-        // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
-        // TODO: two connection are negligible here, but consider sharing a single client if necessary.
+        let near_rpc = near_fetch::Client::new(near_rpc_url);
         let near_client = NearClient::new(
-            near_rpc_url,
+            near_rpc.clone(),
             mpc_contract_id,
             signer.clone(),
             publisher_telemetry,
         );
         let near_governance_client = NearGovernanceClient::new(
-            near_rpc_url,
+            near_rpc,
             my_address,
             &network.sign_sk,
             &network.cipher_sk,
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone()).await;
+        let publishers = stack.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -767,7 +818,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
-    chains: ChainConfigs,
+    stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
@@ -776,24 +827,34 @@ async fn spawn_indexers(
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
+    let ChainStack { configs, gates } = stack;
     let ChainConfigs {
         eth,
         sol,
         hydration,
         canton,
-    } = chains;
+        midnight,
+    } = configs;
 
     tracing::info!(
         ethereum = eth.is_some(),
         solana = sol.is_some(),
         hydration = hydration.is_some(),
         canton = canton.is_some(),
+        midnight = midnight.is_some(),
         "spawning chain indexers"
     );
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
+        match EthereumIndexer::new(
+            eth_config,
+            backlog.clone(),
+            eth_telemetry.clone(),
+            gates[Chain::Ethereum].clone(),
+        )
+        .await
+        {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
                 tokio::spawn(run_supervised(
@@ -869,12 +930,12 @@ async fn spawn_indexers(
                 tokio::spawn(run_supervised(
                     canton_indexer,
                     StreamContext::new(
-                        backlog,
-                        sign_tx,
-                        rpc_channel,
-                        contract_watcher,
-                        mesh_state,
-                        node_client,
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
                         checkpoints_rx[Chain::Canton].clone(),
                     ),
                     canton_telemetry,
@@ -882,6 +943,33 @@ async fn spawn_indexers(
             }
             Err(err) => {
                 tracing::error!(?err, "failed to create canton indexer");
+            }
+        }
+    }
+
+    if let Some(midnight_config) = midnight {
+        let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
+            .await
+        {
+            Ok(midnight_indexer) => {
+                tracing::info!("midnight indexer created successfully");
+                tokio::spawn(run_supervised(
+                    midnight_indexer,
+                    StreamContext::new(
+                        backlog,
+                        sign_tx,
+                        rpc_channel,
+                        contract_watcher,
+                        mesh_state,
+                        node_client,
+                        checkpoints_rx[Chain::Midnight].clone(),
+                    ),
+                    midnight_telemetry,
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create midnight indexer");
             }
         }
     }
@@ -1076,5 +1164,147 @@ mod tests {
         );
 
         assert_eq!(digest, -6950551088322443092);
+    }
+
+    /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag
+    /// `into_str_args` dropped and turn the round-trip test green. Those
+    /// fixtures use the values a developer running a local stack exports,
+    /// which makes that the likely case rather than a remote one.
+    pub(super) fn assert_midnight_env_unset() {
+        for var in [
+            "MPC_MIDNIGHT_NODE_URL",
+            "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_FUNDING_SEED",
+            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
+            "MPC_MIDNIGHT_PROOF_SERVER_URL",
+            "MPC_MIDNIGHT_INDEXER_URL",
+            "MPC_MIDNIGHT_INDEXER_WS_URL",
+        ] {
+            assert!(
+                std::env::var_os(var).is_none(),
+                "{var} is set: these tests require an unpolluted environment"
+            );
+        }
+    }
+
+    /// Dockerized test nodes receive their whole configuration as CLI strings
+    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
+    /// `Cli::Start` but missing from that extension, its config would be
+    /// accepted on the command line and then silently dropped on
+    /// reconstruction.
+    #[test]
+    fn into_str_args_forwards_midnight() {
+        assert_midnight_env_unset();
+
+        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let central_address = "ab".repeat(32);
+        let funding_seed = "0f".repeat(32);
+        let intent_gen_command = r#"["midnight-publisher"]"#;
+        let argv = [
+            "mpc-node",
+            "start",
+            "--account-id",
+            "test.near",
+            "--account-sk",
+            &account_sk,
+            "--cipher-sk",
+            "cipher",
+            "--env",
+            "unit-tests",
+            "--gcp-project-id",
+            "project",
+            "--redis-url",
+            "redis://127.0.0.1:6379",
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
+            "--midnight-central-address",
+            &central_address,
+            "--midnight-funding-seed",
+            &funding_seed,
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
+        ];
+        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
+
+        for expected in [
+            "--midnight-node-url",
+            "http://127.0.0.1:9944",
+            "--midnight-central-address",
+            central_address.as_str(),
+            "--midnight-funding-seed",
+            funding_seed.as_str(),
+            "--midnight-intent-gen-command",
+            intent_gen_command,
+            "--midnight-proof-server-url",
+            "http://127.0.0.1:6300",
+            "--midnight-indexer-url",
+            "http://127.0.0.1:8088/api/v3/graphql",
+            "--midnight-indexer-ws-url",
+            "ws://127.0.0.1:8088/api/v3/graphql/ws",
+        ] {
+            assert!(
+                out.contains(&expected.to_string()),
+                "into_str_args dropped {expected}"
+            );
+        }
+    }
+
+    /// The Midnight config gate: with no Midnight flags supplied, the chain
+    /// must be entirely absent from the node's wiring. `spawn_indexers` reads
+    /// the same `chains.midnight` field, so `None` here also means no indexer
+    /// is spawned.
+    #[tokio::test]
+    async fn midnight_off_by_default() {
+        assert_midnight_env_unset();
+
+        let chains = ChainConfigs::from_args(
+            EthArgs::from_config(None),
+            SolArgs::from_config(None),
+            HydrationArgs::from_config(None),
+            CantonArgs::from_config(None),
+            MidnightArgs::from_config(None),
+        )
+        .unwrap();
+
+        assert!(
+            chains.midnight.is_none(),
+            "empty MidnightArgs must not produce a MidnightConfig"
+        );
+
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        // Never dialed: publishers() only stores the client in the registry.
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
+        let near = NearClient::new(
+            near,
+            &account_id,
+            signer,
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        );
+        let publishers = ChainStack::new(chains).publishers(near).await;
+
+        assert!(
+            !publishers.contains_key(&Chain::Midnight),
+            "unconfigured Midnight must not register a publisher"
+        );
+        assert_eq!(
+            publishers.len(),
+            1,
+            "with no chain configured, only the NEAR publisher must exist"
+        );
+        assert!(publishers.contains_key(&Chain::NEAR));
     }
 }

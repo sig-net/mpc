@@ -14,43 +14,44 @@ use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
 use crate::storage::PresignatureStorage;
-use crate::util::{JoinMap, TimeoutBudget};
+use mpc_utils::{
+    task::JoinMap,
+    time::{unix_elapsed, TimeoutBudget},
+};
 
 use cait_sith::protocol::Participant;
+use enum_map::EnumMap;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{IndexedSignRequest, SignCommand, SignId, SignKind};
-use rand::rngs::StdRng;
-use rand::seq::IteratorRandom;
-use rand::SeedableRng;
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
+mod delay_monitor;
 mod limiter;
+mod mailbox;
 mod metrics;
 mod organize;
 mod posit;
 mod state;
 mod task;
-mod work_queue;
 
+use delay_monitor::DelayMonitor;
 use limiter::SignLimiter;
 use task::SignTask;
 
-pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
-
-/// How many rounds ahead the organizing phase searches for an active proposer.
-const PROPOSER_SEARCH_WINDOW: usize = 512;
+pub(crate) use mailbox::{PositMailbox, SignPositMessage};
 
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
-/// Timeout budget for organizing and posit phases (shorter under test for speed).
+/// Timeout budget for the organizing and posit phases of round 0 (shorter under
+/// test for speed). Later rounds follow [`round_timeout`], which may exceed this.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     5
 } else {
@@ -61,19 +62,71 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 /// a subset after this timeout, if above the minimum threshold.
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Shortest a round may be. A round has to fit a Propose broadcast plus accept
+/// gathering, and an accepted deliberator keeps waiting twice
+/// [`ACCEPT_POSIT_TIMEOUT`] no matter what the budget says. Below that, a round
+/// cannot complete and rotating through it is pure churn.
+const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
+    .saturating_mul(2)
+    .saturating_add(Duration::from_secs(1));
+
+/// Per-round growth factor of 1.15 (=23/20).
+///
+/// Nodes that index a request at different times enter the same round at
+/// different moments, and can only transact while both are inside it.
+/// Thus, a round length has to exceed that skew before the request
+/// can be processed.
+/// Any factor above 1 eventually crosses the skew, so the value is chosen
+/// for what it costs the other case: rotating past inactive proposers
+/// benefits from short rounds. At 1.15 the round length doubles after five rounds.
+const ROUND_TIMEOUT_GROWTH_NUM: u32 = 23;
+const ROUND_TIMEOUT_GROWTH_DEN: u32 = 20;
+
+/// Longest a round may be. High enough that any plausible indexing skew is
+/// crossed, low enough that a wedged request keeps rotating visibly instead of
+/// disappearing into a multi-hour round.
+/// tolerable skew < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR
+const ROUND_TIMEOUT_CEILING: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
+    30
+} else {
+    600
+});
+
+/// Timeout for round `r`: round 0 gets [`ORGANIZE_POSIT_TIMEOUT`], later rounds
+/// start at [`ROUND_TIMEOUT_FLOOR`] and grow geometrically to
+/// [`ROUND_TIMEOUT_CEILING`]. Depends only on `r`, so peers that agree on the
+/// round agree on the deadline.
+fn round_timeout(round: usize) -> Duration {
+    if round == 0 {
+        return ORGANIZE_POSIT_TIMEOUT;
+    }
+    // Saturates at the ceiling within ~16 iterations, which bounds the loop:
+    // `round` derives from `highest_seen_round`, so a peer can make it huge.
+    let mut timeout = ROUND_TIMEOUT_FLOOR;
+    for _ in 1..round {
+        if timeout >= ROUND_TIMEOUT_CEILING {
+            return ROUND_TIMEOUT_CEILING;
+        }
+        timeout = timeout * ROUND_TIMEOUT_GROWTH_NUM / ROUND_TIMEOUT_GROWTH_DEN;
+    }
+    timeout.min(ROUND_TIMEOUT_CEILING)
+}
+
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
-/// so that late-arriving peer posit messages do not re-create orphan queues.
+/// so that late-arriving peer posit messages do not re-create orphan mailboxes.
 const MAX_DEAD_IDS: usize = 4096;
 
 /// A retained in-flight request. `is_proposer` is shared with the current
-/// task incarnation and read by the deadline watcher.
+/// task incarnation and read by the deadline watcher; `round` carries the
+/// posit round across respawns.
 struct SignEntry {
-    request: IndexedSignRequest,
+    request: Arc<IndexedSignRequest>,
     is_proposer: Arc<AtomicBool>,
+    round: Arc<AtomicUsize>,
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
-/// `sign_id`, plus the posit queues, delayed-response watchers, and dedup state
+/// `sign_id`, plus the posit mailboxes, delayed-response watchers, and dedup state
 /// that outlive individual tasks. (TODO: needs refactoring)
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
@@ -81,18 +134,18 @@ pub struct SignatureSpawner {
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
-    /// Per-sign posit queues; also buffer messages that arrive before their
+    /// Per-sign posit mailboxes; also buffer messages that arrive before their
     /// task spawns.
-    posit_queues: HashMap<SignId, Arc<SignPositWorkQueue>>,
-    /// Watchers that increment the delayed metric when response time exceeds expected.
-    delayed_watchers: HashMap<SignId, JoinHandle<()>>,
+    posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
+    /// Monitor alerting when signature requests exceed their expected response time.
+    delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
-    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan queues.
+    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
-    /// Caps concurrent sign-task progress so requests don't flood the system's compute.
-    limiter: SignLimiter,
+    /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
+    limiters: EnumMap<Chain, SignLimiter>,
 
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -110,7 +163,7 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
         let sign_id = request.id;
@@ -121,8 +174,9 @@ impl SignatureSpawner {
         self.requests.insert(
             sign_id,
             SignEntry {
-                request: request.clone(),
+                request: Arc::clone(&request),
                 is_proposer: Arc::clone(&is_proposer),
+                round: Arc::new(AtomicUsize::new(0)),
             },
         );
 
@@ -130,33 +184,16 @@ impl SignatureSpawner {
         let chain = request.chain;
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
-        let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
+        let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0)
-            && !matches!(request.kind, SignKind::Checkpoint(_))
-        {
-            let is_proposer = Arc::clone(&is_proposer);
-            let watcher = tokio::spawn(async move {
-                tokio::time::sleep(remaining_time).await;
-                let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
-                tracing::warn!(
-                    ?sign_id,
-                    ?chain,
-                    elapsed_secs = elapsed.as_secs(),
-                    expected_secs = expected_response_time_secs,
-                    "signature request delayed beyond expected response time"
-                );
-
-                if is_proposer.load(Ordering::Relaxed) {
-                    crate::metrics::requests::SIGN_REQUEST_DELAYED
-                        .with_label_values(&[chain.as_str()])
-                        .inc();
-                }
-            });
-            self.delayed_watchers.insert(sign_id, watcher);
-        }
+        self.delay_monitor.watch(
+            sign_id,
+            chain,
+            unix_timestamp_indexed,
+            remaining_time,
+            Arc::clone(&is_proposer),
+        );
 
         if !governance.is_running {
             tracing::info!(?sign_id, "holding sign request until governance is running");
@@ -169,24 +206,24 @@ impl SignatureSpawner {
     fn spawn_task(
         &mut self,
         governance: &GovernanceInfo,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
         let sign_id = request.id;
         tracing::info!(?sign_id, "spawning signature task");
 
-        let is_proposer = self
+        let (is_proposer, round) = self
             .requests
             .get(&sign_id)
-            .map(|entry| Arc::clone(&entry.is_proposer))
+            .map(|entry| (Arc::clone(&entry.is_proposer), Arc::clone(&entry.round)))
             .expect("sign request entry must exist when spawning its task");
 
-        // Take (or create) the posit queue; it may already hold messages
+        // Take (or create) the posit mailbox; it may already hold messages
         // that arrived before this task spawned.
-        let posit_queue = Arc::clone(
-            self.posit_queues
+        let mailbox = Arc::clone(
+            self.posit_mailboxes
                 .entry(sign_id)
-                .or_insert_with(SignPositWorkQueue::new),
+                .or_insert_with(PositMailbox::new),
         );
 
         let task = SignTask {
@@ -198,25 +235,24 @@ impl SignatureSpawner {
             backlog: self.backlog.clone(),
             cfg,
             is_proposer,
-            limiter: self.limiter.clone(),
+            round,
+            limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
         };
 
         // Spawn the async task with organizing loop
-        self.tasks.spawn(
-            sign_id,
-            task.run(request, self.mesh_state.clone(), posit_queue),
-        );
+        self.tasks
+            .spawn(sign_id, task.run(request, self.mesh_state.clone(), mailbox));
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
-    /// have aborted previous incarnations. Not a retirement: queues,
+    /// have aborted previous incarnations. Not a retirement: mailboxes,
     /// watchers, and dedup state survive.
     fn spawn_tasks(&mut self, governance: &GovernanceInfo, cfg: &ProtocolConfig) {
-        let requests: Vec<IndexedSignRequest> = self
+        let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
             .values()
-            .map(|entry| entry.request.clone())
+            .map(|entry| Arc::clone(&entry.request))
             .collect();
         tracing::info!(
             count = requests.len(),
@@ -235,20 +271,22 @@ impl SignatureSpawner {
         round: usize,
         from: Participant,
         action: PositAction,
+        stale_round: Option<usize>,
     ) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
-        // to prevent re-creating orphan queues.
+        // to prevent re-creating orphan mailboxes.
         if self.dead_ids.contains(&sign_id) {
             return;
         }
-        self.posit_queues
+        self.posit_mailboxes
             .entry(sign_id)
-            .or_insert_with(SignPositWorkQueue::new)
-            .push(SignTaskMessage::PositMessage {
+            .or_insert_with(PositMailbox::new)
+            .push(SignPositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
+                stale_round,
             });
     }
 
@@ -285,29 +323,19 @@ impl SignatureSpawner {
     }
 
     /// Record a sign ID as dead so that late-arriving peer posits are dropped
-    /// instead of recreating an orphan queue. Automatically LRU-evicts the
+    /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
     fn mark_dead(&mut self, sign_id: SignId) {
         self.dead_ids.put(sign_id, ());
     }
 
-    /// Cancel the delayed-response watcher for a task that ended in time.
-    fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
-        if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
-            tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
-            watcher.abort();
-        } else {
-            tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
-        }
-    }
-
-    /// Common teardown when a sign task ends: forget the id, drop its queue and
-    /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
-    fn retire_task(&mut self, sign_id: SignId, reason: &str) {
+    /// Common teardown when a sign task ends: forget the id, drop its mailbox and
+    /// unwatch its delay monitoring. Does not touch `tasks` (aborting varies per caller).
+    fn retire_task(&mut self, sign_id: SignId, reason: &'static str) {
         self.mark_dead(sign_id);
         self.requests.remove(&sign_id);
-        self.posit_queues.remove(&sign_id);
-        self.abort_delayed_watcher(sign_id, reason);
+        self.posit_mailboxes.remove(&sign_id);
+        self.delay_monitor.unwatch(sign_id, reason);
     }
 
     fn handle_sign(
@@ -319,27 +347,6 @@ impl SignatureSpawner {
         match sign {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
-            }
-            SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
-                let sign_id = request.id;
-
-                // Skip requests we already track. Use the request map rather than
-                // the queue map, which may already hold buffered messages (e.g. a
-                // Propose arriving before the indexer notifies us), and rather than
-                // the task map, which is empty while requests are held for governance.
-                if self.requests.contains_key(&sign_id) {
-                    tracing::info!(?sign_id, "skipping duplicate sign request");
-                    return;
-                }
-
-                record_request_latency_since(
-                    request.chain,
-                    SignRequestStep::AwaitingGeneration,
-                    "ok",
-                    request.unix_timestamp_indexed,
-                );
-
-                self.add_request(governance, request, cfg.clone());
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -356,6 +363,27 @@ impl SignatureSpawner {
                     self.retire_task(sign_id, "chain aborted");
                     self.tasks.abort(sign_id);
                 }
+            }
+            SignCommand::Request(request) => {
+                let sign_id = request.id;
+
+                // Skip requests we already track. Use the request map rather than
+                // the mailbox map, which may already hold buffered messages (e.g. a
+                // Propose arriving before the indexer notifies us), and rather than
+                // the task map, which is empty while requests are held for governance.
+                if self.requests.contains_key(&sign_id) {
+                    tracing::info!(?sign_id, "skipping duplicate sign request");
+                    return;
+                }
+
+                record_request_latency_since(
+                    request.chain,
+                    SignRequestStep::AwaitingGeneration,
+                    "ok",
+                    request.unix_timestamp_indexed,
+                );
+
+                self.add_request(governance, request, cfg.clone());
             }
         }
 
@@ -387,8 +415,8 @@ impl SignatureSpawner {
                     };
                     self.handle_sign(&governance, sign, &protocol);
                 }
-                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, presignature_id, round, from, action);
+                Some((sign_id, presignature_id, round, from, action, stale_round)) = posits.recv() => {
+                    self.handle_posit(sign_id, presignature_id, round, from, action, stale_round);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -422,14 +450,13 @@ impl SignatureSpawner {
         self.dead_ids.contains(sign_id)
     }
 
-    fn test_posit_queues_contains(&self, sign_id: &SignId) -> bool {
-        self.posit_queues.contains_key(sign_id)
+    fn test_posit_mailboxes_contains(&self, sign_id: &SignId) -> bool {
+        self.posit_mailboxes.contains_key(sign_id)
     }
 
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
         self.tasks.contains_key(&sign_id)
     }
-
     fn test_requests_contains(&self, sign_id: &SignId) -> bool {
         self.requests.contains_key(sign_id)
     }
@@ -459,16 +486,17 @@ impl SignatureSpawnerTask {
         rpc_channel: RpcChannel,
         backlog: Backlog,
     ) -> Self {
+        let delay_monitor = DelayMonitor::spawn();
         let spawner = SignatureSpawner {
             contract,
             tasks: JoinMap::new(),
-            posit_queues: HashMap::new(),
-            delayed_watchers: HashMap::new(),
+            posit_mailboxes: HashMap::new(),
+            delay_monitor,
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
             mesh_state,
-            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog,
@@ -507,6 +535,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn test_abort_chain_dead_ids_lifecycle() {
@@ -537,16 +566,17 @@ mod tests {
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
+        let delay_monitor = DelayMonitor::spawn();
         let mut spawner = SignatureSpawner {
             contract,
             presignatures,
             tasks: JoinMap::new(),
-            posit_queues: HashMap::new(),
-            delayed_watchers: HashMap::new(),
+            posit_mailboxes: HashMap::new(),
+            delay_monitor,
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state: mesh_rx,
-            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog: Backlog::new(),
@@ -562,41 +592,190 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
+        let request = Arc::new(IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0));
 
-        // Step 1: Spawn → queue created, request retained, not dead
-        spawner.add_request(&governance, request.clone(), cfg.clone());
+        let probe_id = SignId::new([43u8; 32]);
+        let probe_request = IndexedSignRequest::sign(
+            probe_id,
+            request.args.clone(),
+            Chain::Solana,
+            request.unix_timestamp_indexed,
+        );
+        let dropped = Arc::new(Notify::new());
+        struct DropProbe(Arc<Notify>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let probe = DropProbe(Arc::clone(&dropped));
+        spawner.requests.insert(
+            probe_id,
+            SignEntry {
+                request: Arc::new(probe_request),
+                is_proposer: Arc::new(AtomicBool::new(false)),
+                round: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        spawner.tasks.spawn(probe_id, async move {
+            let _probe = probe;
+            std::future::pending::<Result<(), SignError>>().await
+        });
+
+        // Step 1: Spawn → mailbox created, request retained, not dead
+        spawner.add_request(&governance, Arc::clone(&request), cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 2: Abort chain → queue removed, request dropped, marked dead
+        // Step 2: Abort chain → mailbox removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("aborting a chain should cancel its sign tasks");
         assert!(!spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_posit_queues_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(!spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 3: Late posit → dropped (dead_id check), queue NOT recreated
-        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
-        assert!(!spawner.test_posit_queues_contains(&sign_id));
+        // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
+        spawner.handle_posit(
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+            None,
+        );
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
         spawner.add_request(&governance, request, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
-        // Step 5: Posit after re-spawn → accepted, queue re-created
-        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        // Step 5: Posit after re-spawn → accepted, mailbox re-created
+        spawner.handle_posit(
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+            None,
+        );
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
 
-        // Step 6: Governance respawn → task swapped in place, nothing retired.
+        // Step 6: Governance respawn → task swapped in place, nothing retired,
+        // and the new incarnation resumes from the entry's carried round.
+        let carried = Arc::new(AtomicUsize::new(7));
+        spawner.requests.get_mut(&sign_id).unwrap().round = Arc::clone(&carried);
         spawner.tasks.abort_all();
         spawner.spawn_tasks(&governance, &cfg);
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_posit_queues_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(
+            Arc::strong_count(&carried) >= 3,
+            "respawned task must share the entry's round, not a fresh one"
+        );
+        assert!(carried.load(Ordering::Relaxed) >= 7);
+    }
+
+    #[test]
+    fn round_timeout_schedule() {
+        // Every round must outlast a propose broadcast (<1s) plus accept
+        // gathering inside.  For r >= 1 this holds by construction today;
+        // the test serves as a guard so the code can't silently drift.
+        for r in 0..64usize {
+            assert!(
+                round_timeout(r) >= ROUND_TIMEOUT_FLOOR,
+                "round {r} is too short to complete"
+            );
+        }
+
+        // Growth is monotonic from round 1, so a request that keeps failing gets
+        // more time rather than retrying forever on equally short rounds.
+        for r in 1..64usize {
+            assert!(
+                round_timeout(r + 1) >= round_timeout(r),
+                "round {r} is longer than round {}",
+                r + 1
+            );
+        }
+
+        // Rounds must grow past a late node's indexing skew, or the two never
+        // overlap: both advance at the same rate, so a fixed ceiling below the
+        // skew leaves them permanently offset.
+        // In addition, the overlap of the two nodes in the same round must fit a
+        // Propose broadcast plus accept gathering inside (`ROUND_TIMEOUT_FLOOR`).
+        let settling_overlap = |skew: Duration| {
+            (1..1024usize)
+                .map(round_timeout)
+                .find(|&t| t.saturating_sub(skew) > ROUND_TIMEOUT_FLOOR)
+                .map(|t| t - skew)
+                .expect("schedule must clear the skew by a full round")
+        };
+
+        let skew = ORGANIZE_POSIT_TIMEOUT;
+        let wider = 4 * skew;
+
+        // The shared window has to scale with the skew
+        // (up to some ceiling to avoid rounds that last hours).
+        // `settling_overlap` needs a round that clears the skew by more than
+        // ROUND_TIMEOUT_FLOOR. No round exceeds the ceiling, so that's only
+        // reachable while the skew leaves enough room under it.
+        assert!(
+            wider < ROUND_TIMEOUT_CEILING - ROUND_TIMEOUT_FLOOR,
+            "the skews compared here must leave a full round of room under the ceiling"
+        );
+        assert!(
+            settling_overlap(wider) > settling_overlap(skew),
+            "a 4x larger skew must leave a wider window, not the same floor-sized one"
+        );
+
+        // A wedged request keeps rotating rather than vanishing into an
+        // unbounded round. `round` derives from a peer-supplied value, so it
+        // may be arbitrary.
+        assert_eq!(round_timeout(1024), ROUND_TIMEOUT_CEILING);
+        assert_eq!(round_timeout(usize::MAX), ROUND_TIMEOUT_CEILING);
+    }
+
+    #[tokio::test]
+    async fn test_per_chain_sign_limiter_isolation() {
+        let limiters: EnumMap<Chain, SignLimiter> = EnumMap::from_fn(|_| SignLimiter::new(1));
+
+        let eth_permit = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("Ethereum permit acquisition should succeed");
+
+        // Ethereum is now at limit (1/1); second acquire should timeout
+        let eth_second = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(matches!(eth_second, Err(limiter::SignLimitError::Timeout)));
+
+        // Solana has its own independent limiter pool; should acquire immediately
+        let sol_permit = limiters[Chain::Solana]
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("Solana permit acquisition should succeed despite Ethereum being exhausted");
+
+        // Solana is now also at limit (1/1); second acquire on Solana should timeout
+        let sol_second = limiters[Chain::Solana]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(matches!(sol_second, Err(limiter::SignLimitError::Timeout)));
+
+        // Release Ethereum permit; Ethereum can acquire again while Solana is still holding its permit
+        drop(eth_permit);
+        let eth_third = limiters[Chain::Ethereum]
+            .acquire(Duration::from_millis(10))
+            .await;
+        assert!(eth_third.is_ok());
+
+        drop(sol_permit);
     }
 }

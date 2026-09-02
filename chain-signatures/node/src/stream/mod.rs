@@ -8,14 +8,15 @@ use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
-    process_respond_event, process_sign_request, requeue_pending_sign_requests,
-    resume_pending_publish_requests,
+    process_respond_event, process_sign_request, publish_failover_due,
+    requeue_pending_sign_requests, resume_pending_publish_requests,
 };
 use crate::types::CheckpointWatcher;
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_primitives::{Chain, ChainEvent, SignCommand};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 /// Shared, per-chain dependencies
@@ -28,6 +29,9 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
+    /// pin it.
+    pub observe_lag: Option<Duration>,
 }
 
 impl StreamContext {
@@ -49,7 +53,15 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            observe_lag: None,
         }
+    }
+
+    /// Pin the publish failover schedule's observe lag, for fixtures that assert
+    /// the failover itself rather than its production timing.
+    pub fn with_observe_lag(mut self, lag: Option<Duration>) -> Self {
+        self.observe_lag = lag;
+        self
     }
 
     /// Forward a sign command to the signing pipeline, but only when caught up.
@@ -60,6 +72,11 @@ impl StreamContext {
                 .send(cmd)
                 .await
                 .context("sign command channel closed")?;
+        } else {
+            tracing::warn!(
+                ?cmd,
+                "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
+            );
         }
         Ok(())
     }
@@ -89,18 +106,20 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             request,
             block_timestamp,
         } => {
-            // Handle metrics reporting for the sign request event
-            if let Some(ts) = block_timestamp {
-                // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
-                telemetry.request_indexed_at(ts);
-            } else {
-                // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
-                telemetry.request_indexed();
-            }
-
-            process_sign_request(request, ctx)
+            // Record the request's indexed timestamp if it's a new request
+            let is_new = process_sign_request(request, ctx)
                 .await
                 .context("failed to process sign request")?;
+
+            if is_new {
+                if let Some(ts) = block_timestamp {
+                    // Ethereum (~15 min finality) reports the block timestamp.
+                    telemetry.request_indexed_at(ts);
+                } else {
+                    // Faster chains (Solana, Canton, Hydration) report no timestamp.
+                    telemetry.request_indexed();
+                }
+            }
         }
         ChainEvent::Respond(ev) => {
             process_respond_event(ev, ctx, root_pk)
@@ -113,6 +132,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
+            publish_failover_due(ctx, chain).await;
             process_block_event(chain, block, ctx, telemetry)
                 .await
                 .context("failed to process block event")?;

@@ -10,7 +10,8 @@ pub use indexer::ChainIndexer;
 pub use publish::{ChainPublisher, PublishAction};
 pub use state::{MockStateManager, StateManager};
 pub use telemetry::{
-    ChainTelemetry, NoopChainTelemetry, NoopPublisherTelemetry, PublisherTelemetry,
+    ChainTelemetry, ExtractionFailureKind, NoopChainTelemetry, NoopPublisherTelemetry,
+    PublisherTelemetry,
 };
 
 // Re-export backon because `retry_rpc!` uses `Retryable` trait internally

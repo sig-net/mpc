@@ -13,9 +13,10 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  # Light-weight component tests using the MPC fixture, these can run in parallel.
-  component-test:
-    name: Component Test
+  # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
+  # Runs the `fixture` nextest profile (see .config/nextest.toml).
+  fixture-test:
+    name: Fixture Test
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
@@ -46,11 +47,11 @@ jobs:
         run: |
           docker pull redis:7.4.2
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -61,7 +62,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: component-test
+          shared-key: fixture-test
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -70,25 +71,29 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
       - name: Build integration test artifacts
         run: ./setup.sh
-        env:
-          MPC_ENABLE_HELIOS: 1
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests --features helios
+        run: cargo build -p integration-tests --tests
 
       - name: Test
-        run: cargo nextest run -p integration-tests --features helios --profile fixture
+        run: cargo nextest run -p integration-tests --profile fixture
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
 
-  # Integration tests that share the mpc_it_network Docker network and thus must run sequentially.
-  # This also requires additional Solana/Anchor setup.
-  sequential-integration-test:
+  # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
+  # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
+  cluster-test:
     name: Integration Test
     strategy:
       matrix:
@@ -133,11 +138,11 @@ jobs:
         run: |
           docker pull redis:7.4.2
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -170,6 +175,15 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Build integration test artifacts
         run: ./setup.sh
 
@@ -191,3 +205,47 @@ jobs:
           IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
           IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
+
+  # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
+  anvil-integration-test:
+    name: Anvil Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: anvil-integration-test
+          cache-targets: true
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+      - name: Build eth contract artifact   # required by deploy_chain_signatures' include_bytes!
+        working-directory: ./chain-signatures/contract-eth
+        run: npm ci && npx hardhat compile
+
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Clippy (integration-gated code)
+        run: cargo clippy -p mpc-chain-ethereum --tests --features integration -- -Dclippy::all
+
+      - name: Test
+        run: cargo test -p mpc-chain-ethereum --features integration --tests

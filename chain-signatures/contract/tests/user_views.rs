@@ -3,11 +3,11 @@ use common::{create_response, init_env};
 
 use mpc_contract::primitives::{PendingRequest, SignRequest};
 
-use mpc_primitives::SignId;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
+use signet_primitives::SignId;
+use signet_primitives::LATEST_MPC_KEY_VERSION;
 use std::str::FromStr;
 #[tokio::test]
 async fn test_key_version() -> anyhow::Result<()> {

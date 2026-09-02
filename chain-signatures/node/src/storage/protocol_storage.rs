@@ -1,14 +1,23 @@
+use backon::{ExponentialBuilder, Retryable};
 use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
-use std::{fmt, time::Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
+
+// Redis connection backoff configuration
+const REDIS_CONNECT_MIN_DELAY_MS: u64 = 100;
+const REDIS_CONNECT_MAX_DELAY_SECS: u64 = 2;
+const REDIS_CONNECT_MAX_TIMES: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -145,9 +154,15 @@ impl<A: ProtocolArtifact> ArtifactReservation<A> {
         drop(self);
 
         let me = storage.me().ok()?;
-        let mut guard = storage.reserved.write().await;
-        guard.pending.remove(&id);
-        guard.using.insert(id, true);
+        // The guard must be released before `take_reserved_inner`: that function
+        // re-acquires `reserved` on its failure paths, and `RwLock` is not
+        // reentrant — holding it here would deadlock the task. Dropping it early
+        // also keeps the Redis round trip out of the critical section.
+        {
+            let mut guard = storage.reserved.write().await;
+            guard.pending.remove(&id);
+            guard.using.insert(id, true);
+        }
         storage.take_reserved_inner(id, me).await
     }
 }
@@ -300,13 +315,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
+    /// Returns a backoff builder for retrying Redis connections.
+    fn connect_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(REDIS_CONNECT_MIN_DELAY_MS))
+            .with_max_delay(Duration::from_secs(REDIS_CONNECT_MAX_DELAY_SECS))
+            .with_max_times(REDIS_CONNECT_MAX_TIMES)
+    }
+
     async fn connect(&self) -> Option<Connection> {
-        self.redis_pool
-            .get()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to connect to redis");
+        let mut attempt = 0;
+        let op = || self.redis_pool.get();
+        op.retry(&Self::connect_backoff())
+            .notify(move |err: &deadpool_redis::PoolError, sleep: Duration| {
+                attempt += 1;
+                tracing::warn!(attempt, ?err, retry_in = ?sleep, "failed to connect to redis");
             })
+            .await
             .ok()
     }
 
@@ -751,71 +776,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         outcome.is_some()
     }
 
-    /// Take one artifact owned by the given participant.
-    /// It is very important to NOT reuse the same artifact twice for two different
-    /// protocols.
-    pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-
-            if redis.call("SCARD", mine_key) < 1 then
-                return nil
-            end
-
-            -- pop one artifact from the self owner set and delete it once successfully fetched
-            local id = redis.call("SPOP", mine_key)
-            local artifact = redis.call("HGET", artifact_key, id)
-            if not artifact then
-                return {err = "WARN unexpected, artifact " .. id .. " is missing"}
-            end
-
-            -- Delete the artifact from the hash map
-            redis.call("HDEL", artifact_key, id)
-            -- delete the artifact from our self owner set
-            redis.call("SREM", mine_key, id)
-
-            -- Read and delete the holders set
-            local holders_key = artifact_key .. ':holders:' .. id
-            local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
-
-            -- Return the artifact and holders
-            return {artifact, holders}
-        "#;
-
-        let start = Instant::now();
-        let mut conn = self.connect().await?;
-        let me = self.me().ok()?;
-        let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(Some((mut artifact, holders))) => {
-                let holders = holders.into_iter().map(Participant::from).collect();
-                artifact.set_holders(holders);
-                let id = artifact.id();
-                self.reserved.write().await.using.insert(id, true);
-                let taken = ArtifactTaken::new(artifact, self.clone());
-                tracing::debug!(id, ?elapsed, "took mine artifact");
-                Some(taken)
-            }
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
-                None
-            }
-        }
-    }
-
     /// Peek at an available mine artifact without removing it from Redis.
     /// Marks the chosen ID as `pending` in memory so concurrent proposer tasks on this
     /// node cannot select the same artifact. Call `ArtifactReservation::commit()` to
@@ -868,6 +828,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 .collect()
         };
 
+        let start = Instant::now();
         let mut conn = self.connect().await?;
         let result: Result<Option<(A::Id, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
@@ -875,6 +836,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .arg(excluded.as_slice())
             .invoke_async(&mut conn)
             .await;
+
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "peek_mine"])
+            .observe(start.elapsed().as_millis() as f64);
 
         let (id, holders_raw) = match result {
             Ok(Some(val)) => val,
@@ -907,6 +872,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Take a specifically reserved artifact from Redis. The in-memory
     /// transition from `pending` to `using` must have happened before.
+    ///
+    /// The caller must **not** hold a `reserved` guard across this call: both
+    /// failure paths below re-acquire it to roll `using` back, and `RwLock` is
+    /// not reentrant, so a held guard deadlocks the task whenever Redis fails.
     async fn take_reserved_inner(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
@@ -1049,5 +1018,108 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let mut holders: Vec<Participant> = members.into_iter().map(Participant::from).collect();
         holders.sort();
         holders
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deadpool_redis::Runtime;
+    use redis::{RedisResult, RedisWrite, Value};
+    use std::time::Duration;
+
+    /// Minimal artifact so these tests do not depend on cait_sith protocol types.
+    #[derive(Debug)]
+    struct FakeArtifact {
+        id: u64,
+        participants: Vec<Participant>,
+        holders: Option<Vec<Participant>>,
+    }
+
+    impl ProtocolArtifact for FakeArtifact {
+        const METRIC_LABEL: &'static str = "fake";
+        type Id = u64;
+
+        fn id(&self) -> Self::Id {
+            self.id
+        }
+
+        fn participants(&self) -> &[Participant] {
+            &self.participants
+        }
+
+        fn holders(&self) -> Option<&[Participant]> {
+            self.holders.as_deref()
+        }
+
+        fn set_holders(&mut self, holders: Vec<Participant>) {
+            self.holders = Some(holders);
+        }
+    }
+
+    impl ToRedisArgs for FakeArtifact {
+        fn write_redis_args<W>(&self, out: &mut W)
+        where
+            W: ?Sized + RedisWrite,
+        {
+            // Decimal, so this round-trips through the `FromRedisValue` impl below.
+            out.write_arg(self.id.to_string().as_bytes());
+        }
+    }
+
+    impl FromRedisValue for FakeArtifact {
+        fn from_redis_value(v: &Value) -> RedisResult<Self> {
+            Ok(Self {
+                id: u64::from_redis_value(v)?,
+                participants: Vec::new(),
+                holders: None,
+            })
+        }
+    }
+
+    /// Storage pointed at a port with nothing listening, so `connect()` always
+    /// fails and every Redis-touching call takes its error path.
+    fn unreachable_storage() -> ProtocolStorage<FakeArtifact> {
+        // Port 1 is privileged and unused: connections are refused immediately.
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1/")
+            .create_pool(Some(Runtime::Tokio1))
+            .unwrap();
+        let storage =
+            ProtocolStorage::<FakeArtifact>::new(&pool, &"node.near".parse().unwrap(), "fake");
+        storage.set_me(Participant::from(0u32));
+        storage
+    }
+
+    /// Regression test: `commit()` used to hold the `reserved` write guard across
+    /// `take_reserved_inner`, which re-acquires the same non-reentrant lock on its
+    /// failure paths. A Redis failure therefore hung the task forever, wedging every
+    /// other task waiting on `reserved`.
+    #[tokio::test]
+    async fn commit_does_not_deadlock_when_redis_is_unreachable() {
+        let storage = unreachable_storage();
+        let id = 42u64;
+        storage.reserved.write().await.pending.insert(id);
+
+        let reservation = ArtifactReservation {
+            id,
+            holders: vec![Participant::from(1u32)],
+            storage: Some(storage.clone()),
+        };
+
+        let taken = tokio::time::timeout(Duration::from_secs(5), reservation.commit())
+            .await
+            .expect("commit() deadlocked instead of returning on redis failure");
+        assert!(
+            taken.is_none(),
+            "commit() must fail when redis is unreachable"
+        );
+
+        // The lock is released and the bookkeeping is rolled back, so the ID is
+        // neither stuck pending nor leaked as in-use.
+        let state = tokio::time::timeout(Duration::from_secs(5), storage.reserved.read())
+            .await
+            .expect("reserved lock still held after commit()");
+        assert!(!state.pending.contains(&id));
+        assert!(!state.using.contains_key(&id));
     }
 }
