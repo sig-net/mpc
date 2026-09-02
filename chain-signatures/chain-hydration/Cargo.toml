@@ -23,7 +23,7 @@ sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
 sp-state-machine = { version = "0.48", default-features = false, features = ["std"] }
 sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
-subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native", "unstable-light-client"] }
+subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

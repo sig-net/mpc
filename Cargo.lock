@@ -9087,7 +9087,6 @@ dependencies = [
  "sp-runtime",
  "sp-state-machine",
  "sp-trie",
- "subxt",
  "sysinfo 0.32.1",
  "tempfile",
  "test-log",
