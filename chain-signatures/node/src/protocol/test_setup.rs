@@ -29,6 +29,7 @@ impl MpcSignProtocol {
         storage: TestProtocolStorage,
         channels: TestProtocolChannels,
         contract: ContractStateWatcher,
+        backlog: Backlog,
     ) -> Self {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
@@ -45,7 +46,7 @@ impl MpcSignProtocol {
             channels.mesh_state.clone(),
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
-            Backlog::new(),
+            backlog,
             desynced_peer_tx,
         );
         Self {

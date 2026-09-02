@@ -21,8 +21,8 @@ import {
 import {
   parseRequestIdHex,
   parseSecp256k1PublicKey,
-  pureCircuits as signetCircuits,
   requestIdBytes,
+  serializeRespondOutput,
   signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
   type RequestIdHex,
@@ -282,7 +282,9 @@ async function dispatch(request: Request): Promise<unknown> {
     const responseKey = active.responseKey;
     if (responseKey === undefined) throw new Error("caller is not initialised");
     const requestId = parseRequestIdHex(request.requestId);
-    const serializedOutput = signetCircuits.boolAbiWord(true);
+    const serializedOutput = serializeRespondOutput([{ name: "success", type: "bool" }], {
+      success: true,
+    });
     const response = await waitFor("a verified respondBidirectional entry", () =>
       active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
     );

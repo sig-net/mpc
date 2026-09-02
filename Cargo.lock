@@ -8845,6 +8845,7 @@ dependencies = [
  "mpc-utils",
  "serde",
  "serde_json",
+ "signet-midnight-serde",
  "tokio",
  "tokio-util",
  "tracing",
@@ -13654,6 +13655,12 @@ dependencies = [
  "sha3 0.10.8",
  "signet-primitives",
 ]
+
+[[package]]
+name = "signet-midnight-serde"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1316b0ad26db52b0656d331090cf3361894ef5d1c6cc972b7232ba95fb1a69a0"
 
 [[package]]
 name = "signet-primitives"

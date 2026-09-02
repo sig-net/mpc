@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
@@ -9,7 +10,7 @@ use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     SignatureRespondedEvent,
 };
 
@@ -21,18 +22,15 @@ pub(crate) async fn process_sign_request(
         anyhow::bail!("Unexpected sign request kind");
     }
 
-    // Reject malformed bidirectional requests at ingestion: an empty
-    // `serialized_transaction` cannot be RLP-decoded and would otherwise be
-    // stored in the backlog and only blow up later when the respond event
-    // advances it to execution (see `sign_and_hash_transaction`). Drop it here
-    // so a poison-pill request never enters the backlog.
+    // Reject malformed bidirectional requests at ingestion, running the same
+    // deterministic derivations the respond event will need later. A request
+    // admitted here but failing there can never advance: its entry sticks in
+    // pending-publish forever, and every node publishes a leg-1 response
+    // whose second leg will never come.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
-        if event.serialized_transaction.is_empty() {
-            anyhow::bail!(
-                "rejecting bidirectional sign request {:?} with empty serialized_transaction",
-                sign_request.id
-            );
-        }
+        event.validate().with_context(|| {
+            format!("rejecting bidirectional sign request {:?}", sign_request.id)
+        })?;
     }
 
     // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
@@ -67,40 +65,58 @@ pub(crate) async fn requeue_pending_sign_requests(
 }
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
-    let publishable = ctx.backlog.publishable_requests(source_chain).await;
-    if publishable.is_empty() {
-        return;
-    }
-
-    let Some(public_key) = ctx.contract_watcher.public_key().await else {
-        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
-        return;
-    };
-    for (sign_request, publish) in publishable {
+    for (sign_request, publish, _dispatched) in ctx.backlog.publishable_requests(source_chain).await
+    {
         if !publish.is_proposer {
             continue;
         }
 
         let sign_id = sign_request.id;
-        ctx.rpc
-            .publish_with_state(public_key, sign_request, &publish);
+        // This is the proposer's only retry for a publish that reported success but
+        // never landed, so it republishes even if it already dispatched one. Marking
+        // stops the sweep from putting a second copy on chain on the next block: the
+        // deadline was anchored before the restart, so it is already past.
+        ctx.backlog
+            .mark_publish_dispatched(source_chain, &sign_id)
+            .await;
+        ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }
 
-fn verify_entry_signature(
-    root_public_key: mpc_primitives::PublicKey,
-    entry: &crate::backlog::BacklogEntry,
-    signature: &Signature,
-    sign_id: SignId,
-) -> anyhow::Result<()> {
-    mpc_crypto::verify_signature(
-        root_public_key,
-        entry.request.args.epsilon,
-        entry.request.args.payload,
-        signature,
-    )
-    .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))
+/// Publish entries whose proposer stayed silent past this node's deadline.
+///
+/// Only one of the `m` participants needs a healthy stream for failover to happen.
+pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
+    if !ctx.caught_up {
+        return;
+    }
+    let lag = observe_lag(chain, ctx.observe_lag);
+
+    let me = ctx.contract_watcher.account_id().clone();
+    let now = mpc_utils::time::current_unix_timestamp();
+    for (request, publish, dispatched) in ctx.backlog.publishable_requests(chain).await {
+        if dispatched {
+            continue;
+        }
+        let Some(deadline) = publish_deadline(&request.id, &publish, &me, lag) else {
+            continue;
+        };
+        if now < deadline {
+            continue;
+        }
+        let sign_id = request.id;
+        if !ctx.backlog.mark_publish_dispatched(chain, &sign_id).await {
+            continue;
+        }
+
+        tracing::warn!(
+            ?sign_id,
+            %chain,
+            "proposer response not observed in time; publishing failover response"
+        );
+        ctx.rpc.publish_with_state(request, &publish);
+    }
 }
 
 pub(crate) async fn process_respond_event(
@@ -119,7 +135,7 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    verify_entry_signature(root_pk, &entry, &respond_event.signature, sign_id)?;
+    entry.verify_signature(root_pk, &respond_event.signature)?;
 
     match &entry.request.kind {
         SignKind::Sign => {
@@ -157,6 +173,23 @@ async fn advance_bidirectional_to_execution(
             entry_type = %entry.typename(),
             "respond event backlog entry is already advanced; treating as processed"
         );
+        return Ok(());
+    }
+
+    // Admission validates the same derivations, but entries can enter the backlog
+    // without passing admission (checkpoint recovery restores them wholesale). One
+    // that fails here fails identically on every node and on every replay, so it
+    // can never advance: leaving it would park it in pending-publish forever, with
+    // every node publishing a response that is already on chain.
+    // Removing it is deterministic across the network, so checkpoints stay aligned.
+    if let Err(err) = event.validate() {
+        tracing::error!(
+            ?sign_id,
+            ?source_chain,
+            ?err,
+            "quarantining bidirectional request that can never advance"
+        );
+        ctx.backlog.remove(source_chain, &sign_id).await;
         return Ok(());
     }
 
@@ -246,7 +279,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         );
     }
 
-    verify_entry_signature(root_pk, &entry, &event.signature, sign_id)?;
+    entry.verify_signature(root_pk, &event.signature)?;
 
     if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
@@ -293,6 +326,19 @@ pub async fn process_execution_confirmed(
     if unwatched_sign_id != sign_id {
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
+    // The watched transaction is the source of truth for the source chain. The
+    // follow-up request's chain decides which backlog bucket, publish key, and
+    // cancellation key it lives under, and all of them must agree; an execution
+    // watcher filling the event's field differently must not split them.
+    if source_chain != pending_tx.source_chain {
+        tracing::warn!(
+            ?tx_id,
+            event = ?source_chain,
+            watcher = ?pending_tx.source_chain,
+            "source_chain mismatch between event and watcher; using the watcher's"
+        );
+    }
+    let source_chain = pending_tx.source_chain;
 
     let chain_ctx = ctx
         .backlog

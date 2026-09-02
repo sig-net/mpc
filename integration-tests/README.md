@@ -91,7 +91,7 @@ Build the MPC contract and host node, then run the ignored test:
 cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
 ```
 
-The test currently requires the host `mpc-node` binary and does not support the `docker-test` feature. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
 
 ## Logging and Tracing
 We have three types of logging available:
