@@ -2,6 +2,7 @@ use crate::config::HydrationConfig;
 
 use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Context as _, Result};
+
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::{
