@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
@@ -23,10 +24,9 @@ pub(crate) async fn process_sign_request(
 
     // Reject malformed bidirectional requests at ingestion, running the same
     // deterministic derivations the respond event will need later. A request
-    // admitted here but failing there is worse than one never admitted: its entry
-    // sticks in pending-publish forever, and every backup's sweep fires into a
-    // duplicate-publish retry loop that no cancellation ever ends, because the
-    // failing respond processing is where the cancel lives.
+    // admitted here but failing there can never advance: its entry sticks in
+    // pending-publish forever, and every node publishes a leg-1 response
+    // whose second leg will never come.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
         event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
@@ -65,14 +65,57 @@ pub(crate) async fn requeue_pending_sign_requests(
 }
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
-    for (sign_request, publish) in ctx.backlog.publishable_requests(source_chain).await {
+    for (sign_request, publish, _dispatched) in ctx.backlog.publishable_requests(source_chain).await
+    {
         if !publish.is_proposer {
             continue;
         }
 
         let sign_id = sign_request.id;
+        // This is the proposer's only retry for a publish that reported success but
+        // never landed, so it republishes even if it already dispatched one. Marking
+        // stops the sweep from putting a second copy on chain on the next block: the
+        // deadline was anchored before the restart, so it is already past.
+        ctx.backlog
+            .mark_publish_dispatched(source_chain, &sign_id)
+            .await;
         ctx.rpc.publish_with_state(sign_request, &publish);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+    }
+}
+
+/// Publish entries whose proposer stayed silent past this node's deadline.
+///
+/// Only one of the `m` participants needs a healthy stream for failover to happen.
+pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
+    if !ctx.caught_up {
+        return;
+    }
+    let lag = observe_lag(chain, ctx.observe_lag);
+
+    let me = ctx.contract_watcher.account_id().clone();
+    let now = mpc_utils::time::current_unix_timestamp();
+    for (request, publish, dispatched) in ctx.backlog.publishable_requests(chain).await {
+        if dispatched {
+            continue;
+        }
+        let Some(deadline) = publish_deadline(&request.id, &publish, &me, lag) else {
+            continue;
+        };
+        if now < deadline {
+            continue;
+        }
+        let sign_id = request.id;
+        if !ctx.backlog.mark_publish_dispatched(chain, &sign_id).await {
+            continue;
+        }
+
+        tracing::warn!(
+            ?sign_id,
+            %chain,
+            "proposer response not observed in time; publishing failover response"
+        );
+        ctx.rpc.publish_with_state(request, &publish);
     }
 }
 
@@ -137,7 +180,7 @@ async fn advance_bidirectional_to_execution(
     // without passing admission (checkpoint recovery restores them wholesale). One
     // that fails here fails identically on every node and on every replay, so it
     // can never advance: leaving it would park it in pending-publish forever, with
-    // every backup's sweep republishing a response that is already on chain.
+    // every node publishing a response that is already on chain.
     // Removing it is deterministic across the network, so checkpoints stay aligned.
     if let Err(err) = event.validate() {
         tracing::error!(

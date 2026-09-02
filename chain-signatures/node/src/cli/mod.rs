@@ -913,6 +913,7 @@ async fn spawn_indexers(
             mesh_state.clone(),
             node_client.clone(),
             checkpoints_rx[Chain::Hydration].clone(),
+            rpc_channel.clone(),
         ));
     }
 

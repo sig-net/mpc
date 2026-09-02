@@ -3,7 +3,7 @@ use crate::backlog::Backlog;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
@@ -486,7 +486,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     // An unknown target chain fails the same deterministic derivation on every
     // node and every replay, so the entry is quarantined rather than errored:
-    // leaving it would park it in pending-publish with backups republishing it.
+    // leaving it would park it in pending-publish with every node republishing it.
     process_respond_event(event, &ctx, public_key)
         .await
         .expect("quarantining is not an error");
@@ -531,7 +531,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 /// Admission cannot be the only gate: checkpoint recovery restores backlog entries
 /// wholesale, so a poison entry can exist without ever passing admission. The
 /// respond path must then quarantine it (deterministically, on every node), or it
-/// parks in pending-publish forever with every backup's sweep republishing it.
+/// parks in pending-publish forever with every node publishing it.
 #[tokio::test]
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
@@ -595,7 +595,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 /// A non-empty but undecodable transaction is the same poison pill as an empty one,
 /// with a worse blast radius: admitted, it signs, publishes leg 1, then fails
 /// deterministically in respond processing before the cancel, leaving the entry in
-/// pending-publish forever while every backup's sweep fires into a retry loop that
+/// pending-publish forever while every node fires into a retry loop that
 /// nothing ends. Admission runs the same derivations respond processing will need.
 #[tokio::test]
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
@@ -972,6 +972,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                     ),
                     participants: vec![],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -1369,4 +1370,224 @@ async fn live_block_votes_for_checkpoint() {
     assert!(timeout(Duration::from_millis(100), sign_rx.recv())
         .await
         .is_err());
+}
+
+/// The sweep fires each entry once, and the two legs share a sign id, so only
+/// clearing the dispatch flag on re-entry keeps a fired leg 1 from suppressing
+/// leg 2.
+#[tokio::test]
+async fn publish_failover_fires_once_per_leg() {
+    let backlog = Backlog::new();
+    let sign_id = mpc_primitives::SignId::new([21u8; 32]);
+    let args = test_sign_args(21);
+
+    // `publishing_since: 0` puts the deadline far in the past, whatever the draw.
+    let publish = || {
+        Arc::new(PublishState {
+            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer: false,
+            publishing_since: Some(0),
+        })
+    };
+
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+        )))
+        .await;
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish { publish: publish() },
+        )
+        .await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    // No observe lag: this test is about the once-per-leg property, not the gate.
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "leg 1 publishes once past its deadline"
+    );
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "the same entry does not fire twice"
+    );
+
+    // Same sign id, second-leg kind, as the backlog holds after
+    // `transition_to_bidirectional_response`.
+    backlog
+        .set_request(
+            Chain::Solana,
+            &sign_id,
+            Arc::new(IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                args,
+                Chain::Solana,
+                current_unix_timestamp(),
+                RespondBidirectionalTx {
+                    tx_id: mpc_primitives::BidirectionalTxId([0u8; 32]),
+                    output: vec![],
+                    chain_ctx: None,
+                },
+            )),
+        )
+        .await
+        .unwrap();
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublishBidirectional { publish: publish() },
+        )
+        .await;
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "leg 2 fires on its own episode, not leg 1's history"
+    );
+}
+
+/// The rpc channel is fed from a spawned task, so a publish is not visible the
+/// instant the sweep returns.
+async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
+    tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A restarting proposer republishes from the catchup resume, and its deadline is
+/// long past by then. The resume records what it sent, so the next block does not
+/// put a second copy of the same response on chain.
+#[tokio::test]
+async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
+    let backlog = Backlog::new();
+    let sign_id = mpc_primitives::SignId::new([22u8; 32]);
+
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign(
+            sign_id,
+            test_sign_args(22),
+            Chain::Solana,
+            current_unix_timestamp(),
+        )))
+        .await;
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
+                    signature: Signature::new(
+                        ProjectivePoint::GENERATOR.to_affine(),
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                    // Deadline far in the past, whatever this node's draw.
+                    publishing_since: Some(0),
+                }),
+            },
+        )
+        .await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+
+    resume_pending_publish_requests(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "the proposer republishes on catchup"
+    );
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "the sweep must not republish what the resume already dispatched"
+    );
+}
+
+/// Put an entry in pending-publish with a deadline in the past, whatever the draw.
+async fn insert_publishable(backlog: &Backlog, seed: u8) {
+    let sign_id = mpc_primitives::SignId::new([seed; 32]);
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign(
+            sign_id,
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+        )))
+        .await;
+    backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: Arc::new(PublishState {
+                    signature: Signature::new(
+                        ProjectivePoint::GENERATOR.to_affine(),
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: false,
+                    publishing_since: Some(0),
+                }),
+            },
+        )
+        .await;
+}
+
+/// The deadline being past is not enough: a node that has not caught up is not
+/// reading its chain, so it holds fire rather than guessing.
+#[tokio::test]
+async fn publish_failover_needs_catchup() {
+    let backlog = Backlog::new();
+    insert_publishable(&backlog, 23).await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        false,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    ctx.observe_lag = Some(Duration::ZERO);
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "a node that has not caught up does not fail over"
+    );
+
+    ctx.caught_up = true;
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "the deadline was past all along; catchup is what held it back"
+    );
 }
