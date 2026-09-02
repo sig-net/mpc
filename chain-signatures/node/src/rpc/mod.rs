@@ -272,10 +272,6 @@ impl ContractStateWatcher {
         }
     }
 
-    pub fn mark_changed(&mut self) {
-        self.contract_state.mark_changed();
-    }
-
     pub fn participants(&self) -> Option<Participants> {
         match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
@@ -295,24 +291,6 @@ impl ContractStateWatcher {
                 .new_participants
                 .find_participant(&self.account_id)
                 .copied(),
-        }
-    }
-
-    pub async fn threshold(&self) -> Option<usize> {
-        match self.state()? {
-            ProtocolState::Initializing(_) => None,
-            ProtocolState::Running(state) => Some(state.threshold),
-            ProtocolState::Resharing(state) => Some(state.threshold),
-        }
-    }
-
-    /// Wait until the MPC threshold is available and return it
-    pub async fn wait_threshold(&mut self) -> usize {
-        loop {
-            if let Some(threshold) = self.threshold().await {
-                return threshold;
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -371,16 +349,6 @@ impl ContractStateWatcher {
                 state.new_participants.clone(),
                 state.old_participants.clone(),
             ),
-        }
-    }
-
-    /// Waits till the contract is in the running state.
-    pub async fn wait_running(&mut self) -> RunningContractState {
-        loop {
-            if let Some(ProtocolState::Running(state)) = self.borrow_state().as_ref() {
-                return state.clone();
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
