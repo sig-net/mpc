@@ -1,4 +1,4 @@
-use crate::types::KeyVersion;
+use signet_crypto::KeyVersion;
 use crate::PublicKey;
 use anyhow::Context;
 use k256::{
