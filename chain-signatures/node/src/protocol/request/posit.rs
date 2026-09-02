@@ -735,4 +735,45 @@ pub(crate) mod tests {
             "a reject must never be answered"
         );
     }
+
+    /// A proposer that gets enough MissingArtifact rejects to abort the round
+    /// reports every such rejector to the mesh as desynced, so state sync
+    /// repairs the proposer's stale holder list for them.
+    #[tokio::test]
+    async fn advance_reports_missing_artifact_rejectors_as_desynced() {
+        let proposer = Participant::from(0);
+        let rejector = Participant::from(1);
+        // Threshold 2 so a single reject from the other participant is
+        // already enough to abort the round.
+        let mut t = setup(proposer, rejector, 2);
+        let (desynced_peer_tx, mut desynced_peer_rx) = mpsc::channel(1);
+        t.ctx.desynced_peer_tx = desynced_peer_tx;
+
+        t.state.set_round(0);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: rejector,
+            action: PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+            stale_round: None,
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, rejector].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        assert_eq!(
+            desynced_peer_rx.try_recv(),
+            Ok(rejector),
+            "the rejecting peer must be reported as desynced"
+        );
+    }
 }
