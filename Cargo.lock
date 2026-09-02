@@ -6753,6 +6753,7 @@ dependencies = [
  "k256",
  "mpc-chain-canton",
  "mpc-chain-ethereum",
+ "mpc-chain-hydration",
  "mpc-chain-integration-core",
  "mpc-chain-midnight",
  "mpc-chain-near",
@@ -8854,6 +8855,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-hydration"
+version = "1.17.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "mpc-utils",
+ "parity-scale-codec",
+ "serde",
+ "serde_json",
+ "sp-core",
+ "sp-runtime",
+ "sp-state-machine",
+ "sp-trie",
+ "subxt",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "mpc-chain-integration-core"
 version = "1.17.0"
 dependencies = [
@@ -9044,6 +9074,7 @@ dependencies = [
  "mockito",
  "mpc-chain-canton",
  "mpc-chain-ethereum",
+ "mpc-chain-hydration",
  "mpc-chain-integration-core",
  "mpc-chain-midnight",
  "mpc-chain-near",
@@ -9062,7 +9093,6 @@ dependencies = [
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp 0.29.0",
  "opentelemetry_sdk 0.29.0",
- "parity-scale-codec",
  "prometheus 0.14.0",
  "rand 0.8.5",
  "redis",
