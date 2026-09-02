@@ -1,4 +1,3 @@
-use signet_crypto::KeyVersion;
 use crate::PublicKey;
 use anyhow::Context;
 use k256::{
@@ -12,6 +11,7 @@ use k256::{
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
+use signet_crypto::KeyVersion;
 
 // `ScalarExt` and `Sha3_256` are used only by `derive_delta`, which is
 // excluded from the wasm contract build; gate the imports to match so the
