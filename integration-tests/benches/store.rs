@@ -97,6 +97,7 @@ fn env() -> (Runtime, SyncEnv) {
         }
         let client = NodeClient::new(&node_client::Options::default());
         let (synced_peer_tx, synced_peer_rx) = mpsc::channel(1024);
+        let (_desynced_peer_tx, desynced_peer_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
             mpc_node::mesh::Options {
@@ -104,6 +105,7 @@ fn env() -> (Runtime, SyncEnv) {
             },
             &node_id,
             synced_peer_rx,
+            desynced_peer_rx,
         );
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
