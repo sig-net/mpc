@@ -3,9 +3,6 @@ name = "mpc-keys"
 version.workspace = true
 edition = "2021"
 
-[lib]
-crate-type = ["cdylib", "lib"]
-
 [dependencies]
 hex.workspace = true
 hpke = { version = "0.11", features = ["serde_impls", "std"] }
