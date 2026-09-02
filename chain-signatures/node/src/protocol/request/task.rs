@@ -178,9 +178,9 @@ pub struct SignTask {
     pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,
     pub node_account_id: near_account_id::AccountId,
-    /// Reports a peer as out-of-sync to the mesh. A `MissingArtifact` reject proves
-    /// the peer's view of our artifacts is stale, and state sync is what repairs
-    /// holder lists; this puts the peer back through it.
+    /// Reports a peer as out-of-sync to the mesh. A `MissingArtifact` reject
+    /// proves our holder list is wrong about what that peer stored, and state
+    /// sync is what corrects it; this puts the peer back through it.
     pub desynced_peer_tx: mpsc::Sender<Participant>,
 }
 

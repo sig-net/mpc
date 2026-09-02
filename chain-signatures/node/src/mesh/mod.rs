@@ -194,6 +194,30 @@ mod tests {
         panic!("timed out waiting for {participant:?} to become {expected:?}");
     }
 
+    /// Wait for the mesh state to satisfy `f`. Sleeping a fixed span instead
+    /// races the connection tasks, which have to complete a real `/status`
+    /// round trip before any of our reports can take effect.
+    async fn wait_for_state(
+        mesh_state: &mut watch::Receiver<MeshState>,
+        what: &str,
+        f: impl Fn(&MeshState) -> bool,
+    ) {
+        let wait = async {
+            loop {
+                if f(&mesh_state.borrow_and_update()) {
+                    return;
+                }
+                mesh_state.changed().await.unwrap();
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .is_err()
+        {
+            panic!("timed out waiting for mesh state: {what}");
+        }
+    }
+
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
@@ -337,9 +361,10 @@ mod tests {
         mesh_task.abort();
     }
 
-    /// A desync report pulls a peer out of `active` and into `need_sync`, a
-    /// report naming ourselves is ignored, and a later sync report restores
-    /// the peer.
+    /// A desync report pulls a peer out of `active` and into `need_sync`, and
+    /// a later sync report restores it. This covers the wiring of the desync
+    /// arm in the mesh loop; the status transition itself is covered by
+    /// `test_pool_redundant_desync_report_is_a_noop`.
     #[test(tokio::test)]
     async fn test_mesh_desync_report() {
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
@@ -372,33 +397,36 @@ mod tests {
         let mut mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
 
-        // Bring everyone up to active first.
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        for idx in 0..num_nodes {
+        // Peers are only reported synced once they have reached Syncing, so
+        // wait for the connection tasks to get there before reporting. We hold
+        // no connection to ourselves, hence 1..num_nodes.
+        wait_for_state(&mut mesh_state, "peers syncing", |state| {
+            state.need_sync().len() == num_nodes - 1
+        })
+        .await;
+        for idx in 1..num_nodes {
             sync_tx.send(servers[idx].id()).await.unwrap();
         }
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        assert_eq!(mesh_state.borrow_and_update().active().len(), num_nodes);
+        wait_for_state(&mut mesh_state, "all active", |state| {
+            state.active().len() == num_nodes
+        })
+        .await;
 
         // A desync report takes that peer out of active and queues it for sync.
         desync_tx.send(desynced).await.unwrap();
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        {
-            let state = mesh_state.borrow_and_update().clone();
-            assert!(!state.active().contains_key(&desynced));
-            assert!(state.need_sync().contains_key(&desynced));
-            assert_eq!(state.active().len(), num_nodes - 1);
-        }
+        wait_for_state(&mut mesh_state, "peer desynced", |state| {
+            state.need_sync().contains_key(&desynced)
+        })
+        .await;
+        assert!(!mesh_state.borrow().active().contains_key(&desynced));
 
         // A successful sync puts the peer back.
         sync_tx.send(desynced).await.unwrap();
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        {
-            let state = mesh_state.borrow_and_update().clone();
-            assert!(state.active().contains_key(&desynced));
-            assert!(state.need_sync().is_empty());
-            assert_eq!(state.active().len(), num_nodes);
-        }
+        wait_for_state(&mut mesh_state, "peer restored", |state| {
+            state.active().contains_key(&desynced)
+        })
+        .await;
+        assert!(mesh_state.borrow().need_sync().is_empty());
 
         mesh_task.abort();
     }

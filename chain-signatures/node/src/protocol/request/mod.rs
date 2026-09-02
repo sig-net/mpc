@@ -152,7 +152,7 @@ pub struct SignatureSpawner {
     backlog: Backlog,
     node_account_id: near_account_id::AccountId,
     /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
-    /// before we use it again. See `SignTask::desynced_peer_tx`.
+    /// before we use it again. Cloned into each spawned sign task.
     desynced_peer_tx: mpsc::Sender<Participant>,
 }
 

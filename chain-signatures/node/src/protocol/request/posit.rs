@@ -485,6 +485,9 @@ pub(crate) mod tests {
         pub(crate) ctx: SignTask,
         pub(crate) state: SignState,
         pub(crate) outbox: MessageOutbox,
+        /// Desync reports the phase under test emitted. Room for several, so a
+        /// test asserting on one report cannot pass by silently dropping others.
+        pub(crate) desynced_peer_rx: mpsc::Receiver<Participant>,
         _inbox: MessageInbox,
         _rpc_rx: mpsc::Receiver<RpcAction>,
         _mesh_tx: watch::Sender<MeshState>,
@@ -506,7 +509,7 @@ pub(crate) mod tests {
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (desynced_peer_tx, _desynced_peer_rx) = mpsc::channel(1);
+        let (desynced_peer_tx, desynced_peer_rx) = mpsc::channel(8);
 
         let ctx = SignTask {
             governance,
@@ -543,6 +546,7 @@ pub(crate) mod tests {
             ctx,
             state,
             outbox,
+            desynced_peer_rx,
             _inbox,
             _rpc_rx,
             _mesh_tx,
@@ -748,10 +752,6 @@ pub(crate) mod tests {
         // the threshold, as it is here. See
         // `advance_does_not_report_when_the_set_has_slack` for the other side.
         let mut t = setup(proposer, rejector, 2);
-        let (desynced_peer_tx, mut desynced_peer_rx) = mpsc::channel(1);
-        t.ctx.desynced_peer_tx = desynced_peer_tx;
-
-        t.state.set_round(0);
         t.state.budget.reset(Duration::from_millis(200));
 
         let mailbox = PositMailbox::new();
@@ -773,7 +773,7 @@ pub(crate) mod tests {
         assert!(matches!(next, SignPhase::Organizing(_)));
 
         assert_eq!(
-            desynced_peer_rx.try_recv(),
+            t.desynced_peer_rx.try_recv(),
             Ok(rejector),
             "the rejecting peer must be reported as desynced"
         );
@@ -787,10 +787,6 @@ pub(crate) mod tests {
         let proposer = Participant::from(0);
         let rejector = Participant::from(1);
         let mut t = setup(proposer, rejector, 2);
-        let (desynced_peer_tx, mut desynced_peer_rx) = mpsc::channel(1);
-        t.ctx.desynced_peer_tx = desynced_peer_tx;
-
-        t.state.set_round(0);
         t.state.budget.reset(Duration::from_millis(200));
 
         let mailbox = PositMailbox::new();
@@ -814,7 +810,7 @@ pub(crate) mod tests {
         assert!(matches!(next, SignPhase::Organizing(_)));
 
         assert!(
-            desynced_peer_rx.try_recv().is_err(),
+            t.desynced_peer_rx.try_recv().is_err(),
             "only a MissingArtifact reject may report a peer as desynced"
         );
     }
@@ -831,10 +827,6 @@ pub(crate) mod tests {
         // Three participants at threshold 2: one reject is not enough_rejects
         // (1 > 3 - 2 is false), so the round dies on its deadline instead.
         let mut t = setup(proposer, rejector, 2);
-        let (desynced_peer_tx, mut desynced_peer_rx) = mpsc::channel(1);
-        t.ctx.desynced_peer_tx = desynced_peer_tx;
-
-        t.state.set_round(0);
         t.state.budget.reset(Duration::from_millis(200));
 
         let mailbox = PositMailbox::new();
@@ -856,8 +848,91 @@ pub(crate) mod tests {
         assert!(matches!(next, SignPhase::Organizing(_)));
 
         assert!(
-            desynced_peer_rx.try_recv().is_err(),
+            t.desynced_peer_rx.try_recv().is_err(),
             "a single stale holder is currently never reported"
+        );
+    }
+
+    /// Every MissingArtifact rejector in the round is reported, not just the
+    /// first. Also anchors `advance_does_not_report_when_the_set_has_slack`:
+    /// the same three-participant set does report once the rejects clear the
+    /// bar, so that test's silence is the threshold arithmetic and not a
+    /// rejector who was never counted.
+    #[tokio::test]
+    async fn advance_reports_every_missing_artifact_rejector() {
+        let proposer = Participant::from(0);
+        let first = Participant::from(1);
+        let second = Participant::from(2);
+        // Three participants at threshold 2: two rejects clear the bar.
+        let mut t = setup(proposer, first, 2);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        for from in [first, second] {
+            mailbox.push(SignPositMessage {
+                presignature_id: 42,
+                round: 0,
+                from,
+                action: PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+                stale_round: None,
+            });
+        }
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, first, second].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        // `rejects` is a BTreeMap, so reports come out in participant order.
+        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(first));
+        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(second));
+        assert!(t.desynced_peer_rx.try_recv().is_err(), "no further reports");
+    }
+
+    /// With rejects of mixed reasons in one round, only the MissingArtifact
+    /// one is reported. A filter that keyed off anything but the reason would
+    /// pass the all-or-nothing cases and fail here.
+    #[tokio::test]
+    async fn advance_reports_only_the_missing_artifact_rejector() {
+        let proposer = Participant::from(0);
+        let missing = Participant::from(1);
+        let invalid = Participant::from(2);
+        let mut t = setup(proposer, missing, 2);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: missing,
+            action: PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+            stale_round: None,
+        });
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: invalid,
+            action: PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+            stale_round: None,
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, missing, invalid].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(missing));
+        assert!(
+            t.desynced_peer_rx.try_recv().is_err(),
+            "the InvalidRequest rejector must not be reported"
         );
     }
 }
