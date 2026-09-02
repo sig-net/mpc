@@ -57,7 +57,6 @@ pub enum PositAction {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
 pub enum PositRejectReason {
-    Unknown,
     /// The node is already participating in a generation, or has already
     /// finished generation.
     AlreadyGenerating,
