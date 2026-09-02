@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::{self, NodeClient};
@@ -36,7 +35,8 @@ use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
-use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
@@ -292,7 +292,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton, midnight)?;
+            let stack = ChainStack::new(ChainConfigs::from_args(
+                eth, sol, hydration, canton, midnight,
+            )?);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -310,7 +312,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &network,
                 &mpc_contract_id,
                 signer,
-                &chains,
+                &stack,
             )
             .await;
 
@@ -331,7 +333,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &cipher_pk_hex,
                 &network,
                 &near_client,
-                &chains,
+                &stack.configs,
             );
 
             let ProtocolHandles {
@@ -383,7 +385,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             spawn_indexers(
-                chains,
+                stack,
                 sign_tx,
                 rpc_channel.clone(),
                 backlog.clone(),
@@ -498,6 +500,27 @@ impl ChainConfigs {
             midnight: midnight.into_config()?,
         })
     }
+}
+
+/// Per-chain configs paired with runtime RPC state, built once at startup.
+struct ChainStack {
+    configs: ChainConfigs,
+    /// One 429 cooldown gate per chain, shared by that chain's indexer and
+    /// publisher (they hit the same RPC endpoint).
+    gates: EnumMap<Chain, SharedBackoff>,
+}
+
+impl ChainStack {
+    fn new(configs: ChainConfigs) -> Self {
+        Self {
+            configs,
+            gates: EnumMap::from_fn(|_| SharedBackoff::new()),
+        }
+    }
+
+    fn gate(&self, chain: Chain) -> SharedBackoff {
+        self.gates[chain].clone()
+    }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured. A client that fails to build is
@@ -506,17 +529,21 @@ impl ChainConfigs {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
-        if let Some(eth) = &self.eth {
+        if let Some(eth) = &self.configs.eth {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Ethereum));
-            let client = Arc::new(publisher::EthClient::new(eth, telemetry));
+            let client = Arc::new(publisher::EthClient::new(
+                eth,
+                telemetry,
+                self.gate(Chain::Ethereum),
+            ));
             publishers.insert(Chain::Ethereum, client);
         }
-        if let Some(sol) = &self.sol {
+        if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
             let client = Arc::new(SolanaClient::from_config(sol, telemetry));
             publishers.insert(Chain::Solana, client);
         }
-        if let Some(hydration) = &self.hydration {
+        if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
@@ -525,7 +552,7 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
             }
         }
-        if let Some(canton) = &self.canton {
+        if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
             match CantonClient::new(canton, telemetry).await {
                 Ok(client) => {
@@ -534,7 +561,7 @@ impl ChainConfigs {
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
         }
-        if let Some(midnight) = &self.midnight {
+        if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             match MidnightPublisher::connect(midnight, telemetry).await {
                 Ok(client) => {
@@ -648,27 +675,25 @@ impl RpcHandles {
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
-        chains: &ChainConfigs,
+        stack: &ChainStack,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
-        // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
-        // TODO: two connection are negligible here, but consider sharing a single client if necessary.
+        let near_rpc = near_fetch::Client::new(near_rpc_url);
         let near_client = NearClient::new(
-            near_rpc_url,
+            near_rpc.clone(),
             mpc_contract_id,
             signer.clone(),
             publisher_telemetry,
         );
         let near_governance_client = NearGovernanceClient::new(
-            near_rpc_url,
+            near_rpc,
             my_address,
             &network.sign_sk,
             &network.cipher_sk,
             mpc_contract_id,
             signer,
         );
-        let publishers = chains.publishers(near_client.clone()).await;
+        let publishers = stack.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -793,7 +818,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
-    chains: ChainConfigs,
+    stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
@@ -802,13 +827,14 @@ async fn spawn_indexers(
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
+    let ChainStack { configs, gates } = stack;
     let ChainConfigs {
         eth,
         sol,
         hydration,
         canton,
         midnight,
-    } = chains;
+    } = configs;
 
     tracing::info!(
         ethereum = eth.is_some(),
@@ -821,7 +847,14 @@ async fn spawn_indexers(
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
+        match EthereumIndexer::new(
+            eth_config,
+            backlog.clone(),
+            eth_telemetry.clone(),
+            gates[Chain::Ethereum].clone(),
+        )
+        .await
+        {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
                 tokio::spawn(run_supervised(
@@ -871,15 +904,21 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
-        tokio::spawn(indexer_hydration::run(
-            hydration_config,
-            sign_tx.clone(),
-            backlog.clone(),
+        let hydration_indexer =
+            HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
+        tracing::info!("hydration indexer created successfully");
+        tokio::spawn(run_supervised(
+            hydration_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Hydration].clone(),
+            ),
             hydration_telemetry,
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx[Chain::Hydration].clone(),
         ));
     }
 
@@ -1248,13 +1287,14 @@ mod tests {
             _ => unreachable!(),
         };
         // Never dialed: publishers() only stores the client in the registry.
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
         let near = NearClient::new(
-            "http://127.0.0.1:1",
+            near,
             &account_id,
             signer,
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         );
-        let publishers = chains.publishers(near).await;
+        let publishers = ChainStack::new(chains).publishers(near).await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),

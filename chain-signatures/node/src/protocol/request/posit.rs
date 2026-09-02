@@ -340,26 +340,13 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
-                            let peers_already_generating = counter.num_peers_already_generating();
-                            let too_few_available = ctx
-                                .governance
-                                .participants
-                                .len()
-                                .saturating_sub(peers_already_generating)
-                                < ctx.governance.threshold;
-                            let reason = if too_few_available {
-                                state.pause_proposing_until = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(ctx.cfg.signature.generation_timeout),
-                                );
-                                "peers already generating this signature"
-                            } else {
-                                "received enough rejects"
-                            };
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
-                            return state.reorganize(reason);
+                            return state.reorganize(&format!(
+                                "received enough rejects: {:?}",
+                                counter.rejects
+                            ));
                         }
 
                         // Starting as soon as we have enough accepts leaves
@@ -457,7 +444,7 @@ impl PositPhase {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
@@ -467,16 +454,16 @@ mod tests {
 
     /// A posit-phase harness; the unused channel ends are held alive so sends
     /// keep working. The redis pool is lazy and never actually connected.
-    struct TestSetup {
-        ctx: SignTask,
-        state: SignState,
-        outbox: MessageOutbox,
+    pub(crate) struct TestSetup {
+        pub(crate) ctx: SignTask,
+        pub(crate) state: SignState,
+        pub(crate) outbox: MessageOutbox,
         _inbox: MessageInbox,
         _rpc_rx: mpsc::Receiver<RpcAction>,
         _mesh_tx: watch::Sender<MeshState>,
     }
 
-    fn setup(me: Participant, other: Participant, threshold: usize) -> TestSetup {
+    pub(crate) fn setup(me: Participant, other: Participant, threshold: usize) -> TestSetup {
         let account_id: near_account_id::AccountId = "p-1".parse().unwrap();
         let governance = GovernanceInfo {
             me,
@@ -535,7 +522,7 @@ mod tests {
 
     /// The single message sitting in the outbox, which must be a posit from
     /// `from` to `to`; returns its stamped round and action.
-    fn sent_posit(
+    pub(crate) fn sent_posit(
         outbox: &mut MessageOutbox,
         from: Participant,
         to: Participant,

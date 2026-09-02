@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
-use crate::local::NodeEnvConfig;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
 use crate::NodeConfig;
 
@@ -25,18 +24,13 @@ use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
-use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
-use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
-use mpc_node::config::OverrideConfig;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
-use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -49,7 +43,6 @@ use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
 use solana_sdk::signer::{SeedDerivable as _, Signer as _};
 use testcontainers::core::error::{ClientError, TestcontainersError};
-use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -105,149 +98,6 @@ where
     }
 
     unreachable!("retry loop must return or fail")
-}
-
-pub struct Node {
-    pub container: Container,
-    pub address: String,
-    pub account: Account,
-    pub local_address: String,
-    pub cipher_sk: hpke::SecretKey,
-    pub sign_sk: near_crypto::SecretKey,
-    cfg: NodeConfig,
-    // near rpc address, after proxy
-    near_rpc: String,
-}
-
-impl Node {
-    // Container port used for the docker network, does not have to be unique
-    const CONTAINER_PORT: u16 = 3000;
-
-    pub async fn run(
-        ctx: &super::Context,
-        cfg: &NodeConfig,
-        account: &Account,
-    ) -> anyhow::Result<Self> {
-        tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, _cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
-        let near_rpc = ctx.worker.rpc_addr();
-
-        Self::spawn(
-            ctx,
-            NodeEnvConfig {
-                web_port: Self::CONTAINER_PORT,
-                account: account.clone(),
-                cipher_sk,
-                sign_sk,
-                cfg: cfg.clone(),
-                near_rpc,
-                binary_path: None,
-            },
-        )
-        .await
-    }
-
-    pub async fn kill(self) -> NodeEnvConfig {
-        // Give the container a brief moment to clean up connections gracefully
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Err(e) = self.container.stop().await {
-            tracing::warn!(node_account_id = %self.account.id(), "failed to stop node container: {e}");
-        }
-        NodeEnvConfig {
-            web_port: Self::CONTAINER_PORT,
-            account: self.account,
-            cipher_sk: self.cipher_sk,
-            sign_sk: self.sign_sk,
-            cfg: self.cfg,
-            near_rpc: self.near_rpc,
-            binary_path: None,
-        }
-    }
-
-    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
-        let indexer_options = NearIndexerOptions {
-            running_threshold: 120,
-        };
-        let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = SolArgs::from_config(config.cfg.sol.clone());
-        let hydration_args = HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton_args = CantonArgs::from_config(config.cfg.canton.clone());
-        let args = Cli::Start {
-            near_rpc: config.near_rpc.clone(),
-            mpc_contract_id: ctx.mpc_contract.id().clone(),
-            account_id: config.account.id().clone(),
-            account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Some(Self::CONTAINER_PORT),
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            indexer_options: indexer_options.clone(),
-            eth: eth_args,
-            sol: sol_args,
-            hydration: hydration_args,
-            canton: canton_args,
-            midnight: MidnightArgs::from_config(None),
-            my_address: None,
-            storage_options: ctx.storage_options.clone(),
-            log_options: ctx.log_options.clone(),
-            sign_sk: Some(config.sign_sk.clone()),
-            override_config: Some(OverrideConfig::new(serde_json::to_value(
-                config.cfg.protocol.clone(),
-            )?)),
-            client_header_referer: None,
-            mesh_options: ctx.mesh_options.clone(),
-            message_options: ctx.message_options.clone(),
-        }
-        .into_str_args();
-        let container = start_container_with_network_retry(
-            || {
-                GenericImage::new("near/mpc-node", "latest")
-                    .with_wait_for(WaitFor::Nothing)
-                    .with_exposed_port(Self::CONTAINER_PORT.tcp())
-                    .with_env_var("RUST_LOG", "mpc_node=DEBUG")
-                    .with_env_var("RUST_BACKTRACE", "1")
-                    .with_network(&ctx.docker_network)
-                    .with_cmd(args.clone())
-            },
-            &ctx.docker_network,
-        )
-        .await
-        .unwrap();
-
-        let ip_address = ctx
-            .docker_client
-            .get_network_ip_address(&container, &ctx.docker_network)
-            .await
-            .unwrap();
-        let host_port = container
-            .get_host_port_ipv4(Self::CONTAINER_PORT)
-            .await
-            .unwrap();
-
-        container.exec(ExecCommand::new(
-                format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT)
-                    .split_whitespace()
-            )
-            .with_container_ready_conditions(vec![WaitFor::message_on_stdout("node is ready to accept connections")])
-        ).await.unwrap();
-
-        let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
-        tracing::info!(
-            full_address,
-            node_account_id = %config.account.id(),
-            "node container is running",
-        );
-        Ok(Node {
-            container,
-            address: full_address,
-            account: config.account,
-            local_address: format!("http://localhost:{host_port}"),
-            cipher_sk: config.cipher_sk,
-            sign_sk: config.sign_sk,
-            cfg: config.cfg,
-            near_rpc: config.near_rpc,
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -463,10 +313,22 @@ impl Redis {
 
         let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
 
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
+        // The port mapping can lag the container start when several containers come
+        // up at once (PortNotExposed), so give Docker a moment before giving up.
+        let host_port = {
+            let mut attempts = 0;
+            loop {
+                match container.get_host_port_ipv4(Self::DEFAULT_REDIS_PORT).await {
+                    Ok(port) => break port,
+                    Err(err) if attempts < 5 => {
+                        attempts += 1;
+                        tracing::warn!(?err, attempts, "redis port not mapped yet; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Err(err) => panic!("redis container port mapping failed: {err:?}"),
+                }
+            }
+        };
         let internal_address = format!("redis://127.0.0.1:{host_port}");
 
         Self::wait_for_host_port_readiness(&internal_address).await;
@@ -610,7 +472,6 @@ impl Redis {
 
 pub struct EthereumSandbox {
     pub container: Container,
-    pub internal_http_endpoint: String,
     pub external_http_endpoint: String,
     pub secret_key: String,
     pub chain_id: u64,
@@ -643,22 +504,16 @@ impl EthereumSandbox {
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await?;
         let external_port = container
             .get_host_port_ipv4(Self::RPC_PORT)
             .await
             .context("ethereum sandbox port mapping")?;
 
-        let internal_http_endpoint = format!("http://{}:{}", network_ip, Self::RPC_PORT);
         let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
 
         wait_for_rpc(&external_http_endpoint).await?;
 
         Ok(Self {
-            internal_http_endpoint,
             external_http_endpoint,
             secret_key,
             chain_id: Self::DEFAULT_CHAIN_ID,

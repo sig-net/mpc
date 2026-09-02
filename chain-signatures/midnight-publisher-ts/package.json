@@ -23,7 +23,8 @@
     "test:watch": "vitest",
     "compile:real-stack-caller": "node devtools/real-stack/compile-caller.mjs",
     "typecheck:real-stack": "tsc --noEmit -p tsconfig.real-stack.json",
-    "gen:initial-state": "tsx devtools/gen-initial-state.ts"
+    "gen:initial-state": "tsx devtools/gen-initial-state.ts",
+    "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts"
   },
   "dependencies": {
     "@effect/platform-node": "0.107.0",
@@ -51,6 +52,7 @@
     "@vitest/eslint-plugin": "^1.6.26",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
+    "ethers": "6.17.0",
     "prettier": "3.9.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
