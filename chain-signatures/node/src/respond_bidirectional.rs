@@ -67,6 +67,10 @@ impl CompletedTx {
                 output.extend_from_slice(&borsh_data);
                 Bytes::from(output).into()
             }
+            SerDeserFormat::Fab => {
+                output.push(1);
+                Bytes::from(output).into()
+            }
             SerDeserFormat::Abi => {
                 // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
                 let abi_encoded = [0u8; 32];
@@ -193,6 +197,16 @@ mod tests {
         expected.extend_from_slice(&[0u8; 32]);
         *expected.last_mut().unwrap() = 1;
         assert_eq!(respond.output, expected);
+
+        // Midnight (FAB).
+        let fab = completed
+            .create_failed_sign_request(Chain::Midnight, None)
+            .await
+            .unwrap();
+        let SignKind::RespondBidirectional(respond) = fab.kind else {
+            panic!("expected RespondBidirectional kind");
+        };
+        assert_eq!(respond.output, hex::decode("deadbeef01").unwrap());
     }
 
     #[test]

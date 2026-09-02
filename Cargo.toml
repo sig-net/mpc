@@ -103,6 +103,7 @@ mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }
 signet-crypto = { path = "./signet-crypto" }
+signet-midnight-serde = "=0.1.0"
 signet-primitives = { path = "./signet-primitives" }
 signet-program = { path = "./chain-signatures/contract-sol" }
 
