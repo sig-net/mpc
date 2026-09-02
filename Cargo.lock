@@ -5427,26 +5427,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "google-datastore1"
-version = "5.0.4+20240226"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d822056b35f25b564e77b0cfd9bdcbad8fc5c891bf079d61536572d67bfc8e3"
-dependencies = [
- "anyhow",
- "google-apis-common",
- "http 0.2.12",
- "hyper 0.14.32",
- "hyper-rustls 0.24.2",
- "itertools 0.10.5",
- "mime",
- "serde",
- "serde_json",
- "tokio",
- "tower-service",
- "url 1.7.2",
-]
-
-[[package]]
 name = "google-secretmanager1"
 version = "5.0.5+20240621"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9058,7 +9038,6 @@ dependencies = [
  "ed25519-zebra",
  "enum-map",
  "futures-util",
- "google-datastore1",
  "google-secretmanager1",
  "hex",
  "highway",

@@ -14,7 +14,6 @@ axum-extra = "0.9.6"
 backon.workspace = true
 chrono = "0.4.24"
 dashmap = "6.1"
-google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
 highway = "1.1.0"
 hkdf = "0.12.4"
