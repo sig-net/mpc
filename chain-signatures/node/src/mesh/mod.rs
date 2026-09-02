@@ -337,6 +337,107 @@ mod tests {
         mesh_task.abort();
     }
 
+    /// A desync report pulls a peer out of `active` and into `need_sync`, a
+    /// report naming ourselves is ignored, and a later sync report restores
+    /// the peer.
+    #[test(tokio::test)]
+    async fn test_mesh_desync_report() {
+        let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
+        let num_nodes = 3;
+
+        let servers = MockServers::run(num_nodes).await;
+        let participants = servers.participants();
+        let node_id = servers[0].account_id().clone();
+        let desynced = servers[1].id();
+
+        let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+            &node_id,
+            root_sk.public_key().into_affine_point(),
+            2,
+            participants.clone(),
+        );
+
+        let (sync_tx, sync_rx) = mpsc::channel(16);
+        let (desync_tx, desync_rx) = mpsc::channel(16);
+        let mesh = Mesh::new(
+            &servers.client(),
+            Options {
+                ping_interval: PING_INTERVAL.as_millis() as u64,
+            },
+            &node_id,
+            sync_rx,
+            desync_rx,
+        );
+
+        let mut mesh_state = mesh.watch();
+        let mesh_task = tokio::spawn(mesh.run(contract_watcher));
+
+        // Bring everyone up to active first.
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        for idx in 0..num_nodes {
+            sync_tx.send(servers[idx].id()).await.unwrap();
+        }
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        assert_eq!(mesh_state.borrow_and_update().active().len(), num_nodes);
+
+        // A desync report takes that peer out of active and queues it for sync.
+        desync_tx.send(desynced).await.unwrap();
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        {
+            let state = mesh_state.borrow_and_update().clone();
+            assert!(!state.active().contains_key(&desynced));
+            assert!(state.need_sync().contains_key(&desynced));
+            assert_eq!(state.active().len(), num_nodes - 1);
+        }
+
+        // A successful sync puts the peer back.
+        sync_tx.send(desynced).await.unwrap();
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        {
+            let state = mesh_state.borrow_and_update().clone();
+            assert!(state.active().contains_key(&desynced));
+            assert!(state.need_sync().is_empty());
+            assert_eq!(state.active().len(), num_nodes);
+        }
+
+        mesh_task.abort();
+    }
+
+    /// `report_node_desynced` only acts on a peer that is currently active.
+    /// Concurrent sign tasks all reporting the same lagging peer must collapse
+    /// into the one transition rather than waking the mesh once per report.
+    #[test(tokio::test)]
+    async fn test_pool_redundant_desync_report_is_a_noop() {
+        let num_nodes = 2;
+        let servers = MockServers::run(num_nodes).await;
+        let participants = servers.participants();
+        let my_id = servers[0].account_id().clone();
+        let peer = servers[1].id();
+
+        // A long ping interval so the statuses we observe are only the ones
+        // our reports drive: the connection task ticks once, then sleeps.
+        let mut pool = Pool::new(&servers.client(), &my_id, Duration::from_secs(60));
+        let mut watcher = pool.watch();
+        pool.connect_nodes(&participants, &mut HashSet::new()).await;
+
+        // A fresh connection syncs before it is usable.
+        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
+        pool.report_node_synced(peer).await;
+        expect_status(&mut watcher, peer, NodeStatus::Active).await;
+
+        pool.report_node_desynced(peer).await;
+        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
+
+        // Already syncing, so this one must not reach the mesh at all.
+        pool.report_node_desynced(peer).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), watcher.next())
+                .await
+                .is_err(),
+            "a repeated desync report must not notify the mesh again"
+        );
+    }
+
     #[test(tokio::test)]
     async fn test_mesh_contract_update() {
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
