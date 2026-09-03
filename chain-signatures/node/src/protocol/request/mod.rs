@@ -10,6 +10,7 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
@@ -153,7 +154,7 @@ pub struct SignatureSpawner {
     node_account_id: near_account_id::AccountId,
     /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
     /// before we use it again. Cloned into each spawned sign task.
-    desynced_peer_tx: mpsc::Sender<Participant>,
+    sync_report_tx: SyncReportSender,
 }
 
 impl SignatureSpawner {
@@ -241,7 +242,7 @@ impl SignatureSpawner {
             round,
             limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
-            desynced_peer_tx: self.desynced_peer_tx.clone(),
+            sync_report_tx: self.sync_report_tx.clone(),
         };
 
         // Spawn the async task with organizing loop
@@ -487,7 +488,7 @@ impl SignatureSpawnerTask {
         msg_channel: MessageChannel,
         rpc_channel: RpcChannel,
         backlog: Backlog,
-        desynced_peer_tx: mpsc::Sender<Participant>,
+        sync_report_tx: SyncReportSender,
     ) -> Self {
         let delay_monitor = DelayMonitor::spawn();
         let spawner = SignatureSpawner {
@@ -504,7 +505,7 @@ impl SignatureSpawnerTask {
             rpc: rpc_channel,
             backlog,
             node_account_id: my_account_id,
-            desynced_peer_tx,
+            sync_report_tx,
         };
 
         Self {
@@ -569,7 +570,7 @@ mod tests {
             participants.clone(),
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (desynced_peer_tx, _desynced_peer_rx) = mpsc::channel(1);
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
 
         let delay_monitor = DelayMonitor::spawn();
         let mut spawner = SignatureSpawner {
@@ -586,7 +587,7 @@ mod tests {
             rpc: rpc_channel,
             backlog: Backlog::new(),
             node_account_id: account_id,
-            desynced_peer_tx,
+            sync_report_tx,
         };
 
         let cfg = ProtocolConfig::default();

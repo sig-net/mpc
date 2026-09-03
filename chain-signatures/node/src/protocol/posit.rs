@@ -468,6 +468,15 @@ impl SinglePositCounter {
         self.accepts.len() + self.rejects.len() == self.participants.len()
     }
 
+    /// Peers whose reject says they never stored the artifact, which is proof
+    /// our holder list for it is stale. Ordered by participant.
+    pub fn missing_artifact_rejectors(&self) -> impl Iterator<Item = Participant> + '_ {
+        self.rejects
+            .iter()
+            .filter(|(_, reason)| matches!(reason, PositRejectReason::MissingArtifact))
+            .map(|(peer, _)| *peer)
+    }
+
     pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
         if !self.participants.contains(&from) {
             return false;

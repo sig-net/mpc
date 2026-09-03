@@ -343,14 +343,12 @@ impl PositPhase {
                             // A MissingArtifact reject means that holder never stored the
                             // presignature, so our holder list for it is stale. State sync
                             // owns holder lists, so put the peer back through it.
-                            for (peer, _) in counter
-                                .rejects
-                                .iter()
-                                .filter(|(_, reason)| {
-                                    matches!(reason, PositRejectReason::MissingArtifact)
-                                })
-                            {
-                                if ctx.desynced_peer_tx.try_send(*peer).is_err() {
+                            for peer in counter.missing_artifact_rejectors() {
+                                if ctx
+                                    .sync_report_tx
+                                    .try_send((peer, SyncKind::Desynced))
+                                    .is_err()
+                                {
                                     tracing::warn!(
                                         ?sign_id,
                                         ?peer,
@@ -466,6 +464,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
+    use crate::protocol::sync::SyncReportReceiver;
     use crate::rpc::RpcAction;
     use deadpool_redis::Runtime;
     use mpc_primitives::SignKind;
@@ -478,7 +477,7 @@ pub(crate) mod tests {
         pub(crate) outbox: MessageOutbox,
         /// Desync reports the phase under test emitted. Room for several, so a
         /// test asserting on one report cannot pass by silently dropping others.
-        pub(crate) desynced_peer_rx: mpsc::Receiver<Participant>,
+        pub(crate) sync_report_rx: SyncReportReceiver,
         _inbox: MessageInbox,
         _rpc_rx: mpsc::Receiver<RpcAction>,
         _mesh_tx: watch::Sender<MeshState>,
@@ -500,7 +499,7 @@ pub(crate) mod tests {
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (desynced_peer_tx, desynced_peer_rx) = mpsc::channel(8);
+        let (sync_report_tx, sync_report_rx) = mpsc::channel(8);
 
         let ctx = SignTask {
             governance,
@@ -514,7 +513,7 @@ pub(crate) mod tests {
             round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,
-            desynced_peer_tx,
+            sync_report_tx,
         };
 
         let request = IndexedSignRequest::new(
@@ -537,7 +536,7 @@ pub(crate) mod tests {
             ctx,
             state,
             outbox,
-            desynced_peer_rx,
+            sync_report_rx,
             _inbox,
             _rpc_rx,
             _mesh_tx,
@@ -756,9 +755,12 @@ pub(crate) mod tests {
         assert!(matches!(next, SignPhase::Organizing(_)));
 
         // `rejects` is a BTreeMap, so reports come out in participant order.
-        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(first));
-        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(second));
-        assert!(t.desynced_peer_rx.try_recv().is_err(), "no further reports");
+        assert_eq!(t.sync_report_rx.try_recv(), Ok((first, SyncKind::Desynced)));
+        assert_eq!(
+            t.sync_report_rx.try_recv(),
+            Ok((second, SyncKind::Desynced))
+        );
+        assert!(t.sync_report_rx.try_recv().is_err(), "no further reports");
     }
 
     /// With rejects of mixed reasons in one round, only the MissingArtifact
@@ -795,9 +797,12 @@ pub(crate) mod tests {
         let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
         assert!(matches!(next, SignPhase::Organizing(_)));
 
-        assert_eq!(t.desynced_peer_rx.try_recv(), Ok(missing));
+        assert_eq!(
+            t.sync_report_rx.try_recv(),
+            Ok((missing, SyncKind::Desynced))
+        );
         assert!(
-            t.desynced_peer_rx.try_recv().is_err(),
+            t.sync_report_rx.try_recv().is_err(),
             "the InvalidRequest rejector must not be reported"
         );
     }

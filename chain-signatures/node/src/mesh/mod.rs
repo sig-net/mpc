@@ -3,12 +3,13 @@ use std::time::Duration;
 use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
+use crate::protocol::sync::{SyncKind, SyncReportReceiver};
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 pub mod connection;
 mod state;
@@ -39,30 +40,17 @@ pub struct Mesh {
     connections: connection::Pool,
     state_tx: watch::Sender<MeshState>,
     state_rx: watch::Receiver<MeshState>,
-    synced_peer_rx: mpsc::Receiver<Participant>,
-    desynced_peer_rx: mpsc::Receiver<Participant>,
+    sync_report_rx: SyncReportReceiver,
     my_id: AccountId,
     me: Option<Participant>,
 }
 
-/// Bound on queued desync reports. Sized well above the participant count: a
-/// full channel drops whatever report is being sent, first or duplicate, and
-/// the cost of losing a first report is one more failed round for that peer.
-const DESYNCED_PEER_CHANNEL_SIZE: usize = 1024;
-
 impl Mesh {
-    /// Channel for reporting peers whose stored artifacts no longer match our
-    /// records, so the mesh can put them back through state sync.
-    pub fn desynced_peer_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
-        mpsc::channel(DESYNCED_PEER_CHANNEL_SIZE)
-    }
-
     pub fn new(
         client: &NodeClient,
         options: Options,
         my_id: &AccountId,
-        synced_peer_rx: mpsc::Receiver<Participant>,
-        desynced_peer_rx: mpsc::Receiver<Participant>,
+        sync_report_rx: SyncReportReceiver,
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
@@ -71,8 +59,7 @@ impl Mesh {
             connections,
             state_tx,
             state_rx,
-            synced_peer_rx,
-            desynced_peer_rx,
+            sync_report_rx,
             my_id: my_id.clone(),
             me: None,
         }
@@ -126,19 +113,15 @@ impl Mesh {
                         });
                     }
                 }
-                Some(participant) = self.synced_peer_rx.recv() => {
+                Some((participant, kind)) = self.sync_report_rx.recv() => {
                     if self.me == Some(participant) {
-                        tracing::warn!(?participant, "ignoring self sync report");
+                        tracing::warn!(?participant, ?kind, "ignoring self sync report");
                         continue;
                     }
-                    self.connections.report_node_synced(participant).await;
-                }
-                Some(participant) = self.desynced_peer_rx.recv() => {
-                    if self.me == Some(participant) {
-                        tracing::warn!(?participant, "ignoring self desync report");
-                        continue;
+                    match kind {
+                        SyncKind::Synced => self.connections.report_node_synced(participant).await,
+                        SyncKind::Desynced => self.connections.report_node_desynced(participant).await,
                     }
-                    self.connections.report_node_desynced(participant).await;
                 }
             }
         }
@@ -183,6 +166,7 @@ mod tests {
     use crate::protocol::ProtocolState;
     use crate::util::NearPublicKeyExt as _;
     use crate::web::mock::MockServers;
+    use tokio::sync::mpsc;
 
     use test_log::test;
 
@@ -297,7 +281,6 @@ mod tests {
         );
 
         let (sync_tx, sync_rx) = mpsc::channel(16);
-        let (desync_tx, desync_rx) = mpsc::channel(16);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
@@ -305,7 +288,6 @@ mod tests {
             },
             &node_id,
             sync_rx,
-            desync_rx,
         );
 
         let mut mesh_state = mesh.watch();
@@ -319,7 +301,10 @@ mod tests {
             drop(state);
 
             for idx in 0..num_nodes {
-                sync_tx.send(servers[idx].id()).await.unwrap();
+                sync_tx
+                    .send((servers[idx].id(), SyncKind::Synced))
+                    .await
+                    .unwrap();
             }
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
@@ -357,7 +342,10 @@ mod tests {
             assert!(!state.active().contains_key(&servers[1].id()));
             assert!(state.need_sync().contains_key(&servers[1].id()));
 
-            sync_tx.send(servers[1].id()).await.unwrap();
+            sync_tx
+                .send((servers[1].id(), SyncKind::Synced))
+                .await
+                .unwrap();
             tokio::time::sleep(PING_INTERVAL).await;
 
             let state = mesh_state.borrow_and_update().clone();
@@ -373,14 +361,14 @@ mod tests {
         // a later sync report restores it.
         {
             let desynced = servers[1].id();
-            desync_tx.send(desynced).await.unwrap();
+            sync_tx.send((desynced, SyncKind::Desynced)).await.unwrap();
             wait_for_state(&mut mesh_state, "peer desynced", |state| {
                 state.need_sync().contains_key(&desynced)
             })
             .await;
             assert!(!mesh_state.borrow().active().contains_key(&desynced));
 
-            sync_tx.send(desynced).await.unwrap();
+            sync_tx.send((desynced, SyncKind::Synced)).await.unwrap();
             wait_for_state(&mut mesh_state, "peer restored", |state| {
                 state.active().contains_key(&desynced)
             })
@@ -440,16 +428,14 @@ mod tests {
             servers.participants(),
         );
 
-        let (sync_tx, synced_peer_rx) = mpsc::channel(100);
-        let (_desync_tx, desync_rx) = mpsc::channel(100);
+        let (sync_tx, sync_rx) = mpsc::channel(100);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
                 ping_interval: PING_INTERVAL.as_millis() as u64,
             },
             &node_id,
-            synced_peer_rx,
-            desync_rx,
+            sync_rx,
         );
         let mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
@@ -473,7 +459,10 @@ mod tests {
             let expected_participants = servers.participants();
             tokio::time::sleep(PING_INTERVAL * 3).await;
             for i in 0..num_nodes {
-                sync_tx.send(servers[i].id()).await.unwrap();
+                sync_tx
+                    .send((servers[i].id(), SyncKind::Synced))
+                    .await
+                    .unwrap();
             }
 
             tokio::time::sleep(PING_INTERVAL * 3).await;
