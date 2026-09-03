@@ -186,21 +186,6 @@ impl SolanaClient {
         }
     }
 
-    pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
-            SOL_RPC_TIMEOUT,
-            self.rpc_retry,
-            self.shared_backoff,
-            "get_slot",
-            {
-                self.rpc_client
-                    .get_slot()
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
-            }
-        )
-    }
-
     /// Get the latest finalized slot from the Solana RPC.
     /// This is used to determine the upper bound for catchup.
     pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
