@@ -30,9 +30,9 @@ const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
 /// How long a cancelled `run()` gets to drain before it is aborted.
 const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Supervised indexer loop: node-side recovery, then spawn the chain's `run()`
+/// Supervised indexer loop: hydrate local storage on startup, then spawn the chain's `run()`
 /// loop and dispatch its events. Regression or a watchdog stall cancels `run()`
-/// and restarts it, re-running light recovery (`load_local: false`) first.
+/// and restarts it, re-aligning the backlog with consensus first.
 pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
@@ -54,26 +54,33 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let root_pk = reactor.ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
 
+    while let Err(err) = reactor.hydrate().await {
+        tracing::error!(
+            %chain,
+            %err,
+            "failed to hydrate local checkpoint; retrying in {ERROR_RESTART_DELAY:?}"
+        );
+        tokio::time::sleep(ERROR_RESTART_DELAY).await;
+    }
+
     enum Exit {
         Restart,
         Shutdown,
     }
 
-    let mut load_local = true;
     loop {
-        // Cleared before recovery, not after: checkpoint creation and publish
+        // Cleared before alignment, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         reactor.ctx.caught_up = false;
-        if let Err(err) = reactor.recover_backlog(load_local).await {
+        if let Err(err) = reactor.align_backlog_with_consensus().await {
             tracing::error!(
                 %chain,
                 %err,
-                "failed to recover backlog; retrying in {ERROR_RESTART_DELAY:?}"
+                "failed to align backlog with consensus; retrying in {ERROR_RESTART_DELAY:?}"
             );
             tokio::time::sleep(ERROR_RESTART_DELAY).await;
             continue;
         }
-        load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
         let cancel = CancellationToken::new();

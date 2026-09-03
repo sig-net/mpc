@@ -96,37 +96,20 @@ impl StreamReactor {
         Ok(Some(fetched_checkpoint.block_height))
     }
 
-    /// Node-side checkpoint recovery:
-    /// loads the local checkpoint into the backlog (it only touches local storage),
-    /// then aligns the backlog with the consensus checkpoint feed. Mesh availability
-    /// is handled inside `align_backlog_with_consensus` when it needs to fetch a
-    /// checkpoint from peers.
-    pub async fn recover_backlog(&mut self, load_local: bool) -> Result<(), CheckpointError> {
-        tracing::info!(chain = %self.chain, load_local, "starting checkpoint recovery or regression");
-
-        // Hydrate local checkpoint state before aligning: initializes the pending count
-        // and recovers from the latest durable checkpoint if one exists.
-        if load_local {
-            match self.ctx.backlog.hydrate(self.chain).await? {
-                Some(checkpoint) => {
-                    tracing::info!(
-                        chain = ?self.chain,
-                        height = checkpoint.block_height,
-                        "hydrated local checkpoint"
-                    );
-                }
-                None => {
-                    tracing::info!(chain = ?self.chain, "no local checkpoint found");
-                }
+    /// Hydrates the in-memory backlog from local persistent storage at startup.
+    pub async fn hydrate(&mut self) -> Result<(), CheckpointError> {
+        match self.ctx.backlog.hydrate(self.chain).await? {
+            Some(checkpoint) => {
+                tracing::info!(
+                    chain = ?self.chain,
+                    height = checkpoint.block_height,
+                    "hydrated local checkpoint"
+                );
+            }
+            None => {
+                tracing::info!(chain = ?self.chain, "no local checkpoint found");
             }
         }
-
-        // Returns None when no alignment is needed (the normal case); Some(height) when
-        // the backlog was regressed.
-        if self.align_backlog_with_consensus().await?.is_some() {
-            tracing::warn!(chain = %self.chain, "backlog regressed via consensus checkpoint");
-        }
-
         Ok(())
     }
 
