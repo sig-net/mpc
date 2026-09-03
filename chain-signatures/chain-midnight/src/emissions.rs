@@ -11,7 +11,7 @@ use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
-pub const MISC_NAME_LEN: usize = 32;
+const MISC_NAME_LEN: usize = 32;
 pub const MISC_PAYLOAD_LEN: usize = 256;
 const MISC_DATA_LEN: usize = MISC_NAME_LEN + MISC_PAYLOAD_LEN;
 const LOG_ITEM_VERSION: u32 = 1;
@@ -94,7 +94,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     }
 }
 
-pub fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
+fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
     anyhow::ensure!(
         item.version == LOG_ITEM_VERSION,
         "emission-schema: log item version {} is not {LOG_ITEM_VERSION}",
