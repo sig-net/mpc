@@ -18,7 +18,7 @@ impl PositPhase {
         state: &mut SignState,
         mailbox: &PositMailbox,
         proposer: Participant,
-    ) -> Result<PresignatureId, SignPhase> {
+    ) -> Result<PresignatureId, Box<SignPhase>> {
         let sign_id = ctx.sign_id;
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
@@ -150,7 +150,7 @@ impl PositPhase {
                         continue;
                     }
 
-                    break Ok(*presignature_id);
+                    break *presignature_id;
                 } else {
                     tracing::warn!(
                         ?sign_id,
@@ -182,14 +182,10 @@ impl PositPhase {
         })
         .await;
 
-        let presignature_id = match outcome {
-            Ok(Ok(id)) => id,
-            Ok(Err(phase)) => return Err(phase),
-            Err(_) => {
-                return Err(state.reorganize(&format!(
-                    "deliberator timeout waiting for Propose from {proposer:?}"
-                )));
-            }
+        let Ok(presignature_id) = outcome else {
+            return Err(Box::new(state.reorganize(&format!(
+                "deliberator timeout waiting for Propose from {proposer:?}"
+            ))));
         };
 
         // received propose, send Accept
@@ -245,8 +241,8 @@ impl PositPhase {
 
             presignature_id = match Self::wait_for_propose(ctx, state, mailbox, proposer).await {
                 Ok(id) => id,
-                Err(phase) => return phase,
-            }
+                Err(phase) => return *phase,
+            };
         }
 
         // GUARANTEE: at least threshold participants from organizing phase.
@@ -583,7 +579,7 @@ pub(crate) mod tests {
         // for a valid one and reorganizes.
         let phase =
             PositPhase::wait_for_propose(&mut t.ctx, &mut t.state, &mailbox, proposer).await;
-        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+        assert!(matches!(phase, Err(p) if matches!(*p, SignPhase::Organizing(_))));
 
         let (round, action, stale_round) = sent_posit(&mut t.outbox, me, proposer);
         // The id echoes the round of the message being rejected.
@@ -623,7 +619,7 @@ pub(crate) mod tests {
         // No Propose ever arrives, so the wait times out and reorganizes,
         // bumping the round with the recorded rejector's round.
         let phase = PositPhase::wait_for_propose(&mut t.ctx, &mut t.state, &mailbox, peer).await;
-        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+        assert!(matches!(phase, Err(p) if matches!(*p, SignPhase::Organizing(_))));
 
         // Caught up in one bump: max(2 + 1, 5) = 5.
         assert_eq!(t.state.round(), 5);
