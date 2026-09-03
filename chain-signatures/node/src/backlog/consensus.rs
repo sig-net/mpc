@@ -24,10 +24,7 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
-        .await
-    {
+    match backlog.confirm(chain, checkpoint_digest.digest).await {
         Ok(found) => {
             if found {
                 return None;
@@ -618,7 +615,7 @@ mod tests {
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
         assert!(fixture
             .backlog
-            .confirm_consensus(chain, stale.digest())
+            .confirm(chain, stale.digest())
             .await
             .unwrap());
 

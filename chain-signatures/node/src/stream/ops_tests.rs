@@ -381,7 +381,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     // Simulate consensus confirmation so storage has the checkpoint
     assert!(matches!(
         ctx.backlog
-            .confirm_consensus(tx.source_chain, checkpoint.digest())
+            .confirm(tx.source_chain, checkpoint.digest())
             .await,
         Ok(true)
     ));
@@ -1331,7 +1331,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
 
     // Slots should still be available — no pending checkpoints created
     assert!(
-        ctx.backlog.has_checkpoint_slot(chain).await,
+        ctx.backlog.has_checkpoint_slot(chain),
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );

@@ -549,7 +549,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .expect("checkpoint creation should succeed");
     assert!(matches!(
         seeded_backlog
-            .confirm_consensus(Chain::Solana, checkpoint.digest())
+            .confirm(Chain::Solana, checkpoint.digest())
             .await,
         Ok(true)
     ));

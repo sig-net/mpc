@@ -75,6 +75,14 @@ impl Checkpoint {
             self.cumulative_digest,
         )
     }
+
+    pub fn len(&self) -> usize {
+        self.pending_requests.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending_requests.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +94,7 @@ pub(super) struct Checkpoints {
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
     #[error("pending checkpoint cap reached for {chain}")]
-    PendingCap { chain: Chain },
+    PendingCap { chain: Chain, tx_count: usize },
     #[error("failed to persist checkpoint for {chain}")]
     Storage {
         chain: Chain,
@@ -119,12 +127,14 @@ impl Checkpoints {
         let chain = checkpoint.chain;
         let count = self.count(chain);
         if count >= MAX_PENDING_CHECKPOINTS {
+            let tx_count = checkpoint.len();
             tracing::warn!(
                 ?chain,
                 count,
+                tx_count,
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
-            return Err(CheckpointError::PendingCap { chain });
+            return Err(CheckpointError::PendingCap { chain, tx_count });
         }
 
         let inserted = self

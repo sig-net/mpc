@@ -558,14 +558,19 @@ impl Backlog {
         // confirmed checkpoint and replays only the post-checkpoint same-bucket
         // tail.
         if height / interval > prev / interval {
-            let tx_count = pending.len();
             drop(pending);
             match self.checkpoint(chain).await {
                 Ok(checkpoint) => {
-                    tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
+                    tracing::info!(
+                        ?chain,
+                        height,
+                        tx_count = checkpoint.len(),
+                        ?checkpoint,
+                        "creating checkpoint"
+                    );
                     Some(checkpoint)
                 }
-                Err(CheckpointError::PendingCap { .. }) => {
+                Err(CheckpointError::PendingCap { tx_count, .. }) => {
                     tracing::warn!(
                         ?chain,
                         height,
@@ -600,11 +605,7 @@ impl Backlog {
     /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
     /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
     /// storage was unavailable.
-    pub async fn confirm_consensus(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> Result<bool, CheckpointError> {
+    pub async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> Result<bool, CheckpointError> {
         self.checkpoints.confirm(chain, digest).await
     }
 
@@ -635,12 +636,12 @@ impl Backlog {
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
-    pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
+    pub fn has_checkpoint_slot(&self, chain: Chain) -> bool {
         self.checkpoints.has_slot(chain)
     }
 
     /// Number of pending checkpoints for a chain.
-    pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
+    pub fn pending_checkpoint_count(&self, chain: Chain) -> usize {
         self.checkpoints.count(chain)
     }
 
@@ -2652,7 +2653,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            backlog.pending_checkpoint_count(chain).await,
+            backlog.pending_checkpoint_count(chain),
             2,
             "two checkpoints should be pending"
         );
@@ -2669,7 +2670,7 @@ mod tests {
 
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
         assert_eq!(
-            backlog.pending_checkpoint_count(chain).await,
+            backlog.pending_checkpoint_count(chain),
             2,
             "pending checkpoints should remain available for consensus matching"
         );
@@ -2688,18 +2689,18 @@ mod tests {
             .set_processed_block(chain, 2 * interval)
             .await
             .unwrap();
-        assert_eq!(backlog.pending_checkpoint_count(chain).await, 2);
+        assert_eq!(backlog.pending_checkpoint_count(chain), 2);
 
         // A new Backlog instance sharing storage starts with 0 count and None processed block
         let restarted = Backlog::persisted(storage);
-        assert_eq!(restarted.pending_checkpoint_count(chain).await, 0);
+        assert_eq!(restarted.pending_checkpoint_count(chain), 0);
         assert_eq!(restarted.get_processed_block(chain).await, None);
 
         // Hydrate initializes the counter and recovers from the latest checkpoint
         let hydrated = restarted.hydrate(chain).await.unwrap();
         assert!(hydrated.is_some());
         assert_eq!(hydrated.unwrap().block_height, 2 * interval);
-        assert_eq!(restarted.pending_checkpoint_count(chain).await, 2);
+        assert_eq!(restarted.pending_checkpoint_count(chain), 2);
         assert_eq!(
             restarted.get_processed_block(chain).await,
             Some(2 * interval)
