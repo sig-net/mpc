@@ -197,6 +197,22 @@ impl StreamReactor {
         self.find_consensus_checkpoint(digest.digest).await
     }
 
+    /// Collects and randomly shuffles active mesh peers excluding this node.
+    fn active_peers(&mut self, my_account_id: &AccountId) -> Vec<(Participant, ParticipantInfo)> {
+        let mut peers: Vec<_> = self
+            .ctx
+            .mesh_state
+            .borrow_and_update()
+            .active()
+            .participants
+            .clone()
+            .into_iter()
+            .filter(|(_, info)| info.account_id != *my_account_id)
+            .collect();
+        peers.shuffle(&mut thread_rng());
+        peers
+    }
+
     /// Finds the consensus checkpoint from active peers, retrying until found
     /// or until the consensus digest changes.
     pub async fn find_consensus_checkpoint(
@@ -204,17 +220,7 @@ impl StreamReactor {
         target_digest: [u8; 32],
     ) -> Option<Checkpoint> {
         let my_account_id = self.ctx.contract_watcher.account_id().clone();
-        let mut peers: Vec<_> = self
-            .ctx
-            .mesh_state
-            .borrow()
-            .active()
-            .participants
-            .clone()
-            .into_iter()
-            .filter(|(_, info)| info.account_id != my_account_id)
-            .collect();
-        peers.shuffle(&mut thread_rng());
+        let mut peers = self.active_peers(&my_account_id);
 
         loop {
             tokio::select! {
@@ -242,12 +248,7 @@ impl StreamReactor {
                     if changed.is_err() {
                         return None;
                     }
-                    let active = self.ctx.mesh_state.borrow_and_update().active().participants.clone();
-                    peers = active
-                        .into_iter()
-                        .filter(|(_, info)| info.account_id != my_account_id)
-                        .collect();
-                    peers.shuffle(&mut thread_rng());
+                    peers = self.active_peers(&my_account_id);
                 }
 
                 checkpoint = query_peers_checkpoint(
