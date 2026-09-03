@@ -1,18 +1,22 @@
-use crate::backlog::consensus::find_consensus_checkpoint;
 use crate::backlog::{Backlog, Checkpoint, CheckpointError};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
+use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::stream::StreamContext;
 use crate::types::CheckpointWatcher;
 
+use cait_sith::protocol::Participant;
 use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use std::time::Duration;
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegressionOutcome {
-    /// Consensus digest mismatches local backlog — transition to Recovery.
-    Recovery,
+    /// Consensus digest mismatches local backlog — transition to recovery/restart.
+    Diverged,
     /// Local backlog is aligned with consensus, continue current state.
     Aligned,
     /// Consensus checkpoint feed shut down — pipeline should stop.
@@ -62,32 +66,12 @@ impl StreamReactor {
             ?checkpoint_digest.digest,
             "Consensus checkpoint mismatch/divergence detected: triggering regression"
         );
-        let fetched_checkpoint = if self.is_consensus_reset(&checkpoint_digest) {
-            tracing::warn!(
-                chain = ?self.chain,
-                height = checkpoint_digest.height,
-                "consensus checkpoint was reset; rebuilding it locally"
-            );
-            Checkpoint::reset(self.chain, checkpoint_digest.height)
-        } else {
-            let my_account_id = self.ctx.contract_watcher.account_id().clone();
-            let Some(checkpoint) = find_consensus_checkpoint(
-                &mut self.ctx.mesh_state,
-                &self.ctx.node_client,
-                self.chain,
-                checkpoint_digest.digest,
-                &mut self.ctx.checkpoints_rx,
-                &my_account_id,
-            )
-            .await
-            else {
-                return Ok(None);
-            };
-            checkpoint
+        let Some(checkpoint) = self.fetch_consensus_checkpoint(&checkpoint_digest).await else {
+            return Ok(None);
         };
 
-        self.ctx.backlog.regress(&fetched_checkpoint).await?;
-        Ok(Some(fetched_checkpoint.block_height))
+        self.ctx.backlog.regress(&checkpoint).await?;
+        Ok(Some(checkpoint.block_height))
     }
 
     /// Hydrates the in-memory backlog from local persistent storage at startup.
@@ -186,16 +170,104 @@ impl StreamReactor {
         }
     }
 
+    /// Fetches the consensus checkpoint to regress to, either by rebuilding a reset
+    /// checkpoint locally or by querying peers over the mesh.
+    async fn fetch_consensus_checkpoint(
+        &mut self,
+        digest: &CheckpointDigest,
+    ) -> Option<Checkpoint> {
+        if self.is_consensus_reset(digest) {
+            tracing::warn!(
+                chain = ?self.chain,
+                height = digest.height,
+                "consensus checkpoint was reset; rebuilding it locally"
+            );
+            return Some(Checkpoint::reset(self.chain, digest.height));
+        }
+
+        self.find_consensus_checkpoint(digest.digest).await
+    }
+
+    /// Finds the consensus checkpoint from active peers, retrying until found
+    /// or until the consensus digest changes.
+    pub async fn find_consensus_checkpoint(
+        &mut self,
+        target_digest: [u8; 32],
+    ) -> Option<Checkpoint> {
+        let my_account_id = self.ctx.contract_watcher.account_id().clone();
+        let mut peers: Vec<_> = self
+            .ctx
+            .mesh_state
+            .borrow()
+            .active()
+            .participants
+            .clone()
+            .into_iter()
+            .filter(|(_, info)| info.account_id != my_account_id)
+            .collect();
+        peers.shuffle(&mut thread_rng());
+
+        loop {
+            tokio::select! {
+                biased;
+
+                changed = self.ctx.checkpoints_rx.changed() => {
+                    if changed.is_err() {
+                        return None;
+                    }
+                    let checkpoint_digest = self.ctx.checkpoints_rx.borrow_and_update();
+                    match &*checkpoint_digest {
+                        None => {
+                            tracing::info!(chain = ?self.chain, "consensus digest is empty, aborting...");
+                            return None;
+                        }
+                        Some(cp) => {
+                            if cp.digest != target_digest {
+                                tracing::info!(chain = ?self.chain, "consensus digest changed during wait, aborting...");
+                                return None;
+                            }
+                        }
+                    }
+                }
+                changed = self.ctx.mesh_state.changed() => {
+                    if changed.is_err() {
+                        return None;
+                    }
+                    let active = self.ctx.mesh_state.borrow_and_update().active().participants.clone();
+                    peers = active
+                        .into_iter()
+                        .filter(|(_, info)| info.account_id != my_account_id)
+                        .collect();
+                    peers.shuffle(&mut thread_rng());
+                }
+
+                checkpoint = query_peers_checkpoint(
+                    &peers,
+                    &self.ctx.node_client,
+                    self.chain,
+                    target_digest,
+                ) => {
+                    let Some(checkpoint) = checkpoint else {
+                        tracing::warn!("all nodes do not have the checkpoint, retrying in 3 seconds");
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    };
+                    break Some(checkpoint);
+                }
+            }
+        }
+    }
+
     /// Waits for a consensus checkpoint digest change, then checks for regression.
     pub async fn next_regression(&mut self) -> RegressionOutcome {
         if self.detect_regression().await {
-            return RegressionOutcome::Recovery;
+            return RegressionOutcome::Diverged;
         }
         if self.ctx.checkpoints_rx.changed().await.is_err() {
             return RegressionOutcome::Shutdown;
         }
         if self.detect_regression().await {
-            return RegressionOutcome::Recovery;
+            return RegressionOutcome::Diverged;
         }
         RegressionOutcome::Aligned
     }
@@ -214,232 +286,55 @@ impl StreamReactor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::node_client::Options as NodeClientOptions;
-    use mpc_primitives::CheckpointDigest;
-    use std::time::Duration;
+async fn fetch_peer_checkpoint(
+    node_client: &NodeClient,
+    url: &str,
+    chain: Chain,
+    target_digest: [u8; 32],
+) -> Option<Checkpoint> {
+    let checkpoint = node_client
+        .fetch_checkpoint_by_digest(url, chain, target_digest)
+        .await
+        .inspect_err(|err| {
+            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+        })
+        .ok()?;
 
-    fn make_reactor(
-        chain: Chain,
-        backlog: Backlog,
-        rx: watch::Receiver<Option<CheckpointDigest>>,
-    ) -> StreamReactor {
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let node_client = NodeClient::new(&NodeClientOptions::default());
-        let account_id = "test.near".parse().unwrap();
-        StreamReactor::from_parts(chain, backlog, rx, mesh_rx, node_client, &account_id)
-    }
+    let Some(checkpoint) = checkpoint else {
+        tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
+        return None;
+    };
 
-    fn make_digest(
-        height: u64,
-        digest: [u8; 32],
-    ) -> (
-        watch::Sender<Option<CheckpointDigest>>,
-        watch::Receiver<Option<CheckpointDigest>>,
-    ) {
-        watch::channel(Some(CheckpointDigest { height, digest }))
-    }
-
-    #[tokio::test]
-    async fn test_empty_digest_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let (_tx, rx) = watch::channel(None);
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(!result, "empty digest should not trigger regression");
-    }
-
-    #[tokio::test]
-    async fn test_matching_consensus_confirms_and_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp = backlog.checkpoint(chain).await.unwrap();
-        let digest = cp.digest();
-
-        let (_tx, rx) = make_digest(100, digest);
-        let mut reactor = make_reactor(chain, backlog.clone(), rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(!result, "matching digest should not trigger regression");
-
-        let persisted = backlog
-            .checkpoints()
-            .storage()
-            .load_latest(chain)
-            .await
-            .unwrap();
-        assert!(
-            persisted.is_some(),
-            "matching consensus should confirm the checkpoint to storage"
+    let digest = checkpoint.digest();
+    if digest != target_digest {
+        tracing::warn!(
+            ?url,
+            ?chain,
+            ?digest,
+            "peer checkpoint returns mismatched digest"
         );
+        return None;
     }
-
-    #[tokio::test]
-    async fn test_mismatch_triggers_regression() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp1 = backlog.checkpoint(chain).await.unwrap();
-        let digest1 = cp1.digest();
-
-        let (_tx, rx) = make_digest(100, digest1);
-        let mut reactor = make_reactor(chain, backlog.clone(), rx);
-        assert!(!reactor.detect_regression().await);
-
-        // Advance backlog to 200 with new checkpoint
-        backlog.set_processed_block(chain, 200).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        // Consensus arrives with a completely different digest for height 200
-        let different_digest = [0xabu8; 32];
-        let (_tx, rx) = make_digest(200, different_digest);
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(
-            result,
-            "divergent digest at same height should trigger regression"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_no_local_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let (_tx, rx) = make_digest(100, [0xabu8; 32]);
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(!result, "no local checkpoint should not trigger regression");
-    }
-
-    #[tokio::test]
-    async fn test_reset_detected_without_a_local_checkpoint() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let (_tx, rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(
-            result,
-            "a canonical reset must trigger regression even if this node has no local checkpoint"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ahead_with_pending_match_confirms() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp1 = backlog.checkpoint(chain).await.unwrap();
-        let digest1 = cp1.digest();
-
-        backlog.set_processed_block(chain, 200).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let (_tx, rx) = make_digest(100, digest1);
-        let mut reactor = make_reactor(chain, backlog.clone(), rx);
-
-        let result = reactor.detect_regression().await;
-        assert!(
-            !result,
-            "consensus matching a pending checkpoint means node is ahead, not regressed"
-        );
-
-        let persisted = backlog
-            .checkpoints()
-            .storage()
-            .load_latest(chain)
-            .await
-            .unwrap();
-        assert!(persisted.is_some());
-        assert_eq!(persisted.unwrap().block_height, 100);
-    }
-
-    #[tokio::test]
-    async fn test_applied_reset_is_not_a_regression() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog
-            .regress(&Checkpoint::reset(chain, 42))
-            .await
-            .unwrap();
-        assert!(backlog
-            .checkpoints()
-            .confirm(chain, mpc_primitives::reset_checkpoint_digest(chain, 42))
-            .await
-            .unwrap());
-
-        let (_tx, rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        assert!(
-            !reactor.detect_regression().await,
-            "an already-applied reset must not keep restarting the indexer"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wait_detects_regression_after_consumed() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let (_tx, mut rx) = make_digest(200, [0xabu8; 32]);
-        let _ = rx.borrow_and_update();
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let result = tokio::time::timeout(Duration::from_millis(500), reactor.next_regression())
-            .await
-            .expect("should not hang — upfront check catches mismatch");
-        assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression even when receiver state was consumed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wait_detects_regression_after_change() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp = backlog.checkpoint(chain).await.unwrap();
-        let matching_digest = cp.digest();
-
-        let (tx, rx) = make_digest(100, matching_digest);
-        let mut reactor = make_reactor(chain, backlog, rx);
-
-        let handle = tokio::spawn(async move { reactor.next_regression().await });
-
-        tx.send(Some(CheckpointDigest {
-            height: 200,
-            digest: [0xabu8; 32],
-        }))
-        .unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("timeout")
-            .expect("task should not panic");
-
-        assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression after new mismatched value"
-        );
-    }
+    Some(checkpoint)
 }
+
+pub(crate) async fn query_peers_checkpoint(
+    peers: &[(Participant, ParticipantInfo)],
+    node_client: &NodeClient,
+    chain: Chain,
+    target_digest: [u8; 32],
+) -> Option<Checkpoint> {
+    for (peer, info) in peers {
+        tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
+        if let Some(checkpoint) =
+            fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await
+        {
+            return Some(checkpoint);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+#[path = "reactor_tests.rs"]
+mod tests;

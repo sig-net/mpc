@@ -124,7 +124,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 }
                 result = reactor.next_regression() => {
                     match result {
-                        RegressionOutcome::Recovery => {
+                        RegressionOutcome::Diverged => {
                             reactor.abort_inflight().await;
                             break Exit::Restart;
                         }

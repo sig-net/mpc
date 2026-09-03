@@ -1,5 +1,4 @@
 mod checkpoints;
-pub mod consensus;
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
