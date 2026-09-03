@@ -150,6 +150,7 @@ async fn test_consensus_alignment_peer_fetch() {
     );
 
     let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+        chain,
         height: expected_height,
         digest,
     }));
@@ -233,6 +234,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Start with a non-matching digest; we'll change it to zero to abort the fetch loop.
     let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+        chain,
         height: 9999,
         digest: [0xabu8; 32],
     }));

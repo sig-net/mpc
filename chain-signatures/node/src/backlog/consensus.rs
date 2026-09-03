@@ -442,6 +442,7 @@ mod tests {
             }
 
             let msg = remote_digest.map(|digest| CheckpointDigest {
+                chain,
                 height: case.remote_height,
                 digest,
             });
@@ -575,6 +576,7 @@ mod tests {
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
         let fixture = AlignFixture::new(Some(CheckpointDigest {
+            chain,
             height: 100,
             digest: [0xabu8; 32],
         }));

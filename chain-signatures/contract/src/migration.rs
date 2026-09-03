@@ -10,7 +10,7 @@ use crate::update::ProposedUpdates;
 use crate::{MpcContract, VersionedMpcContract};
 
 use borsh::BorshDeserialize;
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::PublicKey;
 
@@ -59,7 +59,11 @@ pub(crate) struct PreviousDevnet {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    // `CheckpointDigest` replaces the previously stored
+    // `ConsensusCheckpointDigest` with an identical Borsh field layout
+    // (`chain`, `height`, `digest`), so states written by the old type still
+    // deserialize without a dedicated migration step.
+    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
 

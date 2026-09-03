@@ -49,6 +49,8 @@ pub enum PublicKeyError {
 pub enum InitError {
     #[error("Threshold cannot be greater than the number of candidates")]
     ThresholdTooHigh,
+    #[error("Checkpoint map key does not match the checkpoint's chain.")]
+    CheckpointChainMismatch,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]

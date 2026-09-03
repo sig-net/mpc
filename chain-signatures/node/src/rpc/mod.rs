@@ -22,7 +22,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
 pub enum RpcAction {
     Publish(PublishAction),
     VoteCheckpoint {
-        checkpoint: ConsensusCheckpointDigest,
+        checkpoint: CheckpointDigest,
         created_at: Instant,
     },
     AbortCheckpoints(Chain),
@@ -77,7 +77,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
+    pub fn vote_checkpoint(&self, checkpoint: CheckpointDigest) {
         let tx = self.tx.clone();
         let created_at = Instant::now();
         tokio::spawn(async move {
@@ -579,10 +579,7 @@ async fn update_contract_data(
 
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
-            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.height,
-                digest: sc.digest,
-            });
+            let new_digest = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
@@ -654,10 +651,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
-async fn execute_vote_checkpoint(
-    near: NearGovernanceClient,
-    checkpoint: ConsensusCheckpointDigest,
-) {
+async fn execute_vote_checkpoint(near: NearGovernanceClient, checkpoint: CheckpointDigest) {
     vote_checkpoint_with_retry(
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
@@ -669,7 +663,7 @@ async fn execute_vote_checkpoint(
 
 /// Submit a checkpoint vote under a bounded retry policy.
 async fn vote_checkpoint_with_retry<F, Fut>(
-    checkpoint: &ConsensusCheckpointDigest,
+    checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
     vote: F,
@@ -730,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
-        let checkpoint = ConsensusCheckpointDigest {
+        let checkpoint = CheckpointDigest {
             chain: Chain::Ethereum,
             height: 1,
             digest: [0; 32],
@@ -1121,7 +1115,7 @@ mod tests {
         });
 
         tx.send(RpcAction::VoteCheckpoint {
-            checkpoint: ConsensusCheckpointDigest {
+            checkpoint: CheckpointDigest {
                 chain: Chain::Ethereum,
                 height: 10,
                 digest: [7; 32],

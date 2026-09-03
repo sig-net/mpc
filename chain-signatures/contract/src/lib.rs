@@ -16,7 +16,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::CheckpointDigest;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -83,7 +83,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
 
@@ -779,7 +779,7 @@ impl VersionedMpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
-        checkpoints: Option<BTreeMap<Chain, ConsensusCheckpointDigest>>,
+        checkpoints: Option<BTreeMap<Chain, CheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
@@ -799,7 +799,16 @@ impl VersionedMpcContract {
         let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpointDigests);
         if let Some(checkpoints) = checkpoints {
             for (chain, checkpoint) in checkpoints {
-                latest_checkpoints.insert(chain, checkpoint);
+                // Reject malformed entries outright: the map key must match the
+                // checkpoint's own chain so per-chain lookups and views never
+                // operate on inconsistent pairs.
+                if chain != checkpoint.chain {
+                    return Err(InitError::CheckpointChainMismatch.message(format!(
+                        "checkpoint map key {chain} does not match checkpoint chain {}",
+                        checkpoint.chain,
+                    )));
+                }
+                latest_checkpoints.insert(checkpoint.chain, checkpoint);
             }
         }
 
@@ -849,8 +858,16 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
-        self.latest_checkpoints().get(&chain)
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&CheckpointDigest> {
+        let checkpoint = self.latest_checkpoints().get(&chain)?;
+        // Entries are validated on write, but legacy state or a bug could still
+        // hold a value whose chain does not match its key. Never expose it
+        // under a different chain: treat such pairs as absent so `read` and
+        // `vote_checkpoint` cannot operate on inconsistent state.
+        if checkpoint.chain != chain {
+            return None;
+        }
+        Some(checkpoint)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -909,10 +926,7 @@ impl VersionedMpcContract {
     /// checkpoint, or the caller submits a different digest for an already
     /// finalized height.
     #[handle_result]
-    pub fn vote_checkpoint(
-        &mut self,
-        checkpoint: ConsensusCheckpointDigest,
-    ) -> Result<bool, Error> {
+    pub fn vote_checkpoint(&mut self, checkpoint: CheckpointDigest) -> Result<bool, Error> {
         let voter = self.voter()?;
         let threshold = match self.state() {
             ProtocolContractState::Running(state) => state.threshold,
@@ -943,7 +957,7 @@ impl VersionedMpcContract {
         if vote_count < threshold {
             return Ok(false);
         }
-        self.insert_checkpoint(checkpoint.chain, checkpoint);
+        self.insert_checkpoint(checkpoint);
 
         // Remove stale votes where candidate checkpoint is less than or equal to
         // this voted in consensus checkpoint.
@@ -953,7 +967,7 @@ impl VersionedMpcContract {
         Ok(true)
     }
 
-    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
+    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(CheckpointDigest, usize)> {
         let votes = match self {
             Self::V0(mpc_contract) => &mpc_contract.checkpoint_votes,
         };
@@ -1184,22 +1198,26 @@ impl VersionedMpcContract {
         Ok(voter)
     }
 
-    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, CheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
         }
     }
 
-    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints_mut(&mut self) -> &mut IterableMap<Chain, CheckpointDigest> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
         }
     }
 
-    fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
+    /// Store a checkpoint under its own `chain` field, keeping the map key and
+    /// the value's chain consistent by construction.
+    fn insert_checkpoint(&mut self, checkpoint: CheckpointDigest) {
         match self {
             Self::V0(mpc_contract) => {
-                mpc_contract.latest_checkpoints.insert(chain, checkpoint);
+                mpc_contract
+                    .latest_checkpoints
+                    .insert(checkpoint.chain, checkpoint);
             }
         }
     }
@@ -1263,10 +1281,7 @@ mod tests {
     // key entry. This reproduces the observed deployed state where
     // `latest_checkpoint(chain)` works because it uses `.get()`, while
     // `IterableMap::iter()` returns no checkpoints.
-    fn seed_checkpoint_lookup_without_iterable_key(
-        chain: Chain,
-        checkpoint: ConsensusCheckpointDigest,
-    ) {
+    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: CheckpointDigest) {
         let mut key_bytes = latest_checkpoints_map_prefix();
         chain.serialize(&mut key_bytes).unwrap();
         let storage_key = env::sha256_array(&key_bytes);
@@ -1341,7 +1356,7 @@ mod tests {
             .build();
         testing_env!(context);
 
-        let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+        let checkpoint = CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
         seed_checkpoint_lookup_without_iterable_key(Chain::Solana, checkpoint);
 
         // Construct a contract whose `latest_checkpoints` map points at the
@@ -1387,10 +1402,10 @@ mod tests {
     #[test]
     fn reset_checkpoint_clears_votes_for_selected_chains() {
         let mut contract = VersionedMpcContract::V0(MpcContract::init(0, BTreeMap::new(), None));
-        let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
-        let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
+        let solana_checkpoint = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let ethereum_checkpoint = CheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
-        contract.insert_checkpoint(Chain::Solana, solana_checkpoint);
+        contract.insert_checkpoint(solana_checkpoint);
         contract
             .checkpoint_votes_mut()
             .entry(solana_checkpoint)
@@ -1405,5 +1420,123 @@ mod tests {
         assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
         assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
         assert_eq!(contract.checkpoint_votes(Chain::Ethereum).len(), 1);
+    }
+
+    #[test]
+    fn init_running_rejects_checkpoint_chain_mismatch() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let public_key: PublicKey = "ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59"
+            .parse()
+            .unwrap();
+        let checkpoints = BTreeMap::from([(
+            Chain::Ethereum,
+            CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]),
+        )]);
+
+        let err = VersionedMpcContract::init_running(
+            0,
+            Participants::new(),
+            0,
+            public_key,
+            None,
+            Some(checkpoints),
+        )
+        .expect_err("mismatched checkpoint map key must be rejected");
+        assert_eq!(
+            err.kind(),
+            &crate::errors::ErrorKind::Init(InitError::CheckpointChainMismatch)
+        );
+    }
+
+    #[test]
+    fn init_running_accepts_matching_checkpoints() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        let public_key: PublicKey = "ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59"
+            .parse()
+            .unwrap();
+        let checkpoints = BTreeMap::from([
+            (
+                Chain::Ethereum,
+                CheckpointDigest::new(Chain::Ethereum, 120, [7u8; 32]),
+            ),
+            (
+                Chain::Solana,
+                CheckpointDigest::new(Chain::Solana, 240, [8u8; 32]),
+            ),
+        ]);
+
+        let contract = VersionedMpcContract::init_running(
+            0,
+            Participants::new(),
+            0,
+            public_key,
+            None,
+            Some(checkpoints),
+        )
+        .expect("matching checkpoint entries must be accepted");
+
+        match &contract {
+            VersionedMpcContract::V0(inner) => {
+                assert_eq!(inner.latest_checkpoints.len(), 2);
+            }
+        }
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Solana),
+            Some(&CheckpointDigest::new(Chain::Solana, 240, [8u8; 32]))
+        );
+        assert_eq!(
+            contract.latest_checkpoint(Chain::Ethereum),
+            Some(&CheckpointDigest::new(Chain::Ethereum, 120, [7u8; 32]))
+        );
+    }
+
+    #[test]
+    fn latest_checkpoint_filters_malformed_stored_entry() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        // Seed a malformed entry: stored under the Solana key but claiming
+        // Ethereum. This can only arise from legacy state or a bug, because all
+        // write paths now keep key and value chain consistent.
+        seed_checkpoint_lookup_without_iterable_key(
+            Chain::Solana,
+            CheckpointDigest::new(Chain::Ethereum, 120, [7u8; 32]),
+        );
+
+        let contract = VersionedMpcContract::V0(MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        });
+
+        // The malformed entry is never exposed under the stored key, nor under
+        // the chain the value claims.
+        assert_eq!(contract.latest_checkpoint(Chain::Solana), None);
+        assert_eq!(contract.latest_checkpoint(Chain::Ethereum), None);
+
+        // `read(Checkpoints)` is the path nodes use; it must not surface it.
+        let checkpoints = contract
+            .read(vec![Read::Checkpoints])
+            .into_iter()
+            .find_map(|view| match view {
+                View::Checkpoints(checkpoints) => Some(checkpoints),
+                _ => None,
+            })
+            .expect("read should return checkpoints view");
+        assert!(!checkpoints.contains_key(&Chain::Solana));
+        assert!(!checkpoints.contains_key(&Chain::Ethereum));
     }
 }

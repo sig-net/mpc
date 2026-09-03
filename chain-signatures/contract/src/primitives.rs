@@ -1,4 +1,4 @@
-pub use mpc_primitives::{Checkpoint, ConsensusCheckpointDigest, PendingTx};
+pub use mpc_primitives::{Checkpoint, CheckpointDigest, PendingTx};
 pub use signet_primitives::{Chain, SignRequest};
 
 use crate::config::Config;
@@ -49,7 +49,7 @@ pub enum Read {
 pub enum View {
     State(ProtocolContractState),
     Config(Config),
-    Checkpoints(HashMap<Chain, ConsensusCheckpointDigest>),
+    Checkpoints(HashMap<Chain, CheckpointDigest>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume
@@ -440,7 +440,7 @@ pub enum SignPoll {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct CheckpointVotes {
-    pub votes: HashMap<ConsensusCheckpointDigest, HashSet<AccountId>>,
+    pub votes: HashMap<CheckpointDigest, HashSet<AccountId>>,
 }
 
 impl Default for CheckpointVotes {
@@ -456,11 +456,11 @@ impl CheckpointVotes {
         }
     }
 
-    pub fn entry(&mut self, checkpoint: ConsensusCheckpointDigest) -> &mut HashSet<AccountId> {
+    pub fn entry(&mut self, checkpoint: CheckpointDigest) -> &mut HashSet<AccountId> {
         self.votes.entry(checkpoint).or_default()
     }
 
-    pub fn get(&self, checkpoint: &ConsensusCheckpointDigest) -> Option<&HashSet<AccountId>> {
+    pub fn get(&self, checkpoint: &CheckpointDigest) -> Option<&HashSet<AccountId>> {
         self.votes.get(checkpoint)
     }
 

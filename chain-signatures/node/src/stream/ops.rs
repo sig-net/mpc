@@ -362,7 +362,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     let digest = checkpoint.digest();
-    let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
+    let checkpoint_digest = mpc_primitives::CheckpointDigest {
         chain,
         height: checkpoint.block_height,
         digest,

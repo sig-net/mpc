@@ -274,13 +274,18 @@ mod tests {
     }
 
     fn make_digest(
+        chain: Chain,
         height: u64,
         digest: [u8; 32],
     ) -> (
         watch::Sender<Option<CheckpointDigest>>,
         watch::Receiver<Option<CheckpointDigest>>,
     ) {
-        watch::channel(Some(CheckpointDigest { height, digest }))
+        watch::channel(Some(CheckpointDigest {
+            chain,
+            height,
+            digest,
+        }))
     }
 
     #[tokio::test]
@@ -302,7 +307,7 @@ mod tests {
         let cp = backlog.checkpoint(chain).await.unwrap();
         let digest = cp.digest();
 
-        let (_tx, mut rx) = make_digest(100, digest);
+        let (_tx, mut rx) = make_digest(chain, 100, digest);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "matching digest should not trigger regression");
@@ -326,7 +331,7 @@ mod tests {
         backlog.checkpoint(chain).await.unwrap();
 
         let digest1 = cp1.digest();
-        let (_tx, mut rx) = make_digest(100, digest1);
+        let (_tx, mut rx) = make_digest(chain, 100, digest1);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "ahead with match should not trigger regression");
@@ -345,7 +350,7 @@ mod tests {
         backlog.checkpoint(chain).await.unwrap();
 
         let different_digest = [0xabu8; 32];
-        let (_tx, mut rx) = make_digest(200, different_digest);
+        let (_tx, mut rx) = make_digest(chain, 200, different_digest);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(result, "mismatched digest should trigger regression");
@@ -357,7 +362,7 @@ mod tests {
         let chain = Chain::Ethereum;
 
         let digest = [0x42u8; 32];
-        let (_tx, mut rx) = make_digest(100, digest);
+        let (_tx, mut rx) = make_digest(chain, 100, digest);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(!result, "no local checkpoint should not trigger regression");
@@ -371,7 +376,7 @@ mod tests {
         backlog.set_processed_block(chain, 100).await;
         backlog.checkpoint(chain).await.unwrap();
 
-        let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
+        let (mut _tx, mut rx) = make_digest(chain, 200, [0xabu8; 32]);
         let _ = rx.borrow_and_update();
 
         let result = tokio::time::timeout(
@@ -396,12 +401,13 @@ mod tests {
         let cp = backlog.checkpoint(chain).await.unwrap();
         let matching_digest = cp.digest();
 
-        let (tx, mut rx) = make_digest(100, matching_digest);
+        let (tx, mut rx) = make_digest(chain, 100, matching_digest);
 
         let handle =
             tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
 
         tx.send(Some(CheckpointDigest {
+            chain,
             height: 200,
             digest: [0xabu8; 32],
         }))
@@ -539,6 +545,7 @@ mod tests {
         }
         cp_tx
             .send(Some(CheckpointDigest {
+                chain,
                 height: 200,
                 digest: [0xab; 32],
             }))
