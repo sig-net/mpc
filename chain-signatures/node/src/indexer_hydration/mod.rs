@@ -325,10 +325,9 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
 ) {
-    // Hydrate the local checkpoint before aligning: the web server (spawned
-    // independently) can then serve durable pending bodies to peers during
-    // startup. `load_local` only reads local storage and does not need the mesh.
-    match backlog.load_local(Chain::Hydration).await {
+    // Hydrate local checkpoint state before aligning: initializes the pending count
+    // and recovers from the latest durable checkpoint if one exists.
+    match backlog.hydrate(Chain::Hydration).await {
         Ok(Some(checkpoint)) => {
             tracing::info!(
                 chain = ?Chain::Hydration,
@@ -343,7 +342,7 @@ pub async fn run<T: ChainTelemetry>(
             tracing::info!(chain = ?Chain::Hydration, "no local checkpoint found");
         }
         Err(err) => {
-            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load local checkpoint");
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to hydrate local checkpoint");
         }
     }
 

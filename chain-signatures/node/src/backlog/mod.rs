@@ -593,9 +593,15 @@ impl Backlog {
         self.checkpoints.confirm(chain, digest).await
     }
 
-    /// Load the durable checkpoint state and return the newest checkpoint.
-    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
-        self.checkpoints.load_local(chain).await
+    /// Hydrate checkpoint state from storage and return the newest local checkpoint.
+    pub async fn hydrate(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        self.checkpoints.pending_count(chain).await?;
+        Ok(self.checkpoints.latest(chain).await)
+    }
+
+    /// Refresh the pending checkpoint count from storage into the local counter.
+    pub async fn pending_count(&self, chain: Chain) -> anyhow::Result<usize> {
+        self.checkpoints.pending_count(chain).await
     }
 
     /// Replace the local backlog with a consensus checkpoint after divergence.

@@ -24,11 +24,10 @@ pub(crate) async fn recover_backlog(
 ) {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
-    // Hydrate the local checkpoint before aligning: the web server (spawned
-    // independently) can then serve durable pending bodies to peers during
-    // startup. `load_local` only reads local storage and does not need the mesh.
+    // Hydrate local checkpoint state before aligning: initializes the pending count
+    // and recovers from the latest durable checkpoint if one exists.
     if load_local {
-        match backlog.load_local(chain).await {
+        match backlog.hydrate(chain).await {
             Ok(Some(checkpoint)) => {
                 tracing::info!(
                     ?chain,
@@ -43,7 +42,7 @@ pub(crate) async fn recover_backlog(
                 tracing::info!(?chain, "no local checkpoint found");
             }
             Err(err) => {
-                tracing::warn!(?chain, %err, "failed to load local checkpoint");
+                tracing::warn!(?chain, %err, "failed to hydrate local checkpoint");
             }
         }
     }

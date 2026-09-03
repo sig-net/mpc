@@ -127,14 +127,16 @@ impl Checkpoints {
             return Err(CheckpointError::PendingCap { chain });
         }
 
-        let new_count = self
+        let inserted = self
             .storage
             .persist_pending(checkpoint)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
-        self.pending_counts[chain].store(new_count, Ordering::Release);
-        self.observe(chain, new_count);
+        if inserted {
+            let new_count = self.pending_counts[chain].fetch_add(1, Ordering::AcqRel) + 1;
+            self.observe(chain, new_count);
+        }
         Ok(())
     }
 
@@ -189,22 +191,22 @@ impl Checkpoints {
         Ok(true)
     }
 
-    /// Initializes pending counts from storage and returns the newest known checkpoint.
-    pub(super) async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+    /// Loads the current pending checkpoint count from storage into the local counter.
+    pub(super) async fn pending_count(&self, chain: Chain) -> anyhow::Result<usize> {
         let count = match self.storage.pending_count(chain).await {
             Ok(count) => count,
             Err(err) => {
                 tracing::warn!(
                     ?chain,
                     %err,
-                    "failed to load pending count; falling back to confirmed checkpoint"
+                    "failed to load pending count from storage; defaulting to 0"
                 );
                 0
             }
         };
         self.pending_counts[chain].store(count, Ordering::Release);
         self.observe(chain, count);
-        self.storage.latest(chain).await
+        Ok(count)
     }
 
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
@@ -380,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_local_hydrates_pending_checkpoints_after_restart() {
+    async fn pending_count_initializes_pending_counter_after_restart() {
         let storage = CheckpointStorage::in_memory();
         let first = checkpoint(1);
         let second = checkpoint(2);
@@ -389,10 +391,7 @@ mod tests {
         checkpoints.persist_pending(&second).await.unwrap();
 
         let restarted = Checkpoints::new(storage);
-        assert_eq!(
-            restarted.load_local(first.chain).await.unwrap(),
-            Some(second.clone())
-        );
+        assert_eq!(restarted.pending_count(first.chain).await.unwrap(), 2);
         assert_eq!(restarted.count(first.chain), 2);
         assert_eq!(
             restarted.find(first.chain, first.digest()).await,
@@ -401,7 +400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_local_ignores_pending_checkpoints_at_confirmed_height() {
+    async fn pending_count_loads_durable_pending_count() {
         let storage = CheckpointStorage::in_memory();
         let confirmed = checkpoint(2);
         let stale_pending = checkpoint(1);
@@ -411,10 +410,7 @@ mod tests {
         storage.persist_pending(&fresh_pending).await.unwrap();
 
         let checkpoints = Checkpoints::new(storage);
-        assert_eq!(
-            checkpoints.load_local(confirmed.chain).await.unwrap(),
-            Some(fresh_pending.clone())
-        );
+        assert_eq!(checkpoints.pending_count(confirmed.chain).await.unwrap(), 2);
         assert_eq!(checkpoints.count(confirmed.chain), 2);
         assert_eq!(
             checkpoints
@@ -552,9 +548,9 @@ mod tests {
         let checkpoint = checkpoint(1);
         storage.persist_pending(&checkpoint).await.unwrap();
 
-        // A fresh `Checkpoints` has an empty mirror until `load_local` hydrates
-        // it, as happens right after a restart before the mesh is active. The
-        // durable pending body must still be findable.
+        // A fresh `Checkpoints` has an empty counter until `pending_count`
+        // initializes it, as happens right after a restart before the mesh is active.
+        // The durable pending body must still be findable.
         let checkpoints = Checkpoints::new(storage);
 
         assert_eq!(
