@@ -174,15 +174,9 @@ async fn test_consensus_alignment_peer_fetch() {
         node_client,
         &my_account_id,
     );
-    let result = tokio::time::timeout(
-        Duration::from_secs(10),
-        reactor.align_backlog_with_consensus(),
-    )
-    .await;
+    let result = tokio::time::timeout(Duration::from_secs(10), reactor.align_to_consensus()).await;
 
-    let result = result
-        .expect("align_backlog_with_consensus should not hang")
-        .unwrap();
+    let result = result.expect("align_to_consensus should not hang").unwrap();
 
     assert!(
         result.is_some(),
@@ -261,7 +255,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
             node_client,
             &my_account_id,
         );
-        reactor.align_backlog_with_consensus().await
+        reactor.align_to_consensus().await
     });
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
@@ -371,13 +365,10 @@ async fn test_reset_converges_divergent_nodes() {
             &my_account_id,
         );
 
-        let applied = tokio::time::timeout(
-            Duration::from_secs(5),
-            reactor.align_backlog_with_consensus(),
-        )
-        .await
-        .expect("a reset must not wait on peers")
-        .unwrap();
+        let applied = tokio::time::timeout(Duration::from_secs(5), reactor.align_to_consensus())
+            .await
+            .expect("a reset must not wait on peers")
+            .unwrap();
 
         assert_eq!(applied, Some(resume_after));
     }

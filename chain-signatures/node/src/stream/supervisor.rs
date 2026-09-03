@@ -72,7 +72,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // Cleared before alignment, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         reactor.ctx.caught_up = false;
-        if let Err(err) = reactor.align_backlog_with_consensus().await {
+        if let Err(err) = reactor.align_to_consensus().await {
             tracing::error!(
                 %chain,
                 %err,

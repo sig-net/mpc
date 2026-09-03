@@ -54,7 +54,7 @@ impl StreamReactor {
     }
 
     /// Aligns this stream's backlog with network consensus, regressing if divergent.
-    pub async fn align_backlog_with_consensus(&mut self) -> Result<Option<u64>, CheckpointError> {
+    pub async fn align_to_consensus(&mut self) -> Result<Option<u64>, CheckpointError> {
         let Some(checkpoint_digest) = self.current_consensus_digest() else {
             return Ok(None);
         };

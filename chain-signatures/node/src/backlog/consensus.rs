@@ -188,7 +188,7 @@ mod tests {
                 self.node_client.clone(),
                 &self.my_account_id,
             );
-            reactor.align_backlog_with_consensus().await.unwrap()
+            reactor.align_to_consensus().await.unwrap()
         }
     }
 
@@ -659,7 +659,7 @@ mod tests {
                 node_client_clone,
                 &my_account_id_clone,
             );
-            reactor.align_backlog_with_consensus().await
+            reactor.align_to_consensus().await
         });
 
         // Let it run and start querying, then update digest to zero to abort
