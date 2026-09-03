@@ -1,13 +1,13 @@
 //! Tests checkpoint consensus alignment via peer-to-peer HTTP fetch.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
-use mpc_node::backlog::consensus::align_backlog_with_consensus;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
+use mpc_node::stream::StreamContext;
 use mpc_primitives::{
     Chain, ChainConfig as _, CheckpointDigest, IndexedSignRequest, SignArgs, SignId,
 };
@@ -153,11 +153,11 @@ async fn test_consensus_alignment_peer_fetch() {
         info,
     );
 
-    let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+    let (_cp_tx, checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
         height: expected_height,
         digest,
     }));
-    let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
+    let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     // Fresh persisted backlog (simulates a node that just started)
     let fresh_storage = CheckpointStorage::in_memory();
@@ -167,16 +167,16 @@ async fn test_consensus_alignment_peer_fetch() {
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Call align_backlog_with_consensus
+    let mut ctx = StreamContext::for_alignment(
+        fresh_backlog.clone(),
+        checkpoints_rx,
+        mesh_rx,
+        node_client,
+        &my_account_id,
+    );
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        align_backlog_with_consensus(
-            chain,
-            &fresh_backlog,
-            &mut checkpoints_rx,
-            &mut mesh_rx,
-            &node_client,
-            &my_account_id,
-        ),
+        ctx.align_backlog_with_consensus(chain),
     )
     .await;
 
@@ -238,11 +238,11 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     );
 
     // Start with a non-matching digest; we'll change it to zero to abort the fetch loop.
-    let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+    let (cp_tx, checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
         height: 9999,
         digest: [0xabu8; 32],
     }));
-    let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
+    let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     let fresh_storage = CheckpointStorage::in_memory();
     let fresh_backlog = Backlog::persisted(fresh_storage.clone());
@@ -253,15 +253,14 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Spawn alignment in background; keep cp_tx here to send the abort signal.
     let handle = tokio::spawn(async move {
-        align_backlog_with_consensus(
-            chain,
-            &fresh_backlog2,
-            &mut checkpoints_rx,
-            &mut mesh_rx,
-            &node_client,
+        let mut ctx = StreamContext::for_alignment(
+            fresh_backlog2,
+            checkpoints_rx,
+            mesh_rx,
+            node_client,
             &my_account_id,
-        )
-        .await
+        );
+        ctx.align_backlog_with_consensus(chain).await
     });
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
@@ -359,19 +358,20 @@ async fn test_reset_converges_divergent_nodes() {
     let node_client = NodeClient::new(&NodeClientOptions::default());
 
     for node in &network.nodes {
-        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
-        let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+        let (_cp_tx, checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
+        let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+
+        let mut ctx = StreamContext::for_alignment(
+            node.backlog.clone(),
+            checkpoints_rx,
+            mesh_rx,
+            node_client.clone(),
+            &my_account_id,
+        );
 
         let applied = tokio::time::timeout(
             Duration::from_secs(5),
-            align_backlog_with_consensus(
-                chain,
-                &node.backlog,
-                &mut checkpoints_rx,
-                &mut mesh_rx,
-                &node_client,
-                &my_account_id,
-            ),
+            ctx.align_backlog_with_consensus(chain),
         )
         .await
         .expect("a reset must not wait on peers")

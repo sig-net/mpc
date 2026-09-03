@@ -1,7 +1,6 @@
 // Supervised indexer loop: node-side recovery, then spawn the chain's
 // `run()` and dispatch its events. Regression or a watchdog stall cancels
 // `run()` and restarts it, re-running light recovery first.
-use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
 use crate::backlog::{Backlog, Checkpoint};
@@ -143,7 +142,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
 
-    let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
 
@@ -157,17 +155,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
-        if let Err(err) = recover_backlog(
-            chain,
-            load_local,
-            &ctx.backlog,
-            &mut ctx.checkpoints_rx,
-            &mut ctx.mesh_state,
-            &ctx.node_client,
-            &my_account_id,
-        )
-        .await
-        {
+        if let Err(err) = ctx.recover_backlog(chain, load_local).await {
             tracing::error!(
                 %chain,
                 %err,

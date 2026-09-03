@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, Checkpoint, CheckpointError};
+use crate::backlog::Checkpoint;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -10,77 +10,6 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::time::Duration;
 use tokio::sync::watch;
-
-/// Returns None if we are aligned, Some(<new_height>) if we have regressed.
-pub async fn align_backlog_with_consensus(
-    chain: Chain,
-    backlog: &Backlog,
-    checkpoints_rx: &mut CheckpointWatcher,
-    mesh_state: &mut watch::Receiver<MeshState>,
-    node_client: &NodeClient,
-    my_account_id: &AccountId,
-) -> Result<Option<u64>, CheckpointError> {
-    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
-        return Ok(None);
-    };
-
-    match backlog
-        .checkpoints()
-        .confirm(chain, checkpoint_digest.digest)
-        .await
-    {
-        Ok(found) => {
-            if found {
-                return Ok(None);
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                ?chain,
-                %err,
-                "transient storage error confirming consensus checkpoint; retrying later"
-            );
-            return Err(err);
-        }
-    }
-
-    tracing::warn!(
-        ?chain,
-        ?checkpoint_digest.digest,
-        "Consensus checkpoint mismatch/divergence detected: triggering regression"
-    );
-    // A reset settles this digest for a state no node has produced, so
-    // `find_consensus_checkpoint` would poll peers forever. Rebuild it instead
-    // and fall through to the ordinary regression path, which is what makes a
-    // reset idempotent: once regressed, the local checkpoint matches the
-    // settled digest and the next pass confirms it.
-    let reset_checkpoint = Checkpoint::reset(chain, checkpoint_digest.height);
-    let fetched_checkpoint = if reset_checkpoint.digest() == checkpoint_digest.digest {
-        tracing::warn!(
-            ?chain,
-            height = checkpoint_digest.height,
-            "consensus checkpoint was reset; rebuilding it locally"
-        );
-        reset_checkpoint
-    } else {
-        let Some(checkpoint) = find_consensus_checkpoint(
-            mesh_state,
-            node_client,
-            chain,
-            checkpoint_digest.digest,
-            checkpoints_rx,
-            my_account_id,
-        )
-        .await
-        else {
-            return Ok(None);
-        };
-        checkpoint
-    };
-
-    backlog.regress(&fetched_checkpoint).await?;
-    Ok(Some(fetched_checkpoint.block_height))
-}
 
 async fn fetch_peer_checkpoint(
     node_client: &NodeClient,
@@ -212,6 +141,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
+    use crate::stream::StreamContext;
 
     use crate::backlog::BacklogEntry;
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
@@ -250,16 +180,14 @@ mod tests {
         }
 
         async fn run(&mut self) -> Option<u64> {
-            align_backlog_with_consensus(
-                self.chain,
-                &self.backlog,
-                &mut self.checkpoints_rx,
-                &mut self.mesh_rx,
-                &self.node_client,
+            let mut ctx = StreamContext::for_alignment(
+                self.backlog.clone(),
+                self.checkpoints_rx.clone(),
+                self.mesh_rx.clone(),
+                self.node_client.clone(),
                 &self.my_account_id,
-            )
-            .await
-            .unwrap()
+            );
+            ctx.align_backlog_with_consensus(self.chain).await.unwrap()
         }
     }
 
@@ -718,19 +646,18 @@ mod tests {
         let backlog_clone = fixture.backlog.clone();
         let node_client_clone = fixture.node_client.clone();
         let my_account_id_clone = fixture.my_account_id.clone();
-        let mut checkpoints_rx_clone = fixture.checkpoints_rx.clone();
-        let mut mesh_rx_clone = fixture.mesh_rx.clone();
+        let checkpoints_rx_clone = fixture.checkpoints_rx.clone();
+        let mesh_rx_clone = fixture.mesh_rx.clone();
 
         let handle = tokio::spawn(async move {
-            align_backlog_with_consensus(
-                chain,
-                &backlog_clone,
-                &mut checkpoints_rx_clone,
-                &mut mesh_rx_clone,
-                &node_client_clone,
+            let mut ctx = StreamContext::for_alignment(
+                backlog_clone,
+                checkpoints_rx_clone,
+                mesh_rx_clone,
+                node_client_clone,
                 &my_account_id_clone,
-            )
-            .await
+            );
+            ctx.align_backlog_with_consensus(chain).await
         });
 
         // Let it run and start querying, then update digest to zero to abort

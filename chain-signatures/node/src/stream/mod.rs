@@ -80,6 +80,34 @@ impl StreamContext {
         }
         Ok(())
     }
+
+    /// Creates a lightweight test StreamContext configured for alignment tests.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub fn for_alignment(
+        backlog: Backlog,
+        checkpoints_rx: CheckpointWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        account_id: &near_account_id::AccountId,
+    ) -> Self {
+        let (sign_tx, _) = mpsc::channel(1);
+        let (rpc_tx, _) = mpsc::channel(1);
+        let (contract_watcher, _) = ContractStateWatcher::with_running(
+            account_id,
+            k256::AffinePoint::GENERATOR,
+            1,
+            Default::default(),
+        );
+        Self::new(
+            backlog,
+            sign_tx,
+            RpcChannel { tx: rpc_tx },
+            contract_watcher,
+            mesh_state,
+            node_client,
+            checkpoints_rx,
+        )
+    }
 }
 
 /// Dispatch a single chain event to the appropriate processor.
