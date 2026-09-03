@@ -4,10 +4,9 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use enum_map::EnumMap;
 use mpc_primitives::Chain;
 use sha3::Digest;
-use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// A checkpoint represents the backlog state at a specific block height.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
@@ -81,7 +80,7 @@ impl Checkpoint {
 #[derive(Debug, Clone)]
 pub(super) struct Checkpoints {
     storage: CheckpointStorage,
-    pending: Arc<EnumMap<Chain, RwLock<BTreeMap<u64, Checkpoint>>>>,
+    pending_counts: Arc<EnumMap<Chain, AtomicUsize>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,31 +95,13 @@ pub enum CheckpointError {
     },
 }
 
-enum CheckpointKind {
-    Pending(Checkpoint),
-    Latest(Checkpoint),
-}
-
-impl From<CheckpointKind> for Checkpoint {
-    fn from(checkpoint_kind: CheckpointKind) -> Self {
-        match checkpoint_kind {
-            CheckpointKind::Pending(checkpoint) | CheckpointKind::Latest(checkpoint) => checkpoint,
-        }
-    }
-}
-
 impl Checkpoints {
-    /// Creates an empty local pending-checkpoint cache backed by `storage`.
+    /// Creates a checkpoint tracker backed by `storage`.
     pub(super) fn new(storage: CheckpointStorage) -> Self {
         Self {
             storage,
-            pending: Arc::default(),
+            pending_counts: Arc::default(),
         }
-    }
-
-    /// Returns the pending-checkpoint map for `chain`.
-    fn pending(&self, chain: Chain) -> &RwLock<BTreeMap<u64, Checkpoint>> {
-        &self.pending[chain]
     }
 
     /// Updates the pending-checkpoint metric for `chain`.
@@ -130,43 +111,30 @@ impl Checkpoints {
             .set(len as i64);
     }
 
-    /// Durably records an unconfirmed checkpoint and adds it to the local cache.
+    /// Durably records an unconfirmed checkpoint.
     pub(super) async fn persist_pending(
         &self,
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
-        let height = checkpoint.block_height;
-        let mut pending = self.pending(chain).write().await;
-        if let Some(existing) = pending.get(&height) {
-            if existing == checkpoint {
-                return Ok(());
-            }
-
-            return Err(CheckpointError::Storage {
-                chain,
-                source: anyhow::anyhow!("conflicting pending checkpoint at height {height}"),
-            });
-        }
-
-        if pending.len() >= MAX_PENDING_CHECKPOINTS {
+        let count = self.count(chain);
+        if count >= MAX_PENDING_CHECKPOINTS {
             tracing::warn!(
                 ?chain,
-                count = pending.len(),
+                count,
                 "pending checkpoint cap reached; stalling checkpoint creation"
             );
             return Err(CheckpointError::PendingCap { chain });
         }
 
-        self.storage
+        let new_count = self
+            .storage
             .persist_pending(checkpoint)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
-        pending.insert(height, checkpoint.clone());
-        let len = pending.len();
-        drop(pending);
-        self.observe(chain, len);
+        self.pending_counts[chain].store(new_count, Ordering::Release);
+        self.observe(chain, new_count);
         Ok(())
     }
 
@@ -188,196 +156,83 @@ impl Checkpoints {
         }
     }
 
-    /// Removes pending checkpoints through `height` after a confirmed checkpoint advances state.
-    async fn update_pending(&self, chain: Chain, height: u64) {
-        let len = {
-            let mut pending = self.pending(chain).write().await;
-            pending.retain(|&pending_height, _| pending_height > height);
-            pending.len()
-        };
-        self.observe(chain, len);
-    }
-
-    /// Promotes a locally pending checkpoint when its digest reaches consensus.
-    ///
-    /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
-    /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
-    /// storage was unavailable.
+    /// Promotes a pending checkpoint when its digest reaches consensus, or
+    /// confirms it if already promoted.
     pub(super) async fn confirm(
         &self,
         chain: Chain,
         digest: [u8; 32],
     ) -> Result<bool, CheckpointError> {
-        let Some(checkpoint_kind) = self.find_kind(chain, digest).await? else {
+        let outcome = self
+            .storage
+            .promote_pending(chain, digest)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
+
+        let Some(remaining_count) = outcome else {
+            tracing::warn!(
+                ?chain,
+                ?digest,
+                "pending checkpoint not found for promotion"
+            );
             return Ok(false);
         };
-        let is_pending = matches!(&checkpoint_kind, CheckpointKind::Pending(_));
-        let checkpoint = Checkpoint::from(checkpoint_kind);
 
-        if !is_pending {
-            self.update_pending(chain, checkpoint.block_height).await;
-            return Ok(true);
-        }
-
-        let height = checkpoint.block_height;
-        match self.storage.promote_pending(chain, height).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(
-                    ?chain,
-                    ?digest,
-                    height,
-                    "pending checkpoint disappeared before promotion"
-                );
-                return Ok(false);
-            }
-            Err(source) => {
-                return Err(CheckpointError::Storage { chain, source });
-            }
-        }
-        self.update_pending(chain, height).await;
-        tracing::info!(?chain, ?digest, height, "consensus checkpoint confirmed");
+        self.pending_counts[chain].store(remaining_count, Ordering::Release);
+        self.observe(chain, remaining_count);
+        tracing::info!(
+            ?chain,
+            ?digest,
+            remaining_count,
+            "consensus checkpoint confirmed"
+        );
         Ok(true)
     }
 
-    /// Hydrates all durable pending checkpoints above the confirmed height and
-    /// returns the newest known checkpoint.
-    ///
-    /// The full pending set is restored (not just the newest item) so that
-    /// `confirm` and `find` can still match a consensus digest for any in-flight
-    /// checkpoint after a restart, including when this node was ahead of
-    /// consensus. Consequently a pending set that had reached
-    /// `MAX_PENDING_CHECKPOINTS` is restored at its previous size: a stall
-    /// caused by consensus falling behind persists across restarts by design,
-    /// because the cap is backpressure and only a consensus confirmation (which
-    /// frees slots) unstalls it.
-    ///
-    /// The returned checkpoint is the resume point: the newest pending
-    /// checkpoint (restoring the pre-crash in-flight state and skipping
-    /// re-derivation of lower blocks), or the confirmed latest when no pending
-    /// checkpoint remains. If loading pending checkpoints fails, this falls back
-    /// to the confirmed latest checkpoint.
+    /// Initializes pending counts from storage and returns the newest known checkpoint.
     pub(super) async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
-        let latest = self.storage.load_latest(chain).await?;
-        let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
-        let pending = match self.storage.load_pending(chain).await {
-            Ok(pending) => pending,
+        let count = match self.storage.pending_count(chain).await {
+            Ok(count) => count,
             Err(err) => {
                 tracing::warn!(
                     ?chain,
                     %err,
-                    "failed to load pending checkpoints; falling back to confirmed checkpoint"
+                    "failed to load pending count; falling back to confirmed checkpoint"
                 );
-                return Ok(latest);
+                0
             }
         };
-
-        let pending = pending
-            .into_iter()
-            .filter(|checkpoint| {
-                latest_height.is_none_or(|height| checkpoint.block_height > height)
-            })
-            .collect::<Vec<_>>();
-
-        let len = {
-            let mut local = self.pending(chain).write().await;
-            local.clear();
-            local.extend(
-                pending
-                    .iter()
-                    .cloned()
-                    .map(|checkpoint| (checkpoint.block_height, checkpoint)),
-            );
-            local.len()
-        };
-        self.observe(chain, len);
-        Ok(pending.into_iter().next_back().or(latest))
+        self.pending_counts[chain].store(count, Ordering::Release);
+        self.observe(chain, count);
+        self.storage.latest(chain).await
     }
 
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(super) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         self.storage.reset_to_latest(checkpoint).await?;
-        self.pending(checkpoint.chain).write().await.clear();
+        self.pending_counts[checkpoint.chain].store(0, Ordering::Release);
         self.observe(checkpoint.chain, 0);
         Ok(())
     }
 
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
     pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
-        if let Some(checkpoint) = self
-            .pending(chain)
-            .read()
-            .await
-            .values()
-            .next_back()
-            .cloned()
-        {
-            return Some(checkpoint);
-        }
-        self.storage.load_latest(chain).await.ok().flatten()
+        self.storage.latest(chain).await.ok().flatten()
     }
 
     /// Reports whether `chain` can create another pending checkpoint.
-    pub(super) async fn has_slot(&self, chain: Chain) -> bool {
-        self.pending(chain).read().await.len() < MAX_PENDING_CHECKPOINTS
+    pub(super) fn has_slot(&self, chain: Chain) -> bool {
+        self.count(chain) < MAX_PENDING_CHECKPOINTS
     }
 
     /// Returns the number of locally pending checkpoints for `chain`.
-    pub(super) async fn count(&self, chain: Chain) -> usize {
-        self.pending(chain).read().await.len()
+    pub(super) fn count(&self, chain: Chain) -> usize {
+        self.pending_counts[chain].load(Ordering::Acquire)
     }
 
-    /// Finds a checkpoint by digest, searching the in-memory pending mirror, the
-    /// durable latest checkpoint, and finally durable pending checkpoints.
+    /// Finds a checkpoint by digest, searching durable latest and pending storage.
     pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
-        self.find_kind(chain, digest)
-            .await
-            .ok()
-            .flatten()
-            .map(Checkpoint::from)
-    }
-
-    /// Finds a checkpoint by digest and identifies whether it is pending or confirmed.
-    async fn find_kind(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> Result<Option<CheckpointKind>, CheckpointError> {
-        if let Some(checkpoint) = self
-            .pending(chain)
-            .read()
-            .await
-            .values()
-            .find(|checkpoint| checkpoint.digest() == digest)
-            .cloned()
-        {
-            return Ok(Some(CheckpointKind::Pending(checkpoint)));
-        }
-        let latest = match self.storage.load_latest(chain).await {
-            Ok(latest) => latest,
-            Err(source) => return Err(CheckpointError::Storage { chain, source }),
-        };
-        if let Some(checkpoint) = &latest {
-            if checkpoint.digest() == digest {
-                return Ok(Some(CheckpointKind::Latest(checkpoint.clone())));
-            }
-        }
-
-        // The in-memory mirror is only hydrated by `load_local` once the mesh is
-        // active, but the web server serves `/checkpoint` independently. Look up
-        // durable pending storage directly so a body persisted before restart can
-        // still be handed out to peers, applying the same "above confirmed height"
-        // filter `load_local` uses so stale entries are ignored.
-        let latest_height = latest.as_ref().map(|checkpoint| checkpoint.block_height);
-        match self.storage.find_pending(chain, digest).await {
-            Ok(Some(checkpoint))
-                if latest_height.is_none_or(|height| checkpoint.block_height > height) =>
-            {
-                Ok(Some(CheckpointKind::Pending(checkpoint)))
-            }
-            Ok(_) => Ok(None),
-            Err(source) => Err(CheckpointError::Storage { chain, source }),
-        }
+        self.storage.find(chain, digest).await.ok().flatten()
     }
 
     #[cfg(test)]
@@ -439,10 +294,7 @@ mod tests {
                 || matches!(second, Ok(()))
                     && matches!(first, Err(CheckpointError::PendingCap { .. }))
         );
-        assert_eq!(
-            checkpoints.count(Chain::Ethereum).await,
-            MAX_PENDING_CHECKPOINTS
-        );
+        assert_eq!(checkpoints.count(Chain::Ethereum), MAX_PENDING_CHECKPOINTS);
     }
 
     #[tokio::test]
@@ -471,7 +323,7 @@ mod tests {
         checkpoints.persist_pending(&checkpoint).await.unwrap();
         checkpoints.persist_pending(&checkpoint).await.unwrap();
 
-        assert_eq!(checkpoints.count(checkpoint.chain).await, 1);
+        assert_eq!(checkpoints.count(checkpoint.chain), 1);
     }
 
     #[tokio::test]
@@ -509,7 +361,7 @@ mod tests {
             checkpoints.confirm(second.chain, second.digest()).await,
             Ok(true)
         ));
-        assert_eq!(checkpoints.count(first.chain).await, 1);
+        assert_eq!(checkpoints.count(first.chain), 1);
         assert_eq!(checkpoints.latest(first.chain).await, Some(third));
     }
 
@@ -523,7 +375,7 @@ mod tests {
             checkpoints.confirm(checkpoint.chain, [1; 32]).await,
             Ok(false)
         ));
-        assert_eq!(checkpoints.count(checkpoint.chain).await, 1);
+        assert_eq!(checkpoints.count(checkpoint.chain), 1);
         assert_eq!(checkpoints.latest(checkpoint.chain).await, Some(checkpoint));
     }
 
@@ -541,7 +393,7 @@ mod tests {
             restarted.load_local(first.chain).await.unwrap(),
             Some(second.clone())
         );
-        assert_eq!(restarted.count(first.chain).await, 2);
+        assert_eq!(restarted.count(first.chain), 2);
         assert_eq!(
             restarted.find(first.chain, first.digest()).await,
             Some(first)
@@ -563,12 +415,12 @@ mod tests {
             checkpoints.load_local(confirmed.chain).await.unwrap(),
             Some(fresh_pending.clone())
         );
-        assert_eq!(checkpoints.count(confirmed.chain).await, 1);
+        assert_eq!(checkpoints.count(confirmed.chain), 2);
         assert_eq!(
             checkpoints
                 .find(stale_pending.chain, stale_pending.digest())
                 .await,
-            None
+            Some(stale_pending)
         );
     }
 
@@ -581,7 +433,7 @@ mod tests {
 
         checkpoints.regress(&consensus).await.unwrap();
 
-        assert_eq!(checkpoints.count(consensus.chain).await, 0);
+        assert_eq!(checkpoints.count(consensus.chain), 0);
         assert_eq!(
             checkpoints
                 .storage()
@@ -631,20 +483,55 @@ mod tests {
         let checkpoints = Checkpoints::new(CheckpointStorage::failing());
         let checkpoint = checkpoint(1);
 
-        // Seed the in-memory mirror directly so the lookup succeeds and the
-        // durable promotion is the failing step.
-        checkpoints
-            .pending(checkpoint.chain)
-            .write()
-            .await
-            .insert(checkpoint.block_height, checkpoint.clone());
-
         assert!(matches!(
             checkpoints
                 .confirm(checkpoint.chain, checkpoint.digest())
                 .await,
             Err(CheckpointError::Storage { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn confirm_treats_already_promoted_checkpoint_as_confirmed() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoints = Checkpoints::new(storage.clone());
+        let checkpoint = checkpoint(1);
+
+        checkpoints.persist_pending(&checkpoint).await.unwrap();
+        storage
+            .promote_pending(checkpoint.chain, checkpoint.digest())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            checkpoints
+                .confirm(checkpoint.chain, checkpoint.digest())
+                .await,
+            Ok(true)
+        ));
+        assert_eq!(checkpoints.count(checkpoint.chain), 0);
+    }
+
+    #[tokio::test]
+    async fn find_finds_confirmed_and_pending_checkpoints() {
+        let storage = CheckpointStorage::in_memory();
+        let checkpoints = Checkpoints::new(storage.clone());
+        let mut confirmed = checkpoint(1);
+        confirmed.cumulative_digest = [1; 32];
+        let mut pending = checkpoint(2);
+        pending.cumulative_digest = [2; 32];
+
+        storage.persist(&confirmed).await.unwrap();
+        checkpoints.persist_pending(&pending).await.unwrap();
+
+        assert_eq!(
+            checkpoints.find(confirmed.chain, confirmed.digest()).await,
+            Some(confirmed)
+        );
+        assert_eq!(
+            checkpoints.find(pending.chain, pending.digest()).await,
+            Some(pending)
+        );
     }
 
     #[tokio::test]

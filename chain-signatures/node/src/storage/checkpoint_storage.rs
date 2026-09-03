@@ -10,6 +10,13 @@ use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailKind {
+    All,
+    Promotion,
+}
+
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
@@ -17,9 +24,9 @@ pub enum CheckpointStorage {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
     },
-    /// A storage that fails every operation, used to exercise error paths in tests.
+    /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
-    Failing,
+    Failing(FailKind),
 }
 
 impl Default for CheckpointStorage {
@@ -38,7 +45,12 @@ impl CheckpointStorage {
 
     #[cfg(test)]
     pub fn failing() -> Self {
-        Self::Failing
+        Self::Failing(FailKind::All)
+    }
+
+    #[cfg(test)]
+    pub fn failing_promotion() -> Self {
+        Self::Failing(FailKind::Promotion)
     }
 
     fn checkpoint_key(&self, chain: Chain) -> String {
@@ -51,7 +63,7 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:latest:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:latest:{chain}"),
+            CheckpointStorage::Failing(_) => format!("checkpoint:latest:{chain}"),
         }
     }
 
@@ -65,7 +77,7 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:pending:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:pending:{chain}"),
+            CheckpointStorage::Failing(_) => format!("checkpoint:pending:{chain}"),
         }
     }
 
@@ -79,7 +91,7 @@ impl CheckpointStorage {
             }
             CheckpointStorage::InMemory { .. } => format!("checkpoint:pending_digest:{chain}"),
             #[cfg(test)]
-            CheckpointStorage::Failing => format!("checkpoint:pending_digest:{chain}"),
+            CheckpointStorage::Failing(_) => format!("checkpoint:pending_digest:{chain}"),
         }
     }
 
@@ -93,7 +105,6 @@ impl CheckpointStorage {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = encode_checkpoint(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-
                 conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), value)
                     .await
                     .context("failed to persist checkpoint to redis")?;
@@ -105,13 +116,16 @@ impl CheckpointStorage {
                     .insert(checkpoint.chain, checkpoint.clone());
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(_) => {
+                anyhow::bail!("failing storage")
+            }
         }
         Ok(())
     }
 
     /// Persist an unconfirmed checkpoint before its digest is submitted for consensus.
-    pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+    /// Returns the new pending count.
+    pub async fn persist_pending(&self, checkpoint: &Checkpoint) -> anyhow::Result<usize> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -121,13 +135,13 @@ impl CheckpointStorage {
                 const PERSIST: &str = r#"
                     local existing = redis.call('HGET', KEYS[1], ARGV[1])
                     if existing and existing ~= ARGV[2] then
-                        return 0
+                        return -1
                     end
                     redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
                     redis.call('HSET', KEYS[2], ARGV[3], ARGV[1])
-                    return 1
+                    return redis.call('HLEN', KEYS[1])
                 "#;
-                let persisted: i32 = redis::Script::new(PERSIST)
+                let count: i32 = redis::Script::new(PERSIST)
                     .key(self.pending_checkpoint_key(checkpoint.chain))
                     .key(self.pending_digest_key(checkpoint.chain))
                     .arg(checkpoint.block_height)
@@ -136,12 +150,13 @@ impl CheckpointStorage {
                     .invoke_async(&mut conn)
                     .await
                     .context("failed to persist pending checkpoint to redis")?;
-                if persisted == 0 {
+                if count < 0 {
                     anyhow::bail!(
                         "conflicting pending checkpoint at height {}",
                         checkpoint.block_height
                     );
                 }
+                Ok(count as usize)
             }
             CheckpointStorage::InMemory { pending, .. } => {
                 let mut pending = pending.write().await;
@@ -154,11 +169,13 @@ impl CheckpointStorage {
                     );
                 }
                 checkpoints.insert(checkpoint.block_height, checkpoint.clone());
+                Ok(checkpoints.len())
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(_) => {
+                anyhow::bail!("failing storage")
+            }
         }
-        Ok(())
     }
 
     /// Load unconfirmed checkpoints ordered by block height.
@@ -187,7 +204,9 @@ impl CheckpointStorage {
                 .map(|checkpoints| checkpoints.values().cloned().collect())
                 .unwrap_or_default()),
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(_) => {
+                anyhow::bail!("failing storage")
+            }
         }
     }
 
@@ -236,68 +255,112 @@ impl CheckpointStorage {
                 }))
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
         }
     }
 
-    /// Promote the durable pending checkpoint identified by its height.
-    /// Returns false when the checkpoint is no longer pending.
-    pub async fn promote_pending(&self, chain: Chain, height: u64) -> anyhow::Result<bool> {
+    /// Promote the durable pending checkpoint identified by its digest, or confirm
+    /// it if already the latest checkpoint.
+    /// Returns `Some(remaining_pending_count)` if confirmed, or `None` if not found.
+    pub async fn promote_pending(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> anyhow::Result<Option<usize>> {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 const PROMOTE: &str = r#"
-                    local pending = redis.call('HGET', KEYS[2], ARGV[1])
-                    if not pending then
-                        return 0
-                    end
-                    redis.call('SET', KEYS[1], pending)
-                    local height = tonumber(ARGV[1])
-                    local entries = redis.call('HGETALL', KEYS[2])
-                    for i = 1, #entries, 2 do
-                        local field_height = tonumber(entries[i])
-                        if field_height <= height then
-                            redis.call('HDEL', KEYS[2], entries[i])
+                    local hex_digest = ARGV[1]
+                    local height = redis.call('HGET', KEYS[2], hex_digest)
+                    if height then
+                        local pending = redis.call('HGET', KEYS[1], height)
+                        if pending then
+                            redis.call('SET', KEYS[3], pending)
+
+                            local num_height = tonumber(height)
+                            local entries = redis.call('HGETALL', KEYS[1])
+                            for i = 1, #entries, 2 do
+                                local field_height = tonumber(entries[i])
+                                if field_height <= num_height then
+                                    redis.call('HDEL', KEYS[1], entries[i])
+                                end
+                            end
+                            local index = redis.call('HGETALL', KEYS[2])
+                            for i = 1, #index, 2 do
+                                local field_height = tonumber(index[i+1])
+                                if field_height <= num_height then
+                                    redis.call('HDEL', KEYS[2], index[i])
+                                end
+                            end
+
+                            local remaining = redis.call('HLEN', KEYS[1])
+                            return { remaining, false }
                         end
                     end
-                    local index = redis.call('HGETALL', KEYS[3])
-                    for i = 1, #index, 2 do
-                        local field_height = tonumber(index[i+1])
-                        if field_height <= height then
-                            redis.call('HDEL', KEYS[3], index[i])
-                        end
-                    end
-                    return 1
+
+                    local remaining = redis.call('HLEN', KEYS[1])
+                    local latest = redis.call('GET', KEYS[3])
+                    return { remaining, latest }
                 "#;
-                let promoted: i32 = redis::Script::new(PROMOTE)
-                    .key(self.checkpoint_key(chain))
-                    .key(self.pending_checkpoint_key(chain))
-                    .key(self.pending_digest_key(chain))
-                    .arg(height)
-                    .invoke_async(&mut conn)
-                    .await
-                    .context("failed to promote pending checkpoint")?;
-                Ok(promoted == 1)
+                let hex_digest = hex::encode(digest);
+                let (remaining, maybe_latest): (usize, Option<Vec<u8>>) =
+                    redis::Script::new(PROMOTE)
+                        .key(self.pending_checkpoint_key(chain))
+                        .key(self.pending_digest_key(chain))
+                        .key(self.checkpoint_key(chain))
+                        .arg(hex_digest)
+                        .invoke_async(&mut conn)
+                        .await
+                        .context("failed to promote pending checkpoint")?;
+                if let Some(bytes) = maybe_latest {
+                    let latest: Checkpoint = decode_checkpoint(&bytes)
+                        .context("failed to deserialize latest checkpoint")?;
+                    if latest.digest() == digest {
+                        return Ok(Some(remaining));
+                    }
+                    return Ok(None);
+                }
+                Ok(Some(remaining))
             }
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
-                let promoted = {
-                    let mut pending = pending.write().await;
-                    let Some(checkpoints) = pending.get_mut(&chain) else {
-                        return Ok(false);
-                    };
-                    let Some(promoted) = checkpoints.remove(&height) else {
-                        return Ok(false);
-                    };
-                    checkpoints.retain(|height, _| *height > promoted.block_height);
-                    promoted
-                };
-                latest.write().await.insert(chain, promoted);
-                Ok(true)
+                let mut pending = pending.write().await;
+                let maybe_height = pending.get(&chain).and_then(|checkpoints| {
+                    checkpoints
+                        .iter()
+                        .find(|(_, cp)| cp.digest() == digest)
+                        .map(|(h, _)| *h)
+                });
+
+                if let Some(height) = maybe_height {
+                    let checkpoints = pending.get_mut(&chain).unwrap();
+                    let promoted = checkpoints.remove(&height).unwrap();
+                    checkpoints.retain(|h, _| *h > height);
+                    let remaining = checkpoints.len();
+                    drop(pending);
+
+                    latest.write().await.insert(chain, promoted);
+                    return Ok(Some(remaining));
+                }
+
+                let remaining = pending.get(&chain).map(|p| p.len()).unwrap_or(0);
+                drop(pending);
+
+                let confirmed = latest.read().await.get(&chain).cloned();
+                if let Some(cp) = confirmed {
+                    if cp.digest() == digest {
+                        return Ok(Some(remaining));
+                    }
+                }
+
+                Ok(None)
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(_) => anyhow::bail!("failing storage"),
         }
     }
 
@@ -332,9 +395,156 @@ impl CheckpointStorage {
                     .insert(checkpoint.chain, checkpoint.clone());
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(_) => anyhow::bail!("failing storage"),
         }
         Ok(())
+    }
+
+    /// Returns the number of pending checkpoints for `chain`.
+    pub async fn pending_count(&self, chain: Chain) -> anyhow::Result<usize> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let count: usize = conn
+                    .hlen(self.pending_checkpoint_key(chain))
+                    .await
+                    .context("failed to get pending checkpoint count from redis")?;
+                Ok(count)
+            }
+            CheckpointStorage::InMemory { pending, .. } => Ok(pending
+                .read()
+                .await
+                .get(&chain)
+                .map(|p| p.len())
+                .unwrap_or(0)),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::Promotion) => Ok(0),
+        }
+    }
+
+    /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
+    pub async fn latest(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                const LATEST: &str = r#"
+                    local entries = redis.call('HGETALL', KEYS[1])
+                    local max_height = -1
+                    local newest_body = nil
+                    for i = 1, #entries, 2 do
+                        local height = tonumber(entries[i])
+                        if height and height > max_height then
+                            max_height = height
+                            newest_body = entries[i+1]
+                        end
+                    end
+                    if newest_body then
+                        return newest_body
+                    end
+                    return redis.call('GET', KEYS[2])
+                "#;
+                let body: Option<Vec<u8>> = redis::Script::new(LATEST)
+                    .key(self.pending_checkpoint_key(chain))
+                    .key(self.checkpoint_key(chain))
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to load latest or newest pending checkpoint from redis")?;
+                match body {
+                    Some(body) => {
+                        let checkpoint =
+                            decode_checkpoint(&body).context("failed to deserialize checkpoint")?;
+                        Ok(Some(checkpoint))
+                    }
+                    None => Ok(None),
+                }
+            }
+            CheckpointStorage::InMemory {
+                latest, pending, ..
+            } => {
+                let newest_pending = pending
+                    .read()
+                    .await
+                    .get(&chain)
+                    .and_then(|checkpoints| checkpoints.values().next_back().cloned());
+                let confirmed = latest.read().await.get(&chain).cloned();
+                match (newest_pending, confirmed) {
+                    (Some(pending), Some(confirmed)) => {
+                        if pending.block_height >= confirmed.block_height {
+                            Ok(Some(pending))
+                        } else {
+                            Ok(Some(confirmed))
+                        }
+                    }
+                    (pending, confirmed) => Ok(pending.or(confirmed)),
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
+        }
+    }
+
+    /// Finds a checkpoint by digest, searching durable latest and pending storage.
+    pub async fn find(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<Checkpoint>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                const FIND: &str = r#"
+                    local height = redis.call('HGET', KEYS[2], ARGV[1])
+                    if height then
+                        local pending = redis.call('HGET', KEYS[1], height)
+                        if pending then
+                            return { true, pending }
+                        end
+                    end
+                    local latest = redis.call('GET', KEYS[3])
+                    return { false, latest }
+                "#;
+                let (is_pending, maybe_body): (bool, Option<Vec<u8>>) = redis::Script::new(FIND)
+                    .key(self.pending_checkpoint_key(chain))
+                    .key(self.pending_digest_key(chain))
+                    .key(self.checkpoint_key(chain))
+                    .arg(hex::encode(digest))
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to find checkpoint by digest")?;
+                let Some(body) = maybe_body else {
+                    return Ok(None);
+                };
+                let checkpoint =
+                    decode_checkpoint(&body).context("failed to deserialize checkpoint")?;
+                if is_pending || checkpoint.digest() == digest {
+                    Ok(Some(checkpoint))
+                } else {
+                    Ok(None)
+                }
+            }
+            CheckpointStorage::InMemory {
+                latest, pending, ..
+            } => {
+                if let Some(cp) = pending.read().await.get(&chain).and_then(|checkpoints| {
+                    checkpoints
+                        .values()
+                        .find(|cp| cp.digest() == digest)
+                        .cloned()
+                }) {
+                    return Ok(Some(cp));
+                }
+                if let Some(cp) = latest.read().await.get(&chain) {
+                    if cp.digest() == digest {
+                        return Ok(Some(cp.clone()));
+                    }
+                }
+                Ok(None)
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
+        }
     }
 
     pub async fn load_latest(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
@@ -358,7 +568,9 @@ impl CheckpointStorage {
                 Ok(latest.read().await.get(&chain).cloned())
             }
             #[cfg(test)]
-            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
+            #[cfg(test)]
+            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
         }
     }
 }
@@ -434,14 +646,25 @@ mod tests {
             vec![first.clone(), second.clone()]
         );
 
-        assert!(storage.promote_pending(chain, first.block_height).await?);
-        assert_eq!(storage.load_latest(chain).await?, Some(first));
-        assert_eq!(storage.load_pending(chain).await?, vec![second]);
+        assert_eq!(
+            storage.promote_pending(chain, first.digest()).await?,
+            Some(1)
+        );
+        assert_eq!(storage.load_latest(chain).await?, Some(first.clone()));
+        assert_eq!(storage.load_pending(chain).await?, vec![second.clone()]);
+        assert_eq!(storage.latest(chain).await?, Some(second));
+        assert_eq!(storage.find(chain, first.digest()).await?, Some(first));
 
         let replacement = checkpoint(5);
         storage.reset_to_latest(&replacement).await?;
-        assert_eq!(storage.load_latest(chain).await?, Some(replacement));
+        assert_eq!(storage.load_latest(chain).await?, Some(replacement.clone()));
+        assert_eq!(storage.latest(chain).await?, Some(replacement.clone()));
+        assert_eq!(
+            storage.find(chain, replacement.digest()).await?,
+            Some(replacement)
+        );
         assert!(storage.load_pending(chain).await?.is_empty());
+        assert_eq!(storage.pending_count(chain).await?, 0);
         Ok(())
     }
 
@@ -460,11 +683,10 @@ mod tests {
         storage.persist_pending(&checkpoint).await?;
         storage.persist_pending(&checkpoint).await?;
         assert!(storage.persist_pending(&conflicting).await.is_err());
-        assert!(
-            !storage
-                .promote_pending(Chain::Solana, checkpoint.block_height + 1)
-                .await?
-        );
+        assert!(storage
+            .promote_pending(Chain::Solana, [99; 32])
+            .await?
+            .is_none());
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
         Ok(())
     }

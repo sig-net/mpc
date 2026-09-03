@@ -615,12 +615,12 @@ impl Backlog {
 
     /// Check if the chain backlog has an available checkpoint slot.
     pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
-        self.checkpoints.has_slot(chain).await
+        self.checkpoints.has_slot(chain)
     }
 
     /// Number of pending checkpoints for a chain.
     pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
-        self.checkpoints.count(chain).await
+        self.checkpoints.count(chain)
     }
 
     #[cfg(test)]
