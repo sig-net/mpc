@@ -588,7 +588,6 @@ impl Backlog {
     }
 
     /// Create a checkpoint of the current backlog state for a specific chain.
-    ///
     pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
         let checkpoint = {
             let requests = self.pending(&chain).read().await;
