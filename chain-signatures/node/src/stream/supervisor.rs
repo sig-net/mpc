@@ -50,7 +50,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
 
-    let mut reactor = StreamReactor::new(ctx);
+    let mut reactor = StreamReactor::new(chain, ctx);
     let root_pk = reactor.ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
 
@@ -64,7 +64,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         reactor.ctx.caught_up = false;
-        if let Err(err) = reactor.recover_backlog(chain, load_local).await {
+        if let Err(err) = reactor.recover_backlog(load_local).await {
             tracing::error!(
                 %chain,
                 %err,
@@ -115,10 +115,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(?err, %chain, "failed to process chain event");
                     }
                 }
-                result = reactor.next_regression(chain) => {
+                result = reactor.next_regression() => {
                     match result {
                         RegressionOutcome::Recovery => {
-                            reactor.abort_chain(chain).await;
+                            reactor.abort_inflight().await;
                             break Exit::Restart;
                         }
                         RegressionOutcome::Aligned => {}

@@ -181,16 +181,14 @@ mod tests {
 
         async fn run(&mut self) -> Option<u64> {
             let mut reactor = StreamReactor::for_alignment(
+                self.chain,
                 self.backlog.clone(),
                 self.checkpoints_rx.clone(),
                 self.mesh_rx.clone(),
                 self.node_client.clone(),
                 &self.my_account_id,
             );
-            reactor
-                .align_backlog_with_consensus(self.chain)
-                .await
-                .unwrap()
+            reactor.align_backlog_with_consensus().await.unwrap()
         }
     }
 
@@ -654,13 +652,14 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             let mut reactor = StreamReactor::for_alignment(
+                chain,
                 backlog_clone,
                 checkpoints_rx_clone,
                 mesh_rx_clone,
                 node_client_clone,
                 &my_account_id_clone,
             );
-            reactor.align_backlog_with_consensus(chain).await
+            reactor.align_backlog_with_consensus().await
         });
 
         // Let it run and start querying, then update digest to zero to abort

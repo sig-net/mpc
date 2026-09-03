@@ -166,8 +166,8 @@ async fn test_consensus_alignment_peer_fetch() {
     let node_client = NodeClient::new(&NodeClientOptions::default());
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
-    // Call align_backlog_with_consensus
     let mut reactor = StreamReactor::for_alignment(
+        chain,
         fresh_backlog.clone(),
         checkpoints_rx,
         mesh_rx,
@@ -176,7 +176,7 @@ async fn test_consensus_alignment_peer_fetch() {
     );
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        reactor.align_backlog_with_consensus(chain),
+        reactor.align_backlog_with_consensus(),
     )
     .await;
 
@@ -254,13 +254,14 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     // Spawn alignment in background; keep cp_tx here to send the abort signal.
     let handle = tokio::spawn(async move {
         let mut reactor = StreamReactor::for_alignment(
+            chain,
             fresh_backlog2,
             checkpoints_rx,
             mesh_rx,
             node_client,
             &my_account_id,
         );
-        reactor.align_backlog_with_consensus(chain).await
+        reactor.align_backlog_with_consensus().await
     });
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
@@ -362,6 +363,7 @@ async fn test_reset_converges_divergent_nodes() {
         let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 
         let mut reactor = StreamReactor::for_alignment(
+            chain,
             node.backlog.clone(),
             checkpoints_rx,
             mesh_rx,
@@ -371,7 +373,7 @@ async fn test_reset_converges_divergent_nodes() {
 
         let applied = tokio::time::timeout(
             Duration::from_secs(5),
-            reactor.align_backlog_with_consensus(chain),
+            reactor.align_backlog_with_consensus(),
         )
         .await
         .expect("a reset must not wait on peers")
