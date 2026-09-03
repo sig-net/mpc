@@ -62,7 +62,7 @@ fn catchup_retry_strategy() -> RetryConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
     Block(UiConfirmedBlock),
     Missing,
