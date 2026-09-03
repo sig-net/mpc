@@ -604,7 +604,7 @@ impl Backlog {
         let Some(checkpoint) = self.checkpoints.latest(chain).await else {
             return Ok(None);
         };
-        self.recover_by_checkpoint(checkpoint.clone()).await;
+        self.recover_by_checkpoint(&checkpoint).await;
         Ok(Some(checkpoint))
     }
 
@@ -612,7 +612,7 @@ impl Backlog {
     /// resets durable storage to consensus, zeroes pending counts, and restores in-memory state.
     pub async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         self.checkpoints.regress(&checkpoint).await?;
-        self.recover_by_checkpoint(checkpoint).await;
+        self.recover_by_checkpoint(&checkpoint).await;
         Ok(())
     }
 
@@ -623,8 +623,8 @@ impl Backlog {
 
     /// Recover backlog state from a checkpoint into memory.
     /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
-    pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) {
-        let restored = PendingRequests::from_checkpoint(&checkpoint);
+    pub async fn recover_by_checkpoint(&self, checkpoint: &Checkpoint) {
+        let restored = PendingRequests::from_checkpoint(checkpoint);
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
@@ -1734,7 +1734,7 @@ mod tests {
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let recovered = Backlog::new();
-        recovered.recover_by_checkpoint(checkpoint).await;
+        recovered.recover_by_checkpoint(&checkpoint).await;
 
         let entry = recovered
             .get(Chain::Solana, &sign_id)
@@ -1772,7 +1772,7 @@ mod tests {
             .persist(&checkpoint)
             .await
             .unwrap();
-        recovered.recover_by_checkpoint(checkpoint.clone()).await;
+        recovered.recover_by_checkpoint(&checkpoint).await;
 
         assert_eq!(
             recovered.checkpoints().latest(Chain::Solana).await,
@@ -1824,7 +1824,7 @@ mod tests {
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let recovered = Backlog::new();
-        recovered.recover_by_checkpoint(checkpoint).await;
+        recovered.recover_by_checkpoint(&checkpoint).await;
 
         let recovered_entry = recovered
             .get(Chain::Solana, &sign_id)
@@ -1858,7 +1858,7 @@ mod tests {
             let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
             let recovered = Backlog::new();
-            recovered.recover_by_checkpoint(checkpoint).await;
+            recovered.recover_by_checkpoint(&checkpoint).await;
 
             let completion_request = IndexedSignRequest::respond_bidirectional(
                 sign_id,
@@ -2531,7 +2531,7 @@ mod tests {
         let recovered = Backlog::new();
         assert_eq!(recovered.len(), 0);
 
-        recovered.recover_by_checkpoint(checkpoint).await;
+        recovered.recover_by_checkpoint(&checkpoint).await;
 
         assert_eq!(recovered.len(), 3);
     }
@@ -2570,7 +2570,7 @@ mod tests {
         assert_eq!(dirty_backlog.len(), 1);
 
         // Recover from checkpoint (should overwrite the dirty state)
-        dirty_backlog.recover_by_checkpoint(checkpoint).await;
+        dirty_backlog.recover_by_checkpoint(&checkpoint).await;
 
         assert_eq!(
             dirty_backlog.len(),
@@ -2607,7 +2607,7 @@ mod tests {
         let fresh_cp = fresh.checkpoint(chain).await.unwrap();
         assert_eq!(fresh_cp.block_height, interval / 2);
 
-        backlog.recover_by_checkpoint(fresh_cp).await;
+        backlog.recover_by_checkpoint(&fresh_cp).await;
         assert_eq!(
             backlog.checkpoints().count(chain),
             2,
