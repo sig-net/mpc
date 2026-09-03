@@ -2,7 +2,7 @@ pub mod ops;
 pub mod reactor;
 pub mod supervisor;
 
-pub use reactor::StreamReactor;
+pub use reactor::{RegressionOutcome, StreamReactor};
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
