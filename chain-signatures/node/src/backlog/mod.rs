@@ -644,9 +644,13 @@ impl Backlog {
             *pending = restored;
 
             // Update total pending count based on the difference between cleared and restored requests
-            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending
-                .fetch_add(restored_len, Ordering::Relaxed);
+            if restored_len > cleared {
+                self.total_pending
+                    .fetch_add(restored_len - cleared, Ordering::Relaxed);
+            } else if cleared > restored_len {
+                self.total_pending
+                    .fetch_sub(cleared - restored_len, Ordering::Relaxed);
+            }
 
             tracing::info!(
                 ?chain,
