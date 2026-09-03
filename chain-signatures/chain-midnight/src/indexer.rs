@@ -563,7 +563,7 @@ mod tests {
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
-        array_of, cell_from_record, key_of, map_of, notification_payload, response_payload,
+        array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
         sample_record,
     };
     use midnight_onchain_state::state::StateValue;
@@ -588,12 +588,6 @@ mod tests {
         "1cd10eb1f4fa5c665084d24a7982b09aa321886dce77d85b5f6feee0687a414b";
     const CAPTURE_NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
     const CAPTURE_CALLER_STATE: &[u8] = include_bytes!("../fixtures/caller-post-state-156.mn");
-
-    fn hex_32(value: &str) -> [u8; 32] {
-        let mut decoded = [0u8; 32];
-        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
-        decoded
-    }
 
     fn test_config() -> MidnightConfig {
         MidnightConfig {

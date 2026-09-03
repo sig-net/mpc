@@ -517,8 +517,9 @@ mod tests {
     use crate::records::SignBidirectionalEventNotification;
     use crate::test_utils::{
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
-        key_of, map_of, minimal_record, sample_record, sample_record_with_partial_access_list,
-        sample_record_with_unused_access_list, widths_from_record,
+        hex_32, key_of, map_of, minimal_record, sample_record,
+        sample_record_with_partial_access_list, sample_record_with_unused_access_list,
+        widths_from_record,
     };
     use midnight_base_crypto::fab::Alignment;
 
@@ -531,12 +532,6 @@ mod tests {
     const RESPOND_TX_161: &[u8] = include_bytes!("../fixtures/respond-tx-161.mn");
     const RESPOND_BIDIRECTIONAL_TX_181: &[u8] =
         include_bytes!("../fixtures/respond-bidirectional-tx-181.mn");
-
-    fn hex_32(value: &str) -> [u8; 32] {
-        let mut decoded = [0u8; 32];
-        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
-        decoded
-    }
 
     fn captured_emission(bytes: &[u8], expected_kind: EmissionKind) -> Emission {
         let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
