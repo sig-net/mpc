@@ -7,7 +7,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_node::stream::StreamContext;
+use mpc_node::stream::StreamReactor;
 use mpc_primitives::{
     Chain, ChainConfig as _, CheckpointDigest, IndexedSignRequest, SignArgs, SignId,
 };
@@ -167,7 +167,7 @@ async fn test_consensus_alignment_peer_fetch() {
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Call align_backlog_with_consensus
-    let mut ctx = StreamContext::for_alignment(
+    let mut reactor = StreamReactor::for_alignment(
         fresh_backlog.clone(),
         checkpoints_rx,
         mesh_rx,
@@ -176,7 +176,7 @@ async fn test_consensus_alignment_peer_fetch() {
     );
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        ctx.align_backlog_with_consensus(chain),
+        reactor.align_backlog_with_consensus(chain),
     )
     .await;
 
@@ -253,14 +253,14 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Spawn alignment in background; keep cp_tx here to send the abort signal.
     let handle = tokio::spawn(async move {
-        let mut ctx = StreamContext::for_alignment(
+        let mut reactor = StreamReactor::for_alignment(
             fresh_backlog2,
             checkpoints_rx,
             mesh_rx,
             node_client,
             &my_account_id,
         );
-        ctx.align_backlog_with_consensus(chain).await
+        reactor.align_backlog_with_consensus(chain).await
     });
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
@@ -361,7 +361,7 @@ async fn test_reset_converges_divergent_nodes() {
         let (_cp_tx, checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
         let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 
-        let mut ctx = StreamContext::for_alignment(
+        let mut reactor = StreamReactor::for_alignment(
             node.backlog.clone(),
             checkpoints_rx,
             mesh_rx,
@@ -371,7 +371,7 @@ async fn test_reset_converges_divergent_nodes() {
 
         let applied = tokio::time::timeout(
             Duration::from_secs(5),
-            ctx.align_backlog_with_consensus(chain),
+            reactor.align_backlog_with_consensus(chain),
         )
         .await
         .expect("a reset must not wait on peers")

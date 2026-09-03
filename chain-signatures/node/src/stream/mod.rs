@@ -1,6 +1,8 @@
 pub mod ops;
-pub(crate) mod recovery;
+pub mod reactor;
 pub mod supervisor;
+
+pub use reactor::StreamReactor;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;

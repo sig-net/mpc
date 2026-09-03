@@ -1,7 +1,7 @@
 // Supervised indexer loop: node-side recovery, then spawn the chain's
 // `run()` and dispatch its events. Regression or a watchdog stall cancels
 // `run()` and restarts it, re-running light recovery first.
-use super::{handle_chain_event, StreamContext};
+use super::{handle_chain_event, StreamContext, StreamReactor};
 
 use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
@@ -135,14 +135,15 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
 
 async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
-    mut ctx: StreamContext,
+    ctx: StreamContext,
     telemetry: T,
     watchdog_timeout: Duration,
 ) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
 
-    let root_pk = ctx.contract_watcher.wait_public_key().await;
+    let mut reactor = StreamReactor::new(ctx);
+    let root_pk = reactor.ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
 
     enum Exit {
@@ -154,8 +155,8 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
-        ctx.caught_up = false;
-        if let Err(err) = ctx.recover_backlog(chain, load_local).await {
+        reactor.ctx.caught_up = false;
+        if let Err(err) = reactor.recover_backlog(chain, load_local).await {
             tracing::error!(
                 %chain,
                 %err,
@@ -181,7 +182,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             tokio::select! {
                 // Gate dispatch on checkpoint capacity: when the cap is full the
                 // channel backs up and pauses the chain's `send().await`.
-                event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
+                event = events_rx.recv(), if reactor.ctx.backlog.checkpoints().has_slot(chain) => {
                     let Some(event) = event else {
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down,
@@ -201,17 +202,17 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         last_block_event = Instant::now();
                     }
                     if let Err(err) =
-                        handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
+                        handle_chain_event(event, &mut reactor.ctx, &telemetry, root_pk, chain).await
                     {
                         tracing::error!(?err, %chain, "failed to process chain event");
                     }
                 }
-                result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
+                result = wait_detected_regression(&mut reactor.ctx.checkpoints_rx, &reactor.ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
-                            ctx.rpc.abort_checkpoints(chain).await;
+                            reactor.ctx.rpc.abort_checkpoints(chain).await;
                             if let Err(err) =
-                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
+                                reactor.ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
                             {
                                 tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
                             }

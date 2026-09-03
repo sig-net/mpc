@@ -141,7 +141,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
-    use crate::stream::StreamContext;
+    use crate::stream::StreamReactor;
 
     use crate::backlog::BacklogEntry;
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
@@ -180,14 +180,17 @@ mod tests {
         }
 
         async fn run(&mut self) -> Option<u64> {
-            let mut ctx = StreamContext::for_alignment(
+            let mut reactor = StreamReactor::for_alignment(
                 self.backlog.clone(),
                 self.checkpoints_rx.clone(),
                 self.mesh_rx.clone(),
                 self.node_client.clone(),
                 &self.my_account_id,
             );
-            ctx.align_backlog_with_consensus(self.chain).await.unwrap()
+            reactor
+                .align_backlog_with_consensus(self.chain)
+                .await
+                .unwrap()
         }
     }
 
@@ -650,14 +653,14 @@ mod tests {
         let mesh_rx_clone = fixture.mesh_rx.clone();
 
         let handle = tokio::spawn(async move {
-            let mut ctx = StreamContext::for_alignment(
+            let mut reactor = StreamReactor::for_alignment(
                 backlog_clone,
                 checkpoints_rx_clone,
                 mesh_rx_clone,
                 node_client_clone,
                 &my_account_id_clone,
             );
-            ctx.align_backlog_with_consensus(chain).await
+            reactor.align_backlog_with_consensus(chain).await
         });
 
         // Let it run and start querying, then update digest to zero to abort
