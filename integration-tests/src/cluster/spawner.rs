@@ -522,7 +522,6 @@ impl IntoFuture for ClusterSpawner {
                 cfg: self.cfg,
                 rpc_client,
                 http_client: reqwest::Client::default(),
-                docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),
