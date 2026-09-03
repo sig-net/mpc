@@ -74,14 +74,12 @@ pub async fn align_backlog_with_consensus(
         .await?
     };
 
-    let height = fetched_checkpoint.block_height;
-
-    if let Err(err) = backlog.regress(fetched_checkpoint).await {
+    if let Err(err) = backlog.regress(&fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 
-    Some(height)
+    Some(fetched_checkpoint.block_height)
 }
 
 async fn fetch_peer_checkpoint(

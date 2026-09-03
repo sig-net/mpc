@@ -610,9 +610,9 @@ impl Backlog {
 
     /// Replace the local backlog with a consensus checkpoint after divergence:
     /// resets durable storage to consensus, zeroes pending counts, and restores in-memory state.
-    pub async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
-        self.checkpoints.regress(&checkpoint).await?;
-        self.recover_by_checkpoint(&checkpoint).await;
+    pub async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        self.checkpoints.regress(checkpoint).await?;
+        self.recover_by_checkpoint(checkpoint).await;
         Ok(())
     }
 
