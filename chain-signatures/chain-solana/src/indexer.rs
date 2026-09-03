@@ -567,6 +567,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
 
+    use crate::test_utils::{signatures_response, unique_signature_entry as signature_entry};
+
     use super::*;
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
@@ -599,28 +601,6 @@ mod tests {
             state_manager,
             telemetry: NoopChainTelemetry,
         }
-    }
-
-    /// Create a mock signature entry for testing, with a given slot.
-    fn signature_entry(slot: u64) -> serde_json::Value {
-        serde_json::json!({
-            "signature": Signature::new_unique().to_string(),
-            "slot": slot,
-            "err": null,
-            "memo": null,
-            "blockTime": null,
-            "confirmationStatus": "confirmed"
-        })
-    }
-
-    /// Create a mock JSON-RPC response for a list of signature entries.
-    fn signatures_response(entries: &[serde_json::Value]) -> String {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": entries
-        })
-        .to_string()
     }
 
     /// Create a mock JSON-RPC response for a block at a given slot.

@@ -556,6 +556,7 @@ impl ChainPublisher for SolanaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{signature_entry, signatures_response};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use solana_sdk::pubkey::Pubkey;
     use solana_sdk::signature::Signature;
@@ -590,28 +591,6 @@ mod tests {
                 "rewards": []
             }
         })
-    }
-
-    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
-    fn signature_entry(slot: u64, sig: &str) -> serde_json::Value {
-        serde_json::json!({
-            "signature": sig,
-            "slot": slot,
-            "err": null,
-            "memo": null,
-            "blockTime": null,
-            "confirmationStatus": "confirmed"
-        })
-    }
-
-    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
-    fn signatures_response(entries: &[serde_json::Value]) -> String {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": entries
-        })
-        .to_string()
     }
 
     #[test]
