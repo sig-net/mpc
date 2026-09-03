@@ -51,7 +51,7 @@ pub(crate) async fn recover_backlog(
         node_client,
         my_account_id,
     )
-    .await
+    .await?
     .is_some()
     {
         tracing::warn!(%chain, "backlog regressed via consensus checkpoint");

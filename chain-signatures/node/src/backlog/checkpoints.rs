@@ -173,7 +173,7 @@ impl Checkpoints {
             .map_err(|source| CheckpointError::Storage { chain, source })?;
 
         let Some(remaining_count) = outcome else {
-            tracing::warn!(
+            tracing::debug!(
                 ?chain,
                 ?digest,
                 "pending checkpoint not found for promotion"

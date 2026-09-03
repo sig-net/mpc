@@ -180,7 +180,9 @@ async fn test_consensus_alignment_peer_fetch() {
     )
     .await;
 
-    let result = result.expect("align_backlog_with_consensus should not hang");
+    let result = result
+        .expect("align_backlog_with_consensus should not hang")
+        .unwrap();
 
     assert!(
         result.is_some(),
@@ -270,7 +272,8 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     let result = tokio::time::timeout(Duration::from_secs(10), handle)
         .await
         .expect("align should complete within timeout")
-        .expect("spawned task should not panic");
+        .expect("spawned task should not panic")
+        .unwrap();
 
     assert!(
         result.is_none(),
@@ -371,7 +374,8 @@ async fn test_reset_converges_divergent_nodes() {
             ),
         )
         .await
-        .expect("a reset must not wait on peers");
+        .expect("a reset must not wait on peers")
+        .unwrap();
 
         assert_eq!(applied, Some(resume_after));
     }

@@ -1,10 +1,8 @@
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, Checkpoint, CheckpointError};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
-
-use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
@@ -21,8 +19,10 @@ pub async fn align_backlog_with_consensus(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
-) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+) -> Result<Option<u64>, CheckpointError> {
+    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
+        return Ok(None);
+    };
 
     match backlog
         .checkpoints()
@@ -31,7 +31,7 @@ pub async fn align_backlog_with_consensus(
     {
         Ok(found) => {
             if found {
-                return None;
+                return Ok(None);
             }
         }
         Err(err) => {
@@ -40,7 +40,7 @@ pub async fn align_backlog_with_consensus(
                 %err,
                 "transient storage error confirming consensus checkpoint; retrying later"
             );
-            return None;
+            return Err(err);
         }
     }
 
@@ -63,7 +63,7 @@ pub async fn align_backlog_with_consensus(
         );
         reset_checkpoint
     } else {
-        find_consensus_checkpoint(
+        let Some(checkpoint) = find_consensus_checkpoint(
             mesh_state,
             node_client,
             chain,
@@ -71,15 +71,15 @@ pub async fn align_backlog_with_consensus(
             checkpoints_rx,
             my_account_id,
         )
-        .await?
+        .await
+        else {
+            return Ok(None);
+        };
+        checkpoint
     };
 
-    if let Err(err) = backlog.regress(&fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
-        return None;
-    }
-
-    Some(fetched_checkpoint.block_height)
+    backlog.regress(&fetched_checkpoint).await?;
+    Ok(Some(fetched_checkpoint.block_height))
 }
 
 async fn fetch_peer_checkpoint(
@@ -259,6 +259,7 @@ mod tests {
                 &self.my_account_id,
             )
             .await
+            .unwrap()
         }
     }
 
@@ -736,7 +737,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         fixture.checkpoints_tx.send(None).unwrap();
 
-        let result = handle.await.unwrap();
+        let result = handle.await.unwrap().unwrap();
         assert!(result.is_none(), "aborted align should return None");
     }
 }
