@@ -1,17 +1,13 @@
-use crate::backlog::{Backlog, Checkpoint, CheckpointError};
-use crate::mesh::MeshState;
+use crate::backlog::{Checkpoint, CheckpointError};
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::stream::StreamContext;
-use crate::types::CheckpointWatcher;
 
 use cait_sith::protocol::Participant;
 use mpc_primitives::{reset_checkpoint_digest, Chain, CheckpointDigest, SignCommand};
-use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::time::Duration;
-use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegressionOutcome {
@@ -33,22 +29,6 @@ pub struct StreamReactor {
 impl StreamReactor {
     pub fn new(chain: Chain, ctx: StreamContext) -> Self {
         Self { chain, ctx }
-    }
-
-    /// Creates a StreamReactor from its component parts.
-    #[cfg(any(test, feature = "test-feature"))]
-    pub fn from_parts(
-        chain: Chain,
-        backlog: Backlog,
-        checkpoints_rx: CheckpointWatcher,
-        mesh_state: watch::Receiver<MeshState>,
-        node_client: NodeClient,
-        account_id: &AccountId,
-    ) -> Self {
-        Self::new(
-            chain,
-            StreamContext::from_parts(backlog, checkpoints_rx, mesh_state, node_client, account_id),
-        )
     }
 
     /// Checks if the stream backlog has capacity for another pending checkpoint.
@@ -85,17 +65,14 @@ impl StreamReactor {
 
     /// Hydrates the in-memory backlog from local persistent storage at startup.
     pub async fn hydrate(&mut self) -> Result<(), CheckpointError> {
-        match self.ctx.backlog.hydrate(self.chain).await? {
-            Some(checkpoint) => {
-                tracing::info!(
-                    chain = ?self.chain,
-                    height = checkpoint.block_height,
-                    "hydrated local checkpoint"
-                );
-            }
-            None => {
-                tracing::info!(chain = ?self.chain, "no local checkpoint found");
-            }
+        if let Some(checkpoint) = self.ctx.backlog.hydrate(self.chain).await? {
+            tracing::info!(
+                chain = ?self.chain,
+                height = checkpoint.block_height,
+                "hydrated local checkpoint"
+            );
+        } else {
+            tracing::info!(chain = ?self.chain, "no local checkpoint found");
         }
         Ok(())
     }
@@ -133,11 +110,7 @@ impl StreamReactor {
 
     /// Fetches the latest consensus checkpoint digest from the watch channel.
     fn current_consensus_digest(&mut self) -> Option<CheckpointDigest> {
-        self.ctx
-            .checkpoints_rx
-            .borrow_and_update()
-            .as_ref()
-            .cloned()
+        self.ctx.checkpoints_rx.borrow_and_update().clone()
     }
 
     /// Checks if a consensus digest represents a canonical genesis/reset checkpoint.
@@ -333,6 +306,39 @@ pub(crate) async fn query_peers_checkpoint(
         }
     }
     None
+}
+
+#[cfg(any(test, feature = "test-feature"))]
+mod sealed {
+    use super::*;
+    use crate::backlog::Backlog;
+    use crate::mesh::MeshState;
+    use crate::types::CheckpointWatcher;
+    use near_account_id::AccountId;
+    use tokio::sync::watch;
+
+    impl StreamReactor {
+        /// Creates a StreamReactor from its component parts.
+        pub fn from_parts(
+            chain: Chain,
+            backlog: Backlog,
+            checkpoints_rx: CheckpointWatcher,
+            mesh_state: watch::Receiver<MeshState>,
+            node_client: NodeClient,
+            account_id: &AccountId,
+        ) -> Self {
+            Self::new(
+                chain,
+                StreamContext::from_parts(
+                    backlog,
+                    checkpoints_rx,
+                    mesh_state,
+                    node_client,
+                    account_id,
+                ),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
