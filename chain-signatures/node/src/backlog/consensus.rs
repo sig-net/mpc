@@ -24,7 +24,11 @@ pub async fn align_backlog_with_consensus(
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
-    match backlog.confirm(chain, checkpoint_digest.digest).await {
+    match backlog
+        .checkpoints()
+        .confirm(chain, checkpoint_digest.digest)
+        .await
+    {
         Ok(found) => {
             if found {
                 return None;
@@ -487,7 +491,8 @@ mod tests {
             // 6. Assert persisted state
             let persisted = fixture
                 .backlog
-                .checkpoint_storage()
+                .checkpoints()
+                .storage()
                 .load_latest(chain)
                 .await
                 .unwrap();
@@ -504,7 +509,7 @@ mod tests {
                     case.name
                 );
                 if case.remote_use_peer_digest {
-                    let latest = fixture.backlog.latest_checkpoint(chain).await.unwrap();
+                    let latest = fixture.backlog.checkpoints().latest(chain).await.unwrap();
                     assert_eq!(
                         latest.digest(), remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
@@ -514,7 +519,7 @@ mod tests {
             } else if case.local_checkpoints.is_empty() {
                 assert!(persisted.is_none(), "Test case failed: {}", case.name);
             } else {
-                let latest = fixture.backlog.latest_checkpoint(chain).await;
+                let latest = fixture.backlog.checkpoints().latest(chain).await;
                 assert!(latest.is_some(), "Test case failed: {}", case.name);
                 assert_eq!(
                     latest.unwrap().block_height,
@@ -615,6 +620,7 @@ mod tests {
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
         assert!(fixture
             .backlog
+            .checkpoints()
             .confirm(chain, stale.digest())
             .await
             .unwrap());
@@ -636,7 +642,7 @@ mod tests {
 
         assert_eq!(result, Some(42));
         assert_eq!(
-            fixture.backlog.latest_checkpoint(chain).await,
+            fixture.backlog.checkpoints().latest(chain).await,
             Some(Checkpoint::reset(chain, 42)),
             "local state should be the canonical reset checkpoint"
         );

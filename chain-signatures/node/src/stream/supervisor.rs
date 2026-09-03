@@ -74,14 +74,18 @@ async fn detect_regression(
     // reset. Any other digest is unmatchable without one to compare against.
     let is_reset =
         Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
-    if !is_reset && backlog.latest_checkpoint(chain).await.is_none() {
+    if !is_reset && backlog.checkpoints().latest(chain).await.is_none() {
         tracing::info!(?chain, "no local checkpoint; skipping regression check");
         return false;
     }
 
     // A consensus digest can match either the latest checkpoint or a retained
     // pending checkpoint while this node is ahead of consensus.
-    match backlog.confirm(chain, checkpoint_digest.digest).await {
+    match backlog
+        .checkpoints()
+        .confirm(chain, checkpoint_digest.digest)
+        .await
+    {
         Ok(found) => {
             if found {
                 return false;
@@ -167,7 +171,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             tokio::select! {
                 // Gate dispatch on checkpoint capacity: when the cap is full the
                 // channel backs up and pauses the chain's `send().await`.
-                event = events_rx.recv(), if ctx.backlog.has_checkpoint_slot(chain) => {
+                event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
                     let Some(event) = event else {
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down,
@@ -306,7 +310,8 @@ mod tests {
         assert!(!result, "matching digest should not trigger regression");
 
         let persisted = backlog
-            .checkpoint_storage()
+            .checkpoints()
+            .storage()
             .load_latest(chain)
             .await
             .unwrap();
@@ -334,7 +339,8 @@ mod tests {
         assert!(!result, "ahead with match should not trigger regression");
 
         let persisted = backlog
-            .checkpoint_storage()
+            .checkpoints()
+            .storage()
             .load_latest(chain)
             .await
             .unwrap();
@@ -396,7 +402,11 @@ mod tests {
             applied.digest(),
             mpc_primitives::reset_checkpoint_digest(chain, 42)
         );
-        assert!(backlog.confirm(chain, applied.digest()).await.unwrap());
+        assert!(backlog
+            .checkpoints()
+            .confirm(chain, applied.digest())
+            .await
+            .unwrap());
 
         let (_tx, mut rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
 
@@ -618,7 +628,11 @@ mod tests {
         let backlog = Backlog::new();
         backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
-        assert!(backlog.confirm(chain, stale.digest()).await.unwrap());
+        assert!(backlog
+            .checkpoints()
+            .confirm(chain, stale.digest())
+            .await
+            .unwrap());
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let first_cancel = Arc::new(Notify::new());
@@ -675,7 +689,7 @@ mod tests {
             "recovery must re-anchor the cursor at the reset height"
         );
         assert_eq!(
-            backlog.latest_checkpoint(chain).await,
+            backlog.checkpoints().latest(chain).await,
             Some(Checkpoint::reset(chain, 42)),
             "local state must be the canonical reset checkpoint"
         );
@@ -760,7 +774,7 @@ mod tests {
             let h = (i as u64) * interval;
             assert!(backlog.set_processed_block(chain, h).await.is_some());
         }
-        assert!(!backlog.has_checkpoint_slot(chain));
+        assert!(!backlog.checkpoints().has_slot(chain));
 
         // The first (stalled) run is restarted by the watchdog; afterwards the
         // instant-Ok exits cannot be observed while the cap is full, so the

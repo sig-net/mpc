@@ -86,7 +86,7 @@ impl Checkpoint {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Checkpoints {
+pub struct Checkpoints {
     storage: CheckpointStorage,
     pending_counts: Arc<EnumMap<Chain, AtomicUsize>>,
 }
@@ -105,7 +105,7 @@ pub enum CheckpointError {
 
 impl Checkpoints {
     /// Creates a checkpoint tracker backed by `storage`.
-    pub(super) fn new(storage: CheckpointStorage) -> Self {
+    pub(crate) fn new(storage: CheckpointStorage) -> Self {
         Self {
             storage,
             pending_counts: Arc::default(),
@@ -120,7 +120,7 @@ impl Checkpoints {
     }
 
     /// Durably records an unconfirmed checkpoint.
-    pub(super) async fn persist_pending(
+    pub(crate) async fn persist_pending(
         &self,
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
@@ -151,7 +151,7 @@ impl Checkpoints {
     }
 
     /// Captures the current request state as a deterministic checkpoint.
-    pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
+    pub(crate) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
         let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
         pending_requests.sort_by_key(|entry| entry.sign_id());
 
@@ -170,11 +170,7 @@ impl Checkpoints {
 
     /// Promotes a pending checkpoint when its digest reaches consensus, or
     /// confirms it if already promoted.
-    pub(super) async fn confirm(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> Result<bool, CheckpointError> {
+    pub async fn confirm(&self, chain: Chain, digest: [u8; 32]) -> Result<bool, CheckpointError> {
         let outcome = self
             .storage
             .promote_pending(chain, digest)
@@ -202,7 +198,7 @@ impl Checkpoints {
     }
 
     /// Hydrates the pending checkpoint count from storage into the local counter.
-    pub(super) async fn hydrate(&self, chain: Chain) -> anyhow::Result<usize> {
+    pub(crate) async fn hydrate(&self, chain: Chain) -> anyhow::Result<usize> {
         let count = match self.storage.pending_count(chain).await {
             Ok(count) => count,
             Err(err) => {
@@ -220,7 +216,7 @@ impl Checkpoints {
     }
 
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
-    pub(super) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+    pub(crate) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         self.storage.reset_to_latest(checkpoint).await?;
         self.pending_counts[checkpoint.chain].store(0, Ordering::Release);
         self.observe(checkpoint.chain, 0);
@@ -228,28 +224,28 @@ impl Checkpoints {
     }
 
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
-    pub(super) async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
+    pub async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
         self.storage.latest(chain).await.ok().flatten()
     }
 
     /// Reports whether `chain` can create another pending checkpoint.
-    pub(super) fn has_slot(&self, chain: Chain) -> bool {
+    pub(crate) fn has_slot(&self, chain: Chain) -> bool {
         self.count(chain) < MAX_PENDING_CHECKPOINTS
     }
 
     /// Returns the number of locally pending checkpoints for `chain`.
-    pub(super) fn count(&self, chain: Chain) -> usize {
+    pub(crate) fn count(&self, chain: Chain) -> usize {
         self.pending_counts[chain].load(Ordering::Acquire)
     }
 
     /// Finds a checkpoint by digest, searching durable latest and pending storage.
-    pub(super) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
+    pub(crate) async fn find(&self, chain: Chain, digest: [u8; 32]) -> Option<Checkpoint> {
         self.storage.find(chain, digest).await.ok().flatten()
     }
 
     #[cfg(test)]
     /// Returns the backing storage for tests that need to seed checkpoint state.
-    pub(super) fn storage(&self) -> &CheckpointStorage {
+    pub(crate) fn storage(&self) -> &CheckpointStorage {
         &self.storage
     }
 }

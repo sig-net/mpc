@@ -190,7 +190,7 @@ async fn test_consensus_alignment_peer_fetch() {
     assert_eq!(result.unwrap(), expected_height);
 
     // Verify fresh backlog has the checkpoint
-    let latest = fresh_backlog.latest_checkpoint(chain).await;
+    let latest = fresh_backlog.checkpoints().latest(chain).await;
     assert!(latest.is_some());
     assert_eq!(latest.unwrap().block_height, expected_height);
 
@@ -277,7 +277,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
         "should return None when consensus digest changes to None"
     );
 
-    assert!(fresh_backlog.latest_checkpoint(chain).await.is_none());
+    assert!(fresh_backlog.checkpoints().latest(chain).await.is_none());
     let persisted = fresh_storage.load_latest(chain).await.unwrap();
     assert!(persisted.is_none());
 }
@@ -377,7 +377,8 @@ async fn test_reset_converges_divergent_nodes() {
     for node in &network.nodes {
         checkpoints_after.push(
             node.backlog
-                .latest_checkpoint(chain)
+                .checkpoints()
+                .latest(chain)
                 .await
                 .expect("every node should hold the reset checkpoint"),
         );
