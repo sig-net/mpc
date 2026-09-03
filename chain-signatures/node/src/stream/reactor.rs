@@ -31,9 +31,9 @@ impl StreamReactor {
         Self { chain, ctx }
     }
 
-    /// Creates a lightweight test StreamReactor configured for alignment tests.
+    /// Creates a StreamReactor from its component parts.
     #[cfg(any(test, feature = "test-feature"))]
-    pub fn for_alignment(
+    pub fn from_parts(
         chain: Chain,
         backlog: Backlog,
         checkpoints_rx: CheckpointWatcher,
@@ -43,13 +43,7 @@ impl StreamReactor {
     ) -> Self {
         Self::new(
             chain,
-            StreamContext::for_alignment(
-                backlog,
-                checkpoints_rx,
-                mesh_state,
-                node_client,
-                account_id,
-            ),
+            StreamContext::from_parts(backlog, checkpoints_rx, mesh_state, node_client, account_id),
         )
     }
 
@@ -235,7 +229,7 @@ mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let node_client = NodeClient::new(&NodeClientOptions::default());
         let account_id = "test.near".parse().unwrap();
-        StreamReactor::for_alignment(chain, backlog, rx, mesh_rx, node_client, &account_id)
+        StreamReactor::from_parts(chain, backlog, rx, mesh_rx, node_client, &account_id)
     }
 
     fn make_digest(

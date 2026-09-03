@@ -180,7 +180,7 @@ mod tests {
         }
 
         async fn run(&mut self) -> Option<u64> {
-            let mut reactor = StreamReactor::for_alignment(
+            let mut reactor = StreamReactor::from_parts(
                 self.chain,
                 self.backlog.clone(),
                 self.checkpoints_rx.clone(),
@@ -651,7 +651,7 @@ mod tests {
         let mesh_rx_clone = fixture.mesh_rx.clone();
 
         let handle = tokio::spawn(async move {
-            let mut reactor = StreamReactor::for_alignment(
+            let mut reactor = StreamReactor::from_parts(
                 chain,
                 backlog_clone,
                 checkpoints_rx_clone,

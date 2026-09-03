@@ -83,9 +83,9 @@ impl StreamContext {
         Ok(())
     }
 
-    /// Creates a lightweight test StreamContext configured for alignment tests.
+    /// Creates a StreamContext from its constituent parts with default sign/rpc channels.
     #[cfg(any(test, feature = "test-feature"))]
-    pub fn for_alignment(
+    pub fn from_parts(
         backlog: Backlog,
         checkpoints_rx: CheckpointWatcher,
         mesh_state: watch::Receiver<MeshState>,
