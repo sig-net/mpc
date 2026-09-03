@@ -6,7 +6,7 @@ use crate::stream::StreamContext;
 use crate::types::CheckpointWatcher;
 
 use cait_sith::protocol::Participant;
-use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+use mpc_primitives::{reset_checkpoint_digest, Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -142,7 +142,7 @@ impl StreamReactor {
 
     /// Checks if a consensus digest represents a canonical genesis/reset checkpoint.
     fn is_consensus_reset(&self, digest: &CheckpointDigest) -> bool {
-        Checkpoint::reset(self.chain, digest.height).digest() == digest.digest
+        reset_checkpoint_digest(self.chain, digest.height) == digest.digest
     }
 
     /// Checks if this node holds a local checkpoint, logging any transient storage error.
@@ -193,7 +193,8 @@ impl StreamReactor {
     }
 
     /// Collects and randomly shuffles active mesh peers excluding this node.
-    fn active_peers(&mut self, my_account_id: &AccountId) -> Vec<(Participant, ParticipantInfo)> {
+    fn active_peers(&mut self) -> Vec<(Participant, ParticipantInfo)> {
+        let my_account_id = self.ctx.contract_watcher.account_id();
         let mut peers: Vec<_> = self
             .ctx
             .mesh_state
@@ -202,7 +203,7 @@ impl StreamReactor {
             .participants
             .clone()
             .into_iter()
-            .filter(|(_, info)| info.account_id != *my_account_id)
+            .filter(|(_, info)| &info.account_id != my_account_id)
             .collect();
         peers.shuffle(&mut thread_rng());
         peers
@@ -214,8 +215,7 @@ impl StreamReactor {
         &mut self,
         target_digest: [u8; 32],
     ) -> Option<Checkpoint> {
-        let my_account_id = self.ctx.contract_watcher.account_id().clone();
-        let mut peers = self.active_peers(&my_account_id);
+        let mut peers = self.active_peers();
 
         loop {
             tokio::select! {
@@ -235,7 +235,7 @@ impl StreamReactor {
                     if changed.is_err() {
                         return None;
                     }
-                    peers = self.active_peers(&my_account_id);
+                    peers = self.active_peers();
                 }
 
                 checkpoint = query_peers_checkpoint(
