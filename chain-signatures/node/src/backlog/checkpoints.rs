@@ -125,16 +125,11 @@ impl Checkpoints {
         checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointError> {
         let chain = checkpoint.chain;
-        let count = self.count(chain);
-        if count >= MAX_PENDING_CHECKPOINTS {
-            let tx_count = checkpoint.len();
-            tracing::warn!(
-                ?chain,
-                count,
-                tx_count,
-                "pending checkpoint cap reached; stalling checkpoint creation"
-            );
-            return Err(CheckpointError::PendingCap { chain, tx_count });
+        if !self.has_slot(chain) {
+            return Err(CheckpointError::PendingCap {
+                chain,
+                tx_count: checkpoint.len(),
+            });
         }
 
         let inserted = self
@@ -298,6 +293,7 @@ mod tests {
                     && matches!(first, Err(CheckpointError::PendingCap { .. }))
         );
         assert_eq!(checkpoints.count(Chain::Ethereum), MAX_PENDING_CHECKPOINTS);
+        assert!(!checkpoints.has_slot(Chain::Ethereum));
     }
 
     #[tokio::test]
@@ -310,6 +306,7 @@ mod tests {
                 .unwrap();
         }
 
+        assert!(!checkpoints.has_slot(Chain::Ethereum));
         assert!(matches!(
             checkpoints
                 .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
@@ -340,10 +337,12 @@ mod tests {
         }
 
         let latest = checkpoint(MAX_PENDING_CHECKPOINTS as u64 - 1);
+        assert!(!checkpoints.has_slot(latest.chain));
         assert!(matches!(
             checkpoints.confirm(latest.chain, latest.digest()).await,
             Ok(true)
         ));
+        assert!(checkpoints.has_slot(latest.chain));
         assert!(checkpoints
             .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
             .await
