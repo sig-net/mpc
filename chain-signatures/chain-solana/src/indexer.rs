@@ -1715,7 +1715,7 @@ mod tests {
         };
 
         let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
-            .unwrap_or_else(|_| "SigDuEPNeDjh3oJv7MUraPN7zaTFomS6ZWfpXwjUg4B".to_string());
+            .unwrap_or_else(|_| "SigDHT99hPznk4d9SAxWLoBnKWT8jcob5pV8X7ti8SM".to_string());
 
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
