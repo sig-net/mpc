@@ -572,7 +572,6 @@ pub struct Solana {
 
 impl Solana {
     /// Program ID hardcoded in the solana program/contract.
-    pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
 

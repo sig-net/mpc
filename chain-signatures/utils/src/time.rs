@@ -37,10 +37,6 @@ impl TimeoutBudget {
     }
 
     /// Returns true if the budget is exhausted.
-    pub fn is_exhausted(&self) -> bool {
-        self.started.elapsed() >= self.timeout
-    }
-
     /// Resets the budget with a new timeout.
     pub fn reset(&mut self, timeout: Duration) {
         self.started = Instant::now();

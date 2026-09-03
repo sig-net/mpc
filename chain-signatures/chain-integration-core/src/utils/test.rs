@@ -179,16 +179,6 @@ impl ChainIndexerStream {
         .await
         .context("timed out waiting for a matching chain event")?
     }
-
-    /// Assert no event arrives within `duration`.
-    pub async fn expect_none_within(&mut self, duration: Duration) -> anyhow::Result<()> {
-        match timeout(duration, self.next_event()).await {
-            Ok(Some(event)) => {
-                anyhow::bail!("expected no event within {duration:?}, but received {event:?}")
-            }
-            Ok(None) | Err(_) => Ok(()),
-        }
-    }
 }
 
 impl Drop for ChainIndexerStream {

@@ -12,7 +12,6 @@ use google_secretmanager1::SecretManager;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
 
-
 pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
 #[derive(Clone)]

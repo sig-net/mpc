@@ -172,11 +172,6 @@ impl Nodes {
         Ok(())
     }
 
-    pub fn proxy_name_for_node(&self, id: usize) -> String {
-        let account_id = self.near_accounts();
-        format!("rpc_from_node_{}", account_id[id].id())
-    }
-
     pub fn contract(&self) -> &Contract {
         &self.ctx().mpc_contract
     }
