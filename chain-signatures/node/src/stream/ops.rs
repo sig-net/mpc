@@ -352,13 +352,10 @@ pub async fn process_execution_confirmed(
     let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
 
     let sign_request = match result {
-        ExecutionOutcome::Success { output } => completed_tx
-            .create_sign_request_from_serialized_output(source_chain, output, chain_ctx)?,
-        ExecutionOutcome::Failed => {
-            completed_tx
-                .create_failed_sign_request(source_chain, chain_ctx)
-                .await?
+        ExecutionOutcome::Success { output } => {
+            completed_tx.create_sign_request_from_serialized_output(output, chain_ctx)?
         }
+        ExecutionOutcome::Failed => completed_tx.create_failed_sign_request(chain_ctx).await?,
     };
 
     let sign_request = Arc::new(sign_request);

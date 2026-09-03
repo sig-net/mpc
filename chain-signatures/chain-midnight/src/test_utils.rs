@@ -163,7 +163,20 @@ pub(crate) fn alignment_of(widths: &[u32]) -> Alignment {
 
 /// The stored cell for `record`: its trimmed atoms beside the widths it declares.
 pub(crate) fn cell_from_record(record: &SignBidirectionalRecord) -> Node {
-    cell_from_atoms(&atoms_from_record(record), &widths_from_record(record))
+    StateValue::from(aligned_value_from_record(record))
+}
+
+/// The aligned cell value for `record`, before it is wrapped as ledger state.
+pub(crate) fn aligned_value_from_record(record: &SignBidirectionalRecord) -> AlignedValue {
+    AlignedValue {
+        value: Value(
+            atoms_from_record(record)
+                .into_iter()
+                .map(ValueAtom)
+                .collect(),
+        ),
+        alignment: alignment_of(&widths_from_record(record)),
+    }
 }
 
 /// A `Bytes<32>` map key, the shape both counter maps and a caller's request index use.

@@ -8986,6 +8986,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-compact-hashing"
+version = "1.17.0"
+dependencies = [
+ "hex",
+ "midnight-transient-crypto 3.0.0",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.17.0"
 dependencies = [
@@ -9079,6 +9087,7 @@ dependencies = [
  "mpc-chain-midnight",
  "mpc-chain-near",
  "mpc-chain-solana",
+ "mpc-compact-hashing",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",

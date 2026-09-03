@@ -86,6 +86,7 @@ mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
 mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
+mpc-compact-hashing.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 mpc-utils.workspace = true
