@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::{self, NodeClient};
@@ -36,6 +35,7 @@ use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
+use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
@@ -904,15 +904,21 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
-        tokio::spawn(indexer_hydration::run(
-            hydration_config,
-            sign_tx.clone(),
-            backlog.clone(),
+        let hydration_indexer =
+            HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
+        tracing::info!("hydration indexer created successfully");
+        tokio::spawn(run_supervised(
+            hydration_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Hydration].clone(),
+            ),
             hydration_telemetry,
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx[Chain::Hydration].clone(),
         ));
     }
 

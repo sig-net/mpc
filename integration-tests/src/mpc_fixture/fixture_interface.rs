@@ -18,6 +18,7 @@ use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -59,6 +60,9 @@ pub struct SharedOutput {
     /// Signaled whenever an RPC action is recorded, so `wait_for_actions`
     /// reacts on the event instead of polling.
     pub actions_changed: Arc<Notify>,
+    /// Publishes across all nodes. `rpc_actions` is a set keyed by the request,
+    /// so it cannot tell one node publishing from several.
+    pub publishes: Arc<AtomicUsize>,
 }
 
 impl MpcFixture {
@@ -173,6 +177,11 @@ impl MpcFixture {
         for node in &self.nodes {
             node.wait_for_presignatures(threshold_per_node).await;
         }
+    }
+
+    /// How many publishes every node has made in total.
+    pub fn publishes(&self) -> usize {
+        self.output.publishes.load(Ordering::Relaxed)
     }
 
     pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
@@ -319,6 +328,23 @@ impl MpcFixture {
                 stream.prepare_block_of_sign_requests(requests).await;
                 stream.progress_block_height(1).await;
             }
+        }
+    }
+
+    /// Advance every node's stream by one empty block.
+    ///
+    /// Real indexers emit `ChainEvent::Block` whether or not the block held
+    /// anything, and work riding the block stream, like the publish failover sweep,
+    /// only runs when one arrives. Tests waiting on such work must keep the chain
+    /// moving rather than only sleeping.
+    pub async fn tick_block(&self, chain: Chain) {
+        for node in &self.nodes {
+            let stream = node
+                .mock_streams
+                .get(&chain)
+                .expect("must have mock stream configured");
+            stream.prepare_block_of_events(&[]).await;
+            stream.progress_block_height(1).await;
         }
     }
 }
@@ -477,6 +503,7 @@ impl SharedOutput {
             msg_log: Arc::new(Mutex::new(M::default())),
             rpc_actions: Arc::new(Mutex::new(HashSet::new())),
             actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }
@@ -487,6 +514,7 @@ impl Default for SharedOutput {
             msg_log: Arc::new(Mutex::new(MessagePrinter)),
             rpc_actions: Default::default(),
             actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }

@@ -284,13 +284,14 @@ impl Backlog {
         requeueable
     }
 
-    /// Returns backlog requests for a chain that are ready to be published.
+    /// Returns backlog requests for a chain that are ready to be published, each
+    /// with whether this node already dispatched a publish for it.
     /// Sorted by indexed timestamp and request id.
     pub async fn publishable_requests(
         &self,
         chain: Chain,
-    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
-        // Read-only scan; the backup sweep calls this every second per chain, so a
+    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>, bool)> {
+        // Read-only scan; the publish failover sweep calls this on every block, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
 
@@ -299,9 +300,11 @@ impl Backlog {
             .values()
             .filter_map(|entry| match &entry.status {
                 SignStatus::PendingPublish { publish }
-                | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((Arc::clone(&entry.request), Arc::clone(publish)))
-                }
+                | SignStatus::PendingPublishBidirectional { publish } => Some((
+                    Arc::clone(&entry.request),
+                    Arc::clone(publish),
+                    entry.publish_dispatched,
+                )),
                 _ => None,
             })
             .collect();
@@ -360,6 +363,18 @@ impl Backlog {
         };
 
         entry.mark_publishing(publish)
+    }
+
+    /// Record that this node dispatched a publish for `id`'s current
+    /// pending-publish episode, returning `false` if one was already dispatched or
+    /// the entry is gone.
+    pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
+        let mut pending = self.pending(&chain).write().await;
+
+        pending
+            .requests
+            .get_mut(id)
+            .is_some_and(BacklogEntry::mark_publish_dispatched)
     }
 
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
@@ -744,22 +759,34 @@ pub enum BacklogError {
     InvalidBidirectionalResponseTransition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
+    /// Whether this node has dispatched a publish for this entry. Node-local, so it
+    /// is not serialized, and checkpoint recovery resets it.
+    #[serde(skip)]
+    publish_dispatched: bool,
+}
+
+/// Node-local state is not part of an entry's identity to avoid divergence.
+impl PartialEq for BacklogEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request && self.status == other.status
+    }
 }
 
 impl BacklogEntry {
     pub fn new(request: Arc<IndexedSignRequest>) -> Self {
-        Self {
-            request,
-            status: SignStatus::PendingGeneration,
-        }
+        Self::with_status(request, SignStatus::PendingGeneration)
     }
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
-        Self { request, status }
+        Self {
+            request,
+            status,
+            publish_dispatched: false,
+        }
     }
 
     pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
@@ -805,12 +832,25 @@ impl BacklogEntry {
         self.status.clone()
     }
 
+    /// The single place a status is assigned. Every transition ends the current
+    /// pending-publish episode, so no dispatch flag may survive one.
+    fn enter_status(&mut self, status: SignStatus) {
+        self.status = status;
+        self.publish_dispatched = false;
+    }
+
+    /// Record that this node dispatched a publish for the current episode,
+    /// returning `false` if one was already dispatched.
+    fn mark_publish_dispatched(&mut self) -> bool {
+        !std::mem::replace(&mut self.publish_dispatched, true)
+    }
+
     /// Set the status of this transaction
     ///
     /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
     pub fn set_status(&mut self, status: SignStatus) {
-        self.status = status;
+        self.enter_status(status);
     }
 
     /// Test-only; see the note on [`Backlog::set_request`].
@@ -838,18 +878,18 @@ impl BacklogEntry {
         }
 
         self.request = request;
-        self.status = SignStatus::PendingGenerationBidirectional;
+        self.enter_status(SignStatus::PendingGenerationBidirectional);
         Ok(())
     }
 
     pub fn mark_publishing(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
         match (&self.request.kind, &self.status) {
             (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
-                self.status = SignStatus::PendingPublish { publish };
+                self.enter_status(SignStatus::PendingPublish { publish });
                 Ok(())
             }
             (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
-                self.status = SignStatus::PendingPublishBidirectional { publish };
+                self.enter_status(SignStatus::PendingPublishBidirectional { publish });
                 Ok(())
             }
             _ => Err(BacklogError::InvalidPublishingTransition),
@@ -865,9 +905,9 @@ impl BacklogEntry {
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
-                self.status = SignStatus::PendingExecution {
+                self.enter_status(SignStatus::PendingExecution {
                     tx: bidirectional_tx,
-                };
+                });
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -940,11 +980,11 @@ mod tests {
     }
 
     fn test_publish_state(is_proposer: bool) -> Arc<PublishState> {
-        Arc::new(PublishState {
-            signature: test_signature(),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+        Arc::new(PublishState::new(
+            test_signature(),
+            vec![Participant::from(0u32), Participant::from(1u32)],
             is_proposer,
-        })
+        ))
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
@@ -1970,6 +2010,70 @@ mod tests {
             .await
             .expect("entry should remain in backlog");
         assert!(matches!(entry.status(), SignStatus::PendingPublish { .. }));
+    }
+
+    /// The flag keeps the per-block sweep to one publish per pending-publish
+    /// episode. Entering pending-publish again, as the second bidirectional leg
+    /// does, starts a new one.
+    #[tokio::test]
+    async fn test_mark_publish_dispatched_is_once_per_episode() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([45u8; 32]);
+
+        assert!(
+            !backlog
+                .mark_publish_dispatched(Chain::Solana, &sign_id)
+                .await,
+            "an entry that is not in the backlog cannot be dispatched"
+        );
+
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await;
+        backlog
+            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(false))
+            .await
+            .expect("pending generation should transition to pending publish");
+
+        let dispatched = |backlog: Backlog| async move {
+            let publishable = backlog.publishable_requests(Chain::Solana).await;
+            assert_eq!(publishable.len(), 1, "the entry stays in the scan");
+            publishable[0].2
+        };
+
+        assert!(!dispatched(backlog.clone()).await);
+        assert!(
+            backlog
+                .mark_publish_dispatched(Chain::Solana, &sign_id)
+                .await
+        );
+        assert!(
+            !backlog
+                .mark_publish_dispatched(Chain::Solana, &sign_id)
+                .await,
+            "the second dispatch is refused"
+        );
+        assert!(
+            dispatched(backlog.clone()).await,
+            "the scan reports it, so the sweep skips it and the resume still sees it"
+        );
+
+        backlog
+            .set_status(Chain::Solana, &sign_id, SignStatus::PendingGeneration)
+            .await;
+        backlog
+            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(false))
+            .await
+            .expect("re-entering pending publish starts a new episode");
+        assert!(
+            !dispatched(backlog.clone()).await,
+            "a new episode is scheduled afresh"
+        );
     }
 
     #[tokio::test]

@@ -140,6 +140,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
     let mut load_local = true;
     loop {
+        // Cleared before recovery, not after: checkpoint creation and publish
+        // failover must not act on a backlog being recovered or replayed into.
+        ctx.caught_up = false;
         recover_backlog(
             chain,
             load_local,
@@ -160,7 +163,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             async move { indexer.run(events_tx, cancel).await }
         });
 
-        ctx.caught_up = false;
         let mut last_block_event = Instant::now();
         let mut run_finished = false;
 

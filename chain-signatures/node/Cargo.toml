@@ -70,7 +70,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 futures-util.workspace = true
-parity-scale-codec.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
@@ -85,6 +84,7 @@ mpc-chain-canton.workspace = true
 mpc-chain-ethereum.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
+mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true

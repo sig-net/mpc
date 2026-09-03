@@ -174,12 +174,15 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 
 ### L3. Settlement
 
-*Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain.
+*Property.* Once a signature is produced, it is eventually accepted on-chain, whether or not the instance's proposer stays online.
 
 *Rationale.* A signature that never reaches the chain is worth no more to the user than no signature at all, while the presignature spent producing it is gone either way.
 
-*Enforcement*: The owner republishes on a timer, retrying indefinitely with backoff capped at 60 s.
-Currently not guaranteed, for two reasons. Only the successful instance's proposer publishes, and no other participant takes over, even though every participant holds the finished signature. And the retry itself lives in the publishing process, so what survives a restart is only what reached a confirmed checkpoint: on the checkpointed chains that includes the pending publish and its signature.
+*Enforcement*: The proposer publishes when generation finishes and retries indefinitely with backoff capped at 60 s. Every other participant holds the same finished signature, and publishes it itself once its own deadline passes without the response being observed on chain: a delay drawn uniformly from `[L, L + m·L/d]`, for `L` the lag until a published response is observed, `m` the participants and `d` the duplicate responses accepted per failover. The `L` offset keeps the happy path at one response; the window costs `d` extra in expectation when the proposer is silent. Duplicates are harmless, since both chains' respond entrypoints are bare event emitters and a repeated response is ignored on every node.
+
+The draw is anchored on a stamp stored with the entry, so it survives a restart rather than restarting the clock, and the sweep runs on block arrival, once the node has caught up: it is the catchup backfill that covers the window being judged, so a node that has not read that window holds fire instead of publishing blind. One participant with a healthy stream is enough.
+
+The `1 + d` cost is what a failover pays when the failover response lands, since every node still waiting observes it within `L` and drops the entry. If no response can land at all, each of the `m` participants publishes once as its own deadline passes, spread over the window.
 
 ### L4. Mesh convergence
 
