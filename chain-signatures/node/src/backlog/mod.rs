@@ -599,9 +599,9 @@ impl Backlog {
 
     /// Hydrate the backlog from storage: initializes the pending checkpoint counter
     /// and recovers local backlog state from the latest durable checkpoint if one exists.
-    pub async fn hydrate(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
+    pub async fn hydrate(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         self.checkpoints.hydrate(chain).await?;
-        let Some(checkpoint) = self.checkpoints.latest(chain).await else {
+        let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
             return Ok(None);
         };
         self.recover_by_checkpoint(&checkpoint).await;
@@ -610,7 +610,7 @@ impl Backlog {
 
     /// Replace the local backlog with a consensus checkpoint after divergence:
     /// resets durable storage to consensus, zeroes pending counts, and restores in-memory state.
-    pub async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+    pub async fn regress(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         self.checkpoints.regress(checkpoint).await?;
         self.recover_by_checkpoint(checkpoint).await;
         Ok(())
@@ -1779,7 +1779,7 @@ mod tests {
         recovered.recover_by_checkpoint(&checkpoint).await;
 
         assert_eq!(
-            recovered.checkpoints().latest(Chain::Solana).await,
+            recovered.checkpoints().latest(Chain::Solana).await.unwrap(),
             Some(checkpoint),
             "recovered checkpoint should be visible via latest for /checkpoint"
         );

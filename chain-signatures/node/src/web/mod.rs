@@ -407,7 +407,13 @@ async fn checkpoint(
         let checkpoint = if let Some(digest) = digest {
             state.backlog.checkpoints().find(chain, digest).await
         } else {
-            state.backlog.checkpoints().latest(chain).await
+            state
+                .backlog
+                .checkpoints()
+                .latest(chain)
+                .await
+                .ok()
+                .flatten()
         };
 
         let Some(checkpoint) = checkpoint else {

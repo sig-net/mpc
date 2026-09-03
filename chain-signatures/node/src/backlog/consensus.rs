@@ -507,7 +507,13 @@ mod tests {
                     case.name
                 );
                 if case.remote_use_peer_digest {
-                    let latest = fixture.backlog.checkpoints().latest(chain).await.unwrap();
+                    let latest = fixture
+                        .backlog
+                        .checkpoints()
+                        .latest(chain)
+                        .await
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(
                         latest.digest(), remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
@@ -517,7 +523,7 @@ mod tests {
             } else if case.local_checkpoints.is_empty() {
                 assert!(persisted.is_none(), "Test case failed: {}", case.name);
             } else {
-                let latest = fixture.backlog.checkpoints().latest(chain).await;
+                let latest = fixture.backlog.checkpoints().latest(chain).await.unwrap();
                 assert!(latest.is_some(), "Test case failed: {}", case.name);
                 assert_eq!(
                     latest.unwrap().block_height,
@@ -640,7 +646,7 @@ mod tests {
 
         assert_eq!(result, Some(42));
         assert_eq!(
-            fixture.backlog.checkpoints().latest(chain).await,
+            fixture.backlog.checkpoints().latest(chain).await.unwrap(),
             Some(Checkpoint::reset(chain, 42)),
             "local state should be the canonical reset checkpoint"
         );

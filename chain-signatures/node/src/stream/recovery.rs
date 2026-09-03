@@ -21,25 +21,22 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
-) {
+) -> Result<(), crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
     // Hydrate local checkpoint state before aligning: initializes the pending count
     // and recovers from the latest durable checkpoint if one exists.
     if load_local {
-        match backlog.hydrate(chain).await {
-            Ok(Some(checkpoint)) => {
+        match backlog.hydrate(chain).await? {
+            Some(checkpoint) => {
                 tracing::info!(
                     ?chain,
                     height = checkpoint.block_height,
                     "hydrated local checkpoint"
                 );
             }
-            Ok(None) => {
+            None => {
                 tracing::info!(?chain, "no local checkpoint found");
-            }
-            Err(err) => {
-                tracing::warn!(?chain, %err, "failed to hydrate local checkpoint");
             }
         }
     }
@@ -59,4 +56,6 @@ pub(crate) async fn recover_backlog(
     {
         tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
+
+    Ok(())
 }

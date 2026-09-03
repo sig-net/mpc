@@ -74,9 +74,22 @@ async fn detect_regression(
     // reset. Any other digest is unmatchable without one to compare against.
     let is_reset =
         Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
-    if !is_reset && backlog.checkpoints().latest(chain).await.is_none() {
-        tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
+    if !is_reset {
+        match backlog.checkpoints().latest(chain).await {
+            Ok(None) => {
+                tracing::info!(?chain, "no local checkpoint; skipping regression check");
+                return false;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?chain,
+                    %err,
+                    "transient storage error checking latest checkpoint; retrying on next change"
+                );
+                return false;
+            }
+            Ok(Some(_)) => {}
+        }
     }
 
     // A consensus digest can match either the latest checkpoint or a retained
@@ -144,7 +157,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
-        recover_backlog(
+        if let Err(err) = recover_backlog(
             chain,
             load_local,
             &ctx.backlog,
@@ -153,7 +166,16 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &ctx.node_client,
             &my_account_id,
         )
-        .await;
+        .await
+        {
+            tracing::error!(
+                %chain,
+                %err,
+                "failed to recover backlog; retrying in {ERROR_RESTART_DELAY:?}"
+            );
+            tokio::time::sleep(ERROR_RESTART_DELAY).await;
+            continue;
+        }
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -689,7 +711,7 @@ mod tests {
             "recovery must re-anchor the cursor at the reset height"
         );
         assert_eq!(
-            backlog.checkpoints().latest(chain).await,
+            backlog.checkpoints().latest(chain).await.unwrap(),
             Some(Checkpoint::reset(chain, 42)),
             "local state must be the canonical reset checkpoint"
         );

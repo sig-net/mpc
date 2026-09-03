@@ -193,34 +193,35 @@ impl Checkpoints {
     }
 
     /// Hydrates the pending checkpoint count from storage into the local counter.
-    pub(crate) async fn hydrate(&self, chain: Chain) -> anyhow::Result<usize> {
-        let count = match self.storage.pending_count(chain).await {
-            Ok(count) => count,
-            Err(err) => {
-                tracing::warn!(
-                    ?chain,
-                    %err,
-                    "failed to load pending count from storage; defaulting to 0"
-                );
-                0
-            }
-        };
+    pub(crate) async fn hydrate(&self, chain: Chain) -> Result<usize, CheckpointError> {
+        let count = self
+            .storage
+            .pending_count(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
         self.pending_counts[chain].store(count, Ordering::Release);
         self.observe(chain, count);
         Ok(count)
     }
 
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
-    pub(crate) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        self.storage.reset_to_latest(checkpoint).await?;
-        self.pending_counts[checkpoint.chain].store(0, Ordering::Release);
-        self.observe(checkpoint.chain, 0);
+    pub(crate) async fn regress(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        let chain = checkpoint.chain;
+        self.storage
+            .reset_to_latest(checkpoint)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })?;
+        self.pending_counts[chain].store(0, Ordering::Release);
+        self.observe(chain, 0);
         Ok(())
     }
 
     /// Returns the newest pending checkpoint or the latest confirmed checkpoint.
-    pub async fn latest(&self, chain: Chain) -> Option<Checkpoint> {
-        self.storage.latest(chain).await.ok().flatten()
+    pub async fn latest(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
+        self.storage
+            .latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
     /// Reports whether `chain` can create another pending checkpoint.
@@ -364,7 +365,7 @@ mod tests {
             Ok(true)
         ));
         assert_eq!(checkpoints.count(first.chain), 1);
-        assert_eq!(checkpoints.latest(first.chain).await, Some(third));
+        assert_eq!(checkpoints.latest(first.chain).await.unwrap(), Some(third));
     }
 
     #[tokio::test]
@@ -378,7 +379,10 @@ mod tests {
             Ok(false)
         ));
         assert_eq!(checkpoints.count(checkpoint.chain), 1);
-        assert_eq!(checkpoints.latest(checkpoint.chain).await, Some(checkpoint));
+        assert_eq!(
+            checkpoints.latest(checkpoint.chain).await.unwrap(),
+            Some(checkpoint)
+        );
     }
 
     #[tokio::test]
