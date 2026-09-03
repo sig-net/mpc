@@ -277,71 +277,52 @@ impl CheckpointStorage {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 const PROMOTE: &str = r#"
-                    local hex_digest = ARGV[1]
-                    local height = redis.call('HGET', KEYS[2], hex_digest)
-                    if not height then
-                        return { redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
-                    end
-
-                    local pending = redis.call('HGET', KEYS[1], height)
-                    if not pending then
-                        return { redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
-                    end
-
-                    redis.call('SET', KEYS[3], pending)
-
-                    local num_height = tonumber(height)
-                    local entries = redis.call('HGETALL', KEYS[1])
-                    for i = 1, #entries, 2 do
-                        if tonumber(entries[i]) <= num_height then
-                            redis.call('HDEL', KEYS[1], entries[i])
+                    local height = redis.call('HGET', KEYS[2], ARGV[1])
+                    local pending = height and redis.call('HGET', KEYS[1], height)
+                    if pending then
+                        redis.call('SET', KEYS[3], pending)
+                        local num = tonumber(height)
+                        local index = redis.call('HGETALL', KEYS[2])
+                        for i = 1, #index, 2 do
+                            if tonumber(index[i+1]) <= num then
+                                redis.call('HDEL', KEYS[1], index[i+1])
+                                redis.call('HDEL', KEYS[2], index[i])
+                            end
                         end
+                        return { true, redis.call('HLEN', KEYS[1]) }
                     end
-                    local index = redis.call('HGETALL', KEYS[2])
-                    for i = 1, #index, 2 do
-                        if tonumber(index[i+1]) <= num_height then
-                            redis.call('HDEL', KEYS[2], index[i])
-                        end
-                    end
-
-                    return { redis.call('HLEN', KEYS[1]), false }
+                    return { false, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
                 "#;
-                let hex_digest = hex::encode(digest);
-                let (remaining, maybe_latest): (usize, Option<Vec<u8>>) =
+                let (promoted, remaining, maybe_latest): (bool, usize, Option<Vec<u8>>) =
                     redis::Script::new(PROMOTE)
                         .key(self.pending_checkpoint_key(chain))
                         .key(self.pending_digest_key(chain))
                         .key(self.checkpoint_key(chain))
-                        .arg(hex_digest)
+                        .arg(hex::encode(digest))
                         .invoke_async(&mut conn)
                         .await
                         .context("failed to promote pending checkpoint")?;
 
-                let Some(bytes) = maybe_latest else {
-                    return Ok(Some(remaining));
-                };
-
-                let latest: Checkpoint =
-                    decode_checkpoint(&bytes).context("failed to deserialize latest checkpoint")?;
-                if latest.digest() == digest {
+                if promoted {
                     return Ok(Some(remaining));
                 }
 
-                Ok(None)
+                let is_confirmed = maybe_latest
+                    .map(|bytes| decode_checkpoint(&bytes))
+                    .transpose()
+                    .context("failed to deserialize latest checkpoint")?
+                    .is_some_and(|cp| cp.digest() == digest);
+
+                Ok(is_confirmed.then_some(remaining))
             }
             CheckpointStorage::InMemory {
                 latest, pending, ..
             } => {
                 let mut pending = pending.write().await;
-                let height = pending.get(&chain).and_then(|checkpoints| {
-                    checkpoints
-                        .iter()
-                        .find(|(_, cp)| cp.digest() == digest)
-                        .map(|(h, _)| *h)
-                });
+                let checkpoints = pending.entry(chain).or_default();
 
-                if let Some(height) = height {
-                    let checkpoints = pending.entry(chain).or_default();
+                if let Some((&height, _)) = checkpoints.iter().find(|(_, cp)| cp.digest() == digest)
+                {
                     let promoted = checkpoints.remove(&height).unwrap();
                     checkpoints.retain(|h, _| *h > height);
                     let remaining = checkpoints.len();
@@ -351,7 +332,7 @@ impl CheckpointStorage {
                     return Ok(Some(remaining));
                 }
 
-                let remaining = pending.get(&chain).map_or(0, |p| p.len());
+                let remaining = checkpoints.len();
                 drop(pending);
 
                 let is_confirmed = latest
@@ -360,11 +341,7 @@ impl CheckpointStorage {
                     .get(&chain)
                     .is_some_and(|cp| cp.digest() == digest);
 
-                if is_confirmed {
-                    return Ok(Some(remaining));
-                }
-
-                Ok(None)
+                Ok(is_confirmed.then_some(remaining))
             }
             #[cfg(test)]
             CheckpointStorage::Failing(_) => anyhow::bail!("failing storage"),
