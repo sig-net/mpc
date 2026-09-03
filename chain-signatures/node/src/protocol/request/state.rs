@@ -5,7 +5,7 @@ use super::*;
 
 pub struct SignState {
     round: usize,
-    pub request: IndexedSignRequest,
+    pub request: Arc<IndexedSignRequest>,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
@@ -21,9 +21,6 @@ pub struct SignState {
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
     /// be cleared when `highest_seen_round` changes. One slot per sender.
     pub buffered_messages: HashMap<Participant, SignPositMessage>,
-    /// When Some, another group is already generating this signature.
-    /// The timestamp is when proposing can be resumed.
-    pub pause_proposing_until: Option<std::time::Instant>,
     /// Shared with `SignEntry` so a respawn resumes at the round it left off;
     /// peers rely on our rounds never going down.
     carried_round: Arc<AtomicUsize>,
@@ -31,7 +28,7 @@ pub struct SignState {
 
 impl SignState {
     pub fn new(
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         mesh_state: watch::Receiver<MeshState>,
         carried_round: Arc<AtomicUsize>,
     ) -> Self {
@@ -43,7 +40,6 @@ impl SignState {
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
-            pause_proposing_until: None,
             carried_round,
         }
     }
@@ -153,7 +149,7 @@ mod tests {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
-        let mut state = SignState::new(request(), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(Arc::new(request()), mesh_rx.clone(), Arc::clone(&carried));
         state.reorganize("test");
         state.highest_seen_round = 9;
         state.reorganize("test");
@@ -161,7 +157,7 @@ mod tests {
 
         // The task is aborted and a new incarnation takes over.
         drop(state);
-        let respawned = SignState::new(request(), mesh_rx, carried);
+        let respawned = SignState::new(Arc::new(request()), mesh_rx, carried);
         assert_eq!(respawned.round(), 9);
     }
 }

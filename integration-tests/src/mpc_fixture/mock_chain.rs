@@ -45,7 +45,7 @@ impl MockChain {
         let events: Vec<ChainEvent> = requests
             .iter()
             .map(|r| ChainEvent::SignRequest {
-                request: r.clone(),
+                request: Arc::new(r.clone()),
                 block_timestamp: None,
             })
             .collect();

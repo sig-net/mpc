@@ -5,6 +5,7 @@ pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
+pub mod publish_failover;
 pub mod request;
 pub mod signature;
 pub mod state;
@@ -63,6 +64,14 @@ impl Drop for MpcSignProtocol {
 /// self-governing methods of the MPC network.
 pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    /// Returns candidate information and admission votes for `account_id`.
+    fn candidate_info(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send;
 
     fn vote_reshared(
         &self,

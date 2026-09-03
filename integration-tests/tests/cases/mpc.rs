@@ -1,22 +1,17 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
-use integration_tests::mpc_fixture::message_collector::CollectMessages;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::message::SendMessage;
-use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::Message;
 use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{Chain, IndexedSignRequest, SignCommand, SignId};
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 use test_log::test;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
@@ -287,12 +282,12 @@ async fn test_sign_request_during_resharing() {
 }
 
 fn sign_request(seed: u8) -> SignCommand {
-    SignCommand::Request(IndexedSignRequest::sign(
+    SignCommand::Request(Arc::new(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
         super::helpers::test_sign_arg(seed),
         Chain::NEAR,
         0,
-    ))
+    )))
 }
 
 /// Drive the network through a threshold-change resharing via the real
@@ -804,20 +799,16 @@ async fn test_sign_contention_5_nodes() {
 /// to keep per owner, then filters all nodes to that consistent set.
 /// Panics if any owner has fewer than `n` artifacts.
 fn truncate_per_owner<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
-    >,
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
     n: usize,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
     use std::collections::BTreeSet;
 
     // Determine which IDs to keep per owner using the first node's ordering.
-    let mut keep_ids_per_owner: BTreeMap<cait_sith::protocol::Participant, BTreeSet<A::Id>> =
-        BTreeMap::new();
+    let mut keep_ids_per_owner: BTreeMap<Participant, BTreeSet<A::Id>> = BTreeMap::new();
     if let Some((first_node, first_owners)) = data.iter().next() {
         for (owner, artifacts) in first_owners {
             assert!(
@@ -848,11 +839,8 @@ where
 
 /// Filter artifact data to keep only artifacts that exist on ALL nodes.
 fn filter_artifacts_on_all_nodes<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
-    >,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
@@ -1157,187 +1145,6 @@ async fn test_sign_missing_presignature_after_posits() {
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
     );
-}
-
-/// Verify that nodes that are not selected as participants for a signature
-/// generation pause after receiving enough AlreadyGenerating rejections.
-///
-/// Setup:
-/// - Nodes 0 and 1 enter the Generating phase together, messages are gated to freeze their progress
-/// - Node 2 is excluded, one ORGANIZE_POSIT_TIMEOUT later, it tries to be a proposer
-/// - Nodes 0 and 1 reply with AlreadyGenerating.
-/// - The gate is released, signature messages flow, and the signature completes
-/// - Assertion: AlreadyGenerating have been sent
-/// - Continue and observe node 2 not trying to be a proposer again until
-///   `signature_timeout_ms` has passed.
-#[test(tokio::test(flavor = "multi_thread"))]
-async fn test_non_participants_pause_posits() {
-    /// Observer struct just for this test
-    struct Tracker {
-        target: Participant,
-        already_generating_received: Arc<AtomicUsize>,
-        proposer_attempts: Arc<AtomicUsize>,
-    }
-    impl CollectMessages for Tracker {
-        fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            let SendMessage {
-                message, from, to, ..
-            } = msg;
-            if *to == self.target {
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(
-                        posit_msg.action,
-                        PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
-                    ) {
-                        self.already_generating_received
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-            if *from == self.target {
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(posit_msg.action, PositAction::Propose) {
-                        self.proposer_attempts.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-        fn print_summary(&self) {}
-    }
-
-    let gate_released = Arc::new(AtomicBool::new(false));
-    let gate_0 = Arc::clone(&gate_released);
-    let gate_1 = Arc::clone(&gate_released);
-    let already_gen_count = Arc::new(AtomicUsize::new(0));
-    let node_2_propose_count = Arc::new(AtomicUsize::new(0));
-    let tracker = Tracker {
-        target: Participant::from(2),
-        already_generating_received: Arc::clone(&already_gen_count),
-        proposer_attempts: Arc::clone(&node_2_propose_count),
-    };
-    let signature_timeout_ms = 16_000;
-
-    let network = MpcFixtureBuilder::new(3, 2)
-        .only_generate_signatures()
-        .with_signature_timeout_ms(signature_timeout_ms)
-        .with_outgoing_message_filter(
-            // Node 0: Hold signature messages until the gate is released.
-            0,
-            Box::new(move |msg: &SendMessage| {
-                let SendMessage { message, .. } = msg;
-                if matches!(message, Message::Signature(_)) {
-                    while !gate_0.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-                true
-            }),
-        )
-        .with_outgoing_message_filter(
-            // Node 1: Hold signature messages until the gate is released.
-            1,
-            Box::new(move |msg: &SendMessage| {
-                let SendMessage { message, .. } = msg;
-                if matches!(message, Message::Signature(_)) {
-                    while !gate_1.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-                true
-            }),
-        )
-        .with_outgoing_message_filter(
-            // Node 2: receives a PROPOSE from node 1 but we drop the ACCEPT, so node 2 is excluded from the signature.
-            2,
-            Box::new(move |msg: &SendMessage| {
-                let SendMessage { message, .. } = msg;
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(posit_msg.action, PositAction::Accept) {
-                        return false;
-                    }
-                }
-                true
-            }),
-        )
-        .with_message_collector(Arc::new(Mutex::new(tracker)))
-        .build()
-        .await;
-
-    // For seed 0, SHA256([0,0,0,0])[0] = 0xdf = 223, and 223 % 3 = 1, so:
-    //   round 0 -> participant 1 (proposes immediately, generates with node 0)
-    //   round 1 -> participant 2 (target: excluded from round-0, proposes after 1 timeout)
-    //   round 2 -> participant 0
-    // Node 2's Accept to node 1's Propose is dropped, so generation is {0, 1}.
-    // After ORGANIZE_POSIT_TIMEOUT, node 2 becomes round-1 proposer and
-    // receives AlreadyGenerating from nodes 0 and 1.
-    // Send the request to all three nodes.
-    network.broadcast(&sign_request(0)).await;
-
-    // Wait for node 2 to propose once, sending a message to both other nodes.
-    // Should happen after ~1 ORGANIZE_POSIT_TIMEOUT (5s for tests)
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let count = node_2_propose_count.load(Ordering::Relaxed);
-            if count >= 2 {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("node 2 never proposed in the first place");
-    let first_propose = Instant::now();
-
-    // Give some time for the PROPOSE to be rejected.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Release the gate: Signature messages between 0 and 1 are forwarded and
-    // they can complete the signature. The AlreadyGenerating replies are now
-    // in the outbox queue (ahead of the post-gate signature traffic), so they
-    // will be forwarded and counted before the signature finishes.
-    gate_released.store(true, Ordering::Release);
-
-    let actions = network.assert_actions(1, Duration::from_secs(20)).await;
-
-    assert_eq!(actions.len(), 1);
-    assert!(
-        actions
-            .iter()
-            .next()
-            .unwrap()
-            .contains("RpcAction::Publish"),
-        "expected a Publish action"
-    );
-
-    let count = already_gen_count.load(Ordering::Relaxed);
-    assert!(
-        count >= 1,
-        "expected AlreadyGenerating to be sent to node 2, but count was {count}"
-    );
-
-    // Node 2 still hasn't seen the signature. Wait until it proposes again:
-    // one generation timeout for the pause to lapse, plus a few rounds for
-    // node 2's turn in the rotation. Generous rather than exact — a round can
-    // outlast ORGANIZE_POSIT_TIMEOUT if it blocks on the mesh gate or reaches
-    // Generating.
-    let organize_timeout = mpc_node::protocol::request::organize_posit_timeout();
-    let second_wait = Duration::from_millis(signature_timeout_ms) + 4 * organize_timeout;
-    tokio::time::timeout(second_wait, async {
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let count = node_2_propose_count.load(Ordering::Relaxed);
-            if count > 2 {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("node 2 never proposed again");
-
-    assert!(
-        first_propose.elapsed().as_millis() as u64 > signature_timeout_ms,
-        "node 2 started proposing again too early"
-    )
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]

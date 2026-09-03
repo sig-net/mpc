@@ -1,9 +1,9 @@
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use reqwest::Url;
 use std::fmt;
 use std::time::Duration;
+use url::Url;
 
 /// Timeouts and retry budget for the read-side Ethereum RPC client.
 #[derive(Clone, Debug)]
@@ -65,8 +65,11 @@ impl GasConfig {
     /// Gas limit from a dynamic `eth_estimateGas` result: buffered, then
     /// clamped to `[base_gas_limit, max_gas_limit]`.
     pub fn clamp_estimate(&self, estimate: u64) -> u64 {
-        let buffered = estimate + (estimate / 100).saturating_mul(self.estimation_buffer_percent);
-        buffered.min(self.max_gas_limit).max(self.base_gas_limit)
+        let buffer = (estimate / 100).saturating_mul(self.estimation_buffer_percent);
+        estimate
+            .saturating_add(buffer)
+            .min(self.max_gas_limit)
+            .max(self.base_gas_limit)
     }
 
     /// Static fallback heuristic when dynamic estimation fails.
@@ -211,5 +214,26 @@ impl fmt::Debug for EthConfig {
             .field("publisher", &self.publisher)
             .field("indexer", &self.indexer)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_estimate_buffers_then_clamps() {
+        let gas = GasConfig::default();
+        assert_eq!(gas.clamp_estimate(100_000), 120_000);
+        assert_eq!(gas.clamp_estimate(99_999), 119_979); // buffer floors the division
+        assert_eq!(gas.clamp_estimate(0), gas.base_gas_limit);
+        assert_eq!(gas.clamp_estimate(15_000_000), gas.max_gas_limit);
+    }
+
+    #[test]
+    fn clamp_estimate_saturates_on_huge_estimate() {
+        let gas = GasConfig::default();
+        // u64::MAX + 20% would overflow, but saturating_add() prevents it
+        assert_eq!(gas.clamp_estimate(u64::MAX), gas.max_gas_limit);
     }
 }

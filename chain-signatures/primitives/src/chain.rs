@@ -4,6 +4,7 @@ use crate::Chain;
 pub enum SerDeserFormat {
     Borsh,
     Abi,
+    Fab,
 }
 
 /// Node-side per-chain configuration (intervals, finality expectations,
@@ -50,7 +51,10 @@ impl ChainConfig for Chain {
         match self {
             Chain::NEAR => 3,
             Chain::Ethereum => 30 * 60,
-            Chain::Solana => 3,
+            // The indexer waits for finalized (supermajority-epoch) blocks: the
+            // finalized pointer advances in ~32-slot batches, trailing the tip
+            // by up to ~13s.
+            Chain::Solana => 15,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
             Chain::Canton => 15,
@@ -65,9 +69,8 @@ impl ChainConfig for Chain {
 
     fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
-            // TODO: Midnight's response format is still under discussion and may
-            // move off Abi.
-            Chain::Canton | Chain::Midnight => SerDeserFormat::Abi,
+            Chain::Midnight => SerDeserFormat::Fab,
+            Chain::Canton => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }

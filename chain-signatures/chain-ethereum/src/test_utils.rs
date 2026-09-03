@@ -5,8 +5,8 @@ use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
 use alloy::rpc::types::{Block, Log};
-use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{
+    utils::retry::{RetryConfig, SharedBackoff},
     ChainTelemetry, ExtractionFailureKind, MockStateManager, NoopChainTelemetry,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +25,15 @@ const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
+    create_test_ethereum_client_with_backoff(url, SharedBackoff::new()).await
+}
+
+/// Like [`create_test_ethereum_client`] but injecting a caller-owned shared
+/// backoff gate (e.g. to assert 429-gating behavior across calls).
+pub async fn create_test_ethereum_client_with_backoff(
+    url: &str,
+    shared_backoff: SharedBackoff,
+) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
     let retry_strategy = RetryConfig {
         min_delay: Duration::from_millis(1),
@@ -49,7 +58,7 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
         indexer: Default::default(),
     };
 
-    EthereumClient::new_with_strategy(eth, retry_strategy)
+    EthereumClient::new_with_strategy(eth, retry_strategy, shared_backoff)
         .await
         .unwrap()
 }
@@ -77,7 +86,7 @@ impl TestIndexerBuilder {
                 network: "sepolia".to_string(),
                 helios_data_path: "/tmp/helios-test".to_string(),
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
-                optimistic_requests: true,
+                optimistic_requests: false,
                 light_client: false,
                 rpc: Default::default(),
                 gas: Default::default(),
@@ -115,6 +124,18 @@ impl TestIndexerBuilder {
             client,
             Address::ZERO,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestIndexerBuilder;
+
+    #[test]
+    fn builder_defaults_to_finalized_requests() {
+        let builder = TestIndexerBuilder::new("http://127.0.0.1:1");
+
+        assert!(!builder.eth.optimistic_requests);
     }
 }
 

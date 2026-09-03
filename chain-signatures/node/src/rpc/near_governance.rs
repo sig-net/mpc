@@ -49,7 +49,7 @@ pub struct NearGovernanceClient {
 
 impl NearGovernanceClient {
     pub fn new(
-        near_rpc: &str,
+        client: NearFetchClient,
         my_addr: &Url,
         sign_sk: &near_crypto::SecretKey,
         cipher_sk: &hpke::SecretKey,
@@ -57,7 +57,7 @@ impl NearGovernanceClient {
         signer: InMemorySigner,
     ) -> Self {
         Self {
-            client: NearFetchClient::new(near_rpc),
+            client,
             contract_id: contract_id.clone(),
             my_addr: my_addr.clone(),
             signer,
@@ -172,6 +172,31 @@ impl Governance for NearGovernanceClient {
                         .await?
                         .into_result()?;
                     Ok(())
+                }
+            )
+        }
+    }
+
+    fn candidate_info(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send {
+        let account_id = account_id.clone();
+        async move {
+            retry_rpc!(
+                NEAR_GOVERNANCE_TIMEOUT,
+                NEAR_GOVERNANCE_RETRY,
+                "governance_candidate_info",
+                {
+                    let candidacy = self
+                        .client
+                        .view(&self.contract_id, "candidate_info")
+                        .args_json(json!({ "account_id": account_id }))
+                        .await?
+                        .json()?;
+                    Ok(candidacy)
                 }
             )
         }

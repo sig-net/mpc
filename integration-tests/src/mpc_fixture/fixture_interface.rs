@@ -18,6 +18,7 @@ use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -59,6 +60,9 @@ pub struct SharedOutput {
     /// Signaled whenever an RPC action is recorded, so `wait_for_actions`
     /// reacts on the event instead of polling.
     pub actions_changed: Arc<Notify>,
+    /// Publishes across all nodes. `rpc_actions` is a set keyed by the request,
+    /// so it cannot tell one node publishing from several.
+    pub publishes: Arc<AtomicUsize>,
 }
 
 impl MpcFixture {
@@ -149,8 +153,6 @@ impl MpcFixture {
             // the threshold.
             threshold: resharing.new_threshold,
             public_key: resharing.public_key,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold_votes: Default::default(),
         };
@@ -177,6 +179,11 @@ impl MpcFixture {
         }
     }
 
+    /// How many publishes every node has made in total.
+    pub fn publishes(&self) -> usize {
+        self.output.publishes.load(Ordering::Relaxed)
+    }
+
     pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
         loop {
             let actions = self.output.rpc_actions.lock().await;
@@ -188,6 +195,32 @@ impl MpcFixture {
             drop(actions);
 
             // Wait for a notification that the RPC actions changed
+            self.output.actions_changed.notified().await;
+        }
+    }
+
+    /// Like [`Self::wait_for_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn wait_for_actions_matching(
+        &self,
+        threshold: usize,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        loop {
+            let matching: Vec<String> = self
+                .output
+                .rpc_actions
+                .lock()
+                .await
+                .iter()
+                .filter(|action| predicate(action.as_str()))
+                .cloned()
+                .collect();
+
+            if matching.len() >= threshold {
+                return matching;
+            }
+
             self.output.actions_changed.notified().await;
         }
     }
@@ -219,6 +252,33 @@ impl MpcFixture {
             self.print_actions().await;
         }
         result.expect("should produce enough signatures")
+    }
+
+    /// Like [`Self::assert_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn assert_actions_matching(
+        &self,
+        threshold: usize,
+        timeout: Duration,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let result = tokio::time::timeout(
+            timeout,
+            self.wait_for_actions_matching(threshold, &predicate),
+        )
+        .await;
+        if result.is_err() {
+            self.print_actions().await;
+        }
+        result.unwrap_or_else(|_| panic!("should produce {threshold} matching actions"))
+    }
+
+    /// Wait for `threshold` `RpcAction::Publish` actions.
+    pub async fn assert_publish_actions(&self, threshold: usize, timeout: Duration) -> Vec<String> {
+        self.assert_actions_matching(threshold, timeout, |action| {
+            action.contains("RpcAction::Publish")
+        })
+        .await
     }
 
     /// Send the same `SignCommand` to every node's `sign_tx`.
@@ -270,6 +330,23 @@ impl MpcFixture {
             }
         }
     }
+
+    /// Advance every node's stream by one empty block.
+    ///
+    /// Real indexers emit `ChainEvent::Block` whether or not the block held
+    /// anything, and work riding the block stream, like the publish failover sweep,
+    /// only runs when one arrives. Tests waiting on such work must keep the chain
+    /// moving rather than only sleeping.
+    pub async fn tick_block(&self, chain: Chain) {
+        for node in &self.nodes {
+            let stream = node
+                .mock_streams
+                .get(&chain)
+                .expect("must have mock stream configured");
+            stream.prepare_block_of_events(&[]).await;
+            stream.progress_block_height(1).await;
+        }
+    }
 }
 
 impl MpcFixtureNode {
@@ -313,7 +390,7 @@ impl MpcFixtureNode {
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: cait_sith::protocol::Participant,
+        from: Participant,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
@@ -368,7 +445,7 @@ impl MpcFixtureNode {
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
         &self,
-        peer: cait_sith::protocol::Participant,
+        peer: Participant,
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {
@@ -426,6 +503,7 @@ impl SharedOutput {
             msg_log: Arc::new(Mutex::new(M::default())),
             rpc_actions: Arc::new(Mutex::new(HashSet::new())),
             actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }
@@ -436,6 +514,7 @@ impl Default for SharedOutput {
             msg_log: Arc::new(Mutex::new(MessagePrinter)),
             rpc_actions: Default::default(),
             actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }

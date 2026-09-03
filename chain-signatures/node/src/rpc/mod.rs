@@ -1,16 +1,15 @@
-mod hydration;
 mod near_governance;
 
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use crate::sign_bidirectional::PublishState;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-// TODO: move clients elsewhere
-pub use hydration::HydrationClient;
+pub use mpc_chain_hydration::HydrationClient;
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
@@ -22,7 +21,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -36,7 +35,7 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 // Publish retry constants
-const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
+pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
 /// The maximum time to wait for a checkpoint vote to complete before retrying
@@ -47,6 +46,26 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
     max_delay: PUBLISH_MAX_DELAY,
     jitter: true,
 };
+
+/// Which response a publish carries. The two legs of a bidirectional request
+/// share a sign id, so this is what keeps the dispatch loop's in-flight set from
+/// treating a second leg as a duplicate of its first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PublishKind {
+    /// The signed transaction (an ordinary request's only response, or leg 1).
+    Response,
+    /// The signed execution outcome (leg 2).
+    BidirectionalResponse,
+}
+
+impl PublishKind {
+    fn of(kind: &SignKind) -> Self {
+        match kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => PublishKind::Response,
+            SignKind::RespondBidirectional(_) => PublishKind::BidirectionalResponse,
+        }
+    }
+}
 
 // `PublishAction` makes this enum relatively large, but boxing it is not worth
 // the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
@@ -102,7 +121,7 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
@@ -124,8 +143,7 @@ impl RpcChannel {
 
     pub fn publish_signature(
         &self,
-        public_key: mpc_crypto::PublicKey,
-        request: IndexedSignRequest,
+        request: Arc<IndexedSignRequest>,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
@@ -134,7 +152,6 @@ impl RpcChannel {
             if let Err(err) = rpc
                 .tx
                 .send(RpcAction::Publish(PublishAction {
-                    public_key,
                     request,
                     signature,
                     participants,
@@ -145,6 +162,10 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
+    }
+
+    pub fn publish_with_state(&self, request: Arc<IndexedSignRequest>, publish: &PublishState) {
+        self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 }
 
@@ -194,8 +215,6 @@ impl ContractStateWatcher {
                 epoch: 0,
                 public_key,
                 participants,
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
                 threshold,
                 threshold_votes: Default::default(),
@@ -445,8 +464,10 @@ impl RpcExecutor {
     ) {
         let mut checkpoint_cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
         let mut checkpoint_abort_times = HashMap::<Chain, Instant>::new();
-        // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
-        let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
+        // Keep track of in-flight publish requests to avoid duplicate publishes.
+        // Keyed by publish kind too: the two legs of a bidirectional request share
+        // a sign id, and a first leg still retrying must not block its second.
+        let in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -462,7 +483,8 @@ impl RpcExecutor {
                     };
 
                     let sign_id = action.request.id;
-                    if !in_flight.insert(sign_id) {
+                    let key = (chain, sign_id, PublishKind::of(&action.request.kind));
+                    if !in_flight.insert(key) {
                         tracing::info!(
                             ?sign_id,
                             ?chain,
@@ -474,10 +496,7 @@ impl RpcExecutor {
                     let publisher = publisher.clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
-                        let _guard = InFlightGuard {
-                            in_flight,
-                            id: sign_id,
-                        };
+                        let _guard = InFlightGuard { in_flight, id: key };
                         execute_publish(publisher, action).await;
                     });
                 }
@@ -594,8 +613,8 @@ async fn update_contract_data(
 /// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
 /// including during a panic unwind, so the slot is always freed for re-publish.
 struct InFlightGuard {
-    in_flight: Arc<DashSet<SignId>>,
-    id: SignId,
+    in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>>,
+    id: (Chain, SignId, PublishKind),
 }
 
 impl Drop for InFlightGuard {
@@ -714,7 +733,6 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
@@ -768,13 +786,11 @@ mod tests {
         );
         let governance = watcher.governance().unwrap();
 
-        let running = |epoch, join_votes| RunningContractState {
+        let running = |epoch, leave_votes| RunningContractState {
             epoch,
             public_key: k256::AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes,
-            leave_votes: Default::default(),
+            leave_votes,
             threshold: 1,
             threshold_votes: Default::default(),
         };
@@ -859,8 +875,6 @@ mod tests {
             epoch: 0,
             public_key: AffinePoint::default(),
             participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),
@@ -893,8 +907,6 @@ mod tests {
             epoch: 1,
             public_key: AffinePoint::default(),
             participants,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
             threshold: 2,
             threshold_votes: Default::default(),
@@ -1099,14 +1111,9 @@ mod tests {
         let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
         let my_addr = "http://127.0.0.1:3000".parse().unwrap();
         let contract_id: AccountId = "contract.testnet".parse().unwrap();
-        let near = NearGovernanceClient::new(
-            &server.url(),
-            &my_addr,
-            &sign_sk,
-            &cipher_sk,
-            &contract_id,
-            signer,
-        );
+        let near = near_fetch::Client::new(&server.url());
+        let near =
+            NearGovernanceClient::new(near, &my_addr, &sign_sk, &cipher_sk, &contract_id, signer);
 
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();

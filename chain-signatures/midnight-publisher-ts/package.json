@@ -1,0 +1,62 @@
+{
+  "name": "midnight-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Midnight respond publisher over a line-delimited stdio protocol: builds a serialized ledger Intent by running a respond circuit, and submits one by proving, balancing and posting it from the funding wallet. Mechanism only, never an authority.",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "midnight-publisher": "dist/main.js"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "lint": "eslint . --max-warnings=0 --concurrency=auto",
+    "lint:fix": "eslint . --fix --concurrency=auto",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "compile:real-stack-caller": "node devtools/real-stack/compile-caller.mjs",
+    "typecheck:real-stack": "tsc --noEmit -p tsconfig.real-stack.json",
+    "gen:initial-state": "tsx devtools/gen-initial-state.ts",
+    "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts"
+  },
+  "dependencies": {
+    "@effect/platform-node": "0.107.0",
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.7",
+    "@midnight-ntwrk/compact-js-node": "2.5.5-rc.7",
+    "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
+    "@midnight-ntwrk/platform-js": "3.0.0",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@sig-net/midnight-contract": "0.20.0-rc.1",
+    "@sig-net/midnight-contract-deploy": "0.20.0-rc.1",
+    "effect": "3.22.0",
+    "rxjs": "7.8.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@midnight-ntwrk/midnight-js": "5.0.0-beta.6",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.6",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.6",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.6",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.6",
+    "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
+    "@sig-net/midnight": "0.20.0-rc.1",
+    "@types/node": "^22.20.1",
+    "@vitest/eslint-plugin": "^1.6.26",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "ethers": "6.17.0",
+    "prettier": "3.9.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.66.0",
+    "vitest": "^3.0.0"
+  }
+}

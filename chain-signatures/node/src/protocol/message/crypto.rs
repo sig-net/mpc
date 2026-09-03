@@ -128,7 +128,7 @@ mod tests {
         let associated_data = b"";
         let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
-            from: cait_sith::protocol::Participant::from(0),
+            from: Participant::from(0),
             data: vec![],
         });
 

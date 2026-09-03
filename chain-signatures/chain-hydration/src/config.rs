@@ -1,4 +1,9 @@
+use sp_core::sr25519;
+use sp_core::Pair as _;
+use sp_runtime::traits::{IdentifyAccount, Verify};
+use sp_runtime::MultiSignature as SpMultiSignature;
 use std::fmt;
+use subxt::config::substrate::AccountId32;
 
 #[derive(Clone)]
 pub struct HydrationConfig {
@@ -11,12 +16,6 @@ pub struct HydrationConfig {
 impl HydrationConfig {
     /// Substrate account address derived from the configured signer URI.
     pub fn signer_address(&self) -> Option<String> {
-        use sp_core::sr25519;
-        use sp_core::Pair as _;
-        use sp_runtime::traits::{IdentifyAccount, Verify};
-        use sp_runtime::MultiSignature as SpMultiSignature;
-        use subxt::config::substrate::AccountId32;
-
         let pair = sr25519::Pair::from_string(&self.signer_uri, None).ok()?;
         let account_id = <SpMultiSignature as Verify>::Signer::from(pair.public()).into_account();
         Some(AccountId32(account_id.into()).to_string())

@@ -11,6 +11,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 axum = "0.7.9"
 axum-extra = "0.9.6"
+backon.workspace = true
 chrono = "0.4.24"
 dashmap = "6.1"
 google-datastore1 = "=5.0.4"
@@ -64,12 +65,11 @@ serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 futures-util.workspace = true
-parity-scale-codec.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
@@ -84,6 +84,7 @@ mpc-chain-canton.workspace = true
 mpc-chain-ethereum.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
+mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
