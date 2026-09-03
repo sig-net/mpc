@@ -5,7 +5,7 @@ use crate::node_client::NodeClient;
 use crate::stream::StreamContext;
 use crate::types::CheckpointWatcher;
 
-use mpc_primitives::{Chain, SignCommand};
+use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
 use tokio::sync::watch;
 
@@ -55,36 +55,12 @@ impl StreamReactor {
 
     /// Aligns this stream's backlog with network consensus, regressing if divergent.
     pub async fn align_backlog_with_consensus(&mut self) -> Result<Option<u64>, CheckpointError> {
-        let Some(checkpoint_digest) = self
-            .ctx
-            .checkpoints_rx
-            .borrow_and_update()
-            .as_ref()
-            .cloned()
-        else {
+        let Some(checkpoint_digest) = self.current_consensus_digest() else {
             return Ok(None);
         };
 
-        match self
-            .ctx
-            .backlog
-            .checkpoints()
-            .confirm(self.chain, checkpoint_digest.digest)
-            .await
-        {
-            Ok(found) => {
-                if found {
-                    return Ok(None);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    chain = ?self.chain,
-                    %err,
-                    "transient storage error confirming consensus checkpoint; retrying later"
-                );
-                return Err(err);
-            }
+        if self.confirm_consensus(checkpoint_digest.digest).await? {
+            return Ok(None);
         }
 
         tracing::warn!(
@@ -92,14 +68,13 @@ impl StreamReactor {
             ?checkpoint_digest.digest,
             "Consensus checkpoint mismatch/divergence detected: triggering regression"
         );
-        let reset_checkpoint = Checkpoint::reset(self.chain, checkpoint_digest.height);
-        let fetched_checkpoint = if reset_checkpoint.digest() == checkpoint_digest.digest {
+        let fetched_checkpoint = if self.is_consensus_reset(&checkpoint_digest) {
             tracing::warn!(
                 chain = ?self.chain,
                 height = checkpoint_digest.height,
                 "consensus checkpoint was reset; rebuilding it locally"
             );
-            reset_checkpoint
+            Checkpoint::reset(self.chain, checkpoint_digest.height)
         } else {
             let my_account_id = self.ctx.contract_watcher.account_id().clone();
             let Some(checkpoint) = find_consensus_checkpoint(
@@ -161,64 +136,77 @@ impl StreamReactor {
     /// retried on the next checkpoint change. Returns `false` when the backlog is
     /// aligned (no regression).
     pub async fn detect_regression(&mut self) -> bool {
-        let Some(checkpoint_digest) = self
-            .ctx
-            .checkpoints_rx
-            .borrow_and_update()
-            .as_ref()
-            .cloned()
-        else {
+        let Some(checkpoint_digest) = self.current_consensus_digest() else {
             return false;
         };
 
         // A node holding no checkpoint still has to re-anchor its cursor on a
         // reset. Any other digest is unmatchable without one to compare against.
-        let is_reset = Checkpoint::reset(self.chain, checkpoint_digest.height).digest()
-            == checkpoint_digest.digest;
-        if !is_reset {
-            match self.ctx.backlog.checkpoints().latest(self.chain).await {
-                Ok(None) => {
-                    tracing::info!(chain = ?self.chain, "no local checkpoint; skipping regression check");
-                    return false;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        chain = ?self.chain,
-                        %err,
-                        "transient storage error checking latest checkpoint; retrying on next change"
-                    );
-                    return false;
-                }
-                Ok(Some(_)) => {}
-            }
+        if !self.is_consensus_reset(&checkpoint_digest) && !self.has_local_checkpoint().await {
+            return false;
         }
 
         // A consensus digest can match either the latest checkpoint or a retained
         // pending checkpoint while this node is ahead of consensus.
-        match self
-            .ctx
-            .backlog
-            .checkpoints()
-            .confirm(self.chain, checkpoint_digest.digest)
-            .await
-        {
-            Ok(found) => {
-                if found {
-                    return false;
-                }
+        match self.confirm_consensus(checkpoint_digest.digest).await {
+            Ok(found) => !found,
+            Err(_) => false,
+        }
+    }
+
+    /// Fetches the latest consensus checkpoint digest from the watch channel.
+    fn current_consensus_digest(&mut self) -> Option<CheckpointDigest> {
+        self.ctx
+            .checkpoints_rx
+            .borrow_and_update()
+            .as_ref()
+            .cloned()
+    }
+
+    /// Checks if a consensus digest represents a canonical genesis/reset checkpoint.
+    fn is_consensus_reset(&self, digest: &CheckpointDigest) -> bool {
+        Checkpoint::reset(self.chain, digest.height).digest() == digest.digest
+    }
+
+    /// Checks if this node holds a local checkpoint, logging any transient storage error.
+    async fn has_local_checkpoint(&self) -> bool {
+        match self.ctx.backlog.checkpoints().latest(self.chain).await {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                tracing::info!(chain = ?self.chain, "no local checkpoint; skipping regression check");
+                false
             }
             Err(err) => {
                 tracing::warn!(
                     chain = ?self.chain,
                     %err,
-                    "transient storage error confirming checkpoint; retrying on next change"
+                    "transient storage error checking latest checkpoint; retrying on next change"
                 );
-                return false;
+                false
             }
         }
+    }
 
-        // No match → regression detected.
-        true
+    /// Checks and confirms the consensus digest against local checkpoints (latest or pending).
+    /// Returns `Ok(true)` if confirmed, `Ok(false)` if divergent, or `Err(err)` on storage failure.
+    async fn confirm_consensus(&self, digest: [u8; 32]) -> Result<bool, CheckpointError> {
+        match self
+            .ctx
+            .backlog
+            .checkpoints()
+            .confirm(self.chain, digest)
+            .await
+        {
+            Ok(found) => Ok(found),
+            Err(err) => {
+                tracing::warn!(
+                    chain = ?self.chain,
+                    %err,
+                    "transient storage error confirming consensus checkpoint; retrying later"
+                );
+                Err(err)
+            }
+        }
     }
 
     /// Waits for a consensus checkpoint digest change, then checks for regression.
