@@ -620,14 +620,11 @@ impl Backlog {
         Ok(Some(checkpoint))
     }
 
-    /// Replace the local backlog with a consensus checkpoint after divergence.
-    async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
-        // Decode the checkpoint before the durable write so a malformed peer
-        // checkpoint cannot leave storage regressed while memory stays put.
-        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+    /// Replace the local backlog with a consensus checkpoint after divergence:
+    /// resets durable storage to consensus, zeroes pending counts, and restores in-memory state.
+    pub async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         self.checkpoints.regress(&checkpoint).await?;
-        self.apply_checkpoint(checkpoint, restored).await;
-        Ok(())
+        self.recover_by_checkpoint(checkpoint).await
     }
 
     /// Get the latest checkpoint for a specific chain.
@@ -659,22 +656,16 @@ impl Backlog {
         self.checkpoints.find(chain, digest).await
     }
 
-    /// Recover backlog state from a checkpoint.
-    /// This is called when a node restarts or when it needs to align/regress to consensus.
+    /// Recover backlog state from a checkpoint into memory.
+    /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         let restored = PendingRequests::from_checkpoint(&checkpoint)?;
-        self.apply_checkpoint(checkpoint, restored).await;
-        Ok(())
-    }
-
-    /// Apply an already-decoded checkpoint to the backlog.
-    async fn apply_checkpoint(&self, checkpoint: Checkpoint, restored: PendingRequests) {
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
             ?chain,
             height = checkpoint_height,
-            num_pending = checkpoint.pending_requests.len(),
+            num_pending = checkpoint.len(),
             "recovering backlog to checkpoint"
         );
 
@@ -711,13 +702,15 @@ impl Backlog {
                 .retain(|_, watcher| watcher.tx.source_chain != chain);
         }
 
-        // now repopulate our execution watchers
+        // Repopulate our execution watchers
         for (sign_id, entry) in execution_to_watch {
             // Only restore execution watchers for bidirectional transactions
             if let Some(tx) = entry.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
+
+        Ok(())
     }
 }
 
