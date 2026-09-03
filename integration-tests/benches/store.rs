@@ -272,6 +272,7 @@ fn into_contract_participants(
                             match info.sign_pk.key_type() {
                                 near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
                                 near_crypto::KeyType::SECP256K1 => near_sdk::CurveType::SECP256K1,
+                                _ => unimplemented!(),
                             },
                             info.sign_pk.key_data().to_vec(),
                         )

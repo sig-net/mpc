@@ -3,7 +3,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::CheckpointDigest;
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -93,7 +93,7 @@ impl NearGovernanceClient {
     /// attempt, so no per-call timeout is needed here.
     pub async fn vote_checkpoint(
         &self,
-        checkpoint: &ConsensusCheckpointDigest,
+        checkpoint: &CheckpointDigest,
     ) -> anyhow::Result<CheckpointVoteOutcome> {
         let transaction = self
             .client

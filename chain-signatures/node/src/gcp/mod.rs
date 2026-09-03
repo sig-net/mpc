@@ -83,8 +83,7 @@ impl GcpService {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let project_id = storage_options.gcp_project_id.clone();
-        let secret_manager;
-        if storage_options.env == "local-test" {
+        let secret_manager = if storage_options.env == "local-test" {
             let client = hyper::Client::builder().build(
                 hyper_rustls::HttpsConnectorBuilder::new()
                     .with_native_roots()
@@ -97,7 +96,7 @@ impl GcpService {
             let authenticator = AccessTokenAuthenticator::builder("TOKEN".to_string())
                 .build()
                 .await?;
-            secret_manager = SecretManager::new(client.clone(), authenticator.clone());
+            SecretManager::new(client.clone(), authenticator.clone())
         } else {
             // restring client to use https in production
             let client = hyper::Client::builder().build(
@@ -115,8 +114,8 @@ impl GcpService {
                 ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await?,
                 ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await?,
             };
-            secret_manager = SecretManager::new(client.clone(), authenticator.clone());
-        }
+            SecretManager::new(client.clone(), authenticator.clone())
+        };
 
         Ok(Self {
             account_id: account_id.clone(),
