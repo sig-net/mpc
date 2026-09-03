@@ -230,18 +230,10 @@ impl StreamReactor {
                     if changed.is_err() {
                         return None;
                     }
-                    let checkpoint_digest = self.ctx.checkpoints_rx.borrow_and_update();
-                    match &*checkpoint_digest {
-                        None => {
-                            tracing::info!(chain = ?self.chain, "consensus digest is empty, aborting...");
-                            return None;
-                        }
-                        Some(cp) => {
-                            if cp.digest != target_digest {
-                                tracing::info!(chain = ?self.chain, "consensus digest changed during wait, aborting...");
-                                return None;
-                            }
-                        }
+                    let digest = self.ctx.checkpoints_rx.borrow_and_update();
+                    if !digest.as_ref().is_some_and(|cp| cp.digest == target_digest) {
+                        tracing::info!(chain = ?self.chain, "consensus digest changed during wait, aborting...");
+                        return None;
                     }
                 }
                 changed = self.ctx.mesh_state.changed() => {
