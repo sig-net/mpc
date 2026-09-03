@@ -30,7 +30,6 @@ use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
-use mpc_node::gcp::GcpService;
 use mpc_node::web::CheckpointResponse;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::Chain;
@@ -175,15 +174,6 @@ impl Nodes {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         Ok(())
-    }
-
-    pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
-        let mut gcp_services = Vec::new();
-        for node in &self.nodes {
-            gcp_services
-                .push(GcpService::init(node.account.id(), &self.ctx.storage_options).await?);
-        }
-        Ok(gcp_services)
     }
 
     pub fn proxy_name_for_node(&self, id: usize) -> String {

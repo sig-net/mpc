@@ -12,7 +12,6 @@ use google_secretmanager1::SecretManager;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
 
-use near_account_id::AccountId;
 
 pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
@@ -72,16 +71,11 @@ impl SecretManagerService {
 
 #[derive(Clone)]
 pub struct GcpService {
-    pub project_id: String,
     pub secret_manager: SecretManagerService,
-    pub account_id: AccountId,
 }
 
 impl GcpService {
-    pub async fn init(
-        account_id: &AccountId,
-        storage_options: &storage::Options,
-    ) -> anyhow::Result<Self> {
+    pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
         let project_id = storage_options.gcp_project_id.clone();
         let secret_manager;
         if storage_options.env == "local-test" {
@@ -119,12 +113,10 @@ impl GcpService {
         }
 
         Ok(Self {
-            account_id: account_id.clone(),
             secret_manager: SecretManagerService {
                 secret_manager,
-                project_id: project_id.clone(),
+                project_id,
             },
-            project_id,
         })
     }
 }

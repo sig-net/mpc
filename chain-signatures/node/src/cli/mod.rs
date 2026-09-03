@@ -710,7 +710,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(account_id, storage_options).await?;
+        let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
         let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
