@@ -120,7 +120,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .into_option()
         .ok_or_else(|| anyhow!("invalid R component in signature"))?;
 
-    let r_scalar = actions::x_coordinate::<k256::Secp256k1>(&big_r);
+    let r_scalar = mpc_crypto::x_coordinate(&big_r);
     let r_bytes = r_scalar.to_bytes();
 
     let mut s_bytes = [0u8; 32];
