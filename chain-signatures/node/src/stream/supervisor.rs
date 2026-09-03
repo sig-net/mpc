@@ -69,9 +69,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     }
 
     loop {
-        // Cleared before alignment, not after: checkpoint creation and publish
-        // failover must not act on a backlog being recovered or replayed into.
-        reactor.ctx.caught_up = false;
         if let Err(err) = reactor.align_to_consensus().await {
             tracing::error!(
                 %chain,
@@ -97,7 +94,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             tokio::select! {
                 // Gate dispatch on checkpoint capacity: when the cap is full the
                 // channel backs up and pauses the chain's `send().await`.
-                event = events_rx.recv(), if reactor.ctx.backlog.checkpoints().has_slot(chain) => {
+                event = events_rx.recv(), if reactor.has_checkpoint_slot() => {
                     let Some(event) = event else {
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down,

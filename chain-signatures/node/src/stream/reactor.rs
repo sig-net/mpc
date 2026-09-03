@@ -51,8 +51,17 @@ impl StreamReactor {
         )
     }
 
+    /// Checks if the stream backlog has capacity for another pending checkpoint.
+    pub fn has_checkpoint_slot(&self) -> bool {
+        self.ctx.backlog.checkpoints().has_slot(self.chain)
+    }
+
     /// Aligns this stream's backlog with network consensus, regressing if divergent.
     pub async fn align_to_consensus(&mut self) -> Result<Option<u64>, CheckpointError> {
+        // Cleared before alignment, not after: checkpoint creation and publish
+        // failover must not act on a backlog being recovered or replayed into.
+        self.ctx.caught_up = false;
+
         let Some(checkpoint_digest) = self.current_consensus_digest() else {
             return Ok(None);
         };
@@ -248,7 +257,10 @@ impl StreamReactor {
                     target_digest,
                 ) => {
                     let Some(checkpoint) = checkpoint else {
-                        tracing::warn!("all nodes do not have the checkpoint, retrying in 3 seconds");
+                        tracing::warn!(
+                            chain = ?self.chain,
+                            "all nodes do not have the checkpoint, retrying in 3 seconds"
+                        );
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
                     };
