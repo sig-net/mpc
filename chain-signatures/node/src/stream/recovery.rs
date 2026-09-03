@@ -32,11 +32,8 @@ pub(crate) async fn recover_backlog(
                 tracing::info!(
                     ?chain,
                     height = checkpoint.block_height,
-                    "loaded local checkpoint"
+                    "hydrated local checkpoint"
                 );
-                if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                    tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
-                }
             }
             Ok(None) => {
                 tracing::info!(?chain, "no local checkpoint found");

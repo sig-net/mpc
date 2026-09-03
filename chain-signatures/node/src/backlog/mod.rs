@@ -593,15 +593,15 @@ impl Backlog {
         self.checkpoints.confirm(chain, digest).await
     }
 
-    /// Hydrate checkpoint state from storage and return the newest local checkpoint.
+    /// Hydrate the backlog from storage: initializes the pending checkpoint counter
+    /// and recovers local backlog state from the latest durable checkpoint if one exists.
     pub async fn hydrate(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
-        self.checkpoints.pending_count(chain).await?;
-        Ok(self.checkpoints.latest(chain).await)
-    }
-
-    /// Refresh the pending checkpoint count from storage into the local counter.
-    pub async fn pending_count(&self, chain: Chain) -> anyhow::Result<usize> {
-        self.checkpoints.pending_count(chain).await
+        self.checkpoints.hydrate(chain).await?;
+        let Some(checkpoint) = self.checkpoints.latest(chain).await else {
+            return Ok(None);
+        };
+        self.recover_by_checkpoint(checkpoint.clone()).await?;
+        Ok(Some(checkpoint))
     }
 
     /// Replace the local backlog with a consensus checkpoint after divergence.
@@ -2568,6 +2568,37 @@ mod tests {
             backlog.pending_checkpoint_count(chain).await,
             2,
             "pending checkpoints should remain available for consensus matching"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hydrate_initializes_pending_and_recovers_backlog() {
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        // Create pending checkpoints
+        backlog.set_processed_block(chain, interval).await.unwrap();
+        backlog
+            .set_processed_block(chain, 2 * interval)
+            .await
+            .unwrap();
+        assert_eq!(backlog.pending_checkpoint_count(chain).await, 2);
+
+        // A new Backlog instance sharing storage starts with 0 count and None processed block
+        let restarted = Backlog::persisted(storage);
+        assert_eq!(restarted.pending_checkpoint_count(chain).await, 0);
+        assert_eq!(restarted.get_processed_block(chain).await, None);
+
+        // Hydrate initializes the counter and recovers from the latest checkpoint
+        let hydrated = restarted.hydrate(chain).await.unwrap();
+        assert!(hydrated.is_some());
+        assert_eq!(hydrated.unwrap().block_height, 2 * interval);
+        assert_eq!(restarted.pending_checkpoint_count(chain).await, 2);
+        assert_eq!(
+            restarted.get_processed_block(chain).await,
+            Some(2 * interval)
         );
     }
 }

@@ -191,8 +191,8 @@ impl Checkpoints {
         Ok(true)
     }
 
-    /// Loads the current pending checkpoint count from storage into the local counter.
-    pub(super) async fn pending_count(&self, chain: Chain) -> anyhow::Result<usize> {
+    /// Hydrates the pending checkpoint count from storage into the local counter.
+    pub(super) async fn hydrate(&self, chain: Chain) -> anyhow::Result<usize> {
         let count = match self.storage.pending_count(chain).await {
             Ok(count) => count,
             Err(err) => {
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_count_initializes_pending_counter_after_restart() {
+    async fn hydrate_initializes_pending_counter_after_restart() {
         let storage = CheckpointStorage::in_memory();
         let first = checkpoint(1);
         let second = checkpoint(2);
@@ -391,7 +391,7 @@ mod tests {
         checkpoints.persist_pending(&second).await.unwrap();
 
         let restarted = Checkpoints::new(storage);
-        assert_eq!(restarted.pending_count(first.chain).await.unwrap(), 2);
+        assert_eq!(restarted.hydrate(first.chain).await.unwrap(), 2);
         assert_eq!(restarted.count(first.chain), 2);
         assert_eq!(
             restarted.find(first.chain, first.digest()).await,
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_count_loads_durable_pending_count() {
+    async fn hydrate_loads_durable_pending_count() {
         let storage = CheckpointStorage::in_memory();
         let confirmed = checkpoint(2);
         let stale_pending = checkpoint(1);
@@ -410,7 +410,7 @@ mod tests {
         storage.persist_pending(&fresh_pending).await.unwrap();
 
         let checkpoints = Checkpoints::new(storage);
-        assert_eq!(checkpoints.pending_count(confirmed.chain).await.unwrap(), 2);
+        assert_eq!(checkpoints.hydrate(confirmed.chain).await.unwrap(), 2);
         assert_eq!(checkpoints.count(confirmed.chain), 2);
         assert_eq!(
             checkpoints
@@ -548,7 +548,7 @@ mod tests {
         let checkpoint = checkpoint(1);
         storage.persist_pending(&checkpoint).await.unwrap();
 
-        // A fresh `Checkpoints` has an empty counter until `pending_count`
+        // A fresh `Checkpoints` has an empty counter until `hydrate`
         // initializes it, as happens right after a restart before the mesh is active.
         // The durable pending body must still be findable.
         let checkpoints = Checkpoints::new(storage);
