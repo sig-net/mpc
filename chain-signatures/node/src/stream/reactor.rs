@@ -120,7 +120,14 @@ impl StreamReactor {
         // pending checkpoint while this node is ahead of consensus.
         match self.confirm_consensus(checkpoint_digest.digest).await {
             Ok(found) => !found,
-            Err(_) => false,
+            Err(err) => {
+                tracing::warn!(
+                    chain = ?self.chain,
+                    %err,
+                    "transient storage error confirming consensus checkpoint; retrying on next change"
+                );
+                false
+            }
         }
     }
 
@@ -160,23 +167,11 @@ impl StreamReactor {
     /// Checks and confirms the consensus digest against local checkpoints (latest or pending).
     /// Returns `Ok(true)` if confirmed, `Ok(false)` if divergent, or `Err(err)` on storage failure.
     async fn confirm_consensus(&self, digest: [u8; 32]) -> Result<bool, CheckpointError> {
-        match self
-            .ctx
+        self.ctx
             .backlog
             .checkpoints()
             .confirm(self.chain, digest)
             .await
-        {
-            Ok(found) => Ok(found),
-            Err(err) => {
-                tracing::warn!(
-                    chain = ?self.chain,
-                    %err,
-                    "transient storage error confirming consensus checkpoint; retrying later"
-                );
-                Err(err)
-            }
-        }
     }
 
     /// Fetches the consensus checkpoint to regress to, either by rebuilding a reset
