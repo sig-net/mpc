@@ -13,6 +13,7 @@ pub struct PositPhase {
 
 impl PositPhase {
     /// Deliberator: wait for the proposer's Propose, reply Accept.
+    #[allow(clippy::result_large_err)]
     async fn wait_for_propose(
         ctx: &mut SignTask,
         state: &mut SignState,

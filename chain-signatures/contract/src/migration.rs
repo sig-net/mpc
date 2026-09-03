@@ -133,10 +133,6 @@ pub(crate) struct PreviousDevnet {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    // `CheckpointDigest` replaces the previously stored
-    // `ConsensusCheckpointDigest` with an identical Borsh field layout
-    // (`chain`, `height`, `digest`), so states written by the old type still
-    // deserialize without a dedicated migration step.
     latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }

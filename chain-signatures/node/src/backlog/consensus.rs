@@ -22,7 +22,7 @@ pub async fn align_backlog_with_consensus(
     node_client: &NodeClient,
     my_account_id: &AccountId,
 ) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+    let checkpoint_digest = *checkpoints_rx.borrow_and_update().as_ref()?;
 
     match backlog
         .confirm_consensus(chain, checkpoint_digest.digest)

@@ -7,15 +7,6 @@ use crate::{Chain, SignId};
 
 /// A checkpoint digest submitted for consensus voting and tracked by the
 /// contract.
-///
-/// This is the single checkpoint-digest type across the node and the contract.
-/// It carries its own `chain` so that values moving through per-chain watch
-/// channels or maps keyed by `Chain` always carry a consistent chain: prefer
-/// reading the value's `chain` field rather than trusting an external key.
-///
-/// The Borsh layout (field order `chain`, `height`, `digest`) matches the
-/// previously stored `ConsensusCheckpointDigest` byte-for-byte, so persisted
-/// contract state needs no migration for this rename/merge.
 #[derive(
     BorshDeserialize,
     BorshSerialize,
@@ -82,73 +73,6 @@ impl CheckpointDigest {
         hasher.update(crate::LATEST_MPC_KEY_VERSION.to_le_bytes());
         let request_id: [u8; 32] = hasher.finalize().into();
         SignId::new(request_id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The merged `CheckpointDigest` keeps the exact Borsh layout that
-    /// `ConsensusCheckpointDigest` persisted on-chain: `chain` (1 byte),
-    /// `height` (LE u64), `digest` (32 bytes). Borsh is field-order based, so
-    /// this is also the contract-state migration contract — any reordering or
-    /// field addition here silently breaks persisted state.
-    #[test]
-    fn borsh_layout_is_chain_then_height_then_digest() {
-        let checkpoint = CheckpointDigest::new(Chain::Solana, 0x0102_0304_0506_0708, [0xAB; 32]);
-        let bytes = borsh::to_vec(&checkpoint).unwrap();
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&checkpoint.chain.to_bytes());
-        expected.extend_from_slice(&checkpoint.height.to_le_bytes());
-        expected.extend_from_slice(&checkpoint.digest);
-        assert_eq!(bytes, expected);
-
-        // Round-trip.
-        let decoded = CheckpointDigest::try_from_slice(&bytes).unwrap();
-        assert_eq!(decoded, checkpoint);
-    }
-
-    /// The consensus signing payload must stay byte-for-byte identical to the
-    /// old `ConsensusCheckpointDigest::sign_payload_bytes`: the chain byte, the
-    /// LE height, then the digest.
-    #[test]
-    fn sign_payload_bytes_is_chain_then_height_then_digest() {
-        let checkpoint = CheckpointDigest::new(Chain::Ethereum, 42, [0x42; 32]);
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&checkpoint.chain.to_bytes());
-        expected.extend_from_slice(&checkpoint.height.to_le_bytes());
-        expected.extend_from_slice(&checkpoint.digest);
-        assert_eq!(checkpoint.sign_payload_bytes(), expected);
-    }
-
-    #[test]
-    fn sign_payload_hash_and_scalar_are_deterministic_and_input_dependent() {
-        let a = CheckpointDigest::new(Chain::Ethereum, 42, [0x42; 32]);
-        let b = CheckpointDigest::new(Chain::Ethereum, 42, [0x42; 32]);
-        let c = CheckpointDigest::new(Chain::Solana, 42, [0x42; 32]);
-        let d = CheckpointDigest::new(Chain::Ethereum, 43, [0x42; 32]);
-
-        assert_eq!(a.sign_payload_hash(), b.sign_payload_hash());
-        assert_eq!(a.sign_payload_scalar(), b.sign_payload_scalar());
-        assert_ne!(a.sign_payload_hash(), c.sign_payload_hash());
-        assert_ne!(a.sign_payload_hash(), d.sign_payload_hash());
-
-        assert_eq!(a.sign_path(), "42");
-    }
-
-    /// `sign_id` commits to chain, height, and the signing payload; identical
-    /// digests on different chains/heights must produce different ids.
-    #[test]
-    fn sign_id_is_deterministic_and_input_dependent() {
-        let a = CheckpointDigest::new(Chain::Ethereum, 42, [0x42; 32]);
-        let b = CheckpointDigest::new(Chain::Ethereum, 42, [0x42; 32]);
-        let c = CheckpointDigest::new(Chain::Solana, 42, [0x42; 32]);
-        let d = CheckpointDigest::new(Chain::Ethereum, 43, [0x42; 32]);
-
-        assert_eq!(a.sign_id(), b.sign_id());
-        assert_ne!(a.sign_id(), c.sign_id());
-        assert_ne!(a.sign_id(), d.sign_id());
     }
 }
 

@@ -93,15 +93,6 @@ impl From<InitError> for Error {
     }
 }
 
-impl InitError {
-    pub(crate) fn message<T>(self, msg: T) -> Error
-    where
-        T: Into<Cow<'static, str>>,
-    {
-        Error::message(ErrorKind::Init(self), msg)
-    }
-}
-
 impl From<VoteError> for Error {
     fn from(code: VoteError) -> Self {
         Self::simple(ErrorKind::Vote(code))

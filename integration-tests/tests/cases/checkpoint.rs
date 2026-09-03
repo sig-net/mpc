@@ -346,6 +346,7 @@ async fn test_reset_converges_divergent_nodes() {
     // Governance settles the canonical reset checkpoint. Each node aligns
     // against it with no peer reachable.
     let settled = CheckpointDigest {
+        chain,
         height: resume_after,
         digest: mpc_primitives::reset_checkpoint_digest(chain, resume_after),
     };
@@ -353,7 +354,7 @@ async fn test_reset_converges_divergent_nodes() {
     let node_client = NodeClient::new(&NodeClientOptions::default());
 
     for node in &network.nodes {
-        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
+        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled));
         let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 
         let applied = tokio::time::timeout(
