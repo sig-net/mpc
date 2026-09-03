@@ -2,12 +2,11 @@ pub mod error;
 
 use crate::storage;
 
-use google_datastore1::api::Key;
-use google_datastore1::oauth2::AccessTokenAuthenticator;
 use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
 use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
 use google_secretmanager1::oauth2::{
-    ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
+    AccessTokenAuthenticator, ApplicationDefaultCredentialsAuthenticator,
+    ApplicationDefaultCredentialsFlowOpts,
 };
 use google_secretmanager1::SecretManager;
 use hyper::client::HttpConnector;
@@ -69,14 +68,6 @@ impl SecretManagerService {
             })?;
         Ok(())
     }
-}
-
-pub trait Keyable: KeyKind {
-    fn key(&self) -> Key;
-}
-
-pub trait KeyKind {
-    fn kind() -> String;
 }
 
 #[derive(Clone)]

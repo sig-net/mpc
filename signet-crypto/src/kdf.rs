@@ -8,8 +8,6 @@ use signet_primitives::{Chain, PublicKey, ScalarExt};
 pub const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 pub const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
 
-const CHECKPOINT_SENDER: &str = "checkpoint|sender";
-
 pub enum DerivationParams {
     /// Account owned by a user on a specific chain.
     UserAccount(KeyVersion, Chain, Address, Path),
@@ -17,8 +15,6 @@ pub enum DerivationParams {
     SystemAccount(KeyVersion, Chain, Path),
     /// Key used for system purposes.
     SystemKey(Purpose),
-    /// Checkpoint for consensus of a given chain and block height.
-    ConsensusCheckpoint(Chain, u64),
 }
 
 impl DerivationParams {
@@ -38,9 +34,6 @@ impl DerivationParams {
             DerivationParams::SystemKey(purpose) => {
                 // key version and other parameters are not relevant for system keys
                 format!("{EPSILON_DERIVATION_PREFIX_V2}:system_key:{purpose}")
-            }
-            DerivationParams::ConsensusCheckpoint(chain, height) => {
-                caip2_derivation_path(*chain, CHECKPOINT_SENDER, &height.to_string())
             }
         }
     }
@@ -76,8 +69,7 @@ pub fn derive_epsilon(params: &DerivationParams) -> Scalar {
     let derivation_path = params.derivation_path();
     match params {
         DerivationParams::UserAccount(_, Chain::NEAR, _, _)
-        | DerivationParams::SystemAccount(_, Chain::NEAR, _)
-        | DerivationParams::ConsensusCheckpoint(_, _) => sha3(derivation_path),
+        | DerivationParams::SystemAccount(_, Chain::NEAR, _) => sha3(derivation_path),
         _ => keccak(derivation_path),
     }
 }

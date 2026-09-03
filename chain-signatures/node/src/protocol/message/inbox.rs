@@ -290,10 +290,6 @@ impl MessageInbox {
         }
     }
 
-    pub fn clear_filters(&mut self) {
-        self.filter.clear();
-    }
-
     pub fn process_subscribe(&mut self, sub: SubscribeRequest) {
         match sub.id {
             SubscribeId::Generating => match sub.action {

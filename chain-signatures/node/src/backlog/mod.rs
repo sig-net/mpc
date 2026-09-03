@@ -921,11 +921,6 @@ impl BacklogEntry {
         }
     }
 
-    /// Check if this is a bidirectional transaction
-    pub fn is_bidirectional(&self) -> bool {
-        matches!(self.request.kind, SignKind::SignBidirectional(_))
-    }
-
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         self.status.execution_tx()
     }
