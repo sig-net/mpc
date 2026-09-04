@@ -18,8 +18,8 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
-    LATEST_MPC_KEY_VERSION,
+    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalTx, SignArgs,
+    SignCommand, SignId, Signature, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -688,6 +688,63 @@ async fn test_solana_respond_round_trip() -> Result<()> {
         panic!("expected Respond event, got {event:?}");
     };
     assert_eq!(responded.request_id, request.id.request_id);
+    assert_eq!(responded.chain, Chain::Solana);
+    assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
+    assert_eq!(responded.signature.s, Scalar::ONE);
+    assert_eq!(responded.signature.recovery_id, 0);
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+    let mut indexer = run_solana_indexer(config.clone()).await?;
+
+    let sign_id = SignId::new([9u8; 32]);
+    let request = Arc::new(IndexedSignRequest::respond_bidirectional(
+        sign_id,
+        SignArgs {
+            entropy: [7u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+        },
+        Chain::Solana,
+        0,
+        RespondBidirectionalTx {
+            tx_id: BidirectionalTxId([1u8; 32]),
+            output: vec![0xde, 0xad, 0xbe, 0xef],
+            chain_ctx: None,
+        },
+    ));
+
+    let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
+    publisher
+        .publish_signature(&PublishAction {
+            request: request.clone(),
+            signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32)],
+            timestamp: std::time::Instant::now(),
+        })
+        .await
+        .context("failed to publish respond bidirectional signature")?;
+
+    let event = indexer
+        .wait_for(
+            |event| matches!(event, ChainEvent::RespondBidirectional(_)),
+            FINALIZED_EVENT_TIMEOUT,
+        )
+        .await
+        .context("indexer never emitted RespondBidirectional: program did not emit a CPI event")?;
+
+    let ChainEvent::RespondBidirectional(responded) = event else {
+        panic!("expected RespondBidirectional event, got {event:?}");
+    };
+    assert_eq!(responded.request_id, sign_id.request_id);
     assert_eq!(responded.chain, Chain::Solana);
     assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
     assert_eq!(responded.signature.s, Scalar::ONE);
