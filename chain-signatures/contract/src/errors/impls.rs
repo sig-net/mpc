@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 use super::{
-    ConversionError, Error, ErrorKind, ErrorRepr, InitError, InvalidParameters, InvalidState,
-    JoinError, PublicKeyError, RespondError, SignError, VoteError,
+    CheckpointError, ConversionError, Error, ErrorKind, ErrorRepr, InitError, InvalidParameters,
+    InvalidState, JoinError, PublicKeyError, RespondError, SignError, VoteError,
 };
 
 impl Error {
@@ -42,8 +42,8 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.repr {
-            ErrorRepr::Simple(kind) => write!(f, "{}", kind),
-            ErrorRepr::Message { kind, message } => write!(f, "{}: {}", kind, message),
+            ErrorRepr::Simple(kind) => write!(f, "{kind}"),
+            ErrorRepr::Message { kind, message } => write!(f, "{kind}: {message}"),
         }
     }
 }
@@ -60,9 +60,24 @@ impl From<RespondError> for Error {
     }
 }
 
+impl From<CheckpointError> for Error {
+    fn from(code: CheckpointError) -> Self {
+        Self::simple(ErrorKind::Checkpoint(code))
+    }
+}
+
 impl From<JoinError> for Error {
     fn from(code: JoinError) -> Self {
         Self::simple(ErrorKind::Join(code))
+    }
+}
+
+impl JoinError {
+    pub(crate) fn message<T>(self, msg: T) -> Error
+    where
+        T: Into<Cow<'static, str>>,
+    {
+        Error::message(ErrorKind::Join(self), msg)
     }
 }
 

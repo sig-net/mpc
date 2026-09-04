@@ -1,29 +1,34 @@
-use std::sync::Arc;
-
-use cait_sith::protocol::{InitializationError, Participant};
-use cait_sith::triples::TripleGenerationOutput;
+use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-use mpc_crypto::PublicKey;
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use mpc_primitives::CheckpointDigest;
+use tokio::sync::watch;
 
 use crate::protocol::contract::ResharingContractState;
 
 pub type SecretKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
-pub type TripleProtocol =
-    RwLock<dyn Protocol<Output = TripleGenerationOutput<Secp256k1>> + Send + Sync>;
+pub type TripleProtocol = Box<
+    dyn Protocol<
+            Output = Vec<(
+                cait_sith::triples::TripleShare<Secp256k1>,
+                cait_sith::triples::TriplePub<Secp256k1>,
+            )>,
+        > + Send
+        + Sync,
+>;
 pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k1>> + Send + Sync>;
 pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;
 
 pub type Epoch = u64;
 
-#[derive(Clone)]
+pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
+
 pub struct KeygenProtocol {
     me: Participant,
     threshold: usize,
     participants: Vec<Participant>,
-    protocol: Arc<RwLock<Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>>>,
+    protocol: Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>,
 }
 
 impl KeygenProtocol {
@@ -36,16 +41,12 @@ impl KeygenProtocol {
             threshold,
             me,
             participants: participants.into(),
-            protocol: Arc::new(RwLock::new(Box::new(cait_sith::keygen::<Secp256k1>(
-                participants,
-                me,
-                threshold,
-            )?))),
+            protocol: Box::new(cait_sith::keygen::<Secp256k1>(participants, me, threshold)?),
         })
     }
 
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        *self.write().await = Box::new(cait_sith::keygen::<Secp256k1>(
+        self.protocol = Box::new(cait_sith::keygen::<Secp256k1>(
             &self.participants,
             self.me,
             self.threshold,
@@ -53,23 +54,17 @@ impl KeygenProtocol {
         Ok(())
     }
 
-    pub async fn write(
-        &self,
-    ) -> RwLockWriteGuard<'_, Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>>
-    {
-        self.protocol.write().await
+    pub fn poke(&mut self) -> Result<Action<KeygenOutput<Secp256k1>>, ProtocolError> {
+        self.protocol.poke()
+    }
+
+    pub fn message(&mut self, from: Participant, data: MessageData) {
+        self.protocol.message(from, data);
     }
 }
 
-#[derive(Clone)]
 pub struct ReshareProtocol {
-    old_participants: Vec<Participant>,
-    new_participants: Vec<Participant>,
-    me: Participant,
-    threshold: usize,
-    private_share: Option<SecretKeyShare>,
-    protocol: Arc<RwLock<Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>>>,
-    root_pk: PublicKey,
+    protocol: Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>,
 }
 
 impl ReshareProtocol {
@@ -86,47 +81,23 @@ impl ReshareProtocol {
             new_participants,
             me
         );
-        Ok(Self {
-            protocol: Arc::new(RwLock::new(Box::new(cait_sith::reshare::<Secp256k1>(
-                &old_participants,
-                contract_state.threshold,
-                &new_participants,
-                contract_state.threshold,
-                me,
-                private_share,
-                contract_state.public_key,
-            )?))),
-            private_share,
+        let protocol = Box::new(cait_sith::reshare::<Secp256k1>(
+            &old_participants,
+            contract_state.threshold,
+            &new_participants,
+            contract_state.new_threshold,
             me,
-            threshold: contract_state.threshold,
-            old_participants,
-            new_participants,
-            root_pk: contract_state.public_key,
-        })
-    }
-
-    pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        tracing::debug!(
-            "ReshareProtocol::refresh old participants {:?} new participants {:?} me {:?}",
-            self.old_participants,
-            self.new_participants,
-            self.me
-        );
-        *self.write().await = Box::new(cait_sith::reshare::<Secp256k1>(
-            &self.old_participants,
-            self.threshold,
-            &self.new_participants,
-            self.threshold,
-            self.me,
-            self.private_share,
-            self.root_pk,
+            private_share,
+            contract_state.public_key,
         )?);
-        Ok(())
+        Ok(Self { protocol })
     }
 
-    pub async fn write(
-        &self,
-    ) -> RwLockWriteGuard<'_, Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>> {
-        self.protocol.write().await
+    pub fn poke(&mut self) -> Result<Action<SecretKeyShare>, ProtocolError> {
+        self.protocol.poke()
+    }
+
+    pub fn message(&mut self, from: Participant, data: MessageData) {
+        self.protocol.message(from, data);
     }
 }

@@ -1,5 +1,6 @@
 name: Deploy Multichain Prod.
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       network:
@@ -11,13 +12,16 @@ on:
         default: testnet
         required: true
 
+env:
+  TAG: ${{ github.sha }}
+
 
 jobs:
   build-mpc-recovery:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         name: "Checkout mpc-recovery"
 
       - name: Login to GCP Artifact Registry Mainnet
@@ -39,4 +43,6 @@ jobs:
         with:
           push: true
           file: ./Dockerfile
-          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest"
+          build-args: |
+            GIT_COMMIT_HASH=${{ github.sha }}
+          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest,europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ env.TAG }}"

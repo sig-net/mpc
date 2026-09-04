@@ -2,13 +2,22 @@
 .direnv
 .DS_Store
 .idea
+.vscode
+.claude
+
+.github/*
+!.github/ISSUE_TEMPLATE/
+!.github/workflows/
 
 tmp
 *.log
+*.log.*.gz
 
 # Artifacts that may be left over
 **/*-secret-manager-*
 integration-tests/.project
+integration-tests/test-ledger/
+test-ledger/
 
 node_modules/
 chain-signatures/contract-eth/artifacts

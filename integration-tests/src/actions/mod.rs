@@ -3,11 +3,10 @@ pub mod wait;
 pub mod wait_for;
 
 use crate::cluster::Cluster;
-use crate::containers::LakeIndexer;
 
+use alloy::primitives::Address;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -16,22 +15,17 @@ use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
 use mpc_crypto::{derive_epsilon_near, derive_key};
+use mpc_node::sign_bidirectional::public_key_to_address;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
-use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
 use near_workspaces::Account;
 use rand::Rng;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
-
-use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
-    PublicKey as K256PublicKey,
-};
-use serde_json::json;
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,
@@ -47,18 +41,18 @@ pub async fn request_batch_random_sign(
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     for _ in 0..3 {
         let payload: [u8; 32] = rand::thread_rng().gen();
-        let payload_hashed = web3::signing::keccak256(&payload);
+        let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
         payloads.push((payload, payload_hashed));
         let request = SignRequest {
             payload: payload_hashed,
             path: "test".to_string(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }
@@ -80,19 +74,19 @@ pub async fn request_batch_duplicate_sign(
 
     let mut tx = nodes.rpc_client.batch(&signer, nodes.contract().id());
     let payload: [u8; 32] = rand::thread_rng().gen();
-    let payload_hashed = web3::signing::keccak256(&payload);
+    let payload_hashed: [u8; 32] = *alloy::primitives::keccak256(payload);
     let sign_call_cnt = 2;
     for _ in 0..sign_call_cnt {
         let request = SignRequest {
             payload: payload_hashed,
             path: "test".to_string(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }
@@ -110,7 +104,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -119,60 +113,6 @@ pub async fn validate_signature(
         )
         .then(|| Ok(()))
         .ok_or_else(|| anyhow::anyhow!("failed to validate signature"))?
-}
-
-// add one of toxic to the toxiproxy-server to make indexer rpc slow down, congested, or unstable
-// available toxics and params: https://github.com/Shopify/toxiproxy?tab=readme-ov-file#toxic-fields
-pub async fn add_toxic(proxy: &str, host: bool, toxic: serde_json::Value) -> anyhow::Result<()> {
-    let toxi_server_address = if host {
-        LakeIndexer::TOXI_SERVER_PROCESS_ADDRESS
-    } else {
-        LakeIndexer::TOXI_SERVER_EXPOSE_ADDRESS
-    };
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{}/proxies/{}/toxics", toxi_server_address, proxy))
-        .header("Content-Type", "application/json")
-        .body(toxic.to_string())
-        .send()
-        .await?;
-    Ok(())
-}
-
-// Add a delay to all data going through the proxy. The delay is equal to latency +/- jitter.
-pub async fn add_latency(
-    proxy: &str,
-    host: bool,
-    probability: f32,
-    latency: u32,
-    jitter: u32,
-) -> anyhow::Result<()> {
-    add_toxic(
-        proxy,
-        host,
-        json!({
-            "type": "latency",
-            "toxicity": probability,
-            "attributes": {
-                "latency": latency,
-                "jitter": jitter
-            }
-        }),
-    )
-    .await
-}
-
-// clear all toxics. Does not need to be called between tests since each test will drop toxiproxy-server
-// Only need if you want to clear all toxics in middle of a test
-#[allow(dead_code)]
-pub async fn clear_toxics() -> anyhow::Result<()> {
-    let toxi_server_address = "http://127.0.0.1:8474";
-    let toxiproxy_client = reqwest::Client::default();
-    toxiproxy_client
-        .post(format!("{}/reset", toxi_server_address))
-        .send()
-        .await?;
-    Ok(())
 }
 
 pub async fn batch_random_signature_production(nodes: &Cluster) -> anyhow::Result<()> {
@@ -211,95 +151,40 @@ pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar 
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 
-pub fn recover<M>(
-    signature: ethers_core::types::Signature,
-    message: M,
-) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
-where
-    M: Into<ethers_core::types::RecoveryMessage>,
-{
-    let message_hash = match message.into() {
-        ethers_core::types::RecoveryMessage::Data(ref message) => {
-            println!("identified as data");
-            ethers_core::utils::hash_message(message)
-        }
-        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
-    };
-    println!("message_hash {message_hash:#?}");
+pub fn recover_eth_address(
+    msg_hash: &[u8; 32],
+    signature_bytes: &[u8; 64],
+    recovery_id: u8,
+) -> Address {
+    let r = k256::Scalar::from_bytes(signature_bytes[..32].try_into().unwrap()).unwrap();
+    let s = k256::Scalar::from_bytes(signature_bytes[32..].try_into().unwrap()).unwrap();
+    let signature = k256::ecdsa::Signature::from_scalars(r, s).expect("valid r,s");
 
-    let (recoverable_sig, recovery_id) = as_signature(signature)?;
-    let verifying_key =
-        VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
-    println!("verifying_key {verifying_key:#?}");
+    let recid = k256::ecdsa::RecoveryId::from_byte(recovery_id).expect("invalid recovery id");
+    let verifying_key = VerifyingKey::recover_from_prehash(msg_hash, &signature, recid)
+        .expect("failed to recover pubkey");
 
-    let public_key = K256PublicKey::from(&verifying_key);
-    //println!("ethercore public key from verifying key {public_key:#?}");
-
-    let public_key = public_key.to_encoded_point(/* compress = */ false);
-    println!("ethercore recover encoded point pk {public_key:#?}");
-    let public_key = public_key.as_bytes();
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_core::utils::keccak256(&public_key[1..]);
-    let result = ethers_core::types::Address::from_slice(&hash[12..]);
-    println!("ethercore recover result {result:#?}");
-    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
-}
-
-/// Retrieves the recovery signature.
-fn as_signature(
-    signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
-    let mut recovery_id = signature.recovery_id()?;
-    let mut signature = {
-        let mut r_bytes = [0u8; 32];
-        let mut s_bytes = [0u8; 32];
-        signature.r.to_big_endian(&mut r_bytes);
-        signature.s.to_big_endian(&mut s_bytes);
-        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&r_bytes);
-        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
-    };
-
-    // Normalize into "low S" form. See:
-    // - https://github.com/RustCrypto/elliptic-curves/issues/988
-    // - https://github.com/bluealloy/revm/pull/870
-    if let Some(normalized) = signature.normalize_s() {
-        signature = normalized;
-        recovery_id = k256::ecdsa::RecoveryId::from_byte(recovery_id.to_byte() ^ 1).unwrap();
-    }
-
-    Ok((signature, recovery_id))
-}
-
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> web3::types::Address {
-    let public_key = public_key.serialize_uncompressed();
-
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = web3::signing::keccak256(&public_key[1..]);
-
-    web3::types::Address::from_slice(&hash[12..])
+    public_key_to_address(verifying_key.to_encoded_point(false).as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use elliptic_curve::sec1::FromEncodedPoint as _;
+    use elliptic_curve::sec1::ToEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::ProjectivePoint;
     use k256::{AffinePoint, EncodedPoint, Scalar};
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
+    use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover, x_coordinate};
+    use super::{public_key_to_address, recover_eth_address, x_coordinate};
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
     #[test]
     fn signatures_havent_changed() {
-        const CHAIN_ID_ETH: u64 = 31337;
-
         let big_r = "029b1b94bf4511b1a25986ba858cfa0fbdd5e4077c02e1d1102a194389b1f72df7";
         let s = "25f3494bb7e7b3349a4b4d939d3e5ae1787a0863e4f698fb8ed2d3e11c195035";
         let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
@@ -318,18 +203,11 @@ mod tests {
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
 
         let account_id = account_id.parse().unwrap();
-        let derivation_epsilon: k256::Scalar = derive_epsilon_near(&account_id, "test");
+        let derivation_epsilon: k256::Scalar =
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            0 => secp256k1::Parity::Even,
-            1 => secp256k1::Parity::Odd,
-            _ => unreachable!(),
-        };
-        let user_pk_x = x_coordinate::<k256::Secp256k1>(&user_pk);
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk: secp256k1::PublicKey =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-        let user_address_from_pk = public_key_to_address(&user_secp_pk);
+        let user_address_from_pk =
+            public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
 
         // Prepare R ans s signature values
         let big_r = hex::decode(big_r).unwrap();
@@ -344,7 +222,7 @@ mod tests {
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let multichain_sig = mpc_node::kdf::into_eth_sig(
+        let multichain_sig = mpc_crypto::kdf::reconstruct_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,
@@ -387,53 +265,20 @@ mod tests {
         // let k256_verify_result = k256_verify_key.verify(&payload_hash_reversed, &k256_sig);
         // assert!(k256_verify_result.is_ok());
 
-        // Check signature using etheres tooling
-        let ethers_r = ethers_core::types::U256::from_big_endian(r.to_bytes().as_slice());
-        let ethers_s = ethers_core::types::U256::from_big_endian(s.to_bytes().as_slice());
-        let ethers_v = to_eip155_v(multichain_sig.recovery_id, CHAIN_ID_ETH);
-
-        let signature = ethers_core::types::Signature {
-            r: ethers_r,
-            s: ethers_s,
-            v: ethers_v,
-        };
-
-        let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
-        let user_address_ethers: ethers_core::types::H160 =
-            ethers_core::utils::public_key_to_address(&verifying_user_pk);
-
-        assert!(signature.verify(payload_hash, user_address_ethers).is_ok());
-
         // Check if recovered address is the same as the user address
         let signature_for_recovery: [u8; 64] = {
-            let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
+            let mut signature = [0u8; 64];
             signature[..32].copy_from_slice(&r.to_bytes());
             signature[32..].copy_from_slice(&s.to_bytes());
             signature
         };
 
-        let recovered_from_signature_address_web3 = web3::signing::recover(
+        let recovered_from_signature_address_web3 = recover_eth_address(
             &payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id as i32,
-        )
-        .unwrap();
+            multichain_sig.recovery_id,
+        );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
-
-        let recovered_from_signature_address_ethers = signature.recover(payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_ethers
-        );
-
-        let recovered_from_signature_address_local_function =
-            recover(signature, payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_local_function
-        );
-
-        assert_eq!(user_address_from_pk, user_address_ethers);
     }
 
     fn verify(
@@ -496,9 +341,5 @@ mod tests {
         l: &Scalar,
     ) -> ProjectivePoint<k256::Secp256k1> {
         (*x * k) + (*y * l)
-    }
-
-    pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
-        (recovery_id as u64) + 35 + chain_id * 2
     }
 }

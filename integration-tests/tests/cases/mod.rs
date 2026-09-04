@@ -1,24 +1,39 @@
-use integration_tests::actions::{self, add_latency};
+use integration_tests::actions;
 use integration_tests::cluster;
+use integration_tests::utils;
 
-use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
-use elliptic_curve::CurveArithmetic;
-use integration_tests::cluster::spawner::ClusterSpawner;
-use integration_tests::containers;
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::Secp256k1;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
-use mpc_node::kdf::into_eth_sig;
-use mpc_node::protocol::presignature::{Presignature, PresignatureId, PresignatureManager};
-use mpc_node::protocol::triple::{Triple, TripleManager};
+use mpc_crypto::{
+    self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
+};
+use mpc_node::protocol::cryptography::set_resharing_running_timeout;
+use mpc_node::protocol::state::ResharingStatus;
+use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_node::util::NearPublicKeyExt as _;
+use mpc_node::web::StateView;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use std::time::{Duration, Instant};
 use test_log::test;
 
+pub mod canton;
+pub mod canton_stream;
+pub mod chains;
+pub mod checkpoint;
+pub mod compat;
+pub mod ethereum;
+pub mod ethereum_stream;
+pub mod helpers;
+pub mod midnight_stream;
+pub mod mpc;
+pub mod mpc_with_stream;
 pub mod nightly;
+pub mod solana;
+pub mod solana_stream;
+pub mod state_sync;
+pub mod store;
+pub mod sync;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {
@@ -66,10 +81,20 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
-    nodes.wait().signable().await?;
-    nodes.sign().rogue_responder().await?;
+async fn test_signature_many() -> anyhow::Result<()> {
+    let nodes = cluster::spawn()
+        .disable_prestockpile()
+        .with_config(|config| {
+            config.protocol.presignature.min_presignatures = 10;
+            config.protocol.presignature.max_presignatures = 100;
+        })
+        .await?;
+
+    for idx in 0..10 {
+        tracing::info!(idx, "producing signature");
+        nodes.wait().signable().await?;
+        nodes.sign().await?;
+    }
 
     Ok(())
 }
@@ -82,7 +107,7 @@ async fn test_signature_offline_node() -> anyhow::Result<()> {
 
     // Kill the node then have presignatures and signature generation only use the active set of nodes
     // to start generating presignatures and signatures.
-    let account_id = nodes.account_ids().into_iter().last().unwrap().clone();
+    let account_id = nodes.account_ids().into_iter().next_back().unwrap().clone();
     nodes.stop(&account_id).await.unwrap();
 
     nodes.wait().signable().await.unwrap();
@@ -102,9 +127,10 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         nodes.wait().signable().await?;
         let outcome = nodes.sign().path(hd_path).await?;
 
-        let derivation_epsilon = derive_epsilon_near(outcome.account.id(), hd_path);
+        let derivation_epsilon =
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
-        let multichain_sig = into_eth_sig(
+        let multichain_sig = reconstruct_signature(
             &user_pk,
             &outcome.signature.big_r,
             &outcome.signature.s,
@@ -113,16 +139,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         .unwrap();
 
         // start recovering the address and compare them:
-        let user_pk_x = x_coordinate(&user_pk);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            1 => secp256k1::Parity::Odd,
-            0 => secp256k1::Parity::Even,
-            _ => unreachable!(),
-        };
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-        let user_addr = actions::public_key_to_address(&user_secp_pk);
+        let user_addr = public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
         let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {
@@ -131,242 +148,15 @@ async fn test_key_derivation() -> anyhow::Result<()> {
             signature[32..].copy_from_slice(&s.to_bytes());
             signature
         };
-        let recovered_addr = web3::signing::recover(
+        let recovered_addr = actions::recover_eth_address(
             &outcome.payload_hash,
             &signature_for_recovery,
-            multichain_sig.recovery_id as i32,
-        )
-        .unwrap();
+            multichain_sig.recovery_id,
+        );
         assert_eq!(user_addr, recovered_addr);
     }
 
     Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_triple_persistence() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
-        .network("test-triple-persistence")
-        .init_network()
-        .await?;
-
-    let node_id = "test.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node_id);
-    let triple_manager =
-        TripleManager::new(Participant::from(0), 5, 123, &node_id, &triple_storage);
-
-    let triple_id_1: u64 = 1;
-    let triple_1 = dummy_triple(triple_id_1);
-    let triple_id_2: u64 = 2;
-    let triple_2 = dummy_triple(triple_id_2);
-
-    // Check that the storage is empty at the start
-    assert!(!triple_manager.contains(triple_id_1).await);
-    assert!(!triple_manager.contains_mine(triple_id_1).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
-    assert_eq!(triple_manager.len_mine().await, 0);
-    assert!(triple_manager.is_empty().await);
-    assert_eq!(triple_manager.len_potential().await, 0);
-
-    triple_manager.insert(triple_1.clone(), false, false).await;
-    triple_manager.insert(triple_2.clone(), false, false).await;
-
-    // Check that the storage contains the foreign triple
-    assert!(triple_manager.contains(triple_id_1).await);
-    assert!(triple_manager.contains(triple_id_2).await);
-    assert!(!triple_manager.contains_mine(triple_id_1).await);
-    assert!(!triple_manager.contains_mine(triple_id_2).await);
-    assert_eq!(triple_manager.len_generated().await, 2);
-    assert_eq!(triple_manager.len_mine().await, 0);
-    assert_eq!(triple_manager.len_potential().await, 2);
-
-    // Take triple and check that it is removed from the storage and added to used set
-    triple_manager
-        .take_two(triple_id_1, triple_id_2)
-        .await
-        .unwrap();
-    assert!(!triple_manager.contains(triple_id_1).await);
-    assert!(!triple_manager.contains(triple_id_2).await);
-    assert!(!triple_manager.contains_mine(triple_id_1).await);
-    assert!(!triple_manager.contains_mine(triple_id_2).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
-    assert_eq!(triple_manager.len_mine().await, 0);
-    assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(triple_id_1).await.unwrap());
-    assert!(triple_storage.contains_used(triple_id_2).await.unwrap());
-
-    // Attempt to re-insert used triples and check that it fails
-    triple_manager.insert(triple_1, false, false).await;
-    assert!(!triple_manager.contains(triple_id_1).await);
-    triple_manager.insert(triple_2, false, false).await;
-    assert!(!triple_manager.contains(triple_id_2).await);
-
-    let mine_id_1: u64 = 3;
-    let mine_triple_1 = dummy_triple(mine_id_1);
-    let mine_id_2: u64 = 4;
-    let mine_triple_2 = dummy_triple(mine_id_2);
-
-    // Add mine triple and check that it is in the storage
-    triple_manager
-        .insert(mine_triple_1.clone(), true, false)
-        .await;
-    triple_manager
-        .insert(mine_triple_2.clone(), true, false)
-        .await;
-    assert!(triple_manager.contains(mine_id_1).await);
-    assert!(triple_manager.contains(mine_id_2).await);
-    assert!(triple_manager.contains_mine(mine_id_1).await);
-    assert!(triple_manager.contains_mine(mine_id_2).await);
-    assert_eq!(triple_manager.len_generated().await, 2);
-    assert_eq!(triple_manager.len_mine().await, 2);
-    assert_eq!(triple_manager.len_potential().await, 2);
-
-    // Take mine triple and check that it is removed from the storage and added to used set
-    triple_manager.take_two_mine().await.unwrap();
-    assert!(!triple_manager.contains(mine_id_1).await);
-    assert!(!triple_manager.contains(mine_id_2).await);
-    assert!(!triple_manager.contains_mine(mine_id_1).await);
-    assert!(!triple_manager.contains_mine(mine_id_2).await);
-    assert_eq!(triple_manager.len_generated().await, 0);
-    assert_eq!(triple_manager.len_mine().await, 0);
-    assert!(triple_manager.is_empty().await);
-    assert_eq!(triple_manager.len_potential().await, 0);
-    assert!(triple_storage.contains_used(mine_id_1).await.unwrap());
-    assert!(triple_storage.contains_used(mine_id_2).await.unwrap());
-
-    // Attempt to re-insert used mine triples and check that it fails
-    triple_manager.insert(mine_triple_1, true, false).await;
-    assert!(!triple_manager.contains(mine_id_1).await);
-    triple_manager.insert(mine_triple_2, true, false).await;
-    assert!(!triple_manager.contains(mine_id_2).await);
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_presignature_persistence() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
-        .network("test-presignature-persistence")
-        .init_network()
-        .await?;
-
-    let node_id = "test.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner).await;
-    let presignature_storage = redis.presignature_storage(&node_id);
-    let mut presignature_manager = PresignatureManager::new(
-        Participant::from(0),
-        5,
-        123,
-        &node_id,
-        &presignature_storage,
-    );
-
-    let presignature = dummy_presignature(1);
-    let presignature_id: PresignatureId = presignature.id;
-
-    // Check that the storage is empty at the start
-    assert!(!presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert!(presignature_manager.is_empty().await);
-    assert_eq!(presignature_manager.len_potential().await, 0);
-
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
-
-    // Check that the storage contains the foreign presignature
-    assert!(presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
-    assert_eq!(presignature_manager.len_generated().await, 1);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert_eq!(presignature_manager.len_potential().await, 1);
-
-    // Take presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take(presignature_id).await.unwrap();
-    assert!(!presignature_manager.contains(&presignature_id).await);
-    assert!(!presignature_manager.contains_mine(&presignature_id).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&presignature_id)
-        .await
-        .unwrap());
-
-    // Attempt to re-insert used presignature and check that it fails
-    let presignature = dummy_presignature(presignature_id);
-    presignature_manager
-        .insert(presignature, false, false)
-        .await;
-    assert!(!presignature_manager.contains(&presignature_id).await);
-
-    let mine_presignature = dummy_presignature(2);
-    let mine_presig_id: PresignatureId = mine_presignature.id;
-
-    // Add mine presignature and check that it is in the storage
-    presignature_manager
-        .insert(mine_presignature, true, false)
-        .await;
-    assert!(presignature_manager.contains(&mine_presig_id).await);
-    assert!(presignature_manager.contains_mine(&mine_presig_id).await);
-    assert_eq!(presignature_manager.len_generated().await, 1);
-    assert_eq!(presignature_manager.len_mine().await, 1);
-    assert_eq!(presignature_manager.len_potential().await, 1);
-
-    // Take mine presignature and check that it is removed from the storage and added to used set
-    presignature_manager.take_mine().await.unwrap();
-    assert!(!presignature_manager.contains(&mine_presig_id).await);
-    assert!(!presignature_manager.contains_mine(&mine_presig_id).await);
-    assert_eq!(presignature_manager.len_generated().await, 0);
-    assert_eq!(presignature_manager.len_mine().await, 0);
-    assert!(presignature_manager.is_empty().await);
-    assert_eq!(presignature_manager.len_potential().await, 0);
-    assert!(presignature_storage
-        .contains_used(&mine_presig_id)
-        .await
-        .unwrap());
-
-    // Attempt to re-insert used mine presignature and check that it fails
-    let mine_presignature = dummy_presignature(mine_presig_id);
-    presignature_manager
-        .insert(mine_presignature, true, false)
-        .await;
-    assert!(!presignature_manager.contains(&mine_presig_id).await);
-
-    Ok(())
-}
-
-fn dummy_presignature(id: u64) -> Presignature {
-    Presignature {
-        id,
-        output: PresignOutput {
-            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
-        },
-        participants: vec![Participant::from(1), Participant::from(2)],
-    }
-}
-
-fn dummy_triple(id: u64) -> Triple {
-    Triple {
-        id,
-        share: TripleShare {
-            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-        },
-        public: TriplePub {
-            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
-        },
-    }
 }
 
 #[test(tokio::test)]
@@ -385,61 +175,6 @@ async fn test_signature_offline_node_back_online() -> anyhow::Result<()> {
     // Check that we can sign again
     nodes.wait().signable().await?;
     let _ = nodes.sign().await?;
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_lake_congestion() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
-    // Currently, with a 10+-1 latency it cannot generate enough tripplets in time
-    // with a 5+-1 latency it fails to wait for signature response
-    add_latency(&nodes.nodes.proxy_name_for_node(0), true, 1.0, 2_000, 200).await?;
-    add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 2_000, 200).await?;
-    add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 2_000, 200).await?;
-
-    // Also mock lake indexer in high load that it becomes slower to finish process
-    // sig req and write to s3
-    // with a 1s latency it fails to wait for signature response in time
-    add_latency("lake-s3", false, 1.0, 100, 10).await?;
-
-    nodes.wait().running().signable().await?;
-    nodes.sign().await.unwrap();
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_multichain_reshare_with_lake_congestion() -> anyhow::Result<()> {
-    let mut nodes = cluster::spawn().await?;
-
-    // add latency to node1->rpc, but not node0->rpc
-    add_latency(&nodes.nodes.proxy_name_for_node(1), true, 1.0, 1_000, 100).await?;
-    // remove node2, node0 and node1 should still reach concensus
-    // this fails if the latency above is too long (10s)
-    nodes.leave(None).await.unwrap();
-
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    // Going below T should error out
-    nodes.leave(None).await.unwrap_err();
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    nodes.join(None).await.unwrap();
-    // add latency to node2->rpc
-    add_latency(&nodes.nodes.proxy_name_for_node(2), true, 1.0, 1_000, 100).await?;
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 3);
-
-    nodes.leave(None).await.unwrap();
-    let state = nodes.expect_running().await?;
-    assert!(state.participants.len() == 2);
-
-    // make sure signing works after reshare
-    nodes.wait().signable().await?;
-    nodes.sign().await.unwrap();
 
     Ok(())
 }
@@ -483,4 +218,253 @@ async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
     let nodes = cluster::spawn().await?;
     actions::batch_duplicate_signature_production(&nodes).await?;
     Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
+    // have a short timeout for the resharing to complete in tests
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    let initial_epoch = initial_state.epoch;
+
+    // Shutdown the node that will be offline during the resharing initially.
+    // This node will not appear in our local cluster list but still be a part of the
+    // contract participants. Meaning they're not kicked, just offline for resharing.
+    // They will have to restart later for resharing to complete.
+    let offline_account = nodes.account_id(0).clone();
+    let offline_config = nodes.kill_node(&offline_account).await;
+
+    // Start a new node that will be added during the resharing.
+    let new_account = nodes.start(None).await?;
+
+    // Voting in the new participant with threshold number of online participants
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voters = participant_accounts
+        .into_iter()
+        .filter(|account| account.id() != &offline_account)
+        .take(nodes.cfg.threshold)
+        .collect::<Vec<_>>();
+    utils::vote_join(&voters, nodes.contract().id(), new_account.id()).await?;
+
+    // Wait for all online nodes to move to resharing state.
+    nodes.wait().nodes_resharing().await?;
+
+    // Now we should wait to see that we are still in the resharing state even after
+    // a long time, since one participant is offline and cannot complete the resharing.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(matches!(
+        nodes.contract_state().await?,
+        mpc_contract::ProtocolContractStateView::Resharing(_)
+    ));
+
+    // Restart the node that was offline during the resharing.
+    nodes.restart_node(offline_config).await?;
+
+    // We should now be able to complete the resharing.
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_epoch + 1)
+        .nodes_running()
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        initial_state.participants.len() + 1
+    );
+    assert!(final_state.participants.contains_key(new_account.id()));
+
+    // sign to ensure everything is working
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    let initial_epoch = initial_state.epoch;
+
+    let target_account = nodes.account_id(0).clone();
+
+    let new_account = nodes.start(None).await?;
+
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voters = participant_accounts
+        .iter()
+        .take(nodes.cfg.threshold)
+        .cloned()
+        .collect::<Vec<_>>();
+    utils::vote_join(&voters, nodes.contract().id(), new_account.id()).await?;
+
+    nodes.wait().nodes_resharing().await?;
+
+    {
+        let states = nodes.fetch_states().await?;
+        for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
+            match state {
+                StateView::Resharing { phase, .. } => {
+                    tracing::info!(%account_id, ?phase, "account resharing phase before kill");
+                }
+                other => {
+                    tracing::info!(%account_id, ?other, "account state before kill");
+                }
+            }
+        }
+    }
+
+    wait_for_resharing_phase(
+        &nodes,
+        &target_account,
+        &[ResharingStatus::Running],
+        Duration::from_secs(20),
+        false,
+    )
+    .await?;
+
+    let target_config = nodes.kill_node(&target_account).await;
+
+    assert!(matches!(
+        nodes.contract_state().await?,
+        mpc_contract::ProtocolContractStateView::Resharing(_)
+    ));
+
+    nodes.restart_node(target_config).await?;
+
+    wait_for_resharing_phase(
+        &nodes,
+        &target_account,
+        &[ResharingStatus::Running],
+        Duration::from_secs(20),
+        true,
+    )
+    .await?;
+
+    {
+        let states = nodes.fetch_states().await?;
+        for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
+            match state {
+                StateView::Resharing { phase, .. } => {
+                    tracing::info!(%account_id, ?phase, "account resharing phase after restart");
+                }
+                other => {
+                    tracing::info!(%account_id, ?other, "account state after restart");
+                }
+            }
+        }
+    }
+
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_epoch + 1)
+        .nodes_running()
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        initial_state.participants.len() + 1
+    );
+    assert!(final_state.participants.contains_key(new_account.id()));
+
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_possible_with_kicked_node_offline() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+
+    let kick_account = nodes.account_id(1).clone();
+
+    // set the node that is getting kicked offline
+    let _ = nodes.kill_node(&kick_account).await;
+
+    // kick node
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voting_accounts = participant_accounts
+        .into_iter()
+        .filter(|account| account.id() != &kick_account)
+        .take(initial_state.threshold)
+        .collect::<Vec<_>>();
+    utils::vote_leave(&voting_accounts, nodes.contract().id(), &kick_account).await?;
+
+    // ensure that the kicked node is not a participant anymore
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .await?;
+    assert_eq!(
+        final_state.participants.len(),
+        initial_state.participants.len() - 1
+    );
+    assert!(!final_state.participants.contains_key(&kick_account));
+
+    // sign to ensure everything is working
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+async fn wait_for_resharing_phase(
+    nodes: &cluster::Cluster,
+    account_id: &near_workspaces::AccountId,
+    expected: &[ResharingStatus],
+    timeout: Duration,
+    allow_completion: bool,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let allow_completion = allow_completion && expected.contains(&ResharingStatus::Running);
+    loop {
+        if let Some(idx) = nodes
+            .account_ids()
+            .iter()
+            .position(|current| *current == account_id)
+        {
+            match nodes.fetch_state(idx).await? {
+                StateView::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
+                StateView::Running { .. } if allow_completion => {
+                    tracing::info!(
+                        %account_id,
+                        "node already returned to running state; treating as successful resharing phase"
+                    );
+                    return Ok(());
+                }
+                StateView::Resharing { phase, .. } => {
+                    tracing::info!(
+                        %account_id,
+                        ?phase,
+                        ?expected,
+                        "node resharing phase does not yet match expectation"
+                    );
+                }
+                state => {
+                    tracing::info!(?state, %account_id, "node not yet in expected resharing phase");
+                }
+            }
+        } else {
+            tracing::info!(%account_id, "account not currently tracked in cluster while waiting for resharing phase");
+        }
+
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "timed out waiting for {account_id} to reach resharing phase in {expected:?}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

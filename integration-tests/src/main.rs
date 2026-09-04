@@ -6,12 +6,11 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-use mpc_node::indexer_eth::EthConfig;
+use mpc_chain_ethereum::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
 use tokio::signal;
-use tracing_subscriber::EnvFilter;
 
 mod commands;
 
@@ -23,17 +22,23 @@ enum Cli {
         nodes: usize,
         #[arg(short, long, default_value_t = 2)]
         threshold: usize,
-        #[arg(long, default_value = "ws://localhost:8545")]
-        eth_rpc_ws_url: String,
         #[arg(long, default_value = "http://localhost:8545")]
-        eth_rpc_http_url: String,
-        #[arg(long, default_value = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
+        eth_consensus_rpc_http_url: String,
+        #[arg(long, default_value = "http://localhost:8545")]
+        eth_execution_rpc_http_url: String,
+        #[arg(long, default_value = "e7f1725E7734CE288F8367e1Bb143E90bb3F0512")]
         eth_contract_address: String,
         #[arg(
             long,
             default_value = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
         )]
         eth_account_sk: String,
+        #[arg(long, default_value = "anvil")]
+        eth_network: String,
+        #[arg(long, default_value = "/tmp/data")]
+        eth_helios_data_path: String,
+        #[arg(long, default_value = "10000")]
+        eth_refresh_finalized_interval: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -43,36 +48,48 @@ enum Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_thread_ids(true)
-        .with_env_filter(EnvFilter::from_default_env());
-    subscriber.init();
+    integration_tests::utils::init_tracing_log();
 
     match Cli::parse() {
         Cli::SetupEnv {
             nodes,
             threshold,
-            eth_rpc_ws_url,
-            eth_rpc_http_url,
+            eth_consensus_rpc_http_url,
+            eth_execution_rpc_http_url,
             eth_contract_address,
             eth_account_sk,
+            eth_network,
+            eth_helios_data_path,
+            eth_refresh_finalized_interval,
         } => {
-            println!(
-                "Setting up an environment with {} nodes, {} threshold ...",
-                nodes, threshold
-            );
+            println!("Setting up an environment with {nodes} nodes, {threshold} threshold ...");
             let config = NodeConfig {
                 nodes,
                 threshold,
-                eth: EthConfig {
-                    account_sk: eth_account_sk,
-                    rpc_ws_url: eth_rpc_ws_url,
-                    rpc_http_url: eth_rpc_http_url,
-                    contract_address: eth_contract_address,
-                },
+                eth: Some(EthConfig {
+                    account_sk: eth_account_sk
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth account sk: {e}"))?,
+                    consensus_rpc_http_url: eth_consensus_rpc_http_url,
+                    execution_rpc_http_url: eth_execution_rpc_http_url
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth execution rpc url: {e}"))?,
+                    contract_address: eth_contract_address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
+                    optimistic_requests: eth_network == "anvil",
+                    network: eth_network,
+                    helios_data_path: eth_helios_data_path,
+                    refresh_finalized_interval: eth_refresh_finalized_interval,
+                    light_client: false,
+                    gas: Default::default(),
+                    indexer: Default::default(),
+                    publisher: Default::default(),
+                    rpc: Default::default(),
+                }),
                 ..Default::default()
             };
-            println!("Full config: {:?}", config);
+            println!("Full config: {config:?}");
             let mut spawner = ClusterSpawner::default()
                 .config(config)
                 .init_network()
@@ -88,19 +105,19 @@ async fn main() -> anyhow::Result<()> {
             println!("  release:        {}", ctx.release);
 
             println!("\nExternal services:");
-            println!("  lake_indexer:  {}", ctx.lake_indexer.rpc_host_address);
+            println!("  near sandbox rpc:  {}", ctx.worker.rpc_addr());
             println!("  redis:  {}", ctx.redis.internal_address);
 
             println!("\nNodes:");
             for i in 0..urls.len() {
-                println!("  Node {}", i);
+                println!("  Node {i}");
                 println!("    Url: {}", urls[i]);
                 let account_id = near_accounts[i].id();
-                println!("    Account: {}", account_id);
+                println!("    Account: {account_id}");
                 let sk = near_accounts[i].secret_key();
-                println!("    Secret Key: {}", sk);
+                println!("    Secret Key: {sk}");
                 let pk = sk.public_key();
-                println!("    Public Key: {}", pk);
+                println!("    Public Key: {pk}");
             }
 
             signal::ctrl_c().await.expect("Failed to listen for event");
@@ -136,22 +153,19 @@ async fn main() -> anyhow::Result<()> {
                 &contract_account_id,
                 &caller_account_id,
             )?);
-            doc.push(format!("near view {} public_key", contract_account_id));
+            doc.push(format!("near view {contract_account_id} public_key"));
 
             doc.push(format!(
-                "near view {} derived_public_key {}",
-                contract_account_id,
+                "near view {contract_account_id} derived_public_key {}",
                 serde_json::to_string(&json!({"path": "test","predecessor": caller_account_id}))?
             ));
 
             doc.push(format!(
-                "near view {} latest_key_version",
-                contract_account_id
+                "near view {contract_account_id} latest_key_version"
             ));
 
             doc.push(format!(
-                "near view {} experimental_signature_deposit",
-                contract_account_id
+                "near view {contract_account_id} experimental_signature_deposit"
             ));
 
             doc.push(format!(
@@ -161,23 +175,19 @@ async fn main() -> anyhow::Result<()> {
             ));
 
             doc.push(format!(
-                "near call {} vote_join '{{\"candidate\":\"{}\"}}' --accountId {} --gas 300000000000000",
-                contract_account_id, caller_account_id, caller_account_id
+                "near call {contract_account_id} vote_join '{{\"candidate\":\"{caller_account_id}\"}}' --accountId {caller_account_id} --gas 300000000000000"
             ));
 
             doc.push(format!(
-                "near call {} vote_leave '{{\"kick\":\"{}\"}}' --accountId {} --gas 300000000000000",
-                contract_account_id, caller_account_id, caller_account_id
+                "near call {contract_account_id} vote_leave '{{\"kick\":\"{caller_account_id}\"}}' --accountId {caller_account_id} --gas 300000000000000"
             ));
 
             doc.push(format!(
-                "near call {} vote_pk '{{\"public_key\": {}}}' --accountId {} --gas 300000000000000",
-                contract_account_id, public_key, caller_account_id
+                "near call {contract_account_id} vote_pk '{{\"public_key\": {public_key}}}' --accountId {caller_account_id} --gas 300000000000000"
             ));
 
             doc.push(format!(
-                "near call {} vote_reshared '{{\"epoch\": 1}}' --accountId {} --gas 300000000000000",
-                contract_account_id, caller_account_id
+                "near call {contract_account_id} vote_reshared '{{\"epoch\": 1}}' --accountId {caller_account_id} --gas 300000000000000"
             ));
 
             doc.push(commands::proposed_updates_command(
@@ -186,8 +196,7 @@ async fn main() -> anyhow::Result<()> {
             )?);
 
             doc.push(format!(
-                "near call {} vote_update '{{\"id\": 0}}' --accountId {} --gas 300000000000000",
-                contract_account_id, caller_account_id
+                "near call {contract_account_id} vote_update '{{\"id\": 0}}' --accountId {caller_account_id} --gas 300000000000000"
             ));
 
             doc.push(format!(
@@ -196,13 +205,13 @@ async fn main() -> anyhow::Result<()> {
                 commands::init_running_command(&contract_account_id, &caller_account_id,)?
             ));
 
-            doc.push(format!("near view {} migrate", contract_account_id));
+            doc.push(format!("near view {contract_account_id} migrate"));
 
-            doc.push(format!("near view {} state", contract_account_id));
+            doc.push(format!("near view {contract_account_id} state"));
 
-            doc.push(format!("near view {} config", contract_account_id));
+            doc.push(format!("near view {contract_account_id} config"));
 
-            doc.push(format!("near view {} version", contract_account_id));
+            doc.push(format!("near view {contract_account_id} version"));
 
             for arg in doc {
                 file.write_all(arg.as_bytes())?;

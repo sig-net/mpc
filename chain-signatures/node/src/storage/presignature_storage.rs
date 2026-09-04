@@ -1,211 +1,47 @@
-use chrono::Duration;
-use deadpool_redis::{Connection, Pool};
+use deadpool_redis::Pool;
 use near_sdk::AccountId;
-use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
+use cait_sith::protocol::Participant;
+
+use super::protocol_storage::{
+    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage,
+};
 use crate::protocol::presignature::{Presignature, PresignatureId};
-use crate::storage::error::{StoreError, StoreResult};
+use crate::storage::protocol_storage::ProtocolArtifact;
 
-// Can be used to "clear" redis storage in case of a breaking change
-const PRESIGNATURE_STORAGE_VERSION: &str = "v6";
-const USED_EXPIRE_TIME: Duration = Duration::hours(24);
+pub type PresignatureStorage = ProtocolStorage<Presignature>;
+pub type PresignatureSlot = ArtifactSlot<Presignature>;
+pub type PresignatureTaken = ArtifactTaken<Presignature>;
+pub type PresignatureTakenDropper = ArtifactTakenDropper<Presignature>;
+pub type PresignatureReservation = ArtifactReservation<Presignature>;
 
-pub fn init(pool: &Pool, node_account_id: &AccountId) -> PresignatureStorage {
-    let presig_key = format!(
-        "presignatures:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let mine_key = format!(
-        "presignatures_mine:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-    let used_key = format!(
-        "presignatures_used:{}:{}",
-        PRESIGNATURE_STORAGE_VERSION, node_account_id
-    );
-
-    PresignatureStorage {
-        redis_pool: pool.clone(),
-        presig_key,
-        mine_key,
-        used_key,
+impl Presignature {
+    pub fn storage(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {
+        ProtocolStorage::new(pool, account_id, "presignatures")
     }
 }
 
-#[derive(Clone)]
-pub struct PresignatureStorage {
-    redis_pool: Pool,
-    presig_key: String,
-    mine_key: String,
-    used_key: String,
-}
+impl ProtocolArtifact for Presignature {
+    type Id = PresignatureId;
 
-impl PresignatureStorage {
-    async fn connect(&self) -> StoreResult<Connection> {
-        self.redis_pool
-            .get()
-            .await
-            .map_err(anyhow::Error::new)
-            .map_err(StoreError::Connect)
+    fn id(&self) -> Self::Id {
+        self.id
     }
 
-    /// Insert a presignature into the storage. If `mine` is true, the presignature will be
-    /// owned by the current node. If `back` is true, the presignature will be marked as unused.
-    pub async fn insert(
-        &self,
-        presignature: Presignature,
-        mine: bool,
-        back: bool,
-    ) -> StoreResult<()> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-            local presig_id = ARGV[1]
-            local presig_value = ARGV[2]
-            local mine = ARGV[3]
-            local back = ARGV[4]
-
-            if back == "true" then
-                redis.call("HDEL", used_key, presig_id)
-            elseif redis.call('HEXISTS', used_key, presig_id) == 1 then
-                return {err = 'Presignature ' .. presig_id .. ' is already used'}
-            end
-
-            if mine == "true" then
-                redis.call("SADD", mine_key, presig_id)
-            end
-
-            redis.call("HSET", presig_key, presig_id, presig_value)
-
-            return "OK"
-        "#;
-
-        let _: String = redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .arg(presignature.id)
-            .arg(presignature)
-            .arg(mine.to_string())
-            .arg(back.to_string())
-            .invoke_async(&mut conn)
-            .await?;
-
-        Ok(())
+    fn participants(&self) -> &[Participant] {
+        &self.participants
     }
 
-    pub async fn contains(&self, id: &PresignatureId) -> StoreResult<bool> {
-        let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(&self.presig_key, id).await?;
-        Ok(result)
+    fn holders(&self) -> Option<&[Participant]> {
+        self.holders.as_deref()
     }
 
-    pub async fn contains_mine(&self, id: &PresignatureId) -> StoreResult<bool> {
-        let mut connection = self.connect().await?;
-        let result: bool = connection.sismember(&self.mine_key, id).await?;
-        Ok(result)
+    fn set_holders(&mut self, holders: Vec<Participant>) {
+        self.holders = Some(holders);
     }
 
-    pub async fn contains_used(&self, id: &PresignatureId) -> StoreResult<bool> {
-        let mut conn = self.connect().await?;
-        let result: bool = conn.hexists(&self.used_key, id).await?;
-        Ok(result)
-    }
-
-    pub async fn take(&self, id: &PresignatureId) -> StoreResult<Presignature> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-            local presig_id = ARGV[1]
-
-            if redis.call('SISMEMBER', mine_key, presig_id) == 1 then
-                return {err = 'Cannot take mine presignature as foreign owned'}
-            end
-
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-
-            if not presig_value then
-                return {err = "Presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", "1", presig_id)
-
-            return presig_value
-        "#;
-
-        let result: Result<Presignature, RedisError> = redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .arg(id)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
-            .await;
-
-        result.map_err(StoreError::from)
-    }
-
-    pub async fn take_mine(&self) -> StoreResult<Option<Presignature>> {
-        let mut conn = self.connect().await?;
-
-        let script = r#"
-            local mine_key = KEYS[1]
-            local presig_key = KEYS[2]
-            local used_key = KEYS[3]
-
-            local presig_id = redis.call("SPOP", mine_key)
-            if not presig_id then
-                return nil
-            end
-
-            local presig_value = redis.call("HGET", presig_key, presig_id)
-            if not presig_value then
-                return {err = "Unexpected behavior. Presignature " .. presig_id .. " is missing"}
-            end
-
-            redis.call("HDEL", presig_key, presig_id)
-            redis.call("HSET", used_key, presig_id, "1")
-            redis.call("HEXPIRE", used_key, ARGV[1], "FIELDS", "1", presig_id)
-
-            return presig_value
-        "#;
-
-        redis::Script::new(script)
-            .key(&self.mine_key)
-            .key(&self.presig_key)
-            .key(&self.used_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
-            .invoke_async(&mut conn)
-            .await
-            .map_err(StoreError::from)
-    }
-
-    pub async fn len_generated(&self) -> StoreResult<usize> {
-        let mut conn = self.connect().await?;
-        let result: usize = conn.hlen(&self.presig_key).await?;
-        Ok(result)
-    }
-
-    pub async fn len_mine(&self) -> StoreResult<usize> {
-        let mut conn = self.connect().await?;
-        let result: usize = conn.scard(&self.mine_key).await?;
-        Ok(result)
-    }
-
-    pub async fn clear(&self) -> StoreResult<()> {
-        let mut conn = self.connect().await?;
-        conn.del::<&str, ()>(&self.presig_key).await?;
-        conn.del::<&str, ()>(&self.mine_key).await?;
-        Ok(())
-    }
+    const METRIC_LABEL: &'static str = "presignature";
 }
 
 impl ToRedisArgs for Presignature {
@@ -234,5 +70,12 @@ impl FromRedisValue for Presignature {
                 e.to_string(),
             ))
         })
+    }
+}
+
+#[cfg(feature = "test-feature")]
+impl ProtocolStorage<Presignature> {
+    pub fn presignature_key(&self) -> &str {
+        self.artifact_key()
     }
 }

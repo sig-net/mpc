@@ -2,7 +2,7 @@ use std::future::{Future, IntoFuture};
 
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
-use mpc_contract::{ProtocolContractState, RunningContractState};
+use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
 use mpc_node::web::StateView;
 use near_account_id::AccountId;
 
@@ -10,7 +10,6 @@ use crate::cluster::Cluster;
 
 type Epoch = u64;
 type Present = bool;
-
 enum ContractState {
     Candidate(AccountId, Present),
     Participant(AccountId, Present),
@@ -50,11 +49,11 @@ impl<'a> WaitAction<'a, ()> {
 }
 
 impl<'a, R> WaitAction<'a, R> {
-    pub fn running(self) -> WaitAction<'a, RunningContractState> {
+    pub fn running(self) -> WaitAction<'a, RunningContractStateView> {
         self.running_on_epoch(0)
     }
 
-    pub fn running_on_epoch(mut self, epoch: Epoch) -> WaitAction<'a, RunningContractState> {
+    pub fn running_on_epoch(mut self, epoch: Epoch) -> WaitAction<'a, RunningContractStateView> {
         self.actions.push(WaitActions::Running(epoch));
         WaitAction {
             nodes: self.nodes,
@@ -65,11 +64,6 @@ impl<'a, R> WaitAction<'a, R> {
 
     pub fn min_triples(mut self, min: usize) -> Self {
         self.actions.push(WaitActions::MinTriples(min, false));
-        self
-    }
-
-    pub fn min_mine_triples(mut self, min: usize) -> Self {
-        self.actions.push(WaitActions::MinTriples(min, true));
         self
     }
 
@@ -88,11 +82,6 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn signable_many(mut self, count: usize) -> Self {
-        self.actions.push(WaitActions::Signable(count));
-        self
-    }
-
     pub fn nodes_running(mut self) -> Self {
         for id in 0..self.nodes.len() {
             self.actions
@@ -101,23 +90,11 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn node_running(mut self, id: usize) -> Self {
-        self.actions
-            .push(WaitActions::NodeState(NodeState::Running, id));
-        self
-    }
-
     pub fn nodes_resharing(mut self) -> Self {
         for id in 0..self.nodes.len() {
             self.actions
                 .push(WaitActions::NodeState(NodeState::Resharing, id));
         }
-        self
-    }
-
-    pub fn node_resharing(mut self, id: usize) -> Self {
-        self.actions
-            .push(WaitActions::NodeState(NodeState::Resharing, id));
         self
     }
 
@@ -203,8 +180,8 @@ impl<'a> IntoFuture for WaitAction<'a, ()> {
     }
 }
 
-impl<'a> IntoFuture for WaitAction<'a, RunningContractState> {
-    type Output = anyhow::Result<RunningContractState>;
+impl<'a> IntoFuture for WaitAction<'a, RunningContractStateView> {
+    type Output = anyhow::Result<RunningContractStateView>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -230,8 +207,8 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(300))
+        .with_max_times(300);
 
     let state = is_ready
         .retry(&strategy)
@@ -240,7 +217,7 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
 
     if matches!(state, NodeState::Joining) {
         // wait a bit longer for voting to join
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
 
     Ok(())
@@ -252,7 +229,13 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 
         match &state {
             ContractState::Candidate(candidate, present) => {
-                if *present != current_state.candidates.contains_key(candidate) {
+                let info: Option<mpc_contract::primitives::CandidateEntry> = nodes
+                    .contract()
+                    .view("candidate_info")
+                    .args_json(serde_json::json!({ "account_id": candidate }))
+                    .await?
+                    .json()?;
+                if *present != info.is_some() {
                     anyhow::bail!("candidate invalid in contract state: expect_present={present} for {candidate:?}");
                 }
             }
@@ -267,8 +250,8 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(300))
+        .with_max_times(300);
 
     is_ready
         .retry(&strategy)
@@ -281,10 +264,10 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
 pub async fn running_mpc(
     nodes: &Cluster,
     epoch: Option<u64>,
-) -> anyhow::Result<RunningContractState> {
+) -> anyhow::Result<RunningContractStateView> {
     let is_running = || async {
         match nodes.contract_state().await? {
-            ProtocolContractState::Running(running) => match epoch {
+            ProtocolContractStateView::Running(running) => match epoch {
                 None => Ok(running),
                 Some(expected_epoch) if running.epoch >= expected_epoch => Ok(running),
                 Some(_) => {
@@ -296,8 +279,8 @@ pub async fn running_mpc(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(50);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(240);
 
     is_running.retry(&strategy).await.with_context(|| {
         format!(
@@ -346,14 +329,11 @@ pub async fn require_presignatures(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!(
-            "mpc nodes failed to generate {} presignatures before deadline",
-            expected
-        )
+        format!("mpc nodes failed to generate {expected} presignatures before deadline")
     })?;
 
     Ok(state_views)
@@ -394,14 +374,11 @@ pub async fn require_triples(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!(
-            "mpc nodes failed to generate {} triples before deadline",
-            expected
-        )
+        format!("mpc nodes failed to generate {expected} triples before deadline")
     })?;
 
     Ok(state_views)

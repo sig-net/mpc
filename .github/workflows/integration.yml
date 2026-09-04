@@ -4,15 +4,96 @@ on:
   push:
     branches:
       - develop
-  pull_request:
     paths:
       - integration-tests/**
       - chain-signatures/**
+  pull_request:
+  merge_group:
 
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  test:
+  # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
+  # Runs the `fixture` nextest profile (see .config/nextest.toml).
+  fixture-test:
+    name: Fixture Test
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - name: Comment on PR if this is a re-run
+        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `⚠️ Component tests (MPC fixture) were re-run (attempt ${process.env.RUN_ATTEMPT})`,
+            });
+
+      - uses: actions/checkout@v6
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Relayer, Sandbox, Redis Docker Images
+        run: |
+          docker pull redis:7.4.2
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+          target: wasm32-unknown-unknown
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fixture-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
+      - name: Build integration test artifacts
+        run: ./setup.sh
+
+      # Build the tests before actually running them to see how long the tests take to run by itself
+      # instead of including the build time in the test time report on Github.
+      - name: Build Chain-Signatures Integration Tests
+        run: cargo build -p integration-tests --tests
+
+      - name: Test
+        run: cargo nextest run -p integration-tests --profile fixture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+  # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
+  # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
+  cluster-test:
     name: Integration Test
     strategy:
       matrix:
@@ -21,7 +102,21 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Comment on PR if this is a re-run
+        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `⚠️ Integration tests were re-run (attempt ${process.env.RUN_ATTEMPT})`,
+            });
+
+      - uses: actions/checkout@v6
 
       - name: Install Docker
         if: ${{ matrix.os == 'macos-latest-xl' }}
@@ -33,7 +128,7 @@ jobs:
           sudo ln -sf $HOME/.colima/default/docker.sock /var/run/docker.sock
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -41,54 +136,60 @@ jobs:
 
       - name: Pull Relayer, Sandbox, Redis Docker Images
         run: |
-          docker pull ghcr.io/near/near-lake-indexer:node-2.3.0
-          docker pull localstack/localstack:3.5.0
           docker pull redis:7.4.2
 
-      - name: Install stable toolchain
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
-      - uses: WarpBuilds/cache@v1
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@v3.1
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+          solana-cli-version: '2.3.9'
+          anchor-version: '0.30.1'
 
-      - name: Install toxiproxy-server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-near
         run: |
-          wget -O toxiproxy-2.9.0_linux_amd64.deb https://github.com/Shopify/toxiproxy/releases/download/v2.9.0/toxiproxy_2.9.0_linux_amd64.deb
-          sudo dpkg -i toxiproxy-2.9.0_linux_amd64.deb
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
-      - name: Configure AWS
-        run: |
-          # Fake AWS configuration for LocalStack
-          aws configure set region us-east-1
-          aws --profile default configure set aws_access_key_id "123"
-          aws --profile default configure set aws_secret_access_key "456"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
-      - name: Build Chain-Signatures Contract
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+      - name: Build integration test artifacts
+        run: ./setup.sh
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
-        run: npm i && npx hardhat compile
-
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+        run: npm ci && npx hardhat compile
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
@@ -96,7 +197,55 @@ jobs:
         run: cargo build -p integration-tests --tests
 
       - name: Test
-        run: cargo test -p integration-tests --jobs 1 -- --test-threads 1
+        run: cargo nextest run -p integration-tests --profile cluster
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+          IT_ETH_ACCOUNT_SK: ${{ secrets.IT_ETH_ACCOUNT_SK }}
+          IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
+          IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
+          IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
+
+  # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
+  anvil-integration-test:
+    name: Anvil Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: anvil-integration-test
+          cache-targets: true
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+      - name: Build eth contract artifact   # required by deploy_chain_signatures' include_bytes!
+        working-directory: ./chain-signatures/contract-eth
+        run: npm ci && npx hardhat compile
+
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Clippy (integration-gated code)
+        run: cargo clippy -p mpc-chain-ethereum --tests --features integration -- -Dclippy::all
+
+      - name: Test
+        run: cargo test -p mpc-chain-ethereum --features integration --tests

@@ -5,8 +5,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::rpc::NearClient;
+use tokio::sync::watch;
 
 /// The contract's config is a dynamic representation of all configurations possible.
 pub type ContractConfig = HashMap<String, Value>;
@@ -18,6 +17,11 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn channel(local: LocalConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        let config = Self::new(local);
+        watch::channel(config)
+    }
+
     pub fn new(local: LocalConfig) -> Self {
         let mut protocol = ProtocolConfig::default();
 
@@ -33,28 +37,25 @@ impl Config {
         Self { protocol, local }
     }
 
-    pub fn try_from_contract(mut contract: ContractConfig, original: &Config) -> Option<Self> {
+    /// Returns whether the merged protocol config actually changed, so that the
+    /// surrounding `watch::Sender::send_if_modified` only notifies receivers on
+    /// real changes instead of every contract poll.
+    pub fn update(&mut self, mut contract: ContractConfig) -> bool {
         let Some(mut protocol) = contract.remove("protocol") else {
             tracing::warn!("unable to find protocol in contract config");
-            return None;
+            return false;
         };
-        merge(&mut protocol, &original.local.over.entries);
+        merge(&mut protocol, &self.local.over.entries);
         let Ok(protocol) = serde_json::from_value(protocol) else {
             tracing::warn!("unable to parse protocol in contract config");
-            return None;
+            return false;
         };
 
-        Some(Self {
-            protocol,
-            local: original.local.clone(),
-        })
-    }
-
-    /// Fetches the latest config from the contract and set the config inplace. The old config
-    /// is returned when swap is completed.
-    pub async fn fetch_inplace(&mut self, rpc_client: &NearClient) -> anyhow::Result<Self> {
-        let new_config = rpc_client.fetch_config(self).await?;
-        Ok(std::mem::replace(self, new_config))
+        if self.protocol == protocol {
+            return false;
+        }
+        self.protocol = protocol;
+        true
     }
 }
 
@@ -66,11 +67,21 @@ pub struct LocalConfig {
     pub over: OverrideConfig,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NetworkConfig {
     pub sign_sk: near_crypto::SecretKey,
     pub cipher_sk: hpke::SecretKey,
-    pub cipher_pk: hpke::PublicKey,
+}
+
+/// Custom Debug implementation to avoid printing the secret keys in logs.
+/// Underlying crates probably redact already, but it's better to be 100% sure
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkConfig")
+            .field("sign_sk", &"<hidden>")
+            .field("cipher_sk", &"<hidden>")
+            .finish()
+    }
 }
 
 impl Default for NetworkConfig {
@@ -81,7 +92,6 @@ impl Default for NetworkConfig {
                 "test-entropy",
             ),
             cipher_sk: hpke::SecretKey::from_bytes(&[0; 32]),
-            cipher_pk: hpke::PublicKey::from_bytes(&[0; 32]),
         }
     }
 }
@@ -138,7 +148,60 @@ pub fn merge(base: &mut Value, new: &Value) {
 mod tests {
     use serde::Deserialize;
 
-    use super::merge;
+    use super::{merge, Config, ContractConfig, LocalConfig, OverrideConfig};
+    use mpc_contract::config::ProtocolConfig;
+
+    fn contract_config(protocol: &ProtocolConfig) -> ContractConfig {
+        ContractConfig::from([(
+            "protocol".to_string(),
+            serde_json::to_value(protocol).unwrap(),
+        )])
+    }
+
+    #[test]
+    fn test_update_returns_whether_protocol_changed() {
+        let mut config = Config::new(LocalConfig::default());
+
+        // Same config as current => no change, no notification.
+        assert!(!config.update(contract_config(&ProtocolConfig::default())));
+
+        // An actual change => updated and notified.
+        let mut changed = ProtocolConfig::default();
+        changed.message_timeout += 1;
+        assert!(config.update(contract_config(&changed)));
+        assert_eq!(config.protocol.message_timeout, changed.message_timeout);
+
+        // The same value again => no change.
+        assert!(!config.update(contract_config(&changed)));
+
+        // Missing protocol section => rejected, no change.
+        assert!(!config.update(ContractConfig::new()));
+    }
+
+    #[test]
+    fn test_update_local_override_wins_and_dedups() {
+        let over = OverrideConfig::new(serde_json::json!({ "message_timeout": 42 }));
+        let mut config = Config::new(LocalConfig {
+            over,
+            ..LocalConfig::default()
+        });
+        assert_eq!(config.protocol.message_timeout, 42);
+
+        // The contract disagrees on the overridden field only: the override wins,
+        // so the merged result equals the current config => no change.
+        let mut contract = ProtocolConfig {
+            message_timeout: 1000,
+            ..ProtocolConfig::default()
+        };
+        assert!(!config.update(contract_config(&contract)));
+        assert_eq!(config.protocol.message_timeout, 42);
+
+        // A change in a non-overridden field still propagates.
+        contract.garbage_timeout += 1;
+        assert!(config.update(contract_config(&contract)));
+        assert_eq!(config.protocol.garbage_timeout, contract.garbage_timeout);
+        assert_eq!(config.protocol.message_timeout, 42);
+    }
 
     #[test]
     fn test_merge() {

@@ -4,8 +4,11 @@ use near_primitives::{borsh::BorshDeserialize, types::AccountId};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
+    hash::Hash,
     str::FromStr,
 };
+
+pub use mpc_contract::primitives::ThresholdVotes;
 
 type ParticipantId = u32;
 
@@ -118,6 +121,10 @@ impl Participants {
         self.participants.insert(*id, info);
     }
 
+    pub fn remove(&mut self, id: &Participant) -> Option<ParticipantInfo> {
+        self.participants.remove(id)
+    }
+
     pub fn get(&self, id: &Participant) -> Option<&ParticipantInfo> {
         self.participants.get(id)
     }
@@ -146,10 +153,6 @@ impl Participants {
 
     pub fn find_participant(&self, account_id: &AccountId) -> Option<&Participant> {
         self.find(account_id).map(|(participant, _)| participant)
-    }
-
-    pub fn find_participant_info(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
-        self.find(account_id).map(|(_, info)| info)
     }
 
     pub fn contains_account_id(&self, account_id: &AccountId) -> bool {
@@ -192,6 +195,10 @@ impl Participants {
             participants: intersect,
         }
     }
+
+    pub fn clear(&mut self) {
+        self.participants.clear();
+    }
 }
 
 /// ParticipantMap used to find a participant by specific amount of participants.
@@ -224,7 +231,18 @@ pub struct CandidateInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl From<mpc_contract::primitives::CandidateInfo> for CandidateInfo {
+    fn from(candidate_info: mpc_contract::primitives::CandidateInfo) -> Self {
+        Self {
+            account_id: AccountId::from_str(candidate_info.account_id.as_ref()).unwrap(),
+            url: candidate_info.url,
+            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
+            sign_pk: BorshDeserialize::try_from_slice(candidate_info.sign_pk.as_bytes()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Candidates {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
 }
@@ -245,14 +263,10 @@ impl Candidates {
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
     }
-
-    pub fn find_candidate(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(account_id)
-    }
 }
 
-impl From<mpc_contract::primitives::Candidates> for Candidates {
-    fn from(contract_candidates: mpc_contract::primitives::Candidates) -> Self {
+impl From<mpc_contract::primitives::CandidatesView> for Candidates {
+    fn from(contract_candidates: mpc_contract::primitives::CandidatesView) -> Self {
         Candidates {
             candidates: contract_candidates
                 .candidates
@@ -260,16 +274,7 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
                 .map(|(account_id, candidate_info)| {
                     (
                         AccountId::from_str(account_id.as_ref()).unwrap(),
-                        CandidateInfo {
-                            account_id: AccountId::from_str(candidate_info.account_id.as_ref())
-                                .unwrap(),
-                            url: candidate_info.url,
-                            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
-                            sign_pk: BorshDeserialize::try_from_slice(
-                                candidate_info.sign_pk.as_bytes(),
-                            )
-                            .unwrap(),
-                        },
+                        candidate_info.into(),
                     )
                 })
                 .collect(),
@@ -277,7 +282,7 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PkVotes {
     pub pk_votes: BTreeMap<near_crypto::PublicKey, HashSet<AccountId>>,
 }
@@ -312,7 +317,7 @@ impl From<mpc_contract::primitives::PkVotes> for PkVotes {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }
@@ -343,4 +348,21 @@ impl From<mpc_contract::primitives::Votes> for Votes {
                 .collect(),
         }
     }
+}
+
+pub fn intersect<T: Copy + Hash + Eq>(sets: &[&[T]]) -> HashSet<T> {
+    if let Some((first, rest)) = sets.split_first() {
+        let mut intersection = first.iter().copied().collect::<HashSet<_>>();
+        for set in rest {
+            let set = set.iter().copied().collect::<HashSet<_>>();
+            intersection.retain(|item| set.contains(item));
+        }
+        intersection
+    } else {
+        HashSet::new()
+    }
+}
+
+pub fn intersect_vec<T: Copy + Hash + Eq>(sets: &[&[T]]) -> Vec<T> {
+    intersect(sets).into_iter().collect()
 }

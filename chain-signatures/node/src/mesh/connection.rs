@@ -1,245 +1,400 @@
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use cait_sith::protocol::Participant;
-use tokio::sync::RwLock;
+use near_account_id::AccountId;
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::WatchStream;
+use tokio_stream::{StreamExt, StreamMap};
 
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::ProtocolState;
-use crate::web::StateView;
-use std::sync::Arc;
-use tokio::task::JoinSet;
+use crate::protocol::state::NodeStatus as OtherNodeStatus;
+use crate::protocol::{ParticipantInfo, ProtocolState};
 
-// TODO: this is a basic connection pool and does not do most of the work yet. This is
-//       mostly here just to facilitate offline node handling for now.
-// TODO/NOTE: we can use libp2p to facilitate most the of low level TCP connection work.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NodeStatus {
+    /// The connected node responds and is actively participating in the MPC
+    /// network.
+    Active,
+    /// State sync is running for node in this state.
+    ///
+    /// State sync needs to run once for every connection when a node starts.
+    /// Additionally, whenever we temporarily lose the connection, we have to
+    /// run it again before we can reliably use the peer node in a protocol.
+    ///
+    /// Note: There are two directions of "being in sync" between two nodes. But
+    /// each node only tracks it one directional.
+    ///
+    /// Example: Node A only cares about IDs it owns. Hence, a peer node B is
+    /// considered active after A sent SyncUpdate and B responded with a
+    /// SyncView. This is all node A needs to know to make decisions about
+    /// protocols it initiates.
+    ///
+    /// The mirrored synchronization, with IDs owned by node B, should also
+    /// happen. But this is irrelevant for what node A does. Hence, only node B
+    /// tracks it.
+    Syncing,
+    /// The node responds but is in an inactive NodeState, hence it is not ready
+    /// for participating in any MPC protocols, yet.
+    Inactive,
+    /// The node can't be reached at the moment.
+    Offline,
+}
+
+/// A connection that runs in the background, constantly polling nodes for their
+/// active status.
+struct NodeConnection {
+    info_tx: watch::Sender<ParticipantInfo>,
+    status_rx: watch::Receiver<(NodeStatus, ParticipantInfo)>,
+    status_tx: watch::Sender<(NodeStatus, ParticipantInfo)>,
+    task: JoinHandle<()>,
+}
+
+impl NodeConnection {
+    fn spawn(
+        client: &NodeClient,
+        participant: Participant,
+        info: &ParticipantInfo,
+        ping_interval: Duration,
+    ) -> Self {
+        let (status_tx, status_rx) = watch::channel((NodeStatus::Offline, info.clone()));
+        let (info_tx, info_rx) = watch::channel(info.clone());
+        let task = tokio::spawn(Self::run(
+            client.clone(),
+            status_tx.clone(),
+            info_rx,
+            participant,
+            ping_interval,
+        ));
+        Self {
+            info_tx,
+            status_rx,
+            status_tx,
+            task,
+        }
+    }
+
+    fn update(&mut self, info: &ParticipantInfo) {
+        tracing::info!(?info, "updating connection with new info");
+        if self.info_tx.send(info.clone()).is_err() {
+            tracing::warn!("unable to update connection");
+        }
+    }
+
+    async fn run(
+        client: NodeClient,
+        status_tx: watch::Sender<(NodeStatus, ParticipantInfo)>,
+        mut info_rx: watch::Receiver<ParticipantInfo>,
+        participant: Participant,
+        ping_interval: Duration,
+    ) {
+        let mut url = info_rx.borrow().url.clone();
+        let mut node = (participant, &url);
+        tracing::info!(?node, "starting connection task");
+        let mut interval = tokio::time::interval(ping_interval);
+        loop {
+            tokio::select! {
+                Ok(()) = info_rx.changed() => {
+                    let new_info = info_rx.borrow_and_update().clone();
+                    url = new_info.url.clone();
+                    node = (participant, &url);
+                    status_tx.send_modify(|(_, info)| {
+                        *info = new_info;
+                    });
+                }
+                _ = interval.tick() => {
+                    let resp = match client.status(&url).await {
+                        Ok(status) => status,
+                        Err(err) => {
+                            tracing::warn!(?node, ?err, "checking /status failed");
+                            status_tx.send_if_modified(|(status, _)| {
+                                std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+                            });
+                            continue;
+                        }
+                    };
+
+                    if resp.protocol_version != crate::PROTOCOL_VERSION {
+                        tracing::warn!(
+                            ?node,
+                            our_version = crate::PROTOCOL_VERSION,
+                            peer_version = resp.protocol_version,
+                            "protocol version mismatch"
+                        );
+                        status_tx.send_if_modified(|(status, _)| {
+                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+                        });
+                        continue;
+                    }
+
+                    let old_status = status_tx.borrow().0;
+                    let mut new_status = match resp.status {
+                        OtherNodeStatus::Running { .. } => NodeStatus::Active,
+                        OtherNodeStatus::Resharing { .. }
+                        | OtherNodeStatus::Generating { .. }
+                        | OtherNodeStatus::Joining { .. }
+                        | OtherNodeStatus::Starting
+                        | OtherNodeStatus::Started
+                        | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
+                    };
+                    if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing)
+                        && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
+                    if old_status != new_status {
+                        tracing::info!(?node, ?old_status, ?new_status, "updated with new status");
+                        status_tx.send_modify(|(status, _)| {
+                            *status = new_status;
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn info(&self) -> watch::Ref<'_, ParticipantInfo> {
+        self.info_tx.borrow()
+    }
+}
+
+impl Drop for NodeConnection {
+    fn drop(&mut self) {
+        tracing::info!(info = ?*self.info_tx.borrow(), "connection dropped");
+        self.task.abort();
+    }
+}
+
+/// Pool that manages connections to nodes in the network. It is responsible for
+/// connecting to nodes, checking their status, and dropping connections that are
+/// no longer within the network.
 pub struct Pool {
     client: NodeClient,
-    connections: RwLock<Participants>,
-    potential_connections: RwLock<Participants>,
-    status: RwLock<HashMap<Participant, StateView>>,
 
-    /// The currently active participants for this epoch.
-    current_active: RwLock<Option<(Participants, Instant)>>,
-    // Potentially active participants that we can use to establish a connection in the next epoch.
-    potential_active: RwLock<Option<(Participants, Instant)>>,
-    refresh_active_timeout: Duration,
+    /// The interval between checking the status of the nodes' connection status.
+    ping_interval: Duration,
+
+    /// All connections in the network, even including the potential ones that are going
+    /// to join the network within the next epoch.
+    connections: HashMap<Participant, NodeConnection>,
+
+    /// Account id of this node. Used to avoid creating self connections.
+    node_account_id: AccountId,
+
+    conn_update_tx: broadcast::Sender<ConnectionUpdate>,
+    conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
 }
 
 impl Pool {
-    pub fn new(client: &NodeClient, refresh_active_timeout: Duration) -> Self {
-        tracing::info!(?refresh_active_timeout, "creating a new pool");
+    pub fn new(client: &NodeClient, node_account_id: &AccountId, ping_interval: Duration) -> Self {
+        tracing::info!("creating new connection pool");
+        let (conn_update_tx, conn_update_rx) = broadcast::channel(256);
         Self {
             client: client.clone(),
-            connections: RwLock::new(Participants::default()),
-            potential_connections: RwLock::new(Participants::default()),
-            status: RwLock::new(HashMap::default()),
-            current_active: RwLock::new(Option::default()),
-            potential_active: RwLock::new(Option::default()),
-            refresh_active_timeout,
+            ping_interval,
+            connections: HashMap::new(),
+            node_account_id: node_account_id.clone(),
+
+            conn_update_tx,
+            conn_update_rx,
         }
     }
 
-    // self typed Arc<Self> so it can be passed between tokio tasks
-    pub async fn ping(self: Arc<Self>) -> Participants {
-        // Check if the current active participants are still valid
-        if let Some((ref active, timestamp)) = *self.current_active.read().await {
-            if timestamp.elapsed() < self.refresh_active_timeout {
-                return active.clone();
+    pub async fn connect(&mut self, contract: ProtocolState) {
+        let mut seen = HashSet::new();
+        match contract {
+            ProtocolState::Initializing(init) => {
+                let participants: Participants = init.candidates.into();
+                self.connect_nodes(&participants, &mut seen).await;
             }
-        }
-
-        let connections = {
-            let conn = self.connections.read().await;
-            conn.clone()
-        };
-
-        // Spawn tasks for each participant
-        let mut join_set = JoinSet::new();
-        for (participant, info) in connections.into_iter() {
-            let pool = Arc::clone(&self);
-
-            join_set.spawn(async move {
-                match pool.client.state(&info.url).await {
-                    Ok(state) => match pool.client.msg_empty(&info.url).await {
-                        Ok(()) => Ok((participant, state, info)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
-                                info.url
-                            );
-                            Err(())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
-                            info.url
-                        );
-                        Err(())
-                    }
-                }
-            });
-        }
-
-        let mut status = self.status.write().await;
-        let mut participants = Participants::default();
-
-        // Process completed tasks
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(Ok((participant, state, info))) => {
-                    status.insert(participant, state);
-                    participants.insert(&participant, info);
-                }
-                Ok(Err(())) => {
-                    // Already logged in task
-                }
-                Err(e) => {
-                    tracing::warn!("fetch participant state task panicked: {e}");
-                }
+            ProtocolState::Running(running) => {
+                self.connect_nodes(&running.participants, &mut seen).await;
             }
-        }
-
-        drop(status);
-
-        // Update the active participants
-        let mut active = self.current_active.write().await;
-        *active = Some((participants.clone(), Instant::now()));
-
-        participants
-    }
-
-    // self typed Arc<Self> so it can be passed between tokio tasks
-    pub async fn ping_potential(self: Arc<Self>) -> Participants {
-        if let Some((ref active, timestamp)) = *self.potential_active.read().await {
-            if timestamp.elapsed() < self.refresh_active_timeout {
-                return active.clone();
-            }
-        }
-
-        let connections = {
-            let conn = self.potential_connections.read().await;
-            conn.clone()
-        };
-
-        // Spawn tasks for each participant
-        let mut join_set = JoinSet::new();
-        for (participant, info) in connections.into_iter() {
-            let pool = Arc::clone(&self); // Clone Arc for use inside tasks
-
-            join_set.spawn(async move {
-                match pool.client.state(&info.url).await {
-                    Ok(state) => match pool.client.msg_empty(&info.url).await {
-                        Ok(()) => Ok((participant, state, info)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Send empty msg for participant {participant:?} with url {} has failed with error {e}.",
-                                info.url
-                            );
-                            Err(())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Fetch state for participant {participant:?} with url {} has failed with error {e}.",
-                            info.url
-                        );
-                        Err(())
-                    }
-                }
-            });
-        }
-
-        let mut status = self.status.write().await;
-        let mut participants = Participants::default();
-
-        // Process completed tasks
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(Ok((participant, state, info))) => {
-                    status.insert(participant, state);
-                    participants.insert(&participant, info);
-                }
-                Ok(Err(())) => {
-                    // Already logged in task
-                }
-                Err(e) => {
-                    tracing::warn!("fetch participant state task panicked: {e}");
-                }
-            }
-        }
-
-        drop(status);
-
-        // Update the active participants
-        let mut potential_active = self.potential_active.write().await;
-        *potential_active = Some((participants.clone(), Instant::now()));
-
-        participants
-    }
-
-    pub async fn establish_participants(&self, contract_state: &ProtocolState) {
-        match contract_state {
-            ProtocolState::Initializing(contract_state) => {
-                let participants: Participants = contract_state.candidates.clone().into();
-                self.set_participants(&participants).await;
-            }
-            ProtocolState::Running(contract_state) => {
-                self.set_participants(&contract_state.participants).await;
-            }
-            ProtocolState::Resharing(contract_state) => {
-                self.set_participants(&contract_state.old_participants)
-                    .await;
-                self.set_potential_participants(&contract_state.new_participants)
+            ProtocolState::Resharing(resharing) => {
+                // NOTE: do NOT connect with old participants since only the new ones are
+                // operating under the new epoch and talking to each other. In the case of
+                // a resharing revert, we will go back to running state from the contract,
+                // and then the old participants would be connected again.
+                self.connect_nodes(&resharing.new_participants, &mut seen)
                     .await;
             }
         }
-        tracing::debug!(
-            "Pool.establish_participants set participants to {:?}",
-            self.connections.read().await.clone().keys_vec()
-        );
+
+        // drop the connections that are not in the seen list
+        self.drop_connections(seen);
     }
 
-    async fn set_participants(&self, participants: &Participants) {
-        *self.connections.write().await = participants.clone();
+    pub fn disconnect_all(&mut self) {
+        self.drop_connections(HashSet::new());
     }
 
-    async fn set_potential_participants(&self, participants: &Participants) {
-        *self.potential_connections.write().await = participants.clone();
-        tracing::debug!(
-            "Pool set potential participants to {:?}",
-            self.potential_connections.read().await.keys_vec()
-        );
-    }
+    pub(crate) async fn connect_nodes(
+        &mut self,
+        participants: &Participants,
+        seen: &mut HashSet<Participant>,
+    ) {
+        for (&participant, info) in participants.iter() {
+            if info.account_id == self.node_account_id {
+                tracing::debug!(?participant, "skipping self connection");
+                if self.connections.remove(&participant).is_some()
+                    && self
+                        .conn_update_tx
+                        .send(ConnectionUpdate::Drop(participant))
+                        .is_err()
+                {
+                    tracing::warn!(?participant, "unable to send drop for self connection");
+                }
+                continue;
+            }
 
-    pub async fn potential_participants(&self) -> Participants {
-        self.potential_connections.read().await.clone()
-    }
+            seen.insert(participant);
 
-    async fn is_participant_stable(&self, participant: &Participant) -> bool {
-        self.status
-            .read()
-            .await
-            .get(participant)
-            .map_or(false, |state| match state {
-                StateView::Running { is_stable, .. } => *is_stable,
-                _ => false,
-            })
-    }
+            let node = (participant, &info.url);
+            match self.connections.entry(participant) {
+                Entry::Occupied(mut conn) => {
+                    if &*conn.get().info() != info {
+                        tracing::info!(?node, "node connection updating");
+                        conn.get_mut().update(info);
+                    }
+                }
+                Entry::Vacant(conn) => {
+                    tracing::info!(?node, "node connection created");
+                    let conn = conn.insert(NodeConnection::spawn(
+                        &self.client,
+                        participant,
+                        info,
+                        self.ping_interval,
+                    ));
 
-    /// Get active participants that have a stable connection. This is useful for arbitrary metrics to
-    /// say whether or not a node is stable, such as a node being on track with the latest block height.
-    pub async fn stable_participants(&self) -> Participants {
-        let mut stable = Participants::default();
-        if let Some((active_participants, _)) = self.current_active.read().await.clone() {
-            for (participant, info) in active_participants.iter() {
-                if self.is_participant_stable(participant).await {
-                    stable.insert(participant, info.clone());
+                    let watcher = conn.status_rx.clone();
+                    if self
+                        .conn_update_tx
+                        .send(ConnectionUpdate::New(participant, watcher))
+                        .is_err()
+                    {
+                        tracing::warn!(?node, "failed to send new connection");
+                    }
                 }
             }
         }
-        stable
+    }
+
+    /// Drop connections that are not in the active connections list. Dropped connections
+    /// are no longer polled for their status.
+    fn drop_connections(&mut self, active_conn: HashSet<Participant>) {
+        let mut remove = Vec::new();
+        for participant in self.connections.keys() {
+            if !active_conn.contains(participant) {
+                remove.push(*participant);
+            }
+        }
+
+        for participant in remove {
+            let removed = self.connections.remove(&participant).is_some();
+            if removed
+                && self
+                    .conn_update_tx
+                    .send(ConnectionUpdate::Drop(participant))
+                    .is_err()
+            {
+                tracing::warn!(?participant, "unable to send update for drop participant");
+            }
+        }
+    }
+
+    /// Mark an active node as out-of-sync, so it is re-synced before we use it
+    /// in protocols we initiate. Called when we learn our record of what that
+    /// peer stores is wrong, e.g. it rejects a posit for an artifact we list
+    /// it as holding.
+    pub async fn report_node_desynced(&self, participant: Participant) {
+        if let Some(conn) = self.connections.get(&participant) {
+            conn.status_tx.send_if_modified(|(status, _)| {
+                if *status == NodeStatus::Active {
+                    tracing::info!(?participant, "reporting node desynced");
+                    *status = NodeStatus::Syncing;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
+    /// Update the node state after synchronization was successful.
+    pub async fn report_node_synced(&self, participant: Participant) {
+        if let Some(conn) = self.connections.get(&participant) {
+            tracing::info!(?participant, "reporting node synced");
+            conn.status_tx.send_if_modified(|(status, _)| {
+                if *status == NodeStatus::Syncing {
+                    *status = NodeStatus::Active;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
+    pub fn watch(&self) -> ConnectionWatcher {
+        ConnectionWatcher::new(self.conn_update_rx.resubscribe())
+    }
+}
+
+#[derive(Clone)]
+pub enum ConnectionUpdate {
+    New(Participant, watch::Receiver<(NodeStatus, ParticipantInfo)>),
+    Drop(Participant),
+}
+
+pub struct ConnectionWatcher {
+    /// Watch for new connections and dropped connections from the pool. This
+    /// is so that we can update our watchers when the pool changes.
+    // NOTE: this is a broadcast channel so that we can get a series of updates, and
+    // not just the latest entry with watcher channel.
+    conn_update: broadcast::Receiver<ConnectionUpdate>,
+    /// Set of active connections that we are watching.
+    watchers: StreamMap<Participant, WatchStream<(NodeStatus, ParticipantInfo)>>,
+}
+
+impl ConnectionWatcher {
+    fn new(conn_update: broadcast::Receiver<ConnectionUpdate>) -> Self {
+        Self {
+            conn_update,
+            watchers: StreamMap::new(),
+        }
+    }
+
+    pub async fn next(&mut self) -> (Participant, NodeStatus, ParticipantInfo) {
+        loop {
+            tokio::select! {
+                // Update our watchers if the connections changed.
+                Ok(update) = self.conn_update.recv() => {
+                    match update {
+                        ConnectionUpdate::New(participant, rx) => {
+                            tracing::debug!(?participant, "adding new watcher");
+                            self.watchers.insert(participant, WatchStream::new(rx));
+                        }
+                        ConnectionUpdate::Drop(participant) => {
+                            tracing::debug!(?participant, "dropping watcher");
+                            self.watchers.remove(&participant);
+                            return (participant, NodeStatus::Offline, ParticipantInfo::new(u32::MAX));
+                        }
+                    }
+                }
+                // NOTE: if watchers.next() return None, it means that the connection is dropped
+                // or that the StreamMap is empty. In that case, we should just continue
+                Some((p, (status, info))) = self.watchers.next() => {
+                    return (p, status, info);
+                }
+            }
+        }
     }
 }

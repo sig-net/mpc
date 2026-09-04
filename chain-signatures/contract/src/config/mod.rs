@@ -53,9 +53,10 @@ pub struct ProtocolConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct TripleConfig {
-    /// Minimum amount of triples that is owned by each node.
+    /// Per-node minimum: each node generates triples until it owns at least this many.
     pub min_triples: u32,
-    /// Maximum amount of triples that is in the whole network.
+    /// Network-wide cap: no new triples are generated once the total potential
+    /// count across all nodes reaches this limit.
     pub max_triples: u32,
     /// Timeout for triple generation in milliseconds.
     pub generation_timeout: u64,
@@ -67,9 +68,10 @@ pub struct TripleConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct PresignatureConfig {
-    /// Minimum amount of presignatures that is owned by each node.
+    /// Per-node minimum: each node generates presignatures until it owns at least this many.
     pub min_presignatures: u32,
-    /// Maximum amount of presignatures that is in the whole network.
+    /// Network-wide cap: no new presignatures are generated once the total
+    /// potential count across all nodes reaches this limit.
     pub max_presignatures: u32,
     /// Timeout for presignature generation in milliseconds.
     pub generation_timeout: u64,

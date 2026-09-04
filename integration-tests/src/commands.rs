@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 use mpc_contract::{
     config::Config,
-    primitives::{CandidateInfo, Candidates, Participants, SignRequest},
+    primitives::{CandidateInfo, CandidatesView as Candidates, Participants, SignRequest},
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;
@@ -23,7 +23,7 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     let sign_request = SignRequest {
         payload: PAYLOAD,
         path: "test".into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let request_json = format!(
@@ -32,17 +32,20 @@ pub fn sign_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} sign {} --accountId {} --gas 300000000000000 --deposit 1",
-        contract_id, request_json, caller_id
+        "near call {contract_id} sign {request_json} --accountId {caller_id} --gas 300000000000000 --deposit 1"
     ))
 }
 
 pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::Result<String> {
-    let payload_hashed = web3::signing::keccak256(&PAYLOAD);
+    let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
-    let key_version = 0;
 
-    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, key_version);
+    let sign_id = SignId::from_parts(
+        caller_id.as_str(),
+        &payload_hashed,
+        path,
+        LATEST_MPC_KEY_VERSION,
+    );
     let big_r = serde_json::from_value(
         "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
     )?; // Fake BigR
@@ -62,8 +65,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     );
 
     Ok(format!(
-        "near call {} respond {} --accountId {} --gas 300000000000000",
-        contract_id, request_json, caller_id
+        "near call {contract_id} respond {request_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -78,8 +80,7 @@ pub fn join_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} join {} --accountId {} --gas 300000000000000",
-        contract_id, join_json, caller_id
+        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000 --deposit 1"
     ))
 }
 
@@ -97,8 +98,7 @@ pub fn proposed_updates_command(
     let base64_encoded = near_primitives::serialize::to_base64(borsh_args.as_slice());
 
     Ok(format!(
-        "near call {} propose_update --base64 {:?} --accountId {} --gas 300000000000000",
-        contract_id, base64_encoded, caller_id
+        "near call {contract_id} propose_update --base64 {base64_encoded:?} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -112,8 +112,7 @@ pub fn init_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {} init {} --accountId {} --gas 300000000000000",
-        contract_id, init_json, caller_id
+        "near call {contract_id} init {init_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
@@ -129,13 +128,12 @@ pub fn init_running_command(
     );
 
     Ok(format!(
-        "near call {} init_running {} --accountId {} --gas 300000000000000",
-        contract_id, init_running_json, caller_id
+        "near call {contract_id} init_running {init_running_json} --accountId {caller_id} --gas 300000000000000"
     ))
 }
 
 pub fn dummy_candidates() -> Candidates {
-    let mut candidates = Candidates::new();
+    let mut candidates = Candidates::default();
     let names: Vec<AccountId> = vec![
         "alice.near".parse().unwrap(),
         "bob.near".parse().unwrap(),
@@ -143,7 +141,7 @@ pub fn dummy_candidates() -> Candidates {
     ];
 
     for account_id in names {
-        candidates.insert(
+        candidates.candidates.insert(
             account_id.clone(),
             CandidateInfo {
                 account_id,

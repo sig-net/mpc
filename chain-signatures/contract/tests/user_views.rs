@@ -1,11 +1,13 @@
 pub mod common;
 use common::{create_response, init_env};
 
-use mpc_contract::primitives::SignRequest;
+use mpc_contract::primitives::{PendingRequest, SignRequest};
 
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
+use signet_primitives::SignId;
+use signet_primitives::LATEST_MPC_KEY_VERSION;
 use std::str::FromStr;
 #[tokio::test]
 async fn test_key_version() -> anyhow::Result<()> {
@@ -17,7 +19,7 @@ async fn test_key_version() -> anyhow::Result<()> {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(version, 0);
+    assert_eq!(version, 1);
     Ok(())
 }
 
@@ -26,7 +28,7 @@ async fn test_public_key() -> anyhow::Result<()> {
     let (_, contract, _, _) = init_env().await;
 
     let key: String = contract.view("public_key").await.unwrap().json().unwrap();
-    println!("{:?}", key);
+    println!("{key:?}");
     let pk = PublicKey::from_str(&key)?;
     assert_eq!(pk.curve_type(), CurveType::SECP256K1);
     Ok(())
@@ -39,6 +41,7 @@ async fn test_derived_public_key() -> anyhow::Result<()> {
     let key: String = contract
         .view("derived_public_key")
         .args_json(json!({
+            "key_version": LATEST_MPC_KEY_VERSION,
             "path": "test",
             "predecessor": "alice.near"
         }))
@@ -68,13 +71,13 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
     let path = "test";
 
     for i in 1..8 {
-        let msg = format!("hello world {}", i);
+        let msg = format!("hello world {i}");
         println!("submitting: {msg}");
         let (payload_hash, _, _) = create_response(alice.id(), &msg, path, &sk).await;
         let request = SignRequest {
             payload: payload_hash,
             path: path.into(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
         let _status = alice
             .call(contract.id(), "sign")
@@ -98,5 +101,42 @@ async fn test_experimental_signature_deposit() -> anyhow::Result<()> {
         .unwrap()
         .parse()?;
     assert_eq!(deposit, NearToken::from_yoctonear(1).as_yoctonear());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_poll_pending_requests() -> anyhow::Result<()> {
+    let (_worker, contract, _, sk) = init_env().await;
+
+    let predecessor_id = "alice.near".parse().unwrap();
+    let msg = "hello world!";
+    let path = "test";
+    let (payload_hash, _respond_req, _respond_resp) =
+        create_response(&predecessor_id, msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: 0,
+    };
+
+    let _status = contract
+        .call("sign")
+        .args_json(serde_json::json!({
+            "request": request,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let pending_requests: Vec<(SignId, PendingRequest)> = contract
+        .view("pending_requests_data")
+        .await
+        .unwrap()
+        .json()?;
+
+    assert_eq!(pending_requests.len(), 1);
     Ok(())
 }

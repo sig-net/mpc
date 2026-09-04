@@ -1,5 +1,5 @@
 pub mod common;
-use common::{init_env, vote_update_till_completion, CONTRACT_FILE_PATH, INVALID_CONTRACT};
+use common::{contract_file_path, init_env, vote_update_till_completion, INVALID_CONTRACT};
 
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ pub fn dummy_contract() -> ProposeUpdateArgs {
 }
 
 pub fn current_contract() -> ProposeUpdateArgs {
-    let new_wasm = std::fs::read(CONTRACT_FILE_PATH).unwrap();
+    let new_wasm = std::fs::read(contract_file_path()).unwrap();
     ProposeUpdateArgs {
         code: Some(new_wasm),
         config: None,
@@ -35,7 +35,7 @@ pub fn invalid_contract() -> ProposeUpdateArgs {
 /// This is the current deposit required for a contract deploy. This is subject to change but make
 /// sure that it's not larger than 1mb. We can go up to 1.5mb technically but our contract should
 /// not be getting that big.
-const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
+const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(11000);
 
 #[tokio::test]
 async fn test_propose_contract_max_size_upload() {
@@ -110,7 +110,7 @@ async fn test_propose_update_config() {
     }
 
     let old_config: serde_json::Value = contract.view("config").await.unwrap().json().unwrap();
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
 
     // check that each participant can vote on a singular proposal and have it reflect changes:
@@ -188,7 +188,7 @@ async fn test_propose_update_contract() {
 
     dbg!(&execution);
 
-    let state: mpc_contract::ProtocolContractState = execution.json().unwrap();
+    let state: mpc_contract::ProtocolContractStateView = execution.json().unwrap();
     dbg!(state);
 }
 
@@ -226,7 +226,7 @@ async fn test_invalid_contract_deploy() {
         .unwrap();
 
     dbg!(&execution);
-    let state: mpc_contract::ProtocolContractState = execution.json().unwrap();
+    let state: mpc_contract::ProtocolContractStateView = execution.json().unwrap();
     dbg!(state);
 }
 
@@ -261,7 +261,7 @@ async fn test_propose_update_contract_many() {
     vote_update_till_completion(&contract, &accounts, proposals.last().unwrap()).await;
 
     // Let's check that we can call into the state and see all the proposals.
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     dbg!(state);
 }

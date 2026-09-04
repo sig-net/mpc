@@ -1,18 +1,22 @@
-use super::contract::primitives::{ParticipantMap, Participants};
-use super::presignature::PresignatureManager;
-use super::signature::SignatureManager;
-use super::triple::TripleManager;
+use super::contract::{primitives::Participants, ResharingContractState};
+use super::triple::TripleSpawnerTask;
+use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
 use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+
+use rand::random;
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Serialize, Deserialize)]
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentNodeData {
     pub epoch: u64,
     pub private_share: SecretKeyShare,
@@ -28,20 +32,22 @@ impl fmt::Debug for PersistentNodeData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StartedState {
     pub persistent_node_data: Option<PersistentNodeData>,
 }
 
-#[derive(Clone)]
 pub struct GeneratingState {
     pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub protocol: KeygenProtocol,
+
+    /// If the generating state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Option<(PublicKey, SecretKeyShare)>,
 }
 
-#[derive(Clone)]
 pub struct WaitingForConsensusState {
     pub epoch: u64,
     pub participants: Participants,
@@ -61,36 +67,114 @@ impl fmt::Debug for WaitingForConsensusState {
     }
 }
 
-#[derive(Clone)]
 pub struct RunningState {
     pub epoch: u64,
+    pub me: Participant,
     pub participants: Participants,
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
-    pub triple_manager: TripleManager,
-    pub presignature_manager: Arc<RwLock<PresignatureManager>>,
-    pub signature_manager: Arc<RwLock<SignatureManager>>,
+    pub triple_task: TripleSpawnerTask,
+    pub presign_task: PresignatureSpawnerTask,
 }
 
-#[derive(Clone)]
 pub struct ResharingState {
     pub me: Participant,
-    pub old_epoch: u64,
-    pub old_participants: Participants,
-    pub new_participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
-    pub protocol: ReshareProtocol,
+    pub contract: ResharingContractState,
+    pub local_private_share: Option<SecretKeyShare>,
+    pub phase: ResharingPhase,
+    pub ready_nonce: u64,
 }
 
-#[derive(Clone)]
+pub struct ReshareAwaiting {
+    pub ready_tokens: HashMap<Participant, u64>,
+    pub my_token: u64,
+    /// Interval to control broadcasting readiness messages.
+    // NOTE: this is an Instant for now since generating/resharing tasks are not async
+    // and happen in main protocol loop. once it becomes async we can make this an interval.
+    pub broadcast_interval: Instant,
+}
+
+pub struct ReshareRunning {
+    pub protocol: ReshareProtocol,
+
+    /// Participants that have sent readiness messages along with their tokens. These
+    /// are retained for the duration of the resharing protocol until either completion
+    /// or restart. They will be combined to form the singular token for all resharing
+    /// messages.
+    pub ready_tokens: HashMap<Participant, u64>,
+
+    /// Unique identifier for the current resharing attempt. Messages that do not match
+    /// this token are discarded and ignored from processing.
+    pub token: u64,
+
+    /// If the resharing state fails to store data after generating, it gets temporarily
+    /// stored here and retried later.
+    pub failed_store: Option<SecretKeyShare>,
+    pub started_at: Instant,
+    pub last_activity: Instant,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum ResharingPhase {
+    Awaiting(ReshareAwaiting),
+    Resharing(ReshareRunning),
+}
+
+impl ResharingPhase {
+    pub fn awaiting(me: Participant) -> Self {
+        let my_token = random::<u64>();
+        Self::Awaiting(ReshareAwaiting {
+            ready_tokens: std::iter::once((me, my_token)).collect(),
+            my_token,
+            // ready to broadcast immediately
+            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResharingStatus {
+    Awaiting,
+    Running,
+}
+
 pub struct JoiningState {
     pub participants: Participants,
     pub public_key: PublicKey,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum NodeStatus {
+    Starting,
+    Started,
+    Generating {
+        participants: Vec<Participant>,
+    },
+    WaitingForConsensus {
+        participants: Vec<Participant>,
+    },
+    Running {
+        me: Participant,
+        participants: Vec<Participant>,
+        ongoing_triple_gen: usize,
+        ongoing_presignature_gen: usize,
+    },
+    Resharing {
+        old_participants: Vec<Participant>,
+        new_participants: Vec<Participant>,
+        phase: ResharingStatus,
+    },
+    Joining {
+        participants: Vec<Participant>,
+    },
+}
+
+#[derive(Default)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeState {
     #[default]
@@ -117,20 +201,156 @@ impl Display for NodeState {
     }
 }
 
-impl NodeState {
-    pub fn participants(&self) -> ParticipantMap {
-        match self {
-            NodeState::Generating(state) => ParticipantMap::One(state.participants.clone()),
-            NodeState::WaitingForConsensus(state) => {
-                ParticipantMap::One(state.participants.clone())
+pub struct Node {
+    pub state: NodeState,
+    pub watcher_tx: watch::Sender<NodeStatus>,
+    pub watcher: NodeStateWatcher,
+    #[cfg(feature = "test-feature")]
+    test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Node {
+    pub fn new() -> Self {
+        let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
+        #[cfg(feature = "test-feature")]
+        let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
+        let watcher = NodeStateWatcher {
+            watcher: watcher_rx,
+            #[cfg(feature = "test-feature")]
+            test_key_info_watcher,
+        };
+        Self {
+            state: NodeState::Starting,
+            watcher_tx,
+            watcher,
+            #[cfg(feature = "test-feature")]
+            test_key_info_watcher_tx,
+        }
+    }
+
+    pub fn watch(&self) -> NodeStateWatcher {
+        self.watcher.clone()
+    }
+
+    pub async fn update_watchers(&mut self) {
+        match &self.state {
+            NodeState::Started(_) => {
+                let _ = self.watcher_tx.send(NodeStatus::Started);
             }
-            NodeState::Running(state) => ParticipantMap::One(state.participants.clone()),
-            NodeState::Resharing(state) => ParticipantMap::Two(
-                state.new_participants.clone(),
-                state.old_participants.clone(),
-            ),
-            NodeState::Joining(state) => ParticipantMap::One(state.participants.clone()),
-            _ => ParticipantMap::Zero,
+            NodeState::Starting => {
+                let _ = self.watcher_tx.send(NodeStatus::Starting);
+            }
+            NodeState::Generating(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Generating {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+            NodeState::WaitingForConsensus(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::WaitingForConsensus {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+            NodeState::Running(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Running {
+                    me: state.me,
+                    participants: state.participants.keys_vec(),
+                    ongoing_triple_gen: state.triple_task.len_ongoing(),
+                    ongoing_presignature_gen: state.presign_task.len_ongoing(),
+                });
+            }
+            NodeState::Resharing(state) => {
+                let phase = match &state.phase {
+                    ResharingPhase::Awaiting(_) => ResharingStatus::Awaiting,
+                    ResharingPhase::Resharing(_) => ResharingStatus::Running,
+                };
+                let _ = self.watcher_tx.send(NodeStatus::Resharing {
+                    old_participants: state.contract.old_participants.keys_vec(),
+                    new_participants: state.contract.new_participants.keys_vec(),
+                    phase,
+                });
+            }
+            NodeState::Joining(state) => {
+                let _ = self.watcher_tx.send(NodeStatus::Joining {
+                    participants: state.participants.keys_vec(),
+                });
+            }
+        }
+
+        #[cfg(feature = "test-feature")]
+        let _ = self.test_key_info_watcher_tx.send(self.state.key_info());
+    }
+}
+
+#[derive(Clone)]
+pub struct NodeStateWatcher {
+    watcher: watch::Receiver<NodeStatus>,
+    // Note: this gives access to the private key share and should not be
+    // exposed to other code outside of tests
+    #[cfg(feature = "test-feature")]
+    pub test_key_info_watcher: watch::Receiver<Option<NodeKeyInfo>>,
+}
+
+impl NodeStateWatcher {
+    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.watcher.changed().await
+    }
+
+    pub fn status(&self) -> NodeStatus {
+        self.watcher.borrow().clone()
+    }
+
+    pub fn participants(&self) -> Vec<Participant> {
+        match self.status() {
+            NodeStatus::Generating { participants } => participants,
+            NodeStatus::WaitingForConsensus { participants } => participants,
+            NodeStatus::Running { participants, .. } => participants,
+            NodeStatus::Resharing {
+                new_participants, ..
+            } => new_participants,
+            NodeStatus::Joining { participants } => participants,
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "test-feature")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NodeKeyInfo {
+    pub private_share: SecretKeyShare,
+    pub public_key: PublicKey,
+}
+
+#[cfg(feature = "test-feature")]
+impl NodeState {
+    fn key_info(&self) -> Option<NodeKeyInfo> {
+        match &self {
+            NodeState::Started(state) => {
+                state
+                    .persistent_node_data
+                    .as_ref()
+                    .map(|stored| NodeKeyInfo {
+                        private_share: stored.private_share,
+                        public_key: stored.public_key,
+                    })
+            }
+            NodeState::Starting => None,
+            NodeState::Generating(_state) => None,
+            NodeState::WaitingForConsensus(state) => Some(NodeKeyInfo {
+                private_share: state.private_share,
+                public_key: state.public_key,
+            }),
+            NodeState::Running(state) => Some(NodeKeyInfo {
+                private_share: state.private_share,
+                public_key: state.public_key,
+            }),
+            NodeState::Resharing(_state) => None,
+            NodeState::Joining(_state) => None,
         }
     }
 }

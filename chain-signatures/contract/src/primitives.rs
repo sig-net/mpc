@@ -1,7 +1,14 @@
-use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
+pub use mpc_primitives::CheckpointDigest;
+pub use signet_primitives::{Chain, SignRequest};
+
+use crate::config::Config;
+use crate::state::ProtocolContractStateView;
+
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
+use signet_primitives::{borsh_scalar, SignId, Signature};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
@@ -13,6 +20,48 @@ pub mod hpke {
 pub enum StorageKey {
     PendingRequests,
     ProposedUpdatesEntries,
+    LatestCheckpoints,
+    LatestCheckpointDigests,
+    Candidates,
+}
+
+/// One chain's entry in a checkpoint reset.
+///
+/// `height` is inclusive: indexing resumes at `height` itself.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub struct CheckpointReset {
+    pub chain: Chain,
+    pub height: u64,
+}
+
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum Read {
+    State,
+    Config,
+    Checkpoints,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum View {
+    State(ProtocolContractStateView),
+    Config(Config),
+    Checkpoints(HashMap<Chain, CheckpointDigest>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume
@@ -94,6 +143,13 @@ pub struct CandidateInfo {
     pub sign_pk: PublicKey,
 }
 
+/// A candidate and the participants that voted to admit it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CandidateEntry {
+    pub info: CandidateInfo,
+    pub join_votes: HashSet<AccountId>,
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct Participants {
     pub next_id: u32,
@@ -107,10 +163,20 @@ impl Default for Participants {
     }
 }
 
-impl From<Candidates> for Participants {
-    fn from(candidates: Candidates) -> Self {
+impl From<&Candidates> for Participants {
+    fn from(candidates: &Candidates) -> Self {
         let mut participants = Participants::new();
-        for (account_id, candidate_info) in candidates.into_iter() {
+        for (account_id, candidate_info) in candidates.iter() {
+            participants.insert(account_id.clone(), candidate_info.clone().into());
+        }
+        participants
+    }
+}
+
+impl From<CandidatesView> for Participants {
+    fn from(candidates: CandidatesView) -> Self {
+        let mut participants = Participants::new();
+        for (account_id, candidate_info) in candidates.candidates {
             participants.insert(account_id, candidate_info.into());
         }
         participants
@@ -141,6 +207,7 @@ impl Participants {
 
     pub fn remove(&mut self, account_id: &AccountId) {
         self.participants.remove(account_id);
+        self.account_to_participant_id.remove(account_id);
     }
 
     pub fn get(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
@@ -195,9 +262,10 @@ impl IntoIterator for Participants {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct Candidates {
-    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+    /// Must be cleared before replacing its owning protocol state.
+    pub candidates: IterableMap<AccountId, CandidateInfo>,
 }
 
 impl Default for Candidates {
@@ -209,7 +277,7 @@ impl Default for Candidates {
 impl Candidates {
     pub fn new() -> Self {
         Candidates {
-            candidates: BTreeMap::new(),
+            candidates: IterableMap::new(StorageKey::Candidates),
         }
     }
 
@@ -225,47 +293,48 @@ impl Candidates {
         self.candidates.remove(account_id);
     }
 
+    pub fn clear(&mut self) {
+        self.candidates.clear();
+    }
+
     pub fn get(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
         self.candidates.get(account_id)
     }
 
-    pub fn iter(&self) -> btree_map::Iter<'_, AccountId, CandidateInfo> {
+    pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
     }
 
-    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, CandidateInfo> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&AccountId, &mut CandidateInfo)> {
         self.candidates.iter_mut()
     }
-}
 
-impl<'a> IntoIterator for &'a Candidates {
-    type Item = (&'a AccountId, &'a CandidateInfo);
-    type IntoIter = btree_map::Iter<'a, AccountId, CandidateInfo>;
+    pub fn len(&self) -> usize {
+        self.candidates.len() as usize
+    }
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter()
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
     }
 }
 
-impl<'a> IntoIterator for &'a mut Candidates {
-    type Item = (&'a AccountId, &'a mut CandidateInfo);
-    type IntoIter = btree_map::IterMut<'a, AccountId, CandidateInfo>;
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CandidatesView {
+    pub candidates: BTreeMap<AccountId, CandidateInfo>,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.iter_mut()
+impl From<&Candidates> for CandidatesView {
+    fn from(candidates: &Candidates) -> Self {
+        Self {
+            candidates: candidates
+                .iter()
+                .map(|(account_id, info)| (account_id.clone(), info.clone()))
+                .collect(),
+        }
     }
 }
 
-impl IntoIterator for Candidates {
-    type Item = (AccountId, CandidateInfo);
-    type IntoIter = btree_map::IntoIter<AccountId, CandidateInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.candidates.into_iter()
-    }
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }
@@ -286,11 +355,35 @@ impl Votes {
     pub fn entry(&mut self, account_id: AccountId) -> &mut HashSet<AccountId> {
         self.votes.entry(account_id).or_default()
     }
+
+    pub fn len(&self) -> usize {
+        self.votes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
+    }
+
+    pub fn remove(&mut self, account_id: &AccountId) {
+        self.votes.remove(account_id);
+    }
+
+    pub fn contains_key(&self, account_id: &AccountId) -> bool {
+        self.votes.contains_key(account_id)
+    }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
+}
+
+pub type Threshold = usize;
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThresholdVotes {
+    /// Maps each participant AccountId to the proposed threshold value they voted for.
+    pub votes: BTreeMap<AccountId, Threshold>,
 }
 
 impl Default for PkVotes {
@@ -311,6 +404,46 @@ impl PkVotes {
     }
 }
 
+impl Default for ThresholdVotes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThresholdVotes {
+    pub fn new() -> Self {
+        ThresholdVotes {
+            votes: BTreeMap::new(),
+        }
+    }
+
+    /// Record `voter`'s support for `threshold`, replacing any vote they had
+    /// previously cast, and return the resulting number of voters backing `threshold`.
+    pub fn vote(&mut self, threshold: Threshold, voter: AccountId) -> usize {
+        self.votes.insert(voter, threshold);
+        self.tally(threshold)
+    }
+
+    /// Remove `voter`'s vote for any proposed threshold.
+    pub fn remove(&mut self, voter: &AccountId) {
+        self.votes.remove(voter);
+    }
+
+    /// Count the number of voters currently backing `threshold`.
+    pub fn tally(&self, threshold: Threshold) -> usize {
+        self.votes.values().filter(|&&t| t == threshold).count()
+    }
+
+    /// Get the threshold value voted for by `voter`, if any.
+    pub fn get(&self, voter: &AccountId) -> Option<Threshold> {
+        self.votes.get(voter).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
+    }
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct InternalSignRequest {
@@ -320,15 +453,45 @@ pub struct InternalSignRequest {
     pub required_deposit: NearToken,
 }
 
-#[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Debug)]
-pub struct SignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
-}
-
 #[derive(Serialize, Deserialize, BorshDeserialize, BorshSerialize, Clone, Debug)]
 pub enum SignPoll {
     Ready(Signature),
     Timeout,
+}
+
+/// Manages votes for checkpoints
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct CheckpointVotes {
+    pub votes: HashMap<CheckpointDigest, HashSet<AccountId>>,
+}
+
+impl Default for CheckpointVotes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CheckpointVotes {
+    pub fn new() -> Self {
+        CheckpointVotes {
+            votes: HashMap::new(),
+        }
+    }
+
+    pub fn entry(&mut self, checkpoint: CheckpointDigest) -> &mut HashSet<AccountId> {
+        self.votes.entry(checkpoint).or_default()
+    }
+
+    pub fn get(&self, checkpoint: &CheckpointDigest) -> Option<&HashSet<AccountId>> {
+        self.votes.get(checkpoint)
+    }
+
+    pub fn len(&self) -> usize {
+        self.votes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
+    }
 }

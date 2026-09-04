@@ -13,14 +13,14 @@ jobs:
     outputs:
       should_run: ${{ steps.should_run.outputs.should_run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: print latest_commit
         run: echo ${{ github.sha }}
       - id: should_run
         continue-on-error: true
         name: Check if the latest commit is within a day
         if: ${{ github.event_name == 'schedule' }}
-        run: test -z $(git rev-list  --after="24 hours"  ${{ github.sha }}) && echo "::set-output name=should_run::false"
+        run: test -z $(git rev-list  --after="24 hours"  ${{ github.sha }}) && echo "should_run=false" >> "$GITHUB_OUTPUT"
 
   nightly:
     strategy:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
       - name: Install Docker
         if: ${{ matrix.os == 'macos-latest-xl' }}
@@ -44,7 +44,7 @@ jobs:
           # https://github.com/abiosoft/colima/blob/main/docs/FAQ.md#cannot-connect-to-the-docker-daemon-at-unixvarrundockersock-is-the-docker-daemon-running
           sudo ln -sf $HOME/.colima/default/docker.sock /var/run/docker.sock
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -52,60 +52,56 @@ jobs:
 
       - name: Pull Relayer & Sandbox Docker Images
         run: |
-          docker pull ghcr.io/near/near-lake-indexer:node-2.3.0
-          docker pull localstack/localstack:3.5.0
           docker pull redis:7.4.2
 
-      - name: Install stable toolchain
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@v3.1
+        with:
+          solana-cli-version: '2.3.9'
+          anchor-version: '0.30.1'
+
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
-      - uses: WarpBuilds/cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: nightly-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
-      - name: Install toxiproxy-server
-        run: |
-          wget -O toxiproxy-2.9.0_linux_amd64.deb https://github.com/Shopify/toxiproxy/releases/download/v2.9.0/toxiproxy_2.9.0_linux_amd64.deb
-          sudo dpkg -i toxiproxy-2.9.0_linux_amd64.deb
-
-      - name: Configure AWS
-        run: |
-          # Fake AWS configuration for LocalStack
-          aws configure set region us-east-1
-          aws --profile default configure set aws_access_key_id "123"
-          aws --profile default configure set aws_secret_access_key "456"
-
-      - name: Build Chain-Signatures Contract
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
-        run: npm i && npx hardhat compile
+        run: npm ci && npx hardhat compile
 
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+      - name: Presetup binaries
+        run: ./setup.sh
+        env:
+          MPC_ENABLE_HELIOS: 1
 
       - name: Build nightly
-        run: cargo build -p integration-tests --tests
+        run: cargo build -p integration-tests --tests --features helios
 
       - name: Run nightly
-        run: cargo test -p integration-tests --test lib -- cases::nightly --show-output --ignored
+        run: cargo test -p integration-tests --features helios --test lib -- cases::nightly --show-output --ignored
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

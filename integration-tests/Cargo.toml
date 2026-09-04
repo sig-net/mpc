@@ -6,10 +6,15 @@ publish = false
 
 
 [dependencies]
+alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
-backon = "0.4"
+async-trait = "0.1"
+backon.workspace = true
 bollard = "0.17.0"
+borsh.workspace = true
+bs58 = "0.5.1"
+ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
@@ -18,41 +23,67 @@ hex.workspace = true
 hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
-testcontainers = { version = "0.23.1" }
-tokio.workspace = true
+testcontainers = "0.23.1"
+tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 url.workspace = true
-web3.workspace = true
+uuid = { version = "1.0", features = ["v4"] }
+sha3.workspace = true
+sha2 = "0.10"
+rlp = "0.5"
+
+# solana dependencies
+anchor-client.workspace = true
+signet-program.workspace = true
+solana-sdk.workspace = true
+solana-client.workspace = true
+solana-transaction-status.workspace = true
 
 # crypto dependencies
+bip32 = "0.5.3"
+bip39 = "2.2.0"
 ecdsa = "0.16.9"
-ethers-core = "2.0.13"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = [
+    "k256",
+] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
-secp256k1 = "0.28.2"
 
 # near dependencies
 near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
+near-crypto.workspace = true
+near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.13.0"
-near-primitives = "0.26.0"
-near-workspaces = { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
+near-jsonrpc-client.workspace = true
+near-primitives.workspace = true
+near-workspaces.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
+mpc-chain-solana.workspace = true
+mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
+mpc-chain-hydration.workspace = true
+mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
-mpc-node.workspace = true
+mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
+    "test-feature",
+    "debug-page",
+] }
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 
 [dev-dependencies]
+criterion = "0.5.1"
+serial_test = "3"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
@@ -60,6 +91,17 @@ anyhow.workspace = true
 async-process = "1"
 tokio.workspace = true
 
+
+[[bench]]
+name = "sign"
+path = "benches/sign.rs"
+harness = false
+
+[[bench]]
+name = "store"
+path = "benches/store.rs"
+harness = false
+
 [features]
 default = []
-docker-test = []
+helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]

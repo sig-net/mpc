@@ -1,6 +1,5 @@
-use std::{fmt, io};
+use std::fmt;
 
-use borsh::{self, BorshDeserialize, BorshSerialize};
 use hpke::{
     aead::{AeadTag, ChaCha20Poly1305},
     kdf::HkdfSha384,
@@ -40,11 +39,9 @@ pub struct SecretKey(<Kem as hpke::Kem>::PrivateKey);
 
 impl fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let key = hex::encode(self.to_bytes());
-        let debug_key = format!("{}[..]", &key[..key.len() - 4]);
         f.debug_struct("SecretKey")
-            .field("key", &debug_key)
-            .finish()
+            .field("key", &"<hidden>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -87,22 +84,6 @@ impl PublicKey {
             encapped_key: EncappedKey(encapped_key),
             text: ciphertext,
             tag: Tag(tag),
-        })
-    }
-}
-
-impl BorshSerialize for PublicKey {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        BorshSerialize::serialize(&self.to_bytes(), writer)
-    }
-}
-
-impl BorshDeserialize for PublicKey {
-    fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        <Vec<u8> as BorshDeserialize>::deserialize_reader(reader).and_then(|buf| {
-            Ok(Self::from_bytes(
-                &<Vec<u8> as BorshDeserialize>::deserialize(&mut buf.as_slice())?,
-            ))
         })
     }
 }

@@ -1,0 +1,39 @@
+[package]
+name = "mpc-chain-ethereum"
+edition = "2021"
+version.workspace = true
+readme = "README.md"
+description = "Ethereum chain integration for MPC"
+
+[dependencies]
+alloy = { workspace = true, features = ["signer-local"] }
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+borsh.workspace = true
+futures-util.workspace = true
+helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19", optional = true }
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+signet-midnight-serde.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[features]
+helios = ["dep:helios"]
+bench = []
+# Gate for deploy/submit helpers and the Hardhat artifact (via include_bytes!).
+contract-test = []
+integration = ["alloy/provider-anvil-node", "contract-test"]
+
+[dev-dependencies]
+mockito.workspace = true
+tracing-subscriber.workspace = true

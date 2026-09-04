@@ -1,483 +1,100 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::env;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
-use crate::local::NodeEnvConfig;
-use crate::{utils, NodeConfig};
+use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
+use crate::NodeConfig;
 
+use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
-use async_process::Child;
-use bollard::container::LogsOptions;
-use bollard::exec::CreateExecOptions;
+use async_process::{Child, Command};
+use backon::{ExponentialBuilder, Retryable};
+use bollard::errors::Error as DockerError;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
+use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
+use cait_sith::FullSignature;
 use elliptic_curve::rand_core::OsRng;
-use futures::StreamExt as _;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
-use mpc_keys::hpke;
-use mpc_node::config::OverrideConfig;
+use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::triple_storage::TriplePair;
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
-use near_workspaces::Account;
+use reqwest::Client;
 use serde_json::json;
-use testcontainers::core::ExecCommand;
+use sha2::{Digest, Sha256};
+use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
+use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use solana_client::rpc_config::RpcSendTransactionConfig;
+use solana_sdk::instruction::AccountMeta;
+use solana_sdk::pubkey::Pubkey as SolanaPubkey;
+use solana_sdk::signature::Keypair as SolanaKeypair;
+use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
+use solana_sdk::signer::{SeedDerivable as _, Signer as _};
+use testcontainers::core::error::{ClientError, TestcontainersError};
 use testcontainers::ContainerAsync;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::runtime::Builder;
+use tokio::time::sleep;
 use tracing;
+
+// Backoff configuration for Redis host-port readiness checks
+const REDIS_PING_MIN_DELAY_MS: u64 = 200;
+const REDIS_PING_MAX_DELAY_SECS: u64 = 2;
+const REDIS_PING_MAX_TIMES: usize = 15;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-pub struct Node {
-    pub container: Container,
-    pub address: String,
-    pub account: Account,
-    pub local_address: String,
-    pub cipher_pk: hpke::PublicKey,
-    pub cipher_sk: hpke::SecretKey,
-    pub sign_sk: near_crypto::SecretKey,
-    cfg: NodeConfig,
-    // near rpc address, after proxy
-    near_rpc: String,
-}
+pub(crate) async fn start_container_with_network_retry<I, R, F>(
+    mut build: F,
+    network: &str,
+) -> Result<ContainerAsync<I>, TestcontainersError>
+where
+    I: testcontainers::Image,
+    R: AsyncRunner<I>,
+    F: FnMut() -> R,
+{
+    const ATTEMPTS: usize = 10;
 
-impl Node {
-    // Container port used for the docker network, does not have to be unique
-    const CONTAINER_PORT: u16 = 3000;
-
-    pub async fn run(
-        node_id: usize,
-        ctx: &super::Context,
-        cfg: &NodeConfig,
-        account: &Account,
-    ) -> anyhow::Result<Self> {
-        tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
-
-        // Use proxied address to mock slow, congested or unstable rpc connection
-        let near_rpc = ctx.lake_indexer.rpc_host_address.clone();
-        let proxy_name = format!("rpc_from_node_{}", account.id());
-        let rpc_port_proxied = utils::pick_unused_port().await?;
-        let rpc_address_proxied = format!("{near_rpc}:{rpc_port_proxied}");
-        tracing::info!(
-            "Proxy RPC address {} accessed by node@{} to {}",
-            near_rpc,
-            account.id(),
-            rpc_address_proxied
-        );
-        LakeIndexer::populate_proxy(&proxy_name, true, &rpc_address_proxied, &near_rpc)
-            .await
-            .unwrap();
-
-        Self::spawn(
-            node_id,
-            ctx,
-            NodeEnvConfig {
-                web_port: Self::CONTAINER_PORT,
-                account: account.clone(),
-                cipher_pk,
-                cipher_sk,
-                sign_sk,
-                cfg: cfg.clone(),
-                near_rpc: rpc_address_proxied,
-            },
-        )
-        .await
-    }
-
-    pub async fn kill(self) -> NodeEnvConfig {
-        self.container.stop().await.unwrap();
-        NodeEnvConfig {
-            web_port: Self::CONTAINER_PORT,
-            account: self.account,
-            cipher_pk: self.cipher_pk,
-            cipher_sk: self.cipher_sk,
-            sign_sk: self.sign_sk,
-            cfg: self.cfg,
-            near_rpc: self.near_rpc,
-        }
-    }
-
-    pub async fn spawn(
-        node_id: usize,
-        ctx: &super::Context,
-        config: NodeEnvConfig,
-    ) -> anyhow::Result<Self> {
-        let indexer_options = mpc_node::indexer::Options {
-            s3_bucket: ctx.localstack.s3_bucket.clone(),
-            s3_region: ctx.localstack.s3_region.clone(),
-            s3_url: Some(ctx.localstack.s3_host_address.clone()),
-            running_threshold: 120,
-            behind_threshold: 120,
-        };
-        let eth_args = mpc_node::indexer_eth::EthArgs {
-            eth_account_sk: Some(config.cfg.eth.account_sk.clone()),
-            eth_rpc_ws_url: Some(config.cfg.eth.rpc_ws_url.clone()),
-            eth_rpc_http_url: Some(config.cfg.eth.rpc_http_url.clone()),
-            eth_contract_address: Some(config.cfg.eth.contract_address.clone()),
-        };
-        let args = mpc_node::cli::Cli::Start {
-            near_rpc: config.near_rpc.clone(),
-            mpc_contract_id: ctx.mpc_contract.id().clone(),
-            account_id: config.account.id().clone(),
-            account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Self::CONTAINER_PORT,
-            cipher_pk: hex::encode(config.cipher_pk.to_bytes()),
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            indexer_options: indexer_options.clone(),
-            eth: eth_args,
-            my_address: None,
-            debug_id: Some(node_id),
-            storage_options: ctx.storage_options.clone(),
-            sign_sk: Some(config.sign_sk.clone()),
-            override_config: Some(OverrideConfig::new(serde_json::to_value(
-                config.cfg.protocol.clone(),
-            )?)),
-            client_header_referer: None,
-            mesh_options: ctx.mesh_options.clone(),
-            message_options: ctx.message_options.clone(),
-        }
-        .into_str_args();
-        let container = GenericImage::new("near/mpc-node", "latest")
-            .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT.tcp())
-            .with_env_var("RUST_LOG", "mpc_node=DEBUG")
-            .with_env_var("RUST_BACKTRACE", "1")
-            .with_network(&ctx.docker_network)
-            .with_cmd(args)
-            .start()
-            .await
-            .unwrap();
-
-        let ip_address = ctx
-            .docker_client
-            .get_network_ip_address(&container, &ctx.docker_network)
-            .await
-            .unwrap();
-        let host_port = container
-            .get_host_port_ipv4(Self::CONTAINER_PORT)
-            .await
-            .unwrap();
-
-        container.exec(ExecCommand::new(
-                format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT)
-                    .split_whitespace()
-            )
-            .with_container_ready_conditions(vec![WaitFor::message_on_stdout("node is ready to accept connections")])
-        ).await.unwrap();
-
-        let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
-        tracing::info!(
-            full_address,
-            node_account_id = %config.account.id(),
-            "node container is running",
-        );
-        Ok(Node {
-            container,
-            address: full_address,
-            account: config.account,
-            local_address: format!("http://localhost:{host_port}"),
-            cipher_pk: config.cipher_pk,
-            cipher_sk: config.cipher_sk,
-            sign_sk: config.sign_sk,
-            cfg: config.cfg,
-            near_rpc: config.near_rpc,
-        })
-    }
-}
-
-pub struct LocalStack {
-    pub container: Container,
-    pub address: String,
-    pub s3_address: String,
-    pub s3_host_address: String,
-    pub s3_bucket: String,
-    pub s3_region: String,
-}
-
-impl LocalStack {
-    const S3_CONTAINER_PORT: u16 = 4566;
-
-    pub async fn run(spawner: &ClusterSpawner, s3_bucket: &str, s3_region: &str) -> Self {
-        tracing::info!("running LocalStack container...");
-        let container = GenericImage::new("localstack/localstack", "3.5.0")
-            .with_wait_for(WaitFor::message_on_stdout("Ready."))
-            .with_network(&spawner.network)
-            .start()
-            .await
-            .unwrap();
-        let address = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await
-            .unwrap();
-
-        // Create the bucket
-        let create_result = spawner
-            .docker
-            .docker
-            .create_exec(
-                container.id(),
-                CreateExecOptions::<&str> {
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    cmd: Some(vec![
-                        "awslocal",
-                        "s3api",
-                        "create-bucket",
-                        "--bucket",
-                        s3_bucket,
-                        "--region",
-                        s3_region,
-                    ]),
-                    ..Default::default()
+    for attempt in 1..=ATTEMPTS {
+        match build().start().await {
+            Ok(container) => return Ok(container),
+            Err(TestcontainersError::Client(ClientError::StartContainer(
+                DockerError::DockerResponseServerError {
+                    status_code: 404,
+                    message,
                 },
-            )
-            .await
-            .unwrap();
-        let result = spawner
-            .docker
-            .docker
-            .start_exec(&create_result.id, None)
-            .await
-            .unwrap();
-        tracing::info!(?result, s3_bucket, s3_region, "localstack created bucket");
-
-        let s3_address = format!("http://{}:{}", address, Self::S3_CONTAINER_PORT);
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let s3_host_address = {
-            let s3_host_port = container
-                .get_host_port_ipv4(Self::S3_CONTAINER_PORT)
-                .await
-                .unwrap();
-            format!("http://127.0.0.1:{s3_host_port}")
-        };
-        #[cfg(target_arch = "x86_64")]
-        let s3_host_address = {
-            let s3_host_port = container
-                .get_host_port_ipv6(Self::S3_CONTAINER_PORT)
-                .await
-                .unwrap();
-            format!("http://[::1]:{s3_host_port}")
-        };
-
-        tracing::info!(
-            s3_address,
-            s3_host_address,
-            "LocalStack container is running"
-        );
-        LocalStack {
-            container,
-            address,
-            s3_address,
-            s3_host_address,
-            s3_bucket: s3_bucket.to_string(),
-            s3_region: s3_region.to_string(),
-        }
-    }
-}
-
-pub struct LakeIndexer {
-    pub container: Container,
-    pub bucket_name: String,
-    pub region: String,
-    pub rpc_address: String,
-    pub rpc_host_address: String,
-    // Toxi Server is only used in network traffic originated from Lake Indexer
-    // to simulate high load and slowness etc. in Lake Indexer
-    // Child process is used for proxy host (local node) to container
-    pub toxi_server_process: Child,
-    // Container toxi server is used for proxy container to container
-    pub toxi_server_container: Container,
-}
-
-impl LakeIndexer {
-    pub const CONTAINER_RPC_PORT: u16 = 3030;
-
-    pub const S3_PORT_PROXIED: u16 = 4566;
-    pub const S3_ADDRESS_PROXIED: &'static str = "127.0.0.1:4566";
-    pub const TOXI_SERVER_PROCESS_PORT: u16 = 8474;
-    pub const TOXI_SERVER_EXPOSE_PORT: u16 = 8475;
-    pub const TOXI_SERVER_PROCESS_ADDRESS: &'static str = "http://127.0.0.1:8474";
-    pub const TOXI_SERVER_EXPOSE_ADDRESS: &'static str = "http://127.0.0.1:8475";
-
-    async fn spin_up_toxi_server_process() -> anyhow::Result<Child> {
-        let toxi_server = async_process::Command::new("toxiproxy-server")
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| "failed to run toxiproxy-server")?;
-        utils::ping_until_ok(
-            &format!("{}/version", Self::TOXI_SERVER_PROCESS_ADDRESS),
-            10,
-        )
-        .await?;
-        Ok(toxi_server)
-    }
-
-    async fn spin_up_toxi_server_container(network: &str) -> anyhow::Result<Container> {
-        let container = GenericImage::new("ghcr.io/shopify/toxiproxy", "2.9.0")
-            .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
-            .with_network(network)
-            .with_mapped_port(
-                Self::TOXI_SERVER_EXPOSE_PORT,
-                Self::TOXI_SERVER_PROCESS_PORT.tcp(),
-            )
-            .start()
-            .await
-            .unwrap();
-
-        container.exec(ExecCommand::new(
-            format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::TOXI_SERVER_PROCESS_PORT)
-                .split_whitespace()
-        )
-        .with_container_ready_conditions(vec![WaitFor::message_on_stdout("version")])
-        ).await.unwrap();
-
-        Ok(container)
-    }
-
-    fn remove_protocol(address: &str) -> &str {
-        if let Some(pos) = address.find("://") {
-            &address[pos + 3..]
-        } else {
-            address
-        }
-    }
-
-    // Populate a new proxy in toxi proxy server. It proxies all traffic originated from `listen`
-    // to `upstream`. The proxy can be configured later (adding latency etc.) given the `name`
-    // `listen` and `upstream` must in format `host:port` since toxiproxy operates on tcp level
-    // host = true, proxy between a host client request host/container server
-    // host = false, proxy between a container client to a container server
-    // With current docker setup, container client cannot request host server
-    pub async fn populate_proxy(
-        name: &str,
-        host: bool,
-        listen: &str,
-        upstream: &str,
-    ) -> anyhow::Result<()> {
-        let toxiproxy_client = reqwest::Client::default();
-        let listen = Self::remove_protocol(listen);
-        let upstream = Self::remove_protocol(upstream);
-        let proxies = json!([{
-            "name": name,
-            "listen": listen,
-            "upstream": upstream
-        }]);
-        let proxies_json = serde_json::to_string(&proxies).unwrap();
-        toxiproxy_client
-            .post(format!(
-                "{}/populate",
-                if host {
-                    Self::TOXI_SERVER_PROCESS_ADDRESS
-                } else {
-                    Self::TOXI_SERVER_EXPOSE_ADDRESS
+            ))) if message.contains("failed to set up container networking") => {
+                if attempt == ATTEMPTS {
+                    return Err(TestcontainersError::Client(ClientError::StartContainer(
+                        DockerError::DockerResponseServerError {
+                            status_code: 404,
+                            message,
+                        },
+                    )));
                 }
-            ))
-            .header("Content-Type", "application/json")
-            .body(proxies_json)
-            .send()
-            .await?;
-        Ok(())
-    }
 
-    pub async fn run(
-        spawner: &ClusterSpawner,
-        s3_address: &str,
-        bucket_name: &str,
-        region: &str,
-    ) -> LakeIndexer {
-        tracing::info!("initializing toxi proxy servers");
-        let toxi_server_process = Self::spin_up_toxi_server_process().await.unwrap();
-        let toxi_server_container = Self::spin_up_toxi_server_container(&spawner.network)
-            .await
-            .unwrap();
-        let toxi_server_container_address = spawner
-            .docker
-            .get_network_ip_address(&toxi_server_container, &spawner.network)
-            .await
-            .unwrap();
-        let s3_address_proxied = format!(
-            "{}:{}",
-            &toxi_server_container_address,
-            Self::S3_PORT_PROXIED
-        );
-        tracing::info!(
-            s3_address,
-            s3_address_proxied,
-            "Proxy S3 access from Lake Indexer"
-        );
-        Self::populate_proxy("lake-s3", false, &s3_address_proxied, s3_address)
-            .await
-            .unwrap();
-
-        tracing::info!(
-            network = %spawner.network,
-            s3_address_proxied,
-            bucket_name,
-            region,
-            "running NEAR Lake Indexer container..."
-        );
-
-        let container = GenericImage::new("ghcr.io/near/near-lake-indexer", "node-2.3.0")
-            .with_wait_for(WaitFor::message_on_stderr("Starting Streamer"))
-            .with_exposed_port(Self::CONTAINER_RPC_PORT.tcp())
-            .with_env_var("AWS_ACCESS_KEY_ID", "FAKE_LOCALSTACK_KEY_ID")
-            .with_env_var("AWS_SECRET_ACCESS_KEY", "FAKE_LOCALSTACK_ACCESS_KEY")
-            .with_network(&spawner.network)
-            .with_cmd(vec![
-                "--endpoint".to_string(),
-                format!("http://{}", s3_address_proxied),
-                "--bucket".to_string(),
-                bucket_name.to_string(),
-                "--region".to_string(),
-                region.to_string(),
-                "--stream-while-syncing".to_string(),
-                "sync-from-latest".to_string(),
-            ])
-            .start()
-            .await
-            .unwrap();
-
-        let address = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await
-            .unwrap();
-        let rpc_address = format!("http://{}:{}", address, Self::CONTAINER_RPC_PORT);
-        let rpc_host_port = container
-            .get_host_port_ipv4(Self::CONTAINER_RPC_PORT)
-            .await
-            .unwrap();
-        let rpc_host_address = format!("http://127.0.0.1:{rpc_host_port}");
-
-        tracing::info!(
-            bucket_name,
-            region,
-            rpc_address,
-            rpc_host_address,
-            "NEAR Lake Indexer container is running"
-        );
-        LakeIndexer {
-            container,
-            bucket_name: bucket_name.to_string(),
-            region: region.to_string(),
-            rpc_address,
-            rpc_host_address,
-            toxi_server_process,
-            toxi_server_container,
+                tracing::debug!(network = %network, attempt, "waiting for docker network to become available");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(e),
         }
     }
+
+    unreachable!("retry loop must return or fail")
 }
 
 #[derive(Clone)]
@@ -527,11 +144,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let list = self.docker.list_networks::<&str>(None).await?;
-        if list.iter().any(|n| n.name == Some(network.to_string())) {
-            return Ok(());
-        }
-
         let create_network_options = CreateNetworkOptions {
             name: network,
             check_duplicate: true,
@@ -546,72 +158,76 @@ impl DockerClient {
             },
             ..Default::default()
         };
-        let _response = &self.docker.create_network(create_network_options).await?;
-
-        Ok(())
+        // Concurrent test threads have a race condition on creating this!
+        // => Treat 409 Conflict (network already exists) as success and continue.
+        match self.docker.create_network(create_network_options).await {
+            Ok(_) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
+    /// Try and remove the docker network
+    pub fn best_effort_remove_network(&self, network: String) {
+        let docker = self.docker.clone();
+        let network_for_join_log = network.clone();
+        let network_for_log = network.clone();
+        let join_result = std::thread::spawn(move || {
+            let runtime = match Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    tracing::debug!(network = %network_for_log, "failed to build runtime for network cleanup: {e}");
+                    return;
+                }
+            };
 
-        // Asynchronous process that pipes docker attach output into stdout.
-        // Will die automatically once Docker container output is closed.
-        tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
-
-            while let Some(Ok(output)) = output.next().await {
-                stdout
-                    .write_all(output.into_bytes().as_ref())
-                    .await
-                    .unwrap();
-                stdout.flush().await.unwrap();
+            for attempt in 1..=3 {
+                match runtime.block_on(async { docker.remove_network(&network).await }) {
+                    Ok(_) => return,
+                    Err(e) => {
+                        tracing::debug!(network = %network_for_log, attempt, "failed to remove docker network: {e}");
+                        if attempt < 3 {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                }
             }
-        });
+        })
+        .join();
 
-        Ok(())
-    }
-
-    pub async fn output_logs(&self, id: &str, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-
-        let mut out = std::fs::File::create(path)?;
-        tokio::spawn(async move {
-            while let Some(Ok(output)) = output.next().await {
-                std::io::Write::write_all(&mut out, output.into_bytes().as_ref()).unwrap();
-            }
-        });
-
-        Ok(())
+        if join_result.is_err() {
+            tracing::debug!(network = %network_for_join_log, "network cleanup thread panicked");
+        }
     }
 }
 
 impl Default for DockerClient {
     fn default() -> Self {
-        Self {
-            docker: Docker::connect_with_local(
-                "unix:///var/run/docker.sock",
-                // 10 minutes timeout for all requests in case a lot of tests are being ran in parallel.
-                600,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .unwrap(),
-        }
+        let timeout = 600;
+        let api_version = bollard::API_DEFAULT_VERSION;
+
+        let docker = match bollard::Docker::connect_with_defaults() {
+            Ok(docker) => docker,
+            Err(default_err) => {
+                let home_socket = env::var("HOME")
+                    .ok()
+                    .map(|home| format!("unix://{home}/.docker/run/docker.sock"));
+                let Some(home_socket) = home_socket else {
+                    panic!("failed to connect to Docker using defaults: {default_err}");
+                };
+
+                bollard::Docker::connect_with_unix(&home_socket, timeout, api_version)
+                    .unwrap_or_else(|home_err| {
+                        panic!(
+                            "failed to connect to Docker using defaults ({default_err}) or Docker Desktop socket {home_socket} ({home_err})"
+                        )
+                    })
+            }
+        };
+
+        Self { docker }
     }
 }
 
@@ -626,13 +242,17 @@ impl Redis {
 
     pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.4.2")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
-            .start()
-            .await
-            .unwrap();
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("redis", "7.4.2")
+                    .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
+                    .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                    .with_network(&spawner.network)
+            },
+            &spawner.network,
+        )
+        .await
+        .unwrap();
         let network_ip = spawner
             .docker
             .get_network_ip_address(&container, &spawner.network)
@@ -641,11 +261,25 @@ impl Redis {
 
         let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
 
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
+        // The port mapping can lag the container start when several containers come
+        // up at once (PortNotExposed), so give Docker a moment before giving up.
+        let host_port = {
+            let mut attempts = 0;
+            loop {
+                match container.get_host_port_ipv4(Self::DEFAULT_REDIS_PORT).await {
+                    Ok(port) => break port,
+                    Err(err) if attempts < 5 => {
+                        attempts += 1;
+                        tracing::warn!(?err, attempts, "redis port not mapped yet; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Err(err) => panic!("redis container port mapping failed: {err:?}"),
+                }
+            }
+        };
         let internal_address = format!("redis://127.0.0.1:{host_port}");
+
+        Self::wait_for_host_port_readiness(&internal_address).await;
 
         tracing::info!(
             external_address,
@@ -660,6 +294,42 @@ impl Redis {
         }
     }
 
+    /// Wait for the Redis container to be reachable via the host port.
+    async fn wait_for_host_port_readiness(internal_address: &str) {
+        let cfg = deadpool_redis::Config::from_url(
+            url::Url::parse(internal_address).expect("valid redis url"),
+        );
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("valid redis pool config");
+
+        let ping = || async {
+            let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
+            deadpool_redis::redis::cmd("PING")
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(anyhow::Error::from)
+        };
+
+        let strategy = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(REDIS_PING_MIN_DELAY_MS))
+            .with_max_delay(Duration::from_secs(REDIS_PING_MAX_DELAY_SECS))
+            .with_max_times(REDIS_PING_MAX_TIMES);
+        if ping
+            .retry(&strategy)
+            .notify(|err, sleep| {
+                tracing::warn!(?err, retry_in = ?sleep, "redis not reachable via host port yet");
+            })
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                internal_address,
+                "redis never became reachable via host port"
+            );
+        }
+    }
+
     pub fn pool(&self) -> deadpool_redis::Pool {
         let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
         let redis_cfg = deadpool_redis::Config::from_url(redis_url);
@@ -668,12 +338,24 @@ impl Redis {
             .unwrap()
     }
 
-    pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        mpc_node::storage::triple_storage::init(&self.pool(), id)
+    pub fn triple_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::TripleStorage {
+        let storage = TriplePair::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
-    pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        mpc_node::storage::presignature_storage::init(&self.pool(), id)
+    pub fn presignature_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::PresignatureStorage {
+        let storage = Presignature::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -682,15 +364,15 @@ impl Redis {
             .participants
             .keys()
             .map(|account_id| {
-                (
-                    Participant::from(
-                        *participants
-                            .account_to_participant_id
-                            .get(account_id)
-                            .unwrap(),
-                    ),
-                    mpc_node::storage::triple_storage::init(&pool, account_id),
-                )
+                let me = Participant::from(
+                    *participants
+                        .account_to_participant_id
+                        .get(account_id)
+                        .unwrap(),
+                );
+                let storage = TriplePair::storage(&pool, account_id);
+                storage.set_me(me);
+                (me, storage)
             })
             .collect::<HashMap<_, _>>();
 
@@ -699,46 +381,1105 @@ impl Redis {
             .values()
             .map(|id| Participant::from(*id))
             .collect::<Vec<_>>();
-        let (public, shares) =
+        let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
             cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
         // - first/second loop add at least min_triples per node
-        // - third loop: for each triple, store the shares individually per node
-        let mut num_triples = 0;
-        for mine_idx in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul) {
-                num_triples += 1;
-                let triple_id = rand::random();
-                for (participant, triple) in participant_ids
+        // - third loop: for each pair, store the shares as pairs per node
+        let mut num_pairs = 0;
+        for owner in &participant_ids {
+            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
+                num_pairs += 1;
+                let pair_id = rand::random();
+                for ((me, triple0), triple1) in participant_ids
                     .iter()
-                    .zip(shares_to_triples(triple_id, &public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
                 {
-                    let mine = participant == mine_idx;
+                    let pair = TriplePair {
+                        id: pair_id,
+                        triple0,
+                        triple1,
+                        holders: Some(participant_ids.clone()),
+                    };
                     storage
-                        .get(participant)
+                        .get(me)
                         .unwrap()
-                        .insert(triple, mine, false)
+                        .create_slot(pair_id, *owner)
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .insert(pair, *owner)
+                        .await;
                 }
             }
         }
 
-        tracing::info!("stockpiled {num_triples} triples");
+        tracing::info!("stockpiled {num_pairs} triple pairs");
+    }
+}
+
+pub struct EthereumSandbox {
+    pub container: Container,
+    pub external_http_endpoint: String,
+    pub secret_key: String,
+    pub chain_id: u64,
+}
+
+impl EthereumSandbox {
+    const RPC_PORT: u16 = 8545;
+    const DEFAULT_CHAIN_ID: u64 = 31337;
+    const DEFAULT_MNEMONIC: &'static str =
+        "test test test test test test test test test test test junk";
+
+    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+        let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
+        let command = format!(
+            "anvil --host 0.0.0.0 --chain-id {} --mnemonic '{}' --block-time 1",
+            chain_id_arg,
+            Self::DEFAULT_MNEMONIC,
+        );
+
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                    .with_exposed_port(Self::RPC_PORT.tcp())
+                    .with_network(&spawner.network)
+                    .with_cmd(vec![command.clone()])
+            },
+            &spawner.network,
+        )
+        .await?;
+
+        let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
+
+        let external_port = container
+            .get_host_port_ipv4(Self::RPC_PORT)
+            .await
+            .context("ethereum sandbox port mapping")?;
+
+        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
+
+        wait_for_rpc(&external_http_endpoint).await?;
+
+        Ok(Self {
+            external_http_endpoint,
+            secret_key,
+            chain_id: Self::DEFAULT_CHAIN_ID,
+            container,
+        })
+    }
+}
+
+async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: usize = 120;
+    let client = Client::new();
+    let mut last_err: Option<String> = None;
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_chainId",
+        "params": []
+    });
+
+    for _ in 0..MAX_ATTEMPTS {
+        match client.post(endpoint).json(&payload).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(body) if body.get("result").is_some() => return Ok(()),
+                        Ok(body) => {
+                            last_err = Some(format!("missing result in response: {body:?}"));
+                        }
+                        Err(err) => {
+                            last_err = Some(format!("json parse error: {err}"));
+                        }
+                    }
+                } else {
+                    last_err = Some(format!("status {}", response.status()));
+                }
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(anyhow!(
+        "ethereum sandbox rpc '{}' did not become ready: {:?}",
+        endpoint,
+        last_err
+    ))
+}
+
+fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
+    use std::str::FromStr;
+
+    use bip32::{DerivationPath, XPrv};
+    use bip39::Mnemonic;
+
+    let mnemonic = Mnemonic::from_str(mnemonic)?;
+    let seed = mnemonic.to_seed("");
+    let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0")?;
+    let child_key = XPrv::derive_from_path(seed, &derivation_path)?;
+    let bytes = child_key.private_key().to_bytes();
+
+    Ok(format!("0x{}", hex::encode(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_secret_key;
+
+    #[test]
+    fn derive_secret_key_matches_hardhat_default_account() {
+        let mnemonic = "test test test test test test test test test test test junk";
+        let secret_key = derive_secret_key(mnemonic).unwrap();
+
+        assert_eq!(
+            secret_key,
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        );
     }
 }
 
 fn shares_to_triples(
-    id: u64,
     public: &TriplePub<Secp256k1>,
     shares: &[TripleShare<Secp256k1>],
 ) -> Vec<Triple> {
     shares
         .iter()
         .map(|share| Triple {
-            id,
             public: public.clone(),
             share: share.clone(),
         })
         .collect()
+}
+
+pub struct Solana {
+    pub process: Child,
+    pub rpc_address: String,
+    pub ws_address: String,
+    pub program_keypair: SolanaKeypair,
+    pub payer_keypair: SolanaKeypair,
+    pub rpc_port: u16,
+    pub ws_port: u16,
+    pub faucet_port: u16,
+    pub rpc_client: SolanaRpcClient,
+    ledger_dir: PathBuf,
+}
+
+impl Solana {
+    /// Program ID hardcoded in the solana program/contract.
+    /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
+    pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
+
+    /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
+    /// macro of our Solana program/contract.
+    pub fn program_keypair() -> SolanaKeypair {
+        SolanaKeypair::from_seed(&[101u8; 32]).unwrap()
+    }
+
+    pub async fn run() -> Self {
+        tracing::info!("Starting Solana Test Validator process...");
+
+        // Check if solana-test-validator is available
+        match Command::new("solana-test-validator")
+            .arg("--help")
+            .output()
+            .await
+        {
+            Err(_) => {
+                panic!(
+                    "solana-test-validator not found in PATH: install Solana CLI tools via
+                    https://docs.solana.com/cli/install-solana-cli-tools"
+                );
+            }
+            Ok(output) if !output.status.success() => {
+                panic!("solana-test-validator exists but returned error when checking --help");
+            }
+            Ok(_) => {
+                tracing::info!("found solana-test-validator in PATH");
+            }
+        }
+
+        // Generate a new keypair for the test validator
+        let program_keypair = Solana::program_keypair();
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
+
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            // Generate a random base port for THIS specific test process
+            let block_index = rand::random::<u16>() % 400;
+            let base_port = 10000 + (block_index * 100);
+
+            // Because the preferred port is randomized per-process, Test A and Test B
+            // will query completely different areas of the OS port space, avoiding the race condition.
+            let rpc_port = pick_preferred_or_unused_port_block(base_port, 2).await;
+            let ws_port = rpc_port + 1;
+
+            let faucet_port = pick_preferred_or_unused_port(base_port + 2).await;
+            let gossip_port = pick_preferred_or_unused_port(base_port + 3).await;
+
+            let dynamic_port_start = pick_preferred_or_unused_port_block(base_port + 4, 33).await;
+            let dynamic_port_end = dynamic_port_start + 32;
+
+            let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
+            let ws_address = format!("ws://127.0.0.1:{}", ws_port);
+            let ledger_dir =
+                std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
+            let mut command = Command::new("solana-test-validator");
+            command
+                .kill_on_drop(true)
+                .arg("--ledger")
+                .arg(&ledger_dir)
+                .arg("--rpc-port")
+                .arg(rpc_port.to_string())
+                .arg("--faucet-port")
+                .arg(faucet_port.to_string())
+                .arg("--gossip-port")
+                .arg(gossip_port.to_string())
+                .arg("--dynamic-port-range")
+                .arg(format!("{dynamic_port_start}-{dynamic_port_end}"))
+                .arg("--bind-address")
+                .arg("127.0.0.1")
+                .arg("--mint")
+                .arg(payer_keypair.pubkey().to_string())
+                .arg("--reset")
+                .arg("--quiet");
+
+            let mut process = command
+                .spawn()
+                .expect("failed to start solana-test-validator");
+
+            let rpc_client = SolanaRpcClient::new_with_commitment(
+                rpc_address.clone(),
+                solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+            );
+
+            match Self::wait_for_validator_ready(
+                &mut process,
+                &rpc_client,
+                &ws_address,
+                &payer_keypair.pubkey(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        rpc_address,
+                        ws_address,
+                        attempt,
+                        "solana-test-validator process is running",
+                    );
+
+                    return Self {
+                        process,
+                        rpc_address,
+                        ws_address,
+                        program_keypair,
+                        payer_keypair,
+                        rpc_port,
+                        ws_port,
+                        faucet_port,
+                        rpc_client,
+                        ledger_dir,
+                    };
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    let _ = process.kill();
+                    tracing::warn!(attempt, "solana-test-validator startup failed, retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        panic!(
+            "solana-test-validator failed to start after retries: {}",
+            last_error
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "unknown startup error".to_string())
+        );
+    }
+
+    async fn wait_for_validator_ready(
+        process: &mut Child,
+        rpc_client: &SolanaRpcClient,
+        ws_address: &str,
+        payer: &SolanaPubkey,
+    ) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 180;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            if let Some(status) = process
+                .try_status()
+                .context("failed to inspect solana-test-validator status")?
+            {
+                anyhow::bail!("solana-test-validator exited before becoming ready: {status}");
+            }
+
+            let version_ready = rpc_client.get_version().await.is_ok();
+            let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
+            let ws_ready = SolanaPubsubClient::new(ws_address).await.is_ok();
+            let funded = rpc_client
+                .get_balance(payer)
+                .await
+                .ok()
+                .is_some_and(|balance| balance > 0);
+
+            if version_ready && blockhash_ready && ws_ready {
+                if !funded {
+                    tracing::warn!(
+                        attempt,
+                        "solana validator RPC is ready but payer balance is still zero"
+                    );
+                }
+                return Ok(());
+            }
+
+            tracing::debug!(
+                attempt,
+                version_ready,
+                blockhash_ready,
+                ws_ready,
+                funded,
+                "waiting for solana-test-validator readiness"
+            );
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        anyhow::bail!("solana-test-validator did not become ready in time")
+    }
+
+    /// Kill and relaunch the validator against the same ledger
+    pub async fn restart(&mut self) -> anyhow::Result<()> {
+        // Kill the existing process and wait for it to exit, so its ports
+        // are free before the relaunch
+        let _ = self.process.kill();
+        while self
+            .process
+            .try_status()
+            .context("failed to inspect validator status")?
+            .is_none()
+        {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        // Port layout mirrors run(): gossip = rpc + 3, dynamic range = rpc + 4..=rpc + 36
+        let gossip_port = self.rpc_port + 3;
+        let dynamic_port_start = self.rpc_port + 4;
+
+        // Restart the validator with the same ledger and ports
+        let mut command = Command::new("solana-test-validator");
+        command
+            .kill_on_drop(true)
+            .arg("--ledger")
+            .arg(&self.ledger_dir)
+            .arg("--rpc-port")
+            .arg(self.rpc_port.to_string())
+            .arg("--faucet-port")
+            .arg(self.faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
+            .arg("--dynamic-port-range")
+            .arg(format!("{dynamic_port_start}-{}", dynamic_port_start + 32))
+            .arg("--bind-address")
+            .arg("127.0.0.1")
+            .arg("--mint")
+            .arg(self.payer_keypair.pubkey().to_string())
+            .arg("--quiet");
+
+        let mut process = command
+            .spawn()
+            .context("failed to restart solana-test-validator")?;
+        Self::wait_for_validator_ready(
+            &mut process,
+            &self.rpc_client,
+            &self.ws_address,
+            &self.payer_keypair.pubkey(),
+        )
+        .await
+        .context("restarted solana-test-validator did not become ready")?;
+
+        // Wait for the program to be ready after the validator restart
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await
+            .context("program missing after validator restart")?;
+
+        // Wait for the validator to resume block production after restart
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut slot = self.rpc_client.get_slot().await?;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let next = self.rpc_client.get_slot().await?;
+            if next > slot {
+                self.process = process;
+                return Ok(());
+            }
+            slot = next;
+        }
+        anyhow::bail!("validator did not resume block production after restart")
+    }
+
+    pub fn get_config(&self, program_address: String) -> SolConfig {
+        SolConfig {
+            account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
+            rpc_http_url: self.rpc_address.clone(),
+            rpc_ws_url: self.ws_address.clone(),
+            program_address,
+            indexer: Default::default(),
+        }
+    }
+
+    /// Deploy the Solana core contracts and return the program address
+    pub async fn deploy_contract(&self) -> anyhow::Result<String> {
+        // Check if solana CLI is available
+        if let Err(err) = tokio::process::Command::new("solana")
+            .arg("--version")
+            .output()
+            .await
+        {
+            anyhow::bail!("Solana CLI not available: {err}");
+        }
+
+        let program_address = match self.deploy().await {
+            Ok(program_address) => program_address,
+            Err(e) => {
+                anyhow::bail!("program deployment failed: {e}");
+            }
+        };
+
+        // Wait a bit for deployment to be fully processed
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await?;
+
+        // Initialize the program after deployment, retrying transient loader races.
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            match self.initialize_program().await {
+                Ok(_) => return Ok(program_address),
+                Err(e) => {
+                    let error_message = e.to_string();
+                    if error_message.contains("Program is not deployed")
+                        || error_message.contains("Unsupported program id")
+                    {
+                        tracing::warn!(attempt, error = %error_message, "solana initialize not ready yet, retrying");
+                        last_error = Some(e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    anyhow::bail!("program initialization failed: {e}");
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "program initialization failed after retries: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
+    async fn wait_for_program_ready(&self, program_id: SolanaPubkey) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.rpc_client.get_account(&program_id).await {
+                Ok(account) if account.executable => {
+                    tracing::info!(attempt, %program_id, "solana program is executable");
+                    return Ok(());
+                }
+                Ok(_) => {
+                    tracing::debug!(attempt, %program_id, "waiting for solana program to become executable");
+                }
+                Err(err) => {
+                    tracing::debug!(attempt, %program_id, %err, "waiting for solana program account");
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        anyhow::bail!("solana program {program_id} did not become executable in time")
+    }
+
+    /// Perform real contract deployment using Solana CLI
+    async fn deploy(&self) -> anyhow::Result<String> {
+        let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(Self::PROGRAM_PATH);
+        if !contract_path.exists() {
+            anyhow::bail!("contract artifact not found at: {contract_path:?}");
+        }
+
+        // Create temporary files for keypairs
+        let temp_dir = std::env::temp_dir();
+        let payer_keypair_path =
+            temp_dir.join(format!("payer-keypair-{}.json", uuid::Uuid::new_v4()));
+        let program_keypair_path =
+            temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
+
+        self.payer_keypair
+            .write_to_file(&payer_keypair_path)
+            .unwrap();
+        self.program_keypair
+            .write_to_file(&program_keypair_path)
+            .unwrap();
+
+        // Deploy the program using solana CLI
+        tracing::info!("deploying solana program via CLI...");
+
+        // Best-effort cleanup in case a previous test run left the program account around.
+        // This avoids `account already in use` errors when redeploying with the same
+        // deterministic program id.
+        let program_pubkey = self.program_keypair.pubkey().to_string();
+        let close_args = [
+            "program",
+            "close",
+            &program_pubkey,
+            "--url",
+            &self.rpc_address,
+            "--keypair",
+            payer_keypair_path.to_str().unwrap(),
+        ];
+        let close_output = tokio::process::Command::new("solana")
+            .args(close_args)
+            .output()
+            .await?;
+        if close_output.status.success() {
+            tracing::info!(program_id = %program_pubkey, "closed existing solana program account");
+        } else {
+            tracing::debug!(program_id = %program_pubkey, "no existing program account closed");
+        }
+
+        let mut deploy_attempt = 0;
+        let mut last_failure = None;
+        let deploy_output = loop {
+            deploy_attempt += 1;
+            let deploy_output = tokio::process::Command::new("solana")
+                .args([
+                    "program",
+                    "deploy",
+                    contract_path.to_str().unwrap(),
+                    "--keypair",
+                    payer_keypair_path.to_str().unwrap(),
+                    "--url",
+                    &self.rpc_address,
+                    "--program-id",
+                    program_keypair_path.to_str().unwrap(),
+                    "-v", // verbose output
+                ])
+                .output()
+                .await?;
+
+            if deploy_output.status.success() {
+                break deploy_output;
+            }
+
+            let stderr = String::from_utf8_lossy(&deploy_output.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&deploy_output.stdout).into_owned();
+            last_failure = Some((stdout, stderr));
+
+            if deploy_attempt >= 3 {
+                break deploy_output;
+            }
+
+            tracing::warn!(attempt = deploy_attempt, rpc_address = %self.rpc_address, "solana deploy failed, retrying");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+
+        // Clean up temporary files
+        let _ = std::fs::remove_file(&payer_keypair_path);
+        let _ = std::fs::remove_file(&program_keypair_path);
+
+        if !deploy_output.status.success() {
+            let (stdout, stderr) = last_failure.unwrap_or_else(|| {
+                (
+                    String::from_utf8_lossy(&deploy_output.stdout).into_owned(),
+                    String::from_utf8_lossy(&deploy_output.stderr).into_owned(),
+                )
+            });
+            anyhow::bail!("failed to deploy solana program. stdout: {stdout}, stderr: {stderr}",);
+        }
+
+        let stdout = String::from_utf8_lossy(&deploy_output.stdout);
+        tracing::info!(%stdout, "solana deploy successful");
+
+        let program_address = self.program_keypair.pubkey().to_string();
+        tracing::info!(
+            program_address = %program_address,
+            contract_path = ?contract_path,
+            "successfully deployed solana program via CLI"
+        );
+
+        Ok(program_address)
+    }
+
+    /// Initialize the deployed Solana program
+    async fn initialize_program(&self) -> anyhow::Result<()> {
+        tracing::info!("initializing solana program...");
+
+        // Create payer keypair - recreate since it doesn't implement Clone
+        let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
+        let program_id = self.program_keypair.pubkey();
+
+        // Define program state PDA
+        let (program_state_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+
+        // Call initialize function
+        let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
+        let chain_id = Chain::Solana.caip2_chain_id().to_string(); // CAIP-2 format for local testnet
+
+        tracing::info!(
+            program_id = %program_id,
+            program_state = %program_state_pda,
+            signature_deposit,
+            chain_id = %chain_id,
+            "calling initialize on solana program"
+        );
+
+        // Create initialize instruction manually
+        let mut data = Vec::new();
+        // Add discriminator for initialize function (first 8 bytes of sha256("global:initialize"))
+        let discriminator = solana_sdk::hash::hash(b"global:initialize").to_bytes();
+        data.extend_from_slice(&discriminator[..8]);
+
+        // Serialize arguments using borsh: signature_deposit (u64) and chain_id (String)
+        let mut args_data = Vec::new();
+        signature_deposit.serialize(&mut args_data)?;
+        chain_id.serialize(&mut args_data)?;
+        data.extend_from_slice(&args_data);
+
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(program_state_pda, false),
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            ],
+            data,
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let transaction = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &[&*payer],
+            recent_blockhash,
+        );
+
+        let tx = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            transaction = %tx,
+            "successfully initialized solana program"
+        );
+
+        Ok(())
+    }
+
+    /// Sign with custom parameters from SignAction
+    pub async fn sign(
+        &self,
+        payload: [u8; 32],
+        path: &str,
+        key_version: u32,
+        algo: &str,
+        dest: &str,
+        params: &str,
+    ) -> anyhow::Result<SolanaSignature> {
+        // Check if the RPC client can get the version (basic readiness check)
+        if self.rpc_client.get_version().await.is_err() {
+            anyhow::bail!("solana container is not ready");
+        }
+
+        let program_id = self.program_keypair.pubkey();
+        tracing::info!("using program_id for sign: {program_id}");
+
+        // Define program state PDA (required by the sign function)
+        let (program_state_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+
+        // Define event authority PDA for CPI events
+        let (event_authority_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        // Manually construct the instruction data
+        // Anchor instructions start with an 8-byte discriminator
+        let mut data = Vec::new();
+        // Correct discriminator for "sign" function: first 8 bytes of sha256("global:sign")
+        data.extend_from_slice(&[5, 221, 155, 46, 237, 91, 28, 236]);
+        // Serialize the arguments using Borsh
+        let args = SignArgs {
+            payload,
+            key_version,
+            path: path.to_string(),
+            algo: algo.to_string(),
+            dest: dest.to_string(),
+            params: params.to_string(),
+        };
+        args.serialize(&mut data)?;
+
+        // Create the instruction with correct accounts matching the external contract
+        // note that #[event_cpi] requires additional accounts
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![
+                // program_state account (writable, not signer)
+                AccountMeta::new(program_state_pda, false),
+                // requester (writable, signer)
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
+                // fee_payer (writable, signer) - same as requester for simplicity
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
+                // system_program (readonly, not signer)
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // event_authority (readonly, not signer) - required for #[event_cpi]
+                AccountMeta::new_readonly(event_authority_pda, false),
+                // program account (readonly, not signer) - required for #[event_cpi]
+                AccountMeta::new_readonly(program_id, false),
+            ],
+            data,
+        };
+
+        // Create and send the transaction to solana
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            ?signature,
+            payload = hex::encode(payload),
+            path,
+            key_version,
+            "sign transaction successful",
+        );
+
+        Ok(signature)
+    }
+
+    /// Submit a tx whose first instruction emits a sign CPI event and whose
+    /// second instruction fails, rolling the whole
+    /// tx back. Returns the slot the failed tx landed in.
+    pub async fn sign_failed_tx(
+        &self,
+        payload: [u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> anyhow::Result<u64> {
+        let program_id = self.program_keypair.pubkey();
+        let (program_state_pda, _) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+        let (event_authority_pda, _) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        // Emits a real sign CPI event
+        let sign_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Sign {
+                program_state: program_state_pda,
+                requester: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+                event_authority: event_authority_pda,
+                program: program_id,
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Sign {
+                payload,
+                key_version,
+                path: path.to_string(),
+                algo: "secp256k1".to_string(),
+                dest: String::new(),
+                params: String::new(),
+            }
+            .data(),
+        };
+
+        // The second instruction is a duplicate initialize, which will fail because the program-state PDA already exists.
+        let initialize_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Initialize {
+                program_state: program_state_pda,
+                admin: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Initialize {
+                signature_deposit: 1_000_000,
+                chain_id: Chain::Solana.caip2_chain_id().to_string(),
+            }
+            .data(),
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[sign_ix, initialize_ix],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+
+        // Send the transaction with skip_preflight to avoid preflight checks that would prevent the transaction from being sent due to the second instruction failing.
+        let signature = self
+            .rpc_client
+            .send_transaction_with_config(
+                &transaction,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Wait for the transaction to be confirmed and check that it failed as expected.
+        for _ in 0..40 {
+            let statuses = self.rpc_client.get_signature_statuses(&[signature]).await?;
+            let confirmed = statuses
+                .value
+                .first()
+                .and_then(|status| status.as_ref())
+                .filter(|status| status.confirmation_status.is_some());
+            match confirmed {
+                Some(status) => {
+                    return match status.err {
+                        Some(_) => {
+                            tracing::info!(
+                                ?signature,
+                                slot = status.slot,
+                                "failed sign tx confirmed as expected"
+                            );
+                            Ok(status.slot)
+                        }
+                        None => anyhow::bail!("duplicate initialize unexpectedly succeeded"),
+                    }
+                }
+                None => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+
+        anyhow::bail!("failed sign tx was not confirmed in time")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sign_bidirectional(
+        &self,
+        serialized_transaction: &[u8],
+        caip2_id: &str,
+        key_version: u32,
+        path: &str,
+        algo: &str,
+        dest: &str,
+        params: &str,
+        callback_program_id: SolanaPubkey,
+        output_deserialization_schema: &[u8],
+        respond_serialization_schema: &[u8],
+    ) -> anyhow::Result<SolanaSignature> {
+        if self.rpc_client.get_version().await.is_err() {
+            anyhow::bail!("solana container is not ready");
+        }
+
+        let contract_program_id = self.program_keypair.pubkey();
+        tracing::info!("using program_id for sign_bidirectional: {contract_program_id}");
+
+        let (program_state_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &contract_program_id);
+        let (event_authority_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &contract_program_id);
+
+        let mut data = Vec::new();
+        let mut hasher = Sha256::new();
+        hasher.update(b"global:sign_bidirectional");
+        let discriminator = hasher.finalize();
+        data.extend_from_slice(&discriminator[..8]);
+
+        let args = SignBidirectionalArgs {
+            serialized_transaction: serialized_transaction.to_vec(),
+            caip2_id: caip2_id.to_string(),
+            key_version,
+            path: path.to_string(),
+            algo: algo.to_string(),
+            dest: dest.to_string(),
+            params: params.to_string(),
+            program_id: callback_program_id.to_bytes(),
+            output_deserialization_schema: output_deserialization_schema.to_vec(),
+            respond_serialization_schema: respond_serialization_schema.to_vec(),
+        };
+        args.serialize(&mut data)?;
+
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id: contract_program_id,
+            accounts: vec![
+                AccountMeta::new(program_state_pda, false),
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+                AccountMeta::new_readonly(event_authority_pda, false),
+                AccountMeta::new_readonly(contract_program_id, false),
+            ],
+            data,
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            ?signature,
+            caip2_id,
+            path,
+            key_version,
+            "sign_bidirectional transaction successful",
+        );
+
+        Ok(signature)
+    }
+
+    pub async fn respond_bidirectional(
+        &self,
+        request_id: [u8; 32],
+        serialized_output: Vec<u8>,
+        signature: &FullSignature<Secp256k1>,
+        recovery_id: u8,
+    ) -> anyhow::Result<SolanaSignature> {
+        if self.rpc_client.get_version().await.is_err() {
+            anyhow::bail!("solana container is not ready");
+        }
+
+        let program_id = self.program_keypair.pubkey();
+        let mut data = Vec::new();
+        let mut hasher = Sha256::new();
+        hasher.update(b"global:respond_bidirectional");
+        let discriminator = hasher.finalize();
+        data.extend_from_slice(&discriminator[..8]);
+
+        let encoded_point = signature.big_r.to_encoded_point(false);
+        let point_bytes = encoded_point.as_bytes();
+        debug_assert_eq!(point_bytes.len(), 65);
+        let mut x = [0u8; 32];
+        let mut y = [0u8; 32];
+        x.copy_from_slice(&point_bytes[1..33]);
+        y.copy_from_slice(&point_bytes[33..65]);
+
+        let mut s_bytes = [0u8; 32];
+        s_bytes.copy_from_slice(signature.s.to_bytes().as_slice());
+
+        let args = RespondBidirectionalArgs {
+            request_id,
+            serialized_output,
+            signature: RespondBidirectionalSignature {
+                big_r: RespondBidirectionalAffinePoint { x, y },
+                s: s_bytes,
+                recovery_id,
+            },
+        };
+        args.serialize(&mut data)?;
+
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![AccountMeta::new(self.payer_keypair.pubkey(), true)],
+            data,
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            ?signature,
+            request_id = %hex::encode(request_id),
+            "respond_bidirectional transaction successful",
+        );
+
+        Ok(signature)
+    }
+}
+
+impl Drop for Solana {
+    fn drop(&mut self) {
+        if let Err(e) = self.process.kill() {
+            tracing::warn!("failed to kill solana-test-validator process: {e}");
+        } else {
+            tracing::info!("solana-test-validator process terminated");
+        }
+
+        if let Err(e) = std::fs::remove_dir_all(&self.ledger_dir) {
+            tracing::debug!(?self.ledger_dir, "failed to remove solana ledger dir: {e}");
+        }
+    }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct SignArgs {
+    payload: [u8; 32],
+    key_version: u32,
+    path: String,
+    algo: String,
+    dest: String,
+    params: String,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct SignBidirectionalArgs {
+    serialized_transaction: Vec<u8>,
+    caip2_id: String,
+    key_version: u32,
+    path: String,
+    algo: String,
+    dest: String,
+    params: String,
+    program_id: [u8; 32],
+    output_deserialization_schema: Vec<u8>,
+    respond_serialization_schema: Vec<u8>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct RespondBidirectionalArgs {
+    request_id: [u8; 32],
+    serialized_output: Vec<u8>,
+    signature: RespondBidirectionalSignature,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct RespondBidirectionalSignature {
+    big_r: RespondBidirectionalAffinePoint,
+    s: [u8; 32],
+    recovery_id: u8,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct RespondBidirectionalAffinePoint {
+    x: [u8; 32],
+    y: [u8; 32],
 }

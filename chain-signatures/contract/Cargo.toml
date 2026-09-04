@@ -11,6 +11,7 @@ borsh.workspace = true
 k256.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
+signet-primitives.workspace = true
 near-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,8 +19,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+near-primitives.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
+near-sdk = { workspace = true, features = ["unit-testing"] }
 
 # crypto dependencies
 ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
@@ -27,5 +31,10 @@ signature = "2.2.0"
 digest = "0.10.7"
 
 # near dependencies
-near-crypto = "0.27.0"
-near-workspaces = "0.15.0"
+near-crypto.workspace = true
+near-workspaces.workspace = true
+
+[features]
+default = []
+# utilized for benchmarking the node:
+bench = []

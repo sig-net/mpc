@@ -1,0 +1,85 @@
+name: Production Compatibility
+
+on:
+  workflow_dispatch:
+  # Temporarily disabled until finalized
+  # push:
+  #   branches:
+  #     - develop
+  #   paths:
+  #     - chain-signatures/**
+  # pull_request:
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  compat:
+    name: Build tagged binaries and run compat tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
+
+      - name: Install Rust (1.93.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.93.0
+          target: wasm32-unknown-unknown
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compat-test
+          cache-targets: true
+          cache-on-failure: false
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - name: Build governance contract
+        run: |
+          ./build-contract.sh
+          mkdir -p target/wasm32-unknown-unknown/release
+          cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm
+
+      - name: Build node with stable toolchain
+        run: cargo build-node
+
+      - name: Build compatibility binaries from tags
+        run: ./scripts/build-compat-binaries.sh
+
+      - name: Build integration tests
+        run: cargo build -p integration-tests --tests
+
+      - name: Run production compatibility tests
+        run: ./scripts/test-prod-compat.sh
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1

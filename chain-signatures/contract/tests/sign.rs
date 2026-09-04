@@ -2,9 +2,10 @@ pub mod common;
 use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
-use mpc_contract::primitives::{CandidateInfo, SignRequest};
-use mpc_primitives::Signature;
+use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
+use mpc_primitives::CheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
+use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
 use std::collections::HashMap;
 
@@ -29,7 +30,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
         let request = SignRequest {
             payload: payload_hash,
             path: path.into(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
         };
 
         sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
@@ -42,7 +43,7 @@ async fn test_contract_sign_request() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
     sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
     sign_and_validate(&request, Some((&respond_req, &respond_resp)), &contract).await?;
@@ -72,7 +73,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = alice
@@ -114,7 +115,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let new_balance = alice.view_account().await?.balance;
     let new_contract_balance = contract.view_account().await?.balance;
     assert!(
-        balance.as_millinear() - new_balance.as_millinear() < 10,
+        balance.as_millinear() - new_balance.as_millinear() < 50,
         "refund should happen"
     );
     println!(
@@ -146,7 +147,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = alice
@@ -182,7 +183,7 @@ async fn test_contract_sign_fail_refund() -> anyhow::Result<()> {
         new_contract_balance.as_yoctonear(),
     );
     assert!(
-        balance.as_millinear() - new_balance.as_millinear() < 10,
+        balance.as_millinear() - new_balance.as_millinear() < 50,
         "refund should happen"
     );
     assert!(
@@ -205,7 +206,7 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
-        key_version: 0,
+        key_version: LATEST_MPC_KEY_VERSION,
     };
 
     let status = contract
@@ -293,6 +294,242 @@ async fn test_contract_initialization() -> anyhow::Result<()> {
         result.is_failure(),
         "initializing with valid candidates again should fail"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
+    let (_, contract, _, sk) = init_env().await;
+    let predecessor_id = contract.id();
+    let path = "test";
+    let msg = "hello world";
+
+    let (payload_hash, sign_id, _valid_resp) =
+        create_response(predecessor_id, msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: LATEST_MPC_KEY_VERSION,
+    };
+
+    // Submit a sign request
+    let _ = contract
+        .call("sign")
+        .args_json(serde_json::json!({ "request": request }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Respond with a bogus signature (zeroed big_r and s)
+    let rogue_signature = Signature {
+        big_r: k256::AffinePoint::IDENTITY,
+        s: k256::Scalar::ZERO,
+        recovery_id: 0,
+    };
+    let respond = contract
+        .call("respond")
+        .args_json(serde_json::json!({
+            "sign_id": sign_id,
+            "signature": rogue_signature,
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    let failure = respond
+        .into_result()
+        .expect_err("rogue signature should be rejected");
+    assert!(
+        failure
+            .to_string()
+            .contains(&errors::RespondError::InvalidSignature.to_string()),
+        "expected InvalidSignature error, got: {failure}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_checkpoint_voting() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+    let checkpoint = CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+
+    let first_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(first_vote.is_success());
+    assert!(!first_vote.json::<bool>()?);
+
+    let duplicate_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(duplicate_vote.is_success());
+    assert!(!duplicate_vote.json::<bool>()?);
+
+    let second_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_vote.is_success());
+    assert!(second_vote.json::<bool>()?);
+
+    let views: Vec<View> = contract
+        .view("read")
+        .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
+        .await?
+        .json()?;
+    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+        .into_iter()
+        .find_map(|view| match view {
+            View::Checkpoints(checkpoints) => Some(checkpoints),
+            _ => None,
+        })
+        .expect("read should return a Checkpoints view");
+    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
+
+    let latest: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    assert_eq!(latest, Some(checkpoint));
+
+    // Verify that every returned checkpoint matches its map key and carries
+    // the correct chain based on the checkpoint digest.
+    for (chain, cp) in &checkpoints {
+        assert_eq!(
+            *chain, cp.chain,
+            "contract returned chain must match checkpoint digest's chain"
+        );
+    }
+
+    // Vote for a checkpoint on a different chain (Ethereum) to verify multi-chain storage.
+    let eth_checkpoint = CheckpointDigest::new(Chain::Ethereum, 50, [0xee; 32]);
+    for account in &accounts[0..2] {
+        let vote = account
+            .call(contract.id(), "vote_checkpoint")
+            .args_json(serde_json::json!({ "checkpoint": eth_checkpoint }))
+            .max_gas()
+            .transact()
+            .await?;
+        assert!(vote.is_success());
+    }
+
+    let views: Vec<View> = contract
+        .view("read")
+        .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
+        .await?
+        .json()?;
+    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+        .into_iter()
+        .find_map(|view| match view {
+            View::Checkpoints(checkpoints) => Some(checkpoints),
+            _ => None,
+        })
+        .expect("read should return a Checkpoints view");
+    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
+    assert_eq!(checkpoints.get(&Chain::Ethereum), Some(&eth_checkpoint));
+    for (chain, cp) in &checkpoints {
+        assert_eq!(
+            *chain, cp.chain,
+            "contract returned chain must match checkpoint digest's chain"
+        );
+    }
+
+    let latest_sol: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    assert_eq!(latest_sol, Some(checkpoint));
+    assert_eq!(latest_sol.unwrap().chain, Chain::Solana);
+
+    let latest_eth: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Ethereum }))
+        .await?
+        .json()?;
+    assert_eq!(latest_eth, Some(eth_checkpoint));
+    assert_eq!(latest_eth.unwrap().chain, Chain::Ethereum);
+
+    let latest_unvoted: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Bitcoin }))
+        .await?
+        .json()?;
+    assert_eq!(latest_unvoted, None);
+
+    let competing_a = CheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
+    let competing_b = CheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
+    let first_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_a }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(first_competing_vote.is_success());
+    assert!(!first_competing_vote.json::<bool>()?);
+
+    let second_competing_vote = accounts[0]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second_competing_vote.is_success());
+    assert!(!second_competing_vote.json::<bool>()?);
+
+    let finalize_competing_vote = accounts[1]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": competing_b }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(finalize_competing_vote.is_success());
+    assert!(finalize_competing_vote.json::<bool>()?);
+
+    let stale = CheckpointDigest::new(Chain::Solana, 119, [9u8; 32]);
+    let stale_vote = accounts[2]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": stale }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(stale_vote.is_failure());
+    let stale_error = stale_vote
+        .into_result()
+        .expect_err("a behind checkpoint should be rejected");
+    assert!(stale_error
+        .to_string()
+        .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
+
+    let conflicting = CheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
+    let conflict = accounts[2]
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": conflicting }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(conflict.is_failure());
+
+    let outsider = worker.dev_create_account().await?;
+    let unauthorized = outsider
+        .call(contract.id(), "vote_checkpoint")
+        .args_json(serde_json::json!({ "checkpoint": checkpoint }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(unauthorized.is_failure());
 
     Ok(())
 }

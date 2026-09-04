@@ -4,7 +4,6 @@ on:
     branches:
       - main
       - develop
-  pull_request:
     paths:
       - ".github/workflows/unit.yml"
       - "chain-signatures/**/*.rs"
@@ -12,6 +11,8 @@ on:
       - "integration-tests/**/*.rs"
       - "chain-signatures/contract-eth/**/*.sol"
       - "chain-signatures/contract-eth/**/*.js"
+  pull_request:
+  merge_group:
 
 env:
   RUSTFLAGS: -D warnings
@@ -20,39 +21,59 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
-      - uses: actions/checkout@v3
-      - name: Install stable toolchain
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: 1.93.0
           target: wasm32-unknown-unknown
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
-      - uses: WarpBuilds/cache@v1
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: unit-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
       - name: Compile Contract
-        run: cargo build -p mpc-contract --target wasm32-unknown-unknown --release
+        run: |
+          ./build-contract.sh
+          mkdir -p target/wasm32-unknown-unknown/release
+          cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm
       - name: Compile eth contract
-        run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
+        run: cd chain-signatures/contract-eth && npm ci && npx hardhat compile
+      
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
-      - name: Compile
-        run: cargo check
+      
       - name: Test format
         run: cargo fmt -- --check
+      
       - name: Test clippy
         run: cargo clippy --tests -- -Dclippy::all
+      
       - name: Unit tests
         run: cargo test --workspace --exclude integration-tests
 
@@ -60,21 +81,14 @@ jobs:
     name: Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Install stable toolchain
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
-      - name: Install Audit
-        run: cargo install cargo-audit
-      - name: Run Audit
-        # even if previous audit step fails, run this audit step to ensure all crates are audited
-        if: always()
-        # ALL audit exceptions must be justified here
-        # RUSTSEC-2024-0344 and RUSTSEC-2022-0093 are both to do with ed25519 signatures in near-sdk, we don't sign things with this library so it's safe
-        # RUSTSEC-2022-0054 wee-alloc is unmaintained, it's fine for now because we barely use an allocator and the contracts are short lived, but we should find a replacement/use the default allocator
-        # RUSTSEC-2021-0145 atty can do an unallocated read with a custom allocator in windows. We don't run this in windows and we don't use a custom allocator.
-        # RUSTSEC-2024-0399 according to the description, this is not affecting us since we are not using Acceptor
-        run: |
-          cargo audit --ignore RUSTSEC-2022-0093 --ignore RUSTSEC-2024-0344 --ignore RUSTSEC-2022-0054 --ignore RUSTSEC-2021-0145 --ignore RUSTSEC-2024-0399
+          toolchain: 1.93.0
+
+      # Run cargo-audit to check for vulnerable dependencies
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
