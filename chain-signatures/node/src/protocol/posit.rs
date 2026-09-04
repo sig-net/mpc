@@ -2,7 +2,7 @@ use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
@@ -57,7 +57,6 @@ pub enum PositAction {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
 pub enum PositRejectReason {
-    Unknown,
     /// The node is already participating in a generation, or has already
     /// finished generation.
     AlreadyGenerating,
@@ -67,9 +66,9 @@ pub enum PositRejectReason {
     /// The posit message is invalid, usually because of bad timing leading to
     /// round / proposer mismatches.
     InvalidRequest,
-    /// The message's round is behind the rejector's current round, carried
-    /// in `PositMessage::stale_round` so the sender can catch up in one bump.
-    StaleRound,
+    /// The message's round is behind the rejector's current round, which is
+    /// carried in the payload so the sender can catch up in one bump.
+    StaleRound(usize),
 }
 
 impl PositAction {
@@ -441,7 +440,8 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
 /// This is used by individual signature tasks instead of the global Posits mapping.
 pub struct SinglePositCounter {
     participants: HashSet<Participant>,
-    rejects: HashMap<Participant, PositRejectReason>,
+    /// Who rejected and why; kept ordered so logs render deterministically.
+    pub rejects: BTreeMap<Participant, PositRejectReason>,
     pub accepts: HashSet<Participant>,
 }
 
@@ -451,7 +451,7 @@ impl SinglePositCounter {
         accepts.insert(me);
         Self {
             participants: participants.iter().copied().collect(),
-            rejects: HashMap::new(),
+            rejects: BTreeMap::new(),
             accepts,
         }
     }
@@ -468,11 +468,13 @@ impl SinglePositCounter {
         self.accepts.len() + self.rejects.len() == self.participants.len()
     }
 
-    pub fn num_peers_already_generating(&self) -> usize {
+    /// Peers whose reject says they never stored the artifact, which is proof
+    /// our holder list for it is stale. Ordered by participant.
+    pub fn missing_artifact_rejectors(&self) -> impl Iterator<Item = Participant> + '_ {
         self.rejects
-            .values()
-            .filter(|reason| matches!(reason, PositRejectReason::AlreadyGenerating))
-            .count()
+            .iter()
+            .filter(|(_, reason)| matches!(reason, PositRejectReason::MissingArtifact))
+            .map(|(peer, _)| *peer)
     }
 
     pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
@@ -680,48 +682,5 @@ mod tests {
         let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
-    }
-
-    #[test]
-    fn test_single_posit_counter_reason_counting() {
-        let me = Participant::from(0);
-        let participants = vec![
-            me,
-            Participant::from(1),
-            Participant::from(2),
-            Participant::from(3),
-        ];
-        let mut counter = SinglePositCounter::new(me, &participants);
-
-        assert_eq!(counter.num_peers_already_generating(), 0);
-
-        counter.process_action(
-            Participant::from(1),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-        assert_eq!(counter.num_peers_already_generating(), 1);
-
-        counter.process_action(
-            Participant::from(3),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-        assert_eq!(counter.num_peers_already_generating(), 2);
-
-        // Other reject reasons are not counted.
-        counter.process_action(
-            Participant::from(2),
-            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
-        );
-        assert_eq!(counter.num_peers_already_generating(), 2);
-
-        counter.process_action(Participant::from(3), &PositAction::Accept);
-        assert_eq!(counter.num_peers_already_generating(), 2);
-
-        // Reject from the same peer is not counted again.
-        counter.process_action(
-            Participant::from(1),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-        assert_eq!(counter.num_peers_already_generating(), 2);
     }
 }

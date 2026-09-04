@@ -13,7 +13,8 @@ use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
+    NoopChainTelemetry, StateManager,
 };
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
@@ -352,8 +353,13 @@ async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<ChainIndexerStream> {
-    let indexer =
-        EthereumIndexer::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
 
@@ -390,8 +396,13 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let indexer =
-        EthereumIndexer::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -552,6 +563,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -579,8 +591,13 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let indexer =
-        EthereumIndexer::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -778,8 +795,13 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         )))
         .await;
 
-    let indexer =
-        EthereumIndexer::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -887,6 +909,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -1030,6 +1053,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -1090,6 +1114,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )

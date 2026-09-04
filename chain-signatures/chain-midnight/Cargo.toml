@@ -21,14 +21,13 @@ midnight-onchain-runtime.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
+midnight-transient-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
 mpc-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Cargo unifies features across this crate and `node` in a workspace build, so
-# nothing here may rely on `unstable-light-client` (node's addition) being absent.
 subxt = { workspace = true, features = ["native"] }
 tokio.workspace = true
 tokio-util.workspace = true
@@ -41,5 +40,4 @@ sandbox = []
 
 [dev-dependencies]
 jsonrpsee = { version = "0.24.10", features = ["server"] }
-midnight-transient-crypto = "3.0.0"
 tokio = { workspace = true, features = ["test-util"] }

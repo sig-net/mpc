@@ -27,6 +27,10 @@ ignore = [
 	# wasmtime stores can mix up type indices between engines; only reachable via near-sdk's `unit-testing`
 	# dev-only dependency (near-vm-runner 0.37.2 pins wasmtime ^45, which has no patched release; blocked upstream).
 	"RUSTSEC-2026-0222",
+	# wasmtime filesystem sandbox escape via trailing slashes in paths/symlinks (RUSTSEC-2026-0269); same dependency chain as
+	# RUSTSEC-2026-0222: near-vm-runner 0.37.x pins wasmtime ^45, which has no patched release (fixes only in 46.0.3+/47.0.4+).
+	# Only reachable via near-sdk's `unit-testing` dev-only feature; we never expose a WASI filesystem to guest code.
+	"RUSTSEC-2026-0269",
 	# h2 unbounded empty DATA frames (RUSTSEC-2026-0258); DoS via CPU exhaustion on HTTP/2 stream parsing (not a secret/data leakage vulnerability).
 	# Server-side traffic uses hyper 1.x / h2 0.4 which is upgraded to >=0.4.16. h2 0.3.x is used solely by outgoing client connections
 	# to GCP Secret Manager endpoints (via unmaintained google-apis-rs / hyper 0.14) with no upstream 0.3 patch available.

@@ -1,3 +1,5 @@
+mod midnight;
+
 use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::{Bytes, I256, U256};
 use borsh::BorshSerialize;
@@ -40,6 +42,12 @@ impl Output {
         format: SerDeserFormat,
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
+        // FAB uses Midnight schema capacities and Compact layout, unlike the shared ABI/Borsh encoders.
+        // TODO: Extract FAB serialization when another execution target needs to respond to
+        // Midnight. See https://github.com/sig-net/mpc/issues/1196.
+        if format == SerDeserFormat::Fab {
+            return midnight::serialize(self, schema_json_bytes);
+        }
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
         let data = if self.is_contract_call() {
@@ -51,22 +59,19 @@ impl Output {
         match format {
             SerDeserFormat::Abi => encode_abi(data, &schema),
             SerDeserFormat::Borsh => encode_borsh(data, &schema),
+            SerDeserFormat::Fab => unreachable!(),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct TransactionOutput {
-    // TODO: consider if we need this field or use Output alone
-    #[allow(dead_code)]
-    pub success: bool,
     pub output: Output,
 }
 
 impl TransactionOutput {
     pub fn non_contract_call_output() -> Self {
         Self {
-            success: true,
             output: Output {
                 fields: HashMap::new(),
                 from_contract_call: false,
@@ -98,7 +103,6 @@ impl TransactionOutput {
         }
 
         Ok(TransactionOutput {
-            success: true,
             output: Output {
                 fields: output_map,
                 from_contract_call: true,
@@ -327,6 +331,78 @@ mod tests {
         let mut buf = [0u8; 32];
         buf[24..].copy_from_slice(&value.to_be_bytes());
         Bytes::from(buf.to_vec())
+    }
+
+    fn abi_bool(value: bool) -> Bytes {
+        abi_uint256(u64::from(value))
+    }
+
+    #[test]
+    fn all_response_formats_share_evm_decode_acceptance() {
+        let output_schema = br#"[{"name":"message","type":"string"}]"#;
+        let trace = Bytes::from(
+            DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
+        );
+
+        let abi_result = build_serialized_output(
+            true,
+            output_schema,
+            TraceOutput::Output(trace.clone()),
+            SerDeserFormat::Abi,
+            output_schema,
+        );
+        let fab_result = build_serialized_output(
+            true,
+            output_schema,
+            TraceOutput::Output(trace),
+            SerDeserFormat::Fab,
+            br#"[{"name":"message","type":"string","maxBytes":32}]"#,
+        );
+
+        assert_eq!(abi_result.is_ok(), fab_result.is_ok());
+    }
+
+    #[test]
+    fn build_serialized_output_fab_contract_bool() {
+        let bool_schema = br#"[{"name":"ok","type":"bool"}]"#;
+        let out = build_serialized_output(
+            true,
+            bool_schema,
+            TraceOutput::Output(abi_bool(true)),
+            SerDeserFormat::Fab,
+            bool_schema,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
+    }
+
+    #[test]
+    fn build_serialized_output_fab_non_contract_default_skips_output_schema() {
+        let out = build_serialized_output(
+            false,
+            b"not JSON",
+            TraceOutput::NotTraced,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
+    }
+
+    #[test]
+    fn build_serialized_output_fab_void_call_uses_default() {
+        let out = build_serialized_output(
+            true,
+            b"[]",
+            TraceOutput::NoReturnData,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(out, vec![1]);
     }
 
     #[test]

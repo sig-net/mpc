@@ -11,7 +11,9 @@ use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
@@ -63,8 +65,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Delay between retries of transient RPC failures
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-    pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let client = Arc::new(EthereumClient::new(eth.clone()).await?);
+    pub async fn new(
+        eth: EthConfig,
+        state_manager: S,
+        telemetry: T,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<Self> {
+        let client = Arc::new(EthereumClient::new(eth.clone(), shared_backoff).await?);
         let contract_address = eth.contract_address;
 
         let finalized_head = FinalizedHeadTracker::new(&eth);
@@ -597,8 +604,8 @@ mod tests {
 
         // 32-block catchup: blocks have empty blooms so the batch issues exactly
         // 1 eth_getBlockByNumber(batch) and ZERO eth_getLogs (bloom gate skips).
-        let blocks: Vec<_> = (1..=32)
-            .map(|n| test_utils::block_response(n as u64, n as u64))
+        let blocks: Vec<_> = (0..32)
+            .map(|n| test_utils::block_response(n, n + 1))
             .collect();
         let blocks_mock = server
             .mock("POST", "/")
@@ -661,8 +668,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response(1, 10),
-                    test_utils::block_response(2, 11)
+                    test_utils::block_response(0, 10),
+                    test_utils::block_response(1, 11)
                 ])
                 .to_string(),
             )
@@ -777,7 +784,7 @@ mod tests {
             .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(json!([test_utils::block_response(1, block_number)]).to_string())
+            .with_body(json!([test_utils::block_response(0, block_number)]).to_string())
             .expect(1)
             .create_async()
             .await;

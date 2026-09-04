@@ -137,10 +137,6 @@ impl MockServers {
     pub fn remove_back(&mut self) {
         self.servers.pop();
     }
-
-    pub fn swap_remove_front(&mut self) {
-        self.servers.swap_remove(0);
-    }
 }
 
 impl std::ops::Index<usize> for MockServers {

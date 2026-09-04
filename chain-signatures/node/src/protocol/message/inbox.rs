@@ -76,14 +76,7 @@ pub struct MessageInbox {
     /// Protocol messages per running signature generation.
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
     /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
-    signature_posit: Subscriber<(
-        SignId,
-        PresignatureId,
-        Round,
-        Participant,
-        PositAction,
-        Option<Round>,
-    )>,
+    signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -146,7 +139,6 @@ impl MessageInbox {
                         round,
                         message.from,
                         message.action,
-                        message.stale_round,
                     ));
                     self.signature_posit.report_capacity_global();
                 }
@@ -226,14 +218,15 @@ impl MessageInbox {
 
             match decrypted {
                 Ok(batch) => batches.push(batch),
-                Err(err) => {
-                    if matches!(err, MessageError::UnknownParticipant(_)) {
-                        retry.push((encrypted, timestamp));
-                    } else {
-                        tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
-                    }
-                    continue;
+                // Sender is not in our participant map yet; keep the batch and
+                // retry once the map catches up.
+                Err(MessageError::UnknownParticipant(_)) => retry.push((encrypted, timestamp)),
+                // A batch we have already ingested, resent because the peer's
+                // outbox retried a send that had in fact landed.
+                Err(MessageError::Idempotent) => {
+                    tracing::debug!("inbox: dropped duplicate message batch");
                 }
+                Err(err) => tracing::warn!(?err, "inbox: failed to decrypt/verify messages"),
             };
         }
 
@@ -287,10 +280,6 @@ impl MessageInbox {
         for message in messages {
             self.send(message);
         }
-    }
-
-    pub fn clear_filters(&mut self) {
-        self.filter.clear();
     }
 
     pub fn process_subscribe(&mut self, sub: SubscribeRequest) {
@@ -797,7 +786,6 @@ mod tests {
                 id: PositProtocolId::Signature(sign_id, 77, round),
                 from,
                 action: PositAction::Accept,
-                stale_round: None,
             }));
         }
         messages.push(Message::Ready(ReadyMessage {

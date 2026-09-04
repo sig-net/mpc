@@ -353,11 +353,7 @@ fn build_publish_state(
         request.args.payload,
     )
     .ok()?;
-    let publish = PublishState {
-        signature,
-        participants: participants.to_vec(),
-        is_proposer,
-    };
+    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
 
     Some(Arc::new(publish))
 }

@@ -10,6 +10,7 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
@@ -151,6 +152,9 @@ pub struct SignatureSpawner {
     rpc: RpcChannel,
     backlog: Backlog,
     node_account_id: near_account_id::AccountId,
+    /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
+    /// before we use it again. Cloned into each spawned sign task.
+    sync_report_tx: SyncReportSender,
 }
 
 impl SignatureSpawner {
@@ -238,6 +242,7 @@ impl SignatureSpawner {
             round,
             limiter: self.limiters[request.chain].clone(),
             node_account_id: self.node_account_id.clone(),
+            sync_report_tx: self.sync_report_tx.clone(),
         };
 
         // Spawn the async task with organizing loop
@@ -271,7 +276,6 @@ impl SignatureSpawner {
         round: usize,
         from: Participant,
         action: PositAction,
-        stale_round: Option<usize>,
     ) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
@@ -286,7 +290,6 @@ impl SignatureSpawner {
                 round,
                 from,
                 action,
-                stale_round,
             });
     }
 
@@ -415,8 +418,8 @@ impl SignatureSpawner {
                     };
                     self.handle_sign(&governance, sign, &protocol);
                 }
-                Some((sign_id, presignature_id, round, from, action, stale_round)) = posits.recv() => {
-                    self.handle_posit(sign_id, presignature_id, round, from, action, stale_round);
+                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
+                    self.handle_posit(sign_id, presignature_id, round, from, action);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -485,6 +488,7 @@ impl SignatureSpawnerTask {
         msg_channel: MessageChannel,
         rpc_channel: RpcChannel,
         backlog: Backlog,
+        sync_report_tx: SyncReportSender,
     ) -> Self {
         let delay_monitor = DelayMonitor::spawn();
         let spawner = SignatureSpawner {
@@ -501,6 +505,7 @@ impl SignatureSpawnerTask {
             rpc: rpc_channel,
             backlog,
             node_account_id: my_account_id,
+            sync_report_tx,
         };
 
         Self {
@@ -565,6 +570,7 @@ mod tests {
             participants.clone(),
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
 
         let delay_monitor = DelayMonitor::spawn();
         let mut spawner = SignatureSpawner {
@@ -581,6 +587,7 @@ mod tests {
             rpc: rpc_channel,
             backlog: Backlog::new(),
             node_account_id: account_id,
+            sync_report_tx,
         };
 
         let cfg = ProtocolConfig::default();
@@ -640,14 +647,7 @@ mod tests {
         assert!(spawner.test_dead_ids_contains(&sign_id));
 
         // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
-        spawner.handle_posit(
-            sign_id,
-            0,
-            0,
-            Participant::from(1),
-            PositAction::Propose,
-            None,
-        );
+        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
@@ -656,14 +656,7 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 5: Posit after re-spawn → accepted, mailbox re-created
-        spawner.handle_posit(
-            sign_id,
-            0,
-            0,
-            Participant::from(1),
-            PositAction::Propose,
-            None,
-        );
+        spawner.handle_posit(sign_id, 0, 0, Participant::from(1), PositAction::Propose);
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 6: Governance respawn → task swapped in place, nothing retired,

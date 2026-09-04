@@ -1,8 +1,9 @@
+use crate::client::logs_filter;
 use crate::{EthConfig, MaybeBlock};
-use alloy::eips::{BlockId, BlockNumberOrTag};
+use alloy::eips::BlockId;
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
-use alloy::rpc::types::{Filter, Log, TransactionRequest};
+use alloy::rpc::types::Log;
 use futures_util::future::join_all;
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
@@ -61,16 +62,6 @@ impl HeliosEthereumClient {
         Ok(blocks)
     }
 
-    pub async fn get_block_receipts(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
-        self.client
-            .get_block_receipts(block_id)
-            .await
-            .map_err(|err| anyhow::anyhow!("Failed to get block receipts for block: {:?}", err))
-    }
-
     /// Fetch a single transaction's receipt
     pub async fn get_transaction_receipt(
         &self,
@@ -85,28 +76,6 @@ impl HeliosEthereumClient {
                     err
                 )
             })
-    }
-
-    /// Helios has no native JSON-RPC batch, so batch = `join_all` of single
-    /// `get_block_receipts` calls (mirrors `get_blocks`). Order-preserving via
-    /// the input index ordering of `join_all`.
-    pub async fn get_block_receipts_batch(
-        &self,
-        block_ids: &[alloy::rpc::types::BlockId],
-    ) -> anyhow::Result<Vec<Option<Vec<alloy::rpc::types::TransactionReceipt>>>> {
-        if block_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let results = join_all(
-            block_ids
-                .iter()
-                .copied()
-                .map(|block_id| async move { self.get_block_receipts(block_id).await }),
-        )
-        .await;
-
-        results.into_iter().collect()
     }
 
     /// Fetch all logs emitted by `address` within `block_id`
@@ -186,42 +155,6 @@ impl HeliosEthereumClient {
         )
     }
 
-    pub async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        // Build a base tx *without* the sentinel max gas
-        let mut tx = TransactionRequest::default()
-            .from(from)
-            .to(to)
-            .input(alloy::rpc::types::TransactionInput::both(data.clone()));
-
-        // 1) Estimate
-        let est = self
-            .client
-            .estimate_gas(&tx, BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .await
-            .unwrap_or(3_000_000u64); // fallback
-
-        // 2) Add 20% buffer, but keep < 16,777,216
-        let mut gas = (est as f64 * 1.2) as u64;
-        if gas > 16_777_216 {
-            gas = 16_777_216;
-        }
-
-        // 3) Apply gas limit
-        tx = tx.gas_limit(gas);
-
-        // 4) Execute the call
-        self.client
-            .call(&tx, BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .await
-            .map_err(|err| anyhow::anyhow!("Failed to call: {err:?}"))
-    }
-
     async fn fetch_block(
         &self,
         block_id: BlockId,
@@ -230,20 +163,6 @@ impl HeliosEthereumClient {
             anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
         })
     }
-}
-
-/// Build an alloy [`Filter`] scoped to a single `address` and one block,
-/// mirroring the direct-RPC `logs_filter_object`.
-///
-/// - `BlockId::Hash` → `Filter::AtBlockHash(hash)` (pins to the exact block).
-/// - `BlockId::Number(tag)` → `Filter::Range { from = to = tag }`.
-fn logs_filter(address: Address, block_id: BlockId) -> Filter {
-    let mut filter = Filter::new().address(address);
-    filter = match block_id {
-        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
-        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
-    };
-    filter
 }
 
 pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient> {

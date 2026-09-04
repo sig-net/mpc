@@ -94,12 +94,20 @@ pub fn generate_sign_request(
             algo,
             dest,
             params: String::new(),
-            output_deserialization_schema: record.output_deserialization_schema.clone(),
-            respond_serialization_schema: record.respond_serialization_schema.clone(),
+            output_deserialization_schema: schema_prefix(&record.output_deserialization_schema),
+            respond_serialization_schema: schema_prefix(&record.respond_serialization_schema),
             chain: Chain::Midnight,
             chain_ctx: None,
         },
     ))
+}
+
+fn schema_prefix(bytes: &[u8]) -> Vec<u8> {
+    bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())]
+        .to_vec()
 }
 
 /// The `pad(N, "text")` convention `caip2_id` uses: trailing NULs are padding and are
@@ -153,20 +161,51 @@ mod tests {
             event.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
             "the full 32 path bytes as lowercase hex, padding included"
         );
-        assert_eq!(
-            event.output_deserialization_schema,
-            record.output_deserialization_schema
-        );
-        assert_eq!(
-            event.respond_serialization_schema,
-            record.respond_serialization_schema
-        );
+        assert_eq!(event.output_deserialization_schema, b"uint256".to_vec());
+        assert_eq!(event.respond_serialization_schema, b"uint256".to_vec());
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(
             event.chain_ctx, None,
             "the respond target is config, so the request carries no per-chain blob"
         );
+    }
+
+    #[test]
+    fn generate_sign_request_forwards_schema_prefixes_without_changing_request_id_bytes() {
+        let output_json = br#"{"type":"bytes"}"#.to_vec();
+        let respond_json = br#"{"type":"string"}"#.to_vec();
+        let mut record = caller_record();
+        record.output_deserialization_schema = [output_json.as_slice(), b"\0junk\0\0"].concat();
+        record.respond_serialization_schema =
+            [respond_json.as_slice(), b"\0nonzero-suffix\0"].concat();
+        let request_id_before = crate::hashing::compute_request_id(
+            &crate::test_utils::aligned_value_from_record(&record),
+        );
+
+        let request = generate_sign_request(&record, &READ_ADDRESS, request_id_before, INDEXED_TS)
+            .expect("the caller record converts");
+        let mut forwarded_record = record.clone();
+        forwarded_record.output_deserialization_schema = output_json.clone();
+        forwarded_record.respond_serialization_schema = respond_json.clone();
+        assert_ne!(
+            crate::hashing::compute_request_id(&crate::test_utils::aligned_value_from_record(
+                &forwarded_record,
+            )),
+            request_id_before,
+            "request ID must remain bound to the full schema buffers, not the forwarded prefixes"
+        );
+        assert_eq!(
+            request.id,
+            mpc_primitives::SignId::new(request_id_before),
+            "the generated request must retain the ID verified from the full record bytes"
+        );
+        let SignKind::SignBidirectional(event) = request.kind else {
+            panic!("expected SignBidirectional kind");
+        };
+
+        assert_eq!(event.output_deserialization_schema, output_json);
+        assert_eq!(event.respond_serialization_schema, respond_json);
     }
 
     #[test]
