@@ -12,7 +12,7 @@ use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payloa
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -114,7 +114,6 @@ impl SolanaSignEvent {
                     return None;
                 }
 
-                tracing::info!(?sign_id, "solana signature requested");
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
                 Some(IndexedSignRequest::sign(
                     sign_id,
@@ -131,7 +130,6 @@ impl SolanaSignEvent {
             }
             SolanaSignEvent::SignBidirectional(ev) => {
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
-                tracing::info!(?sign_id, "solana bidirectional signature requested");
                 let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
@@ -265,7 +263,7 @@ fn parse_cpi_events(
                     match try_parse_events(&ui.data) {
                         Ok(mut v) => {
                             if !v.is_empty() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "parsed {} event(s) from {}.{}",
                                     v.len(),
                                     set_idx,
@@ -368,7 +366,7 @@ fn parse_cpi_respond_events(
                     match try_parse_respond_event(&ui.data) {
                         Ok((mut r_bdx, mut s_resp)) => {
                             if !r_bdx.is_empty() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "parsed {} RespondBidirectionalEvent(s) from {}.{}",
                                     r_bdx.len(),
                                     set_idx,
@@ -376,7 +374,7 @@ fn parse_cpi_respond_events(
                                 );
                             }
                             if !s_resp.is_empty() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "parsed {} SignatureRespondedEvent(s) from {}.{}",
                                     s_resp.len(),
                                     set_idx,
@@ -448,6 +446,7 @@ pub async fn emit_events(
                     tracing::info!(
                         tx_hash = %signature,
                         sign_id = ?request.id,
+                        bidirectional = matches!(request.kind, SignKind::SignBidirectional(_)),
                         "solana sign request parsed",
                     );
                     events_tx
