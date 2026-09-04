@@ -1,7 +1,9 @@
 mod checkpoints;
 pub mod consensus;
 
-use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
+use crate::sign_bidirectional::{
+    BidirectionalProgress, PublishState, SignBidirectionalEventExt, SignProgress, SignStatus,
+};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
@@ -71,7 +73,15 @@ impl PendingRequests {
     fn pending_generations(&self) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.status() == SignStatus::PendingGeneration)
+            .filter(|(_, entry)| {
+                matches!(
+                    &entry.status,
+                    SignStatus::Sign(SignProgress::Generating)
+                        | SignStatus::Bidirectional(BidirectionalProgress::Initial(
+                            SignProgress::Generating
+                        ))
+                )
+            })
             .map(|(id, entry)| (*id, entry.clone()))
             .collect()
     }
@@ -79,7 +89,15 @@ impl PendingRequests {
     fn pending_generation_bidirectionals(&self) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.status() == SignStatus::PendingGenerationBidirectional)
+            .filter(|(_, entry)| {
+                matches!(
+                    &entry.status,
+                    SignStatus::Bidirectional(BidirectionalProgress::Final {
+                        progress: SignProgress::Generating,
+                        ..
+                    })
+                )
+            })
             .map(|(id, entry)| (*id, entry.clone()))
             .collect()
     }
@@ -272,7 +290,7 @@ impl Backlog {
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| Arc::clone(&entry.request))
+            .map(|entry| Arc::clone(entry.active_request()))
             .collect();
 
         requeueable.sort_by(|left, right| {
@@ -297,12 +315,9 @@ impl Backlog {
         let mut publishable: Vec<_> = pending
             .requests
             .values()
-            .filter_map(|entry| match &entry.status {
-                SignStatus::PendingPublish { publish }
-                | SignStatus::PendingPublishBidirectional { publish } => {
-                    Some((Arc::clone(&entry.request), Arc::clone(publish)))
-                }
-                _ => None,
+            .filter_map(|entry| {
+                let publish = entry.status.publish_state()?;
+                Some((Arc::clone(entry.active_request()), Arc::clone(publish)))
             })
             .collect();
 
@@ -347,7 +362,7 @@ impl Backlog {
     }
 
     /// Marks a request as publishing for a specific chain and request id, with the given publish state.
-    pub async fn mark_publishing(
+    pub async fn publish(
         &self,
         chain: Chain,
         id: &SignId,
@@ -359,14 +374,20 @@ impl Backlog {
             return Err(BacklogError::NotFound { chain, id: *id });
         };
 
-        entry.mark_publishing(publish)
+        entry.publish(publish)
     }
 
-    // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
-    // where we can have proper typestate on a set of types. With these types, we can easily guide
-    // ourselves into the right transitions. For now, this is used to set the request in
-    // `execution_confirmed` to transition from PendingExecution to PendingGenerationBidirectional.
-    //
+    /// Alias for backwards compatibility with [`Backlog::publish`].
+    #[inline]
+    pub async fn mark_publishing(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        publish: Arc<PublishState>,
+    ) -> Result<(), BacklogError> {
+        self.publish(chain, id, publish).await
+    }
+
     // Test-only: production transitions go through the checked helpers above, which keep
     // request kind and status paired. `test-feature` is what exposes this to
     // `integration-tests`; a bare `cfg(test)` would not.
@@ -387,7 +408,7 @@ impl Backlog {
     }
 
     /// Atomically move a completed target-chain execution into final response signing.
-    pub async fn transition_to_bidirectional_response(
+    pub async fn respond(
         &self,
         chain: Chain,
         id: &SignId,
@@ -399,8 +420,19 @@ impl Backlog {
             .requests
             .get_mut(id)
             .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.transition_to_bidirectional_response(request)?;
+        entry.respond(request)?;
         Ok(entry.clone())
+    }
+
+    /// Alias for backwards compatibility with [`Backlog::respond`].
+    #[inline]
+    pub async fn transition_to_bidirectional_response(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        request: Arc<IndexedSignRequest>,
+    ) -> Result<BacklogEntry, BacklogError> {
+        self.respond(chain, id, request).await
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -490,7 +522,7 @@ impl Backlog {
             .get_mut(&sign_id)
             .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
 
-        entry.advance_to_execution(Arc::clone(&bidirectional_tx))?;
+        entry.advance(Arc::clone(&bidirectional_tx))?;
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
@@ -746,10 +778,19 @@ pub struct BacklogEntry {
 
 impl BacklogEntry {
     pub fn new(request: Arc<IndexedSignRequest>) -> Self {
-        Self {
-            request,
-            status: SignStatus::PendingGeneration,
-        }
+        let status = match &request.kind {
+            SignKind::Sign => SignStatus::Sign(SignProgress::Generating),
+            SignKind::SignBidirectional(_) => {
+                SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+            }
+            SignKind::RespondBidirectional(_) => {
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    respond_request: Arc::clone(&request),
+                    progress: SignProgress::Generating,
+                })
+            }
+        };
+        Self { request, status }
     }
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
@@ -757,11 +798,29 @@ impl BacklogEntry {
     }
 
     pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
-        Self::with_status(request, SignStatus::PendingExecution { tx })
+        Self::with_status(
+            request,
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)),
+        )
     }
 
     pub fn sign_id(&self) -> SignId {
         self.request.id
+    }
+
+    /// The request actively being signed or published.
+    /// In Phase 2 this yields the `respond_request`, while `self.request` retains
+    /// the original `SignBidirectional` provenance.
+    pub fn active_request(&self) -> &Arc<IndexedSignRequest> {
+        match &self.status {
+            SignStatus::Sign(_)
+            | SignStatus::Bidirectional(
+                BidirectionalProgress::Initial(_) | BidirectionalProgress::Executing(_),
+            ) => &self.request,
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request, ..
+            }) => respond_request,
+        }
     }
 
     /// Check that a respond event's signature is the one this entry asked for.
@@ -770,10 +829,11 @@ impl BacklogEntry {
         root_public_key: PublicKey,
         signature: &Signature,
     ) -> anyhow::Result<()> {
+        let active = self.active_request();
         mpc_crypto::verify_signature(
             root_public_key,
-            self.request.args.epsilon,
-            self.request.args.payload,
+            active.args.epsilon,
+            active.args.payload,
             signature,
         )
         .with_context(|| {
@@ -813,7 +873,7 @@ impl BacklogEntry {
         self.request = request;
     }
 
-    /// Rewrite this entry into the final-response request produced by a confirmed
+    /// Move this entry into the final-response request produced by a confirmed
     /// target-chain execution.
     ///
     /// Rejects a request whose id differs from this entry's. Callers look the entry
@@ -821,69 +881,88 @@ impl BacklogEntry {
     /// with the key it is stored under, and `checkpoint` commits to the key while
     /// diagnostics report the id. `Backlog::watch_execution` warns when the two
     /// identifiers diverge, which is the only way to reach this rejection.
-    fn transition_to_bidirectional_response(
-        &mut self,
-        request: Arc<IndexedSignRequest>,
-    ) -> Result<(), BacklogError> {
+    pub fn respond(&mut self, request: Arc<IndexedSignRequest>) -> Result<(), BacklogError> {
         if self.request.id != request.id
             || !matches!(&request.kind, SignKind::RespondBidirectional(_))
         {
             return Err(BacklogError::InvalidBidirectionalResponseTransition);
         }
 
-        self.request = request;
-        self.status = SignStatus::PendingGenerationBidirectional;
+        self.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: request,
+            progress: SignProgress::Generating,
+        });
         Ok(())
     }
 
-    pub fn mark_publishing(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
-        match (&self.request.kind, &self.status) {
-            (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
-                self.status = SignStatus::PendingPublish { publish };
-                Ok(())
+    /// Alias for backwards compatibility with [`BacklogEntry::respond`].
+    #[inline]
+    pub fn transition_to_bidirectional_response(
+        &mut self,
+        request: Arc<IndexedSignRequest>,
+    ) -> Result<(), BacklogError> {
+        self.respond(request)
+    }
+
+    pub fn publish(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+        match &mut self.status {
+            SignStatus::Sign(progress) => progress.publish(publish),
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)) => {
+                progress.publish(publish)
             }
-            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
-                self.status = SignStatus::PendingPublishBidirectional { publish };
-                Ok(())
+            SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                progress.publish(publish)
             }
-            _ => Err(BacklogError::InvalidPublishingTransition),
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
+                Err(BacklogError::InvalidPublishingTransition)
+            }
         }
     }
 
-    pub fn advance_to_execution(
-        &mut self,
-        bidirectional_tx: Arc<BidirectionalTx>,
-    ) -> Result<(), BacklogError> {
-        match (&self.request.kind, self.status.clone()) {
-            (
-                SignKind::SignBidirectional(_),
-                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
-            ) => {
-                self.status = SignStatus::PendingExecution {
-                    tx: bidirectional_tx,
-                };
+    /// Alias for backwards compatibility with [`BacklogEntry::publish`].
+    #[inline]
+    pub fn mark_publishing(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+        self.publish(publish)
+    }
+
+    pub fn advance(&mut self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
+        match &mut self.status {
+            SignStatus::Bidirectional(progress @ BidirectionalProgress::Initial(_)) => {
+                *progress = BidirectionalProgress::Executing(tx);
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
         }
     }
 
+    /// Alias for backwards compatibility with [`BacklogEntry::advance`].
+    #[inline]
+    pub fn advance_to_execution(
+        &mut self,
+        bidirectional_tx: Arc<BidirectionalTx>,
+    ) -> Result<(), BacklogError> {
+        self.advance(bidirectional_tx)
+    }
+
     /// Get target chain if this is a bidirectional transaction
-    // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        match &self.request.kind {
-            SignKind::Sign => None,
-            SignKind::SignBidirectional(event) => self
-                .execution_tx()
-                .map(|tx| tx.target_chain)
-                .or_else(|| event.target_chain().ok()),
-            SignKind::RespondBidirectional(_) => None,
+        match &self.status {
+            SignStatus::Sign(_) => None,
+            SignStatus::Bidirectional(progress) => match progress {
+                BidirectionalProgress::Executing(tx) => Some(tx.target_chain),
+                BidirectionalProgress::Initial(_) | BidirectionalProgress::Final { .. } => {
+                    match &self.request.kind {
+                        SignKind::SignBidirectional(event) => event.target_chain().ok(),
+                        _ => None,
+                    }
+                }
+            },
         }
     }
 
     /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
-        matches!(self.request.kind, SignKind::SignBidirectional(_))
+        matches!(self.status, SignStatus::Bidirectional(_))
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
@@ -891,19 +970,15 @@ impl BacklogEntry {
     }
 
     pub fn typename(&self) -> &'static str {
-        match (&self.request.kind, &self.status) {
-            (SignKind::Sign, _) => "Sign",
-            (SignKind::SignBidirectional(_), SignStatus::PendingExecution { .. }) => {
+        match &self.status {
+            SignStatus::Sign(_) => "Sign",
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
                 "BidirectionalExecution"
             }
-            (SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
-                "BidirectionalPending"
-            }
-            (SignKind::SignBidirectional(_), _) => "BidirectionalPending",
-            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(_)) => "BidirectionalPending",
+            SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => {
                 "BidirectionalRespondPending"
             }
-            (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
         }
     }
 }
@@ -911,7 +986,9 @@ impl BacklogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sign_bidirectional::{PublishState, SignStatus};
+    use crate::sign_bidirectional::{
+        BidirectionalProgress, PublishState, SignProgress, SignStatus,
+    };
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
@@ -942,9 +1019,30 @@ mod tests {
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-        SignStatus::PendingExecution {
-            tx: Arc::new(tx.clone()),
-        }
+        SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::new(tx.clone())))
+    }
+
+    fn bidi_initial_status() -> SignStatus {
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+    }
+
+    fn bidi_final_status(tx: &BidirectionalTx, chain: Chain) -> SignStatus {
+        let sign_id = SignId::new(tx.request_id);
+        let completion_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            chain,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: Arc::new(completion_request),
+            progress: SignProgress::Generating,
+        })
     }
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
@@ -1057,11 +1155,11 @@ mod tests {
             SignKind::SignBidirectional(create_test_event(dest)),
         ));
 
-        match status {
-            SignStatus::PendingExecution { .. } => {
-                BacklogEntry::pending_execution(request, Arc::new(tx))
+        match &status {
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
+                BacklogEntry::pending_execution(request, Arc::clone(tx))
             }
-            status => BacklogEntry::with_status(request, status),
+            _ => BacklogEntry::with_status(request, status),
         }
     }
 
@@ -1084,63 +1182,7 @@ mod tests {
         backlog
             .insert(create_bidirectional_request(sign_id, chain, dest, 0))
             .await;
-
-        match status {
-            SignStatus::PendingGeneration => {}
-            SignStatus::PendingGenerationBidirectional => {
-                let completion_request = IndexedSignRequest::respond_bidirectional(
-                    sign_id,
-                    create_test_args(sign_id.request_id[0]),
-                    chain,
-                    0,
-                    RespondBidirectionalTx {
-                        tx_id: tx.id,
-                        output: vec![],
-                        chain_ctx: None,
-                    },
-                );
-                backlog
-                    .set_request(chain, &sign_id, Arc::new(completion_request))
-                    .await
-                    .unwrap();
-                backlog
-                    .set_status(chain, &sign_id, SignStatus::PendingGenerationBidirectional)
-                    .await;
-            }
-            SignStatus::PendingPublish { .. } => {
-                backlog.set_status(chain, &sign_id, status).await;
-            }
-            SignStatus::PendingExecution { .. } => {
-                backlog
-                    .set_status(
-                        chain,
-                        &sign_id,
-                        SignStatus::PendingPublish {
-                            publish: test_publish_state(true),
-                        },
-                    )
-                    .await;
-                backlog.advance(chain, sign_id, Arc::new(tx)).await.unwrap();
-            }
-            SignStatus::PendingPublishBidirectional { .. } => {
-                let completion_request = IndexedSignRequest::respond_bidirectional(
-                    sign_id,
-                    create_test_args(sign_id.request_id[0]),
-                    chain,
-                    0,
-                    RespondBidirectionalTx {
-                        tx_id: tx.id,
-                        output: vec![],
-                        chain_ctx: None,
-                    },
-                );
-                backlog
-                    .set_request(chain, &sign_id, Arc::new(completion_request))
-                    .await
-                    .unwrap();
-                backlog.set_status(chain, &sign_id, status).await;
-            }
-        }
+        backlog.set_status(chain, &sign_id, status).await;
     }
 
     #[tokio::test]
@@ -1160,7 +1202,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx_eth.clone(),
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "ethereum",
         )
         .await;
@@ -1168,7 +1210,7 @@ mod tests {
             &backlog,
             Chain::Solana,
             tx_sol.clone(),
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "solana",
         )
         .await;
@@ -1176,7 +1218,7 @@ mod tests {
             &backlog,
             Chain::NEAR,
             tx_near.clone(),
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "near",
         )
         .await;
@@ -1204,15 +1246,15 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx1,
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "ethereum",
         )
         .await;
         insert_bidirectional_with_status(
             &backlog,
             Chain::Ethereum,
-            tx2,
-            SignStatus::PendingGenerationBidirectional,
+            tx2.clone(),
+            bidi_final_status(&tx2, Chain::Ethereum),
             "ethereum",
         )
         .await;
@@ -1278,7 +1320,7 @@ mod tests {
                     &backlog,
                     Chain::Ethereum,
                     tx,
-                    SignStatus::PendingGeneration,
+                    bidi_initial_status(),
                     "ethereum",
                 )
                 .await;
@@ -1294,7 +1336,7 @@ mod tests {
                     &backlog,
                     Chain::Solana,
                     tx,
-                    SignStatus::PendingGeneration,
+                    bidi_initial_status(),
                     "solana",
                 )
                 .await;
@@ -1351,7 +1393,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2.clone(),
-            SignStatus::PendingGenerationBidirectional,
+            bidi_final_status(&tx2, Chain::Ethereum),
             "ethereum",
         )
         .await;
@@ -1382,7 +1424,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1391,7 +1433,7 @@ mod tests {
             create_execution_entry(
                 tx2.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1403,7 +1445,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1412,7 +1454,7 @@ mod tests {
             create_execution_entry(
                 tx2.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1443,23 +1485,23 @@ mod tests {
         let generation = single_entry_checkpoint(create_execution_entry(
             tx.clone(),
             Chain::Ethereum,
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "ethereum",
         ));
         let publish = single_entry_checkpoint(create_execution_entry(
             tx.clone(),
             Chain::Ethereum,
-            SignStatus::PendingPublish {
-                publish: test_publish_state(true),
-            },
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                test_publish_state(true),
+            ))),
             "ethereum",
         ));
         let publish_other = single_entry_checkpoint(create_execution_entry(
             tx.clone(),
             Chain::Ethereum,
-            SignStatus::PendingPublish {
-                publish: test_publish_state(false),
-            },
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                test_publish_state(false),
+            ))),
             "ethereum",
         ));
         assert_eq!(generation.digest(), publish.digest());
@@ -1476,9 +1518,7 @@ mod tests {
         let plain_generation = single_entry_checkpoint(BacklogEntry::new(Arc::clone(&plain)));
         let plain_publish = single_entry_checkpoint(BacklogEntry::with_status(
             plain,
-            SignStatus::PendingPublish {
-                publish: test_publish_state(true),
-            },
+            SignStatus::Sign(SignProgress::Publishing(test_publish_state(true))),
         ));
         assert_eq!(plain_generation.digest(), plain_publish.digest());
 
@@ -1491,7 +1531,7 @@ mod tests {
             pending_execution_status(&tx),
             "ethereum",
         ));
-        let response_request = IndexedSignRequest::respond_bidirectional(
+        let response_request = Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             Chain::Ethereum,
@@ -1501,16 +1541,21 @@ mod tests {
                 output: vec![],
                 chain_ctx: None,
             },
-        );
+        ));
+        let origin_request = create_bidirectional_request(sign_id, Chain::Ethereum, "ethereum", 0);
         let gen_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
-            Arc::new(response_request.clone()),
-            SignStatus::PendingGenerationBidirectional,
+            Arc::clone(&origin_request),
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request: Arc::clone(&response_request),
+                progress: SignProgress::Generating,
+            }),
         ));
         let pub_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
-            Arc::new(response_request),
-            SignStatus::PendingPublishBidirectional {
-                publish: test_publish_state(true),
-            },
+            origin_request,
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request: response_request,
+                progress: SignProgress::Publishing(test_publish_state(true)),
+            }),
         ));
         assert_eq!(
             execution.digest(),
@@ -1554,15 +1599,19 @@ mod tests {
             },
         );
 
-        entry
-            .transition_to_bidirectional_response(Arc::new(response_request))
-            .unwrap();
+        entry.respond(Arc::new(response_request)).unwrap();
 
         assert!(matches!(
-            entry.request.kind,
+            entry.active_request().kind,
             SignKind::RespondBidirectional(_)
         ));
-        assert_eq!(entry.status(), SignStatus::PendingGenerationBidirectional);
+        assert!(matches!(
+            entry.status(),
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                progress: SignProgress::Generating,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1587,9 +1636,7 @@ mod tests {
             },
         );
 
-        let err = entry
-            .transition_to_bidirectional_response(Arc::new(response_request))
-            .unwrap_err();
+        let err = entry.respond(Arc::new(response_request)).unwrap_err();
 
         assert!(matches!(
             err,
@@ -1598,7 +1645,7 @@ mod tests {
         assert_eq!(entry.sign_id(), original_sign_id);
         assert!(matches!(
             entry.status(),
-            SignStatus::PendingExecution { .. }
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
         ));
     }
 
@@ -1609,14 +1656,14 @@ mod tests {
         let entry1 = create_execution_entry_with_timestamp(
             tx.clone(),
             Chain::Ethereum,
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "ethereum",
             1000,
         );
         let entry2 = create_execution_entry_with_timestamp(
             tx.clone(),
             Chain::Ethereum,
-            SignStatus::PendingGeneration,
+            bidi_initial_status(),
             "ethereum",
             9999,
         );
@@ -1646,7 +1693,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1658,7 +1705,7 @@ mod tests {
             create_execution_entry(
                 tx2.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                bidi_initial_status(),
                 "ethereum",
             ),
         );
@@ -1844,11 +1891,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovered_completed_bidirectional_requests_are_requeued_for_final_respond() {
-        let status = SignStatus::PendingGenerationBidirectional;
         for offset in 0..2 {
             let backlog = Backlog::new();
             let tx = create_test_tx(8 + offset as u8);
             let sign_id = SignId::new(tx.request_id);
+
+            let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                create_test_args(sign_id.request_id[0]),
+                Chain::Solana,
+                0,
+                RespondBidirectionalTx {
+                    tx_id: tx.id,
+                    output: vec![],
+                    chain_ctx: None,
+                },
+            ));
+            let status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request: Arc::clone(&completion_request),
+                progress: SignProgress::Generating,
+            });
 
             insert_bidirectional_with_status(
                 &backlog,
@@ -1867,29 +1929,6 @@ mod tests {
                 .recover_by_checkpoint(checkpoint)
                 .await
                 .expect("failed to recover");
-
-            let completion_request = IndexedSignRequest::respond_bidirectional(
-                sign_id,
-                create_test_args(sign_id.request_id[0]),
-                Chain::Solana,
-                0,
-                RespondBidirectionalTx {
-                    tx_id: tx.id,
-                    output: vec![],
-                    chain_ctx: None,
-                },
-            );
-            recovered
-                .set_request(Chain::Solana, &sign_id, Arc::new(completion_request))
-                .await
-                .expect("failed to store completion request");
-            recovered
-                .set_status(
-                    Chain::Solana,
-                    &sign_id,
-                    SignStatus::PendingGenerationBidirectional,
-                )
-                .await;
 
             let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
             assert_eq!(
@@ -1910,7 +1949,7 @@ mod tests {
         let tx = create_test_tx(42);
         let sign_id = SignId::new(tx.request_id);
 
-        let completion_request = IndexedSignRequest::respond_bidirectional(
+        let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             Chain::Solana,
@@ -1920,14 +1959,24 @@ mod tests {
                 output: vec![1, 2, 3],
                 chain_ctx: None,
             },
-        );
+        ));
 
-        backlog.insert(Arc::new(completion_request)).await;
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await;
         backlog
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingGenerationBidirectional,
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    respond_request: completion_request,
+                    progress: SignProgress::Generating,
+                }),
             )
             .await;
 
@@ -1955,15 +2004,18 @@ mod tests {
             .await;
 
         backlog
-            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(true))
+            .publish(Chain::Solana, &sign_id, test_publish_state(true))
             .await
-            .expect("pending generation should transition to pending publish");
+            .expect("pending generation should transition to publishing");
 
         let entry = backlog
             .get(Chain::Solana, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert!(matches!(entry.status(), SignStatus::PendingPublish { .. }));
+        assert!(matches!(
+            entry.status(),
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(_)))
+        ));
     }
 
     #[tokio::test]
@@ -1972,7 +2024,7 @@ mod tests {
         let tx = create_test_tx(44);
         let sign_id = SignId::new(tx.request_id);
 
-        let completion_request = IndexedSignRequest::respond_bidirectional(
+        let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             Chain::Solana,
@@ -1982,21 +2034,31 @@ mod tests {
                 output: vec![],
                 chain_ctx: None,
             },
-        );
+        ));
 
-        backlog.insert(Arc::new(completion_request)).await;
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await;
         backlog
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingGenerationBidirectional,
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    respond_request: completion_request,
+                    progress: SignProgress::Generating,
+                }),
             )
             .await;
 
         backlog
-            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(true))
+            .publish(Chain::Solana, &sign_id, test_publish_state(true))
             .await
-            .expect("pending generation bidirectional should transition to pending publish bidirectional");
+            .expect("final respond generation should transition to publishing");
 
         let entry = backlog
             .get(Chain::Solana, &sign_id)
@@ -2004,7 +2066,10 @@ mod tests {
             .expect("entry should remain in backlog");
         assert!(matches!(
             entry.status(),
-            SignStatus::PendingPublishBidirectional { .. }
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                progress: SignProgress::Publishing(_),
+                ..
+            })
         ));
     }
 
@@ -2047,11 +2112,25 @@ mod tests {
         assert_eq!(watched_tx.id, tx.id);
 
         // set_status should update the sign request status
+        let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            tx.source_chain,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        ));
         backlog
             .set_status(
                 tx.source_chain,
                 &sign_id,
-                SignStatus::PendingGenerationBidirectional,
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    respond_request: completion_request,
+                    progress: SignProgress::Generating,
+                }),
             )
             .await;
         let successes = backlog
@@ -2314,9 +2393,9 @@ mod tests {
             .set_status(
                 tx.source_chain,
                 &sign_id,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
+                SignStatus::Bidirectional(BidirectionalProgress::Initial(
+                    SignProgress::Publishing(test_publish_state(true)),
+                )),
             )
             .await;
 

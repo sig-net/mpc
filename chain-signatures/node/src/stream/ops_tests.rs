@@ -4,7 +4,7 @@ use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::{PublishState, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -166,14 +166,19 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let maybe_tx = ctx.backlog.get(tx.source_chain, &sign_id).await;
     assert!(maybe_tx.is_some(), "expected sign tx to still exist");
     let tx_after = maybe_tx.unwrap();
-    assert_eq!(
-        tx_after.status(),
-        SignStatus::PendingGenerationBidirectional,
-        "expected PendingGenerationBidirectional but found status: {:?}",
+    assert!(
+        matches!(
+            tx_after.status(),
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                progress: SignProgress::Generating,
+                ..
+            })
+        ),
+        "expected Bidirectional Final Generating but found status: {:?}",
         tx_after.status()
     );
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.active_request().kind,
         SignKind::RespondBidirectional(_)
     ));
 
@@ -309,12 +314,15 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
     .unwrap();
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert_eq!(
-        tx_after.status(),
-        SignStatus::PendingGenerationBidirectional
-    );
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
+    ));
+    assert!(matches!(
+        tx_after.active_request().kind,
         SignKind::RespondBidirectional(_)
     ));
     assert!(ctx
@@ -963,8 +971,8 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .set_status(
             Chain::Ethereum,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: Signature::new(
                         ProjectivePoint::GENERATOR.to_affine(),
                         Scalar::ONE,
@@ -973,7 +981,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                     participants: vec![],
                     is_proposer: true,
                 }),
-            },
+            ))),
         )
         .await;
 
@@ -1003,7 +1011,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .expect("entry should remain in backlog");
     assert!(matches!(
         entry.status(),
-        SignStatus::PendingExecution { .. }
+        SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
     ));
     let execution_tx_id = entry
         .execution_tx()
@@ -1073,7 +1081,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert!(matches!(
-        tx_after.request.kind,
+        tx_after.active_request().kind,
         SignKind::RespondBidirectional(_)
     ));
 
@@ -1220,11 +1228,14 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await
         .is_empty());
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert_eq!(
+    assert!(matches!(
         tx_after.status(),
-        SignStatus::PendingGenerationBidirectional
-    );
-    match &tx_after.request.kind {
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
+    ));
+    match &tx_after.active_request().kind {
         SignKind::RespondBidirectional(res) => {
             assert_eq!(res.tx_id, tx.id);
             assert_eq!(res.output, vec![1]);
