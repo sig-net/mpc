@@ -120,6 +120,8 @@ async fn detect_regression(
 
 /// Delay before respawning a `run()` that returned an error.
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Maximum delay between consecutive backlog recovery retry attempts during storage outages.
+const MAX_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How long a cancelled `run()` gets to drain before it is aborted.
 const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -153,6 +155,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     }
 
     let mut load_local = true;
+    let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
@@ -171,11 +174,14 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             tracing::error!(
                 %chain,
                 %err,
-                "failed to recover backlog; retrying in {ERROR_RESTART_DELAY:?}"
+                ?recovery_retry_delay,
+                "failed to recover backlog; retrying"
             );
-            tokio::time::sleep(ERROR_RESTART_DELAY).await;
+            tokio::time::sleep(recovery_retry_delay).await;
+            recovery_retry_delay = (recovery_retry_delay * 2).min(MAX_RECOVERY_RETRY_DELAY);
             continue;
         }
+        recovery_retry_delay = ERROR_RESTART_DELAY;
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
