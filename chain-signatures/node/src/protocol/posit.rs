@@ -57,7 +57,6 @@ pub enum PositAction {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
 pub enum PositRejectReason {
-    Unknown,
     /// The node is already participating in a generation, or has already
     /// finished generation.
     AlreadyGenerating,
@@ -67,9 +66,9 @@ pub enum PositRejectReason {
     /// The posit message is invalid, usually because of bad timing leading to
     /// round / proposer mismatches.
     InvalidRequest,
-    /// The message's round is behind the rejector's current round, carried
-    /// in `PositMessage::stale_round` so the sender can catch up in one bump.
-    StaleRound,
+    /// The message's round is behind the rejector's current round, which is
+    /// carried in the payload so the sender can catch up in one bump.
+    StaleRound(usize),
 }
 
 impl PositAction {
@@ -467,6 +466,15 @@ impl SinglePositCounter {
 
     pub fn meets_totality(&self) -> bool {
         self.accepts.len() + self.rejects.len() == self.participants.len()
+    }
+
+    /// Peers whose reject says they never stored the artifact, which is proof
+    /// our holder list for it is stale. Ordered by participant.
+    pub fn missing_artifact_rejectors(&self) -> impl Iterator<Item = Participant> + '_ {
+        self.rejects
+            .iter()
+            .filter(|(_, reason)| matches!(reason, PositRejectReason::MissingArtifact))
+            .map(|(peer, _)| *peer)
     }
 
     pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {

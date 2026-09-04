@@ -22,7 +22,7 @@ pub async fn align_backlog_with_consensus(
     node_client: &NodeClient,
     my_account_id: &AccountId,
 ) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+    let checkpoint_digest = *checkpoints_rx.borrow_and_update().as_ref()?;
 
     match backlog
         .checkpoints()
@@ -470,6 +470,7 @@ mod tests {
             }
 
             let msg = remote_digest.map(|digest| CheckpointDigest {
+                chain,
                 height: case.remote_height,
                 digest,
             });
@@ -635,6 +636,7 @@ mod tests {
         fixture
             .checkpoints_tx
             .send(Some(CheckpointDigest {
+                chain,
                 height: 42,
                 digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
             }))
@@ -681,6 +683,7 @@ mod tests {
         fixture
             .checkpoints_tx
             .send(Some(CheckpointDigest {
+                chain,
                 height: 42,
                 digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
             }))
@@ -702,6 +705,7 @@ mod tests {
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
         let fixture = AlignFixture::new(Some(CheckpointDigest {
+            chain,
             height: 100,
             digest: [0xabu8; 32],
         }));

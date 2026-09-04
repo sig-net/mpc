@@ -5427,26 +5427,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "google-datastore1"
-version = "5.0.4+20240226"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d822056b35f25b564e77b0cfd9bdcbad8fc5c891bf079d61536572d67bfc8e3"
-dependencies = [
- "anyhow",
- "google-apis-common",
- "http 0.2.12",
- "hyper 0.14.32",
- "hyper-rustls 0.24.2",
- "itertools 0.10.5",
- "mime",
- "serde",
- "serde_json",
- "tokio",
- "tower-service",
- "url 1.7.2",
-]
-
-[[package]]
 name = "google-secretmanager1"
 version = "5.0.5+20240621"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8892,7 +8872,6 @@ dependencies = [
  "async-trait",
  "backon",
  "cait-sith",
- "futures-util",
  "k256",
  "mpc-crypto",
  "mpc-primitives",
@@ -9031,7 +9010,6 @@ dependencies = [
 name = "mpc-keys"
 version = "1.17.0"
 dependencies = [
- "borsh 1.8.0",
  "hex",
  "hpke",
  "rand 0.8.5",
@@ -9058,7 +9036,6 @@ dependencies = [
  "ed25519-zebra",
  "enum-map",
  "futures-util",
- "google-datastore1",
  "google-secretmanager1",
  "hex",
  "highway",
@@ -9108,7 +9085,6 @@ dependencies = [
  "sp-runtime",
  "sp-state-machine",
  "sp-trie",
- "subxt",
  "sysinfo 0.32.1",
  "tempfile",
  "test-log",
@@ -9136,7 +9112,6 @@ dependencies = [
  "serde_bytes",
  "sha3 0.10.8",
  "signet-primitives",
- "thiserror 1.0.69",
 ]
 
 [[package]]

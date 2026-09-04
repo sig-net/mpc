@@ -1,5 +1,5 @@
-use crate::protocol::{Chain, IndexedSignRequest};
-use alloy::primitives::{keccak256, Address, Bytes};
+use crate::protocol::Chain;
+use alloy::primitives::{keccak256, Address};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
@@ -94,8 +94,6 @@ impl SignStatus {
         }
     }
 }
-
-pub type RequestId = [u8; 32];
 
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
@@ -201,29 +199,6 @@ impl BidirectionalTxExt for BidirectionalTx {
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }
-}
-
-pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Bytes>> {
-    let payload = if is_eip1559 {
-        &rlp_data[1..]
-    } else {
-        &rlp_data
-    };
-
-    let rlp = rlp::Rlp::new(payload);
-
-    if !rlp.is_list() {
-        anyhow::bail!("Input is not a valid RLP list");
-    }
-
-    let mut result = Vec::new();
-
-    for i in 0..rlp.item_count()? {
-        let item = rlp.at(i)?;
-        result.push(Bytes::copy_from_slice(item.data()?));
-    }
-
-    Ok(result)
 }
 
 /// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
@@ -432,13 +407,6 @@ mod derive_tests {
 
         assert_eq!(derive_user_address(mpc_pk, derivation_epsilon), expected);
     }
-}
-
-#[derive(Clone)]
-pub struct SignBidirectionalSignature {
-    pub public_key: mpc_crypto::PublicKey,
-    pub request: IndexedSignRequest,
-    pub signature: Signature,
 }
 
 #[cfg(test)]

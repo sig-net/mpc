@@ -34,6 +34,9 @@ impl MpcSignProtocol {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
         let ready = channels.msg_channel.subscribe_ready().await;
+        // Nothing in tests observes sync-status reports, so the receiving end is
+        // dropped immediately.
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
         let sign_task = SignatureSpawnerTask::run(
             my_account_id.clone(),
             channels.sign_rx,
@@ -44,6 +47,7 @@ impl MpcSignProtocol {
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
             backlog,
+            sync_report_tx,
         );
         Self {
             my_account_id,

@@ -636,7 +636,7 @@ impl MpcFixtureNodeBuilder {
             presignature_storage.clone(),
             mesh_rx.clone(),
             context.contract_state,
-            mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
+            mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
         );
         tokio::spawn(sync_task.run());
 

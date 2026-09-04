@@ -21,7 +21,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ impl PublishKind {
 pub enum RpcAction {
     Publish(PublishAction),
     VoteCheckpoint {
-        checkpoint: ConsensusCheckpointDigest,
+        checkpoint: CheckpointDigest,
         created_at: Instant,
     },
     AbortCheckpoints(Chain),
@@ -96,7 +96,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
+    pub fn vote_checkpoint(&self, checkpoint: CheckpointDigest) {
         let tx = self.tx.clone();
         let created_at = Instant::now();
         tokio::spawn(async move {
@@ -272,10 +272,6 @@ impl ContractStateWatcher {
         }
     }
 
-    pub fn mark_changed(&mut self) {
-        self.contract_state.mark_changed();
-    }
-
     pub fn participants(&self) -> Option<Participants> {
         match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
@@ -295,24 +291,6 @@ impl ContractStateWatcher {
                 .new_participants
                 .find_participant(&self.account_id)
                 .copied(),
-        }
-    }
-
-    pub async fn threshold(&self) -> Option<usize> {
-        match self.state()? {
-            ProtocolState::Initializing(_) => None,
-            ProtocolState::Running(state) => Some(state.threshold),
-            ProtocolState::Resharing(state) => Some(state.threshold),
-        }
-    }
-
-    /// Wait until the MPC threshold is available and return it
-    pub async fn wait_threshold(&mut self) -> usize {
-        loop {
-            if let Some(threshold) = self.threshold().await {
-                return threshold;
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -371,16 +349,6 @@ impl ContractStateWatcher {
                 state.new_participants.clone(),
                 state.old_participants.clone(),
             ),
-        }
-    }
-
-    /// Waits till the contract is in the running state.
-    pub async fn wait_running(&mut self) -> RunningContractState {
-        loop {
-            if let Some(ProtocolState::Running(state)) = self.borrow_state().as_ref() {
-                return state.clone();
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -598,10 +566,7 @@ async fn update_contract_data(
 
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
-            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.height,
-                digest: sc.digest,
-            });
+            let new_digest = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
@@ -673,10 +638,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
-async fn execute_vote_checkpoint(
-    near: NearGovernanceClient,
-    checkpoint: ConsensusCheckpointDigest,
-) {
+async fn execute_vote_checkpoint(near: NearGovernanceClient, checkpoint: CheckpointDigest) {
     vote_checkpoint_with_retry(
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
@@ -688,7 +650,7 @@ async fn execute_vote_checkpoint(
 
 /// Submit a checkpoint vote under a bounded retry policy.
 async fn vote_checkpoint_with_retry<F, Fut>(
-    checkpoint: &ConsensusCheckpointDigest,
+    checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
     vote: F,
@@ -748,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
-        let checkpoint = ConsensusCheckpointDigest {
+        let checkpoint = CheckpointDigest {
             chain: Chain::Ethereum,
             height: 1,
             digest: [0; 32],
@@ -1128,7 +1090,7 @@ mod tests {
         });
 
         tx.send(RpcAction::VoteCheckpoint {
-            checkpoint: ConsensusCheckpointDigest {
+            checkpoint: CheckpointDigest {
                 chain: Chain::Ethereum,
                 height: 10,
                 digest: [7; 32],

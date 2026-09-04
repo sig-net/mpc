@@ -1,7 +1,6 @@
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
-pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
@@ -19,9 +18,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use mpc_primitives::{
-    Chain, ConsensusCheckpointDigest, IndexedSignRequest, RespondBidirectionalTx,
-};
+pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
