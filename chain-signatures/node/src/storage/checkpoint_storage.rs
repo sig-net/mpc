@@ -221,7 +221,7 @@ impl CheckpointStorage {
                 //    - Overwrites canonical latest (`KEYS[3]`).
                 //    - Scans `KEYS[2]` and trims all entries with `height <= num` from both
                 //      the pending hash (`KEYS[1]`) and the index hash (`KEYS[2]`).
-                //    - Returns `{ true, remaining_count }`.
+                //    - Returns `{ true, remaining_count, false }`.
                 // 3. If absent from pending:
                 //    - Returns `{ false, remaining_count, latest_body }` so caller can verify
                 //      if the checkpoint was already promoted.
@@ -238,7 +238,7 @@ impl CheckpointStorage {
                                 redis.call('HDEL', KEYS[2], index[i])
                             end
                         end
-                        return { true, redis.call('HLEN', KEYS[1]) }
+                        return { true, redis.call('HLEN', KEYS[1]), false }
                     end
                     return { false, redis.call('HLEN', KEYS[1]), redis.call('GET', KEYS[3]) }
                 "#;
