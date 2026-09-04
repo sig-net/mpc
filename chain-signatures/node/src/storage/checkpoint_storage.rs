@@ -10,13 +10,6 @@ use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FailKind {
-    All,
-    Promotion,
-}
-
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
@@ -26,7 +19,7 @@ pub enum CheckpointStorage {
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
-    Failing(FailKind),
+    Failing,
 }
 
 impl Default for CheckpointStorage {
@@ -45,12 +38,7 @@ impl CheckpointStorage {
 
     #[cfg(test)]
     pub fn failing() -> Self {
-        Self::Failing(FailKind::All)
-    }
-
-    #[cfg(test)]
-    pub fn failing_promotion() -> Self {
-        Self::Failing(FailKind::Promotion)
+        Self::Failing
     }
 
     fn key(&self, kind: &str, chain: Chain) -> String {
@@ -98,7 +86,7 @@ impl CheckpointStorage {
                     .insert(checkpoint.chain, checkpoint.clone());
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(_) => {
+            CheckpointStorage::Failing => {
                 anyhow::bail!("failing storage")
             }
         }
@@ -165,7 +153,7 @@ impl CheckpointStorage {
                 Ok(true)
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(_) => {
+            CheckpointStorage::Failing => {
                 anyhow::bail!("failing storage")
             }
         }
@@ -197,7 +185,7 @@ impl CheckpointStorage {
                 .map(|checkpoints| checkpoints.values().cloned().collect())
                 .unwrap_or_default()),
             #[cfg(test)]
-            CheckpointStorage::Failing(_) => {
+            CheckpointStorage::Failing => {
                 anyhow::bail!("failing storage")
             }
         }
@@ -293,7 +281,7 @@ impl CheckpointStorage {
                 Ok(is_confirmed.then_some(remaining))
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(_) => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
 
@@ -330,7 +318,7 @@ impl CheckpointStorage {
                     .insert(checkpoint.chain, checkpoint.clone());
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(_) => anyhow::bail!("failing storage"),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
         Ok(())
     }
@@ -353,9 +341,7 @@ impl CheckpointStorage {
                 .map(|p| p.len())
                 .unwrap_or(0)),
             #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
-            #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::Promotion) => Ok(0),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
 
@@ -418,9 +404,7 @@ impl CheckpointStorage {
                 })
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
-            #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
 
@@ -474,9 +458,7 @@ impl CheckpointStorage {
                 Ok(confirmed.filter(|cp| cp.digest() == digest))
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
-            #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
 
@@ -499,9 +481,7 @@ impl CheckpointStorage {
                 Ok(latest.read().await.get(&chain).cloned())
             }
             #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::All) => anyhow::bail!("failing storage"),
-            #[cfg(test)]
-            CheckpointStorage::Failing(FailKind::Promotion) => Ok(None),
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
 }
