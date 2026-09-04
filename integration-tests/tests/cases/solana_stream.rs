@@ -725,7 +725,6 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
     publisher
         .publish_signature(&PublishAction {
-            public_key: AffinePoint::GENERATOR,
             request: request.clone(),
             signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
             participants: vec![Participant::from(0u32)],
