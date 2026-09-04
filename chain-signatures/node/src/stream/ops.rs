@@ -229,13 +229,10 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     };
 
-    if !matches!(
-        entry.active_request().kind,
-        SignKind::RespondBidirectional(_)
-    ) {
+    if !matches!(entry.request().kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!(
             "unexpected sign type for RespondBidirectionalEvent: {:?}",
-            entry.active_request().kind
+            entry.request().kind
         );
     }
 

@@ -166,21 +166,14 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let maybe_tx = ctx.backlog.get(tx.source_chain, &sign_id).await;
     assert!(maybe_tx.is_some(), "expected sign tx to still exist");
     let tx_after = maybe_tx.unwrap();
-    assert!(
-        matches!(
-            tx_after.status(),
-            SignStatus::Bidirectional(BidirectionalProgress::Final {
-                progress: SignProgress::Generating,
-                ..
-            })
-        ),
-        "expected Bidirectional Final Generating but found status: {:?}",
-        tx_after.status()
+    assert_matches!(
+        tx_after.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
     );
-    assert!(matches!(
-        tx_after.active_request().kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
 
     // A sign request should have been sent to the sign queue
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -257,13 +250,13 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         .unwrap();
     match first {
         SignCommand::Request(req) => {
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)))
+            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected one sign request, got {other:?}"),
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
-    assert!(matches!(no_second, Err(_) | Ok(None)));
+    assert_matches!(no_second, Err(_) | Ok(None));
 
     assert!(ctx
         .backlog
@@ -314,17 +307,14 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
     .unwrap();
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert!(matches!(
+    assert_matches!(
         tx_after.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Final {
             progress: SignProgress::Generating,
             ..
         })
-    ));
-    assert!(matches!(
-        tx_after.active_request().kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    );
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
     assert!(ctx
         .backlog
         .get_execution_watchers(tx.target_chain)
@@ -387,12 +377,12 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
 
     // Simulate consensus confirmation so storage has the checkpoint
-    assert!(matches!(
+    assert_matches!(
         ctx.backlog
             .confirm_consensus(tx.source_chain, checkpoint.digest())
             .await,
         Ok(true)
-    ));
+    );
 
     let threshold = 1;
     let mut mesh_state = MeshState::default();
@@ -423,7 +413,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
+            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected recovered final respond request, got {other:?}"),
     }
@@ -819,7 +809,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
-    assert!(matches!(no_second, Err(_) | Ok(None)));
+    assert_matches!(no_second, Err(_) | Ok(None));
 }
 
 #[tokio::test]
@@ -1009,10 +999,10 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .get(Chain::Ethereum, &sign_id)
         .await
         .expect("entry should remain in backlog");
-    assert!(matches!(
+    assert_matches!(
         entry.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
-    ));
+    );
     let execution_tx_id = entry
         .execution_tx()
         .expect("pending execution entries should store the execution transaction")
@@ -1080,10 +1070,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     assert!(waiting.contains_key(&sign_id));
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert!(matches!(
-        tx_after.active_request().kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
 
     // A sign request should have been sent
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -1173,10 +1160,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.chain, Chain::Solana);
-            assert!(matches!(
-                req.kind,
-                mpc_primitives::SignKind::RespondBidirectional(_)
-            ));
+            assert_matches!(req.kind, mpc_primitives::SignKind::RespondBidirectional(_));
         }
         other => panic!("expected cross-chain follow-up request, got {other:?}"),
     }
@@ -1228,14 +1212,14 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await
         .is_empty());
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert!(matches!(
+    assert_matches!(
         tx_after.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Final {
             progress: SignProgress::Generating,
             ..
         })
-    ));
-    match &tx_after.active_request().kind {
+    );
+    match &tx_after.request().kind {
         SignKind::RespondBidirectional(res) => {
             assert_eq!(res.tx_id, tx.id);
             assert_eq!(res.output, vec![1]);

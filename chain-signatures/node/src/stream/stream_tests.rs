@@ -262,10 +262,10 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         .await
         .expect("bidirectional sign request should be tracked in the backlog");
 
-    assert!(matches!(
+    assert_matches!(
         entry.request.kind,
         mpc_primitives::SignKind::SignBidirectional(_)
-    ));
+    );
 }
 
 /// A `ChainEvent::Respond` against an entry that is already in `PendingPublish`
