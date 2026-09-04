@@ -6,7 +6,7 @@ use std::vec;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
-use mpc_node::indexer_eth::EthConfig;
+use mpc_chain_ethereum::EthConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -33,7 +33,7 @@ enum Cli {
             default_value = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
         )]
         eth_account_sk: String,
-        #[arg(long, default_value = "sepolia")]
+        #[arg(long, default_value = "anvil")]
         eth_network: String,
         #[arg(long, default_value = "/tmp/data")]
         eth_helios_data_path: String,
@@ -67,15 +67,25 @@ async fn main() -> anyhow::Result<()> {
                 nodes,
                 threshold,
                 eth: Some(EthConfig {
-                    account_sk: eth_account_sk,
+                    account_sk: eth_account_sk
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth account sk: {e}"))?,
                     consensus_rpc_http_url: eth_consensus_rpc_http_url,
-                    execution_rpc_http_url: eth_execution_rpc_http_url,
-                    contract_address: eth_contract_address,
+                    execution_rpc_http_url: eth_execution_rpc_http_url
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth execution rpc url: {e}"))?,
+                    contract_address: eth_contract_address
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
+                    optimistic_requests: eth_network == "anvil",
                     network: eth_network,
                     helios_data_path: eth_helios_data_path,
                     refresh_finalized_interval: eth_refresh_finalized_interval,
-                    optimistic_requests: false,
                     light_client: false,
+                    gas: Default::default(),
+                    indexer: Default::default(),
+                    publisher: Default::default(),
+                    rpc: Default::default(),
                 }),
                 ..Default::default()
             };

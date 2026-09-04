@@ -4,12 +4,12 @@ use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
 
-use crate::protocol::posit::Positor;
+use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::{AffinePointExt, JoinMap};
-
+use mpc_chain_near::AffinePointExt as _;
 use mpc_contract::config::ProtocolConfig;
+use mpc_utils::task::JoinMap;
 
 use chrono::Utc;
 use rand::rngs::OsRng;
@@ -78,6 +78,8 @@ impl TripleGenerator {
 
         let protocol = threshold_signatures::ecdsa::ot_based_ecdsa::triples::generate_triple_many::<
             2,
+            _,
+            _,
         >(&participants, me, threshold, OsRng)?;
 
         let inbox = msg.subscribe_triple(id).await;
@@ -181,6 +183,9 @@ impl TripleGenerator {
             self.render_debug(total_pokes);
 
             match action {
+                Action::Yield => {
+                    tokio::task::yield_now().await;
+                }
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
@@ -190,10 +195,14 @@ impl TripleGenerator {
                         }
                         break;
                     };
-                    self.protocol
+                    if let Err(err) = self
+                        .protocol
                         .as_mut()
                         .expect("must always be Some")
-                        .message(msg.from, msg.data);
+                        .message(msg.from, msg.data)
+                    {
+                        tracing::warn!(?err, "failed to process message in triple protocol");
+                    }
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -408,10 +417,14 @@ impl TripleSpawner {
     ) {
         let internal_action = if self.contains_ongoing(id) {
             tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if self.contains(id).await {
             tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]

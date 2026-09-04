@@ -1,0 +1,31 @@
+[package]
+name = "mpc-chain-canton"
+edition = "2021"
+version.workspace = true
+description = "Canton chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+borsh.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-aux = { version = "4", default-features = false }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true

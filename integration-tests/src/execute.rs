@@ -1,6 +1,6 @@
 use anyhow::Context;
 use async_process::Child;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, ChainConfig as _};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -77,10 +77,6 @@ pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf>
         .join(if release { "release" } else { "debug" })
         .join(executable);
     Some(executable)
-}
-
-pub fn spawn_node(release: bool, node: &str, cli: mpc_node::cli::Cli) -> anyhow::Result<Child> {
-    spawn_node_with_binary(None, release, node, cli)
 }
 
 pub fn spawn_node_with_binary(

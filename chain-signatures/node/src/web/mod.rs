@@ -100,9 +100,18 @@ pub async fn run(
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(?addr, ?err, "failed to bind web server");
+            return;
+        }
+    };
+
     tracing::info!(?addr, "starting http server");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(?addr, ?err, "web server exited with an error");
+    }
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
@@ -133,9 +142,7 @@ async fn msg(
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
         tokio::spawn(async move {
-            if let Err(err) = msg_channel.inbox.send(encrypted).await {
-                tracing::error!(?err, "failed to forward an encrypted protocol message");
-            }
+            msg_channel.send_inbox(encrypted).await;
         });
     }
     WEB_ENDPOINT_LATENCY
@@ -235,6 +242,13 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointResponse {
+    #[serde(default)]
+    pub version: u64,
+    pub checkpoints: HashMap<Chain, Checkpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub status: NodeStatus,
     #[serde(default)]
@@ -303,20 +317,22 @@ async fn sync(
     Ok(Cbor(response))
 }
 
+type ChainAndDigest = (Chain, Option<[u8; 32]>);
+
 #[derive(Debug, Deserialize)]
 pub struct CheckpointQuery {
-    /// Combined chain selection and hash filter. Entries are separated by commas.
+    /// Combined chain selection and digest filter. Entries are separated by commas.
     /// Examples:
-    /// - "Ethereum" -> latest Ethereum checkpoint
-    /// - "Solana:1234" -> specific Solana checkpoint by hash
-    /// - "Solana:1234,Ethereum" -> mix of filters
+    /// - `"Ethereum"` -> latest Ethereum checkpoint
+    /// - `"Solana:0x<64 hex chars>"` -> specific Solana checkpoint by digest
+    /// - `"Solana:0x...,Ethereum"` -> mix of filters
     #[serde(default)]
     query: Option<String>,
 }
 
 impl CheckpointQuery {
     #[allow(clippy::result_large_err)]
-    fn parse(self) -> Result<Vec<(Chain, Option<u64>)>, Error> {
+    fn parse(self) -> Result<Vec<ChainAndDigest>, Error> {
         let Some(query) = self.query else {
             return Ok(Chain::iter()
                 .into_iter()
@@ -342,24 +358,35 @@ impl CheckpointQuery {
                 Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
             })?;
 
-            let hash = match parts.next() {
-                Some(hash_part) => {
-                    let hash_part = hash_part.trim();
-                    if hash_part.is_empty() {
+            let digest = match parts.next() {
+                Some(suffix) => {
+                    let suffix = suffix.trim();
+                    let hex = suffix.strip_prefix("0x").ok_or_else(|| {
+                        Error::InvalidParameters(format!(
+                            "Digest for '{}' must start with '0x' (got '{}').",
+                            chain_part, suffix
+                        ))
+                    })?;
+                    if hex.len() != 64 {
                         return Err(Error::InvalidParameters(format!(
-                            "Invalid hash format for '{}'. Expected 'chain:hash'",
-                            chain_part
+                            "Digest for '{}' must be 64 hex chars, got {}.",
+                            chain_part,
+                            hex.len()
                         )));
                     }
-
-                    Some(hash_part.parse::<u64>().map_err(|e| {
-                        Error::InvalidParameters(format!("Invalid hash '{}': {}", hash_part, e))
-                    })?)
+                    let mut bytes = [0u8; 32];
+                    hex::decode_to_slice(hex, &mut bytes).map_err(|e| {
+                        Error::InvalidParameters(format!(
+                            "Invalid hex digest for '{}': {}",
+                            chain_part, e
+                        ))
+                    })?;
+                    Some(bytes)
                 }
                 None => None,
             };
 
-            selections.push((chain, hash));
+            selections.push((chain, digest));
         }
 
         Ok(selections)
@@ -370,19 +397,21 @@ impl CheckpointQuery {
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
+) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
-    let selections = query.parse()?;
+
     let mut resp = HashMap::new();
-    for (chain, hash) in selections {
-        let checkpoint = if let Some(hash) = hash {
-            state.backlog.find_checkpoint_by_hash(chain, hash).await
+    let selections = query.parse()?;
+
+    for (chain, digest) in selections {
+        let checkpoint = if let Some(digest) = digest {
+            state.backlog.find_checkpoint_by_digest(chain, digest).await
         } else {
             state.backlog.latest_checkpoint(chain).await
         };
 
         let Some(checkpoint) = checkpoint else {
-            tracing::warn!(?chain, ?hash, "unable to find checkpoint");
+            tracing::debug!(?chain, ?digest, "unable to find checkpoint");
             continue;
         };
 
@@ -393,7 +422,10 @@ async fn checkpoint(
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(resp))
+    Ok(Cbor(CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        checkpoints: resp,
+    }))
 }
 
 #[cfg(not(feature = "debug-page"))]

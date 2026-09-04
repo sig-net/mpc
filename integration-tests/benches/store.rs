@@ -94,14 +94,14 @@ fn env() -> (Runtime, SyncEnv) {
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());
-        let (synced_peer_tx, synced_peer_rx) = mpsc::channel(1024);
+        let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
             mpc_node::mesh::Options {
                 ping_interval: 1000,
             },
             &node_id,
-            synced_peer_rx,
+            sync_report_rx,
         );
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -112,9 +112,8 @@ fn env() -> (Runtime, SyncEnv) {
                 epoch: 0,
                 public_key: *pk.as_affine(),
                 participants: participants.clone(),
-                candidates: Default::default(),
-                join_votes: Default::default(),
                 leave_votes: Default::default(),
+                threshold_votes: Default::default(),
                 threshold,
             }),
         );
@@ -125,7 +124,7 @@ fn env() -> (Runtime, SyncEnv) {
             presignatures.clone(),
             mesh.watch(),
             contract_watcher,
-            synced_peer_tx,
+            sync_report_tx,
         );
 
         SyncEnv {
@@ -247,7 +246,7 @@ fn dummy_triple() -> Triple {
             big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
             participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
+            threshold: 5.into(),
         },
     }
 }
@@ -271,6 +270,7 @@ fn into_contract_participants(
                             match info.sign_pk.key_type() {
                                 near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
                                 near_crypto::KeyType::SECP256K1 => near_sdk::CurveType::SECP256K1,
+                                _ => unimplemented!(),
                             },
                             info.sign_pk.key_data().to_vec(),
                         )

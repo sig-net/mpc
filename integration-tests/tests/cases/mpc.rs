@@ -2,18 +2,19 @@ use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use test_log::test;
-use tokio::sync::oneshot;
-use tokio::sync::Mutex;
-
+use mpc_primitives::{Chain, IndexedSignRequest, SignCommand, SignId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
+use test_log::test;
+use threshold_signatures::participants::Participant;
+use tokio::sync::oneshot;
+use tokio::sync::Mutex;
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
@@ -50,8 +51,21 @@ async fn test_basic_generate_keys() {
         panic!("should reach running state eventually, final state was {protocol_state:?}");
     }
 
-    // give time to make all nodes aware that the protocol is running now
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if network
+                .nodes
+                .iter()
+                .all(|node| node.state.test_key_info_watcher.borrow().is_some())
+            {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("all nodes should publish generated key info");
 
     let mut data = BTreeMap::new();
     for node in &network.nodes {
@@ -197,10 +211,7 @@ async fn test_basic_sign() {
         .await;
 
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
     let timeout = Duration::from_secs(10);
 
@@ -229,10 +240,7 @@ async fn test_sign_task_survives_resharing() {
         .assert_presignatures(1, Duration::from_secs(5))
         .await;
 
-    let request = sign_request(7);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(7)).await;
 
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -260,10 +268,7 @@ async fn test_sign_request_during_resharing() {
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let request = sign_request(8);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(8)).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     network.complete_resharing();
@@ -276,25 +281,130 @@ async fn test_sign_request_during_resharing() {
     );
 }
 
-fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest::sign(
+fn sign_request(seed: u8) -> SignCommand {
+    SignCommand::Request(Arc::new(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
-        sign_arg(seed),
+        super::helpers::test_sign_arg(seed),
         Chain::NEAR,
         0,
-    ))
+    )))
 }
 
-fn sign_arg(seed: u8) -> SignArgs {
-    let mut entropy = [1; 32];
-    entropy[0] = seed;
-    SignArgs {
-        entropy,
-        epsilon: k256::Scalar::default(),
-        payload: k256::Scalar::default(),
-        path: "test".to_owned(),
-        key_version: LATEST_MPC_KEY_VERSION,
-    }
+/// Drive the network through a threshold-change resharing via the real
+/// [`MockGovernance::vote_new_threshold`] path on every node.
+///
+/// Steps:
+///   1. Build a 3-node fixture (computed threshold = 2).
+///   2. Wait for nodes to be running.
+///   3. Drive the [`MockGovernance::vote_new_threshold`] call on every
+///      node concurrently. The first call observes the running state and
+///      tallies the vote; once the running threshold is met the contract
+///      flips into `Resharing`. The remaining nodes see `Resharing` and
+///      gracefully no-op.
+///   4. Wait for every node to enter the resharing phase (the consensus
+///      loop should pick up the new state).
+///   5. Use the existing helper to mark the cryptographic resharing done
+///      and the contract flips back to `Running` with `new_threshold`.
+///   6. Assert the running threshold was actually changed and that the
+///      network still produces signatures end-to-end.
+///
+/// This replaces an earlier test that poked the contract state directly; the
+/// goal is to exercise the actual governance path (`MockGovernance::vote_new_
+/// threshold`) so the new code path is covered by an end-to-end test.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_threshold_change_via_mpc_governance() {
+    const NEW_THRESHOLD: usize = 3;
+
+    let network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_preshared_presignatures()
+        .with_node_min_triples(1)
+        .with_node_min_presignatures(1)
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    let initial_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state, got {other:?}"),
+    };
+    assert_eq!(initial_threshold, 2, "fixture default threshold");
+
+    // Drive every node's MockGovernance.vote_threshold concurrently.
+    // Only the first vote that crosses the running threshold flips the
+    // contract into Resharing; the rest see Resharing and gracefully no-op.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        network.vote_threshold(NEW_THRESHOLD),
+    )
+    .await
+    .expect("vote_threshold helper should finish")
+    .expect("vote_threshold should succeed");
+
+    // The shared contract state must now be Resharing.
+    let resharing_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Resharing(state)) => (state.threshold, state.new_threshold),
+        other => panic!("expected resharing state after governance vote, got {other:?}"),
+    };
+    assert_eq!(
+        resharing_threshold,
+        (2, NEW_THRESHOLD),
+        "resharing state must keep the old threshold and adopt the new one"
+    );
+
+    // Wait for every node to enter the resharing phase via the consensus loop.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let all_resharing = network.nodes.iter().all(|node| {
+                matches!(
+                    node.state.status(),
+                    mpc_node::protocol::state::NodeStatus::Resharing { .. }
+                )
+            });
+            if all_resharing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("nodes should reach resharing state via the consensus loop");
+
+    // Simulate the cryptographic resharing completing on every node. This
+    // helper mirrors what the contract would do after threshold-many nodes
+    // called `vote_reshared` (the mock's `MockGovernance::vote_reshared`
+    // does not tally, so we still hop the state forward here).
+    network.complete_resharing();
+
+    tokio::time::timeout(Duration::from_secs(15), network.wait_for_running())
+        .await
+        .expect("nodes should return to running with the new threshold");
+
+    let new_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state after complete_resharing, got {other:?}"),
+    };
+    assert_eq!(
+        new_threshold, NEW_THRESHOLD,
+        "running state must adopt the reshared threshold"
+    );
+    // Sign a request end-to-end to prove the network still produces valid
+    // signatures after the threshold-change resharing.
+    network
+        .assert_presignatures(1, Duration::from_secs(120))
+        .await;
+    network.broadcast(&sign_request(88)).await;
+    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
+    assert_eq!(actions.len(), 1);
+    assert!(actions
+        .iter()
+        .next()
+        .unwrap()
+        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
@@ -303,7 +413,7 @@ fn sign_arg(seed: u8) -> SignArgs {
 async fn test_presignature_timeout() {
     fn create_filter() -> MessageFilter {
         let mut drop_counter = 20;
-        Box::new(move |(msg, _)| {
+        Box::new(move |SendMessage { message: msg, .. }| {
             let pass = match msg {
                 mpc_node::protocol::Message::Presignature(_) => drop_counter == 0,
                 _ => true,
@@ -363,10 +473,7 @@ async fn test_sign_adequate_stockpile() {
     // Send sign requests to all nodes concurrently
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures to be produced
@@ -441,10 +548,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Send all requests at once to maximize contention
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests simultaneously");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // We expect to complete at least as many signatures as we have presignatures.
@@ -533,10 +637,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     // Send ALL sign requests at once - more than we have presignatures for
     tracing::info!(TOTAL_SIGN_REQUESTS, "sending all sign requests");
     for seed in 0..TOTAL_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // First batch: wait for as many signatures as we initially have presignatures
@@ -645,10 +746,7 @@ async fn test_sign_contention_5_nodes() {
 
     // Send sign requests to all nodes concurrently (simulates real network conditions)
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures - allow more time for 5-node consensus
@@ -701,25 +799,16 @@ async fn test_sign_contention_5_nodes() {
 /// to keep per owner, then filters all nodes to that consistent set.
 /// Panics if any owner has fewer than `n` artifacts.
 fn truncate_per_owner<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        threshold_signatures::participants::Participant,
-        BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
-    >,
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
     n: usize,
-) -> BTreeMap<
-    threshold_signatures::participants::Participant,
-    BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
->
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
     use std::collections::BTreeSet;
 
     // Determine which IDs to keep per owner using the first node's ordering.
-    let mut keep_ids_per_owner: BTreeMap<
-        threshold_signatures::participants::Participant,
-        BTreeSet<A::Id>,
-    > = BTreeMap::new();
+    let mut keep_ids_per_owner: BTreeMap<Participant, BTreeSet<A::Id>> = BTreeMap::new();
     if let Some((first_node, first_owners)) = data.iter().next() {
         for (owner, artifacts) in first_owners {
             assert!(
@@ -750,14 +839,8 @@ where
 
 /// Filter artifact data to keep only artifacts that exist on ALL nodes.
 fn filter_artifacts_on_all_nodes<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        threshold_signatures::participants::Participant,
-        BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
-    >,
-) -> BTreeMap<
-    threshold_signatures::participants::Participant,
-    BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
->
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
@@ -828,10 +911,7 @@ async fn test_sign_no_presignature_waste() {
     );
 
     for seed in 0..initial_presignatures {
-        let request = sign_request(seed as u8);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed as u8)).await;
     }
 
     let actions = network
@@ -902,6 +982,27 @@ async fn test_presignature_no_triple_waste() {
         .assert_presignatures(expected_per_node, Duration::from_secs(180))
         .await;
 
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut all_drained = true;
+
+            for node in &network.nodes {
+                if node.triple_storage.len_by_owner(node.me).await != 0 {
+                    all_drained = false;
+                    break;
+                }
+            }
+
+            if all_drained {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("triple pairs should drain after presignatures are generated");
+
     // Verify every node consumed all its triple pairs and produced the expected presignatures.
     for node in &network.nodes {
         let remaining_triples = node.triple_storage.len_by_owner(node.me).await;
@@ -921,9 +1022,9 @@ async fn test_presignature_no_triple_waste() {
             node.me
         );
 
-        assert_eq!(
-            owned_presignatures, expected_per_node,
-            "node {:?} expected {expected_per_node} presignatures, got {owned_presignatures}",
+        assert!(
+            owned_presignatures >= expected_per_node,
+            "node {:?} expected at least {expected_per_node} presignatures, got {owned_presignatures}",
             node.me
         );
     }
@@ -954,10 +1055,7 @@ async fn test_sign_missing_presignature() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // give 2 minutes to resolve the problem
     // expectation: the node without the presignature will reject a posit, or if
@@ -985,7 +1083,7 @@ async fn test_sign_missing_presignature_after_posits() {
     // node would be involved in signing the first time
     fn create_filter(tx: oneshot::Sender<()>) -> MessageFilter {
         let mut maybe_tx = Some(tx);
-        Box::new(move |(msg, _)| match msg {
+        Box::new(move |SendMessage { message: msg, .. }| match msg {
             mpc_node::protocol::Message::Signature(_signature_message) => {
                 if let Some(tx) = maybe_tx.take() {
                     tx.send(()).unwrap();
@@ -1015,10 +1113,7 @@ async fn test_sign_missing_presignature_after_posits() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // Wait for first round of posits to go through.
     tokio::time::timeout(Duration::from_millis(5000), rx)

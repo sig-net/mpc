@@ -8,7 +8,8 @@ use mpc_node::types::SecretKeyShare;
 use test_log::test;
 use threshold_signatures::participants::Participant;
 
-use super::helpers::{dummy_pair, dummy_presignature};
+use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
+use mpc_primitives::SignId;
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -106,9 +107,22 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take mine triple pairs and check that they are removed from the storage and marked as using
-    let _taken3 = triple_storage.take_mine().await.unwrap();
-    let _taken4 = triple_storage.take_mine().await.unwrap();
+    // Reserve and commit mine triple pairs and check that they are removed from
+    // the storage and marked as using
+    let _taken3 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    let _taken4 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -248,8 +262,15 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 1);
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage and marked as using
-    let _taken_ps2 = presignature_storage.take_mine().await.unwrap();
+    // Reserve and commit mine presignature and check that it is removed from
+    // the storage and marked as using
+    let _taken_ps2 = presignature_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -297,5 +318,136 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 5);
     assert_eq!(presignature_spawner.len_potential().await, 8);
 
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::Chain;
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-checkpoint-persistence")
+        .init_network()
+        .await?;
+
+    let redis = containers::Redis::run(&spawner).await;
+    let pool = redis.pool();
+    let account_id: AccountId = "party0.near".parse().unwrap();
+
+    let storage = CheckpointStorage::Redis(pool.clone(), account_id);
+
+    // 1. Clean storage returns None
+    assert!(storage.load_latest(Chain::Solana).await?.is_none());
+
+    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
+        use sha3::Digest;
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(status);
+        hasher.finalize().into()
+    }
+
+    // 2. Persist first checkpoint (simulates consensus confirmation)
+    let tx1 = dummy_backlog_entry(1, Chain::Solana);
+    let cp1 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 10,
+        pending_requests: vec![tx1],
+        cumulative_digest: cumulative_digest([0]),
+    };
+    storage.persist(&cp1).await?;
+
+    // 3. Verify latest
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.block_height, 10);
+    assert_eq!(latest.pending_requests.len(), 1);
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([1u8; 32]));
+
+    // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
+    let tx2 = dummy_backlog_entry(2, Chain::Solana);
+    let cp2 = Checkpoint {
+        chain: Chain::Solana,
+        block_height: 20,
+        pending_requests: vec![tx2],
+        cumulative_digest: cumulative_digest([0]),
+    };
+    storage.persist(&cp2).await?;
+
+    // 5. Verify latest is updated
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.block_height, 20);
+    assert_eq!(latest.pending_requests.len(), 1);
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([2u8; 32]));
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::Chain;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-pending-checkpoint-persistence")
+        .init_network()
+        .await?;
+    let redis = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis.pool(), account_id);
+    let checkpoint = |height| Checkpoint {
+        chain: Chain::Solana,
+        block_height: height,
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+    };
+
+    let first = checkpoint(10);
+    let second = checkpoint(20);
+    storage.persist_pending(&first).await?;
+    storage.persist_pending(&second).await?;
+
+    let restarted = storage.clone();
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![first.clone(), second.clone()]
+    );
+
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, first.block_height)
+            .await?
+    );
+    assert_eq!(
+        restarted.load_latest(Chain::Solana).await?,
+        Some(first.clone())
+    );
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+
+    let mut conflicting = second.clone();
+    conflicting.cumulative_digest[0] = 1;
+    assert!(restarted.persist_pending(&conflicting).await.is_err());
+    assert!(
+        !restarted
+            .promote_pending(Chain::Solana, second.block_height + 1)
+            .await?
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+    assert!(
+        restarted
+            .promote_pending(Chain::Solana, second.block_height)
+            .await?
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
+    assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
     Ok(())
 }

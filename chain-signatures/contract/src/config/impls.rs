@@ -1,8 +1,7 @@
-use borsh::{self, BorshDeserialize, BorshSerialize};
-
 use super::{
     Config, DynamicValue, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
 };
+use borsh::{self, BorshDeserialize, BorshSerialize};
 
 /// This is maximum expected participants we aim to support right now. This can be different
 /// in the future as we scale the network further.

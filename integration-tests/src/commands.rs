@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use mpc_contract::{
     config::Config,
-    primitives::{CandidateInfo, Candidates, Participants, SignRequest},
+    primitives::{CandidateInfo, CandidatesView as Candidates, Participants, SignRequest},
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
@@ -40,7 +40,12 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
 
-    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, LATEST_MPC_KEY_VERSION);
+    let sign_id = SignId::from_parts(
+        caller_id.as_str(),
+        &payload_hashed,
+        path,
+        LATEST_MPC_KEY_VERSION,
+    );
     let big_r = serde_json::from_value(
         "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
     )?; // Fake BigR
@@ -75,7 +80,7 @@ pub fn join_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow::R
     );
 
     Ok(format!(
-        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000"
+        "near call {contract_id} join {join_json} --accountId {caller_id} --gas 300000000000000 --deposit 1"
     ))
 }
 
@@ -128,7 +133,7 @@ pub fn init_running_command(
 }
 
 pub fn dummy_candidates() -> Candidates {
-    let mut candidates = Candidates::new();
+    let mut candidates = Candidates::default();
     let names: Vec<AccountId> = vec![
         "alice.near".parse().unwrap(),
         "bob.near".parse().unwrap(),
@@ -136,7 +141,7 @@ pub fn dummy_candidates() -> Candidates {
     ];
 
     for account_id in names {
-        candidates.insert(
+        candidates.candidates.insert(
             account_id.clone(),
             CandidateInfo {
                 account_id,

@@ -1,0 +1,12 @@
+[package]
+name = "mpc-compact-hashing"
+edition = "2021"
+version.workspace = true
+description = "Compact FAB transient hashing for MPC protocol messages"
+publish = false
+
+[dependencies]
+midnight-transient-crypto.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

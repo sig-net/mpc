@@ -1,44 +1,43 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
-use crate::local::NodeEnvConfig;
-use crate::utils::pick_preferred_or_unused_port;
+use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
 use crate::NodeConfig;
 
+use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
-use bollard::container::LogsOptions;
+use backon::{ExponentialBuilder, Retryable};
+use bollard::errors::Error as DockerError;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use elliptic_curve::rand_core::OsRng;
-use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::ProjectivePoint;
+use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
-use mpc_keys::hpke;
-use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
-use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
 use solana_sdk::signer::{SeedDerivable as _, Signer as _};
-use testcontainers::core::ExecCommand;
+use testcontainers::core::error::{ClientError, TestcontainersError};
 use testcontainers::ContainerAsync;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -49,148 +48,54 @@ use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShar
 use threshold_signatures::ecdsa::Polynomial;
 use threshold_signatures::ecdsa::Signature as FullSignature;
 use threshold_signatures::participants::Participant;
-use tokio::io::AsyncWriteExt;
-use tokio::time::{sleep, Duration};
+use tokio::runtime::Builder;
+use tokio::time::sleep;
 use tracing;
+
+// Backoff configuration for Redis host-port readiness checks
+const REDIS_PING_MIN_DELAY_MS: u64 = 200;
+const REDIS_PING_MAX_DELAY_SECS: u64 = 2;
+const REDIS_PING_MAX_TIMES: usize = 15;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-pub struct Node {
-    pub container: Container,
-    pub address: String,
-    pub account: Account,
-    pub local_address: String,
-    pub cipher_sk: hpke::SecretKey,
-    pub sign_sk: near_crypto::SecretKey,
-    cfg: NodeConfig,
-    // near rpc address, after proxy
-    near_rpc: String,
-}
+pub(crate) async fn start_container_with_network_retry<I, R, F>(
+    mut build: F,
+    network: &str,
+) -> Result<ContainerAsync<I>, TestcontainersError>
+where
+    I: testcontainers::Image,
+    R: AsyncRunner<I>,
+    F: FnMut() -> R,
+{
+    const ATTEMPTS: usize = 10;
 
-impl Node {
-    // Container port used for the docker network, does not have to be unique
-    const CONTAINER_PORT: u16 = 3000;
+    for attempt in 1..=ATTEMPTS {
+        match build().start().await {
+            Ok(container) => return Ok(container),
+            Err(TestcontainersError::Client(ClientError::StartContainer(
+                DockerError::DockerResponseServerError {
+                    status_code: 404,
+                    message,
+                },
+            ))) if message.contains("failed to set up container networking") => {
+                if attempt == ATTEMPTS {
+                    return Err(TestcontainersError::Client(ClientError::StartContainer(
+                        DockerError::DockerResponseServerError {
+                            status_code: 404,
+                            message,
+                        },
+                    )));
+                }
 
-    pub async fn run(
-        ctx: &super::Context,
-        cfg: &NodeConfig,
-        account: &Account,
-    ) -> anyhow::Result<Self> {
-        tracing::info!(id = %account.id(), "running node container");
-        let (cipher_sk, _cipher_pk) = hpke::generate();
-        let sign_sk =
-            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
-        let near_rpc = ctx.worker.rpc_addr();
-
-        Self::spawn(
-            ctx,
-            NodeEnvConfig {
-                web_port: Self::CONTAINER_PORT,
-                account: account.clone(),
-                cipher_sk,
-                sign_sk,
-                cfg: cfg.clone(),
-                near_rpc,
-                binary_path: None,
-            },
-        )
-        .await
-    }
-
-    pub async fn kill(self) -> NodeEnvConfig {
-        // Give the container a brief moment to clean up connections gracefully
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        self.container.stop().await.unwrap();
-        NodeEnvConfig {
-            web_port: Self::CONTAINER_PORT,
-            account: self.account,
-            cipher_sk: self.cipher_sk,
-            sign_sk: self.sign_sk,
-            cfg: self.cfg,
-            near_rpc: self.near_rpc,
-            binary_path: None,
+                tracing::debug!(network = %network, attempt, "waiting for docker network to become available");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(e),
         }
     }
 
-    pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
-        let indexer_options = mpc_node::indexer::Options {
-            running_threshold: 120,
-        };
-        let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
-        let hydration_args =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton_args =
-            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
-        let args = mpc_node::cli::Cli::Start {
-            near_rpc: config.near_rpc.clone(),
-            mpc_contract_id: ctx.mpc_contract.id().clone(),
-            account_id: config.account.id().clone(),
-            account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Some(Self::CONTAINER_PORT),
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            indexer_options: indexer_options.clone(),
-            eth: eth_args,
-            sol: sol_args,
-            hydration: hydration_args,
-            canton: canton_args,
-            my_address: None,
-            storage_options: ctx.storage_options.clone(),
-            log_options: ctx.log_options.clone(),
-            sign_sk: Some(config.sign_sk.clone()),
-            override_config: Some(OverrideConfig::new(serde_json::to_value(
-                config.cfg.protocol.clone(),
-            )?)),
-            client_header_referer: None,
-            mesh_options: ctx.mesh_options.clone(),
-            message_options: ctx.message_options.clone(),
-        }
-        .into_str_args();
-        let container = GenericImage::new("near/mpc-node", "latest")
-            .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT.tcp())
-            .with_env_var("RUST_LOG", "mpc_node=DEBUG")
-            .with_env_var("RUST_BACKTRACE", "1")
-            .with_network(&ctx.docker_network)
-            .with_cmd(args)
-            .start()
-            .await
-            .unwrap();
-
-        let ip_address = ctx
-            .docker_client
-            .get_network_ip_address(&container, &ctx.docker_network)
-            .await
-            .unwrap();
-        let host_port = container
-            .get_host_port_ipv4(Self::CONTAINER_PORT)
-            .await
-            .unwrap();
-
-        container.exec(ExecCommand::new(
-                format!("bash -c 'while [[ \"$(curl -s -o /dev/null -w ''%{{http_code}}'' localhost:{})\" != \"200\" ]]; do sleep 1; done'", Self::CONTAINER_PORT)
-                    .split_whitespace()
-            )
-            .with_container_ready_conditions(vec![WaitFor::message_on_stdout("node is ready to accept connections")])
-        ).await.unwrap();
-
-        let full_address = format!("http://{ip_address}:{}", Self::CONTAINER_PORT);
-        tracing::info!(
-            full_address,
-            node_account_id = %config.account.id(),
-            "node container is running",
-        );
-        Ok(Node {
-            container,
-            address: full_address,
-            account: config.account,
-            local_address: format!("http://localhost:{host_port}"),
-            cipher_sk: config.cipher_sk,
-            sign_sk: config.sign_sk,
-            cfg: config.cfg,
-            near_rpc: config.near_rpc,
-        })
-    }
+    unreachable!("retry loop must return or fail")
 }
 
 #[derive(Clone)]
@@ -265,53 +170,37 @@ impl DockerClient {
         }
     }
 
-    pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
+    /// Try and remove the docker network
+    pub fn best_effort_remove_network(&self, network: String) {
+        let docker = self.docker.clone();
+        let network_for_join_log = network.clone();
+        let network_for_log = network.clone();
+        let join_result = std::thread::spawn(move || {
+            let runtime = match Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    tracing::debug!(network = %network_for_log, "failed to build runtime for network cleanup: {e}");
+                    return;
+                }
+            };
 
-        // Asynchronous process that pipes docker attach output into stdout.
-        // Will die automatically once Docker container output is closed.
-        tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
-
-            while let Some(Ok(output)) = output.next().await {
-                stdout
-                    .write_all(output.into_bytes().as_ref())
-                    .await
-                    .unwrap();
-                stdout.flush().await.unwrap();
+            for attempt in 1..=3 {
+                match runtime.block_on(async { docker.remove_network(&network).await }) {
+                    Ok(_) => return,
+                    Err(e) => {
+                        tracing::debug!(network = %network_for_log, attempt, "failed to remove docker network: {e}");
+                        if attempt < 3 {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                }
             }
-        });
+        })
+        .join();
 
-        Ok(())
-    }
-
-    pub async fn output_logs(&self, id: &str, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-
-        let mut out = std::fs::File::create(path)?;
-        tokio::spawn(async move {
-            while let Some(Ok(output)) = output.next().await {
-                std::io::Write::write_all(&mut out, output.into_bytes().as_ref()).unwrap();
-            }
-        });
-
-        Ok(())
+        if join_result.is_err() {
+            tracing::debug!(network = %network_for_join_log, "network cleanup thread panicked");
+        }
     }
 }
 
@@ -354,13 +243,17 @@ impl Redis {
 
     pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.4.2")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
-            .start()
-            .await
-            .unwrap();
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("redis", "7.4.2")
+                    .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
+                    .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                    .with_network(&spawner.network)
+            },
+            &spawner.network,
+        )
+        .await
+        .unwrap();
         let network_ip = spawner
             .docker
             .get_network_ip_address(&container, &spawner.network)
@@ -369,11 +262,25 @@ impl Redis {
 
         let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
 
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
+        // The port mapping can lag the container start when several containers come
+        // up at once (PortNotExposed), so give Docker a moment before giving up.
+        let host_port = {
+            let mut attempts = 0;
+            loop {
+                match container.get_host_port_ipv4(Self::DEFAULT_REDIS_PORT).await {
+                    Ok(port) => break port,
+                    Err(err) if attempts < 5 => {
+                        attempts += 1;
+                        tracing::warn!(?err, attempts, "redis port not mapped yet; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Err(err) => panic!("redis container port mapping failed: {err:?}"),
+                }
+            }
+        };
         let internal_address = format!("redis://127.0.0.1:{host_port}");
+
+        Self::wait_for_host_port_readiness(&internal_address).await;
 
         tracing::info!(
             external_address,
@@ -385,6 +292,42 @@ impl Redis {
             container,
             internal_address,
             external_address,
+        }
+    }
+
+    /// Wait for the Redis container to be reachable via the host port.
+    async fn wait_for_host_port_readiness(internal_address: &str) {
+        let cfg = deadpool_redis::Config::from_url(
+            url::Url::parse(internal_address).expect("valid redis url"),
+        );
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("valid redis pool config");
+
+        let ping = || async {
+            let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
+            deadpool_redis::redis::cmd("PING")
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(anyhow::Error::from)
+        };
+
+        let strategy = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(REDIS_PING_MIN_DELAY_MS))
+            .with_max_delay(Duration::from_secs(REDIS_PING_MAX_DELAY_SECS))
+            .with_max_times(REDIS_PING_MAX_TIMES);
+        if ping
+            .retry(&strategy)
+            .notify(|err, sleep| {
+                tracing::warn!(?err, retry_in = ?sleep, "redis not reachable via host port yet");
+            })
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                internal_address,
+                "redis never became reachable via host port"
+            );
         }
     }
 
@@ -468,7 +411,7 @@ impl Redis {
             big_b: (ProjectivePoint::GENERATOR * b).to_affine(),
             big_c: (ProjectivePoint::GENERATOR * c).to_affine(),
             participants: participants_owned,
-            threshold: cfg.threshold,
+            threshold: cfg.threshold.into(),
         };
 
         // - first/second loop add at least min_triples per node
@@ -507,7 +450,6 @@ impl Redis {
 
 pub struct EthereumSandbox {
     pub container: Container,
-    pub internal_http_endpoint: String,
     pub external_http_endpoint: String,
     pub secret_key: String,
     pub chain_id: u64,
@@ -527,31 +469,29 @@ impl EthereumSandbox {
             Self::DEFAULT_MNEMONIC,
         );
 
-        let request = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-            .with_exposed_port(Self::RPC_PORT.tcp())
-            .with_network(&spawner.network)
-            .with_cmd(vec![command]);
-
-        let container = request.start().await?;
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                    .with_exposed_port(Self::RPC_PORT.tcp())
+                    .with_network(&spawner.network)
+                    .with_cmd(vec![command.clone()])
+            },
+            &spawner.network,
+        )
+        .await?;
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await?;
         let external_port = container
             .get_host_port_ipv4(Self::RPC_PORT)
             .await
             .context("ethereum sandbox port mapping")?;
 
-        let internal_http_endpoint = format!("http://{}:{}", network_ip, Self::RPC_PORT);
         let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
 
         wait_for_rpc(&external_http_endpoint).await?;
 
         Ok(Self {
-            internal_http_endpoint,
             external_http_endpoint,
             secret_key,
             chain_id: Self::DEFAULT_CHAIN_ID,
@@ -604,15 +544,34 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
-    use ethers::signers::{coins_bip39::English, MnemonicBuilder};
+    use std::str::FromStr;
 
-    let wallet = MnemonicBuilder::<English>::default()
-        .phrase(mnemonic)
-        .derivation_path("m/44'/60'/0'/0/0")?
-        .build()?;
-    let bytes = wallet.signer().to_bytes();
+    use bip32::{DerivationPath, XPrv};
+    use bip39::Mnemonic;
+
+    let mnemonic = Mnemonic::from_str(mnemonic)?;
+    let seed = mnemonic.to_seed("");
+    let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0")?;
+    let child_key = XPrv::derive_from_path(seed, &derivation_path)?;
+    let bytes = child_key.private_key().to_bytes();
 
     Ok(format!("0x{}", hex::encode(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_secret_key;
+
+    #[test]
+    fn derive_secret_key_matches_hardhat_default_account() {
+        let mnemonic = "test test test test test test test test test test test junk";
+        let secret_key = derive_secret_key(mnemonic).unwrap();
+
+        assert_eq!(
+            secret_key,
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        );
+    }
 }
 
 fn shares_to_triples(public: &TriplePub, shares: &[TripleShare]) -> Vec<Triple> {
@@ -632,7 +591,6 @@ pub struct Solana {
     pub program_keypair: SolanaKeypair,
     pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
-    pub ws_port: u16,
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
     ledger_dir: PathBuf,
@@ -640,7 +598,6 @@ pub struct Solana {
 
 impl Solana {
     /// Program ID hardcoded in the solana program/contract.
-    pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
 
@@ -677,77 +634,117 @@ impl Solana {
         let program_keypair = Solana::program_keypair();
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
-        // Find available ports for RPC and WebSocket
-        // Find available ports (websocket is automatically rpc_port + 1)
-        let rpc_port = pick_preferred_or_unused_port(8899).await;
-        let ws_port = rpc_port + 1;
-        let faucet_port = pick_preferred_or_unused_port(9900).await;
-        let gossip_port = pick_preferred_or_unused_port(8000).await;
-        let dynamic_port_start = pick_preferred_or_unused_port(gossip_port + 1).await;
-        let dynamic_port_end = dynamic_port_start + 32;
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            // Generate a random base port for THIS specific test process
+            let block_index = rand::random::<u16>() % 400;
+            let base_port = 10000 + (block_index * 100);
 
-        let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
-        let ws_address = format!("ws://127.0.0.1:{}", ws_port);
-        let ledger_dir =
-            std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
-        // Start the solana-test-validator process
-        let mut command = Command::new("solana-test-validator");
-        command
-            .arg("--ledger")
-            .arg(&ledger_dir)
-            .arg("--rpc-port")
-            .arg(rpc_port.to_string())
-            .arg("--faucet-port")
-            .arg(faucet_port.to_string())
-            .arg("--gossip-port")
-            .arg(gossip_port.to_string())
-            .arg("--dynamic-port-range")
-            .arg(format!("{dynamic_port_start}-{dynamic_port_end}"))
-            .arg("--bind-address")
-            .arg("127.0.0.1")
-            .arg("--mint")
-            .arg(payer_keypair.pubkey().to_string())
-            .arg("--reset")
-            .arg("--quiet");
+            // Because the preferred port is randomized per-process, Test A and Test B
+            // will query completely different areas of the OS port space, avoiding the race condition.
+            let rpc_port = pick_preferred_or_unused_port_block(base_port, 2).await;
+            let ws_port = rpc_port + 1;
 
-        let process = command
-            .spawn()
-            .expect("failed to start solana-test-validator");
+            let faucet_port = pick_preferred_or_unused_port(base_port + 2).await;
+            let gossip_port = pick_preferred_or_unused_port(base_port + 3).await;
 
-        let rpc_client = SolanaRpcClient::new_with_commitment(
-            rpc_address.clone(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
-        );
-        Self::wait_for_validator_ready(&rpc_client, &ws_address, &payer_keypair.pubkey()).await;
+            let dynamic_port_start = pick_preferred_or_unused_port_block(base_port + 4, 33).await;
+            let dynamic_port_end = dynamic_port_start + 32;
 
-        tracing::info!(
-            rpc_address,
-            ws_address,
-            "solana-test-validator process is running",
-        );
+            let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
+            let ws_address = format!("ws://127.0.0.1:{}", ws_port);
+            let ledger_dir =
+                std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
+            let mut command = Command::new("solana-test-validator");
+            command
+                .kill_on_drop(true)
+                .arg("--ledger")
+                .arg(&ledger_dir)
+                .arg("--rpc-port")
+                .arg(rpc_port.to_string())
+                .arg("--faucet-port")
+                .arg(faucet_port.to_string())
+                .arg("--gossip-port")
+                .arg(gossip_port.to_string())
+                .arg("--dynamic-port-range")
+                .arg(format!("{dynamic_port_start}-{dynamic_port_end}"))
+                .arg("--bind-address")
+                .arg("127.0.0.1")
+                .arg("--mint")
+                .arg(payer_keypair.pubkey().to_string())
+                .arg("--reset")
+                .arg("--quiet");
 
-        Self {
-            process,
-            rpc_address,
-            ws_address,
-            program_keypair,
-            payer_keypair,
-            rpc_port,
-            ws_port,
-            faucet_port,
-            rpc_client,
-            ledger_dir,
+            let mut process = command
+                .spawn()
+                .expect("failed to start solana-test-validator");
+
+            let rpc_client = SolanaRpcClient::new_with_commitment(
+                rpc_address.clone(),
+                solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+            );
+
+            match Self::wait_for_validator_ready(
+                &mut process,
+                &rpc_client,
+                &ws_address,
+                &payer_keypair.pubkey(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        rpc_address,
+                        ws_address,
+                        attempt,
+                        "solana-test-validator process is running",
+                    );
+
+                    return Self {
+                        process,
+                        rpc_address,
+                        ws_address,
+                        program_keypair,
+                        payer_keypair,
+                        rpc_port,
+                        faucet_port,
+                        rpc_client,
+                        ledger_dir,
+                    };
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    let _ = process.kill();
+                    tracing::warn!(attempt, "solana-test-validator startup failed, retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         }
+
+        panic!(
+            "solana-test-validator failed to start after retries: {}",
+            last_error
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "unknown startup error".to_string())
+        );
     }
 
     async fn wait_for_validator_ready(
+        process: &mut Child,
         rpc_client: &SolanaRpcClient,
         ws_address: &str,
         payer: &SolanaPubkey,
-    ) {
-        const MAX_ATTEMPTS: usize = 60;
+    ) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 180;
 
         for attempt in 1..=MAX_ATTEMPTS {
+            if let Some(status) = process
+                .try_status()
+                .context("failed to inspect solana-test-validator status")?
+            {
+                anyhow::bail!("solana-test-validator exited before becoming ready: {status}");
+            }
+
             let version_ready = rpc_client.get_version().await.is_ok();
             let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
             let ws_ready = SolanaPubsubClient::new(ws_address).await.is_ok();
@@ -764,7 +761,7 @@ impl Solana {
                         "solana validator RPC is ready but payer balance is still zero"
                     );
                 }
-                return;
+                return Ok(());
             }
 
             tracing::debug!(
@@ -778,15 +775,85 @@ impl Solana {
             sleep(Duration::from_secs(1)).await;
         }
 
-        panic!("solana-test-validator did not become ready in time");
+        anyhow::bail!("solana-test-validator did not become ready in time")
     }
 
-    pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
-        mpc_node::indexer_sol::SolConfig {
+    /// Kill and relaunch the validator against the same ledger
+    pub async fn restart(&mut self) -> anyhow::Result<()> {
+        // Kill the existing process and wait for it to exit, so its ports
+        // are free before the relaunch
+        let _ = self.process.kill();
+        while self
+            .process
+            .try_status()
+            .context("failed to inspect validator status")?
+            .is_none()
+        {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        // Port layout mirrors run(): gossip = rpc + 3, dynamic range = rpc + 4..=rpc + 36
+        let gossip_port = self.rpc_port + 3;
+        let dynamic_port_start = self.rpc_port + 4;
+
+        // Restart the validator with the same ledger and ports
+        let mut command = Command::new("solana-test-validator");
+        command
+            .kill_on_drop(true)
+            .arg("--ledger")
+            .arg(&self.ledger_dir)
+            .arg("--rpc-port")
+            .arg(self.rpc_port.to_string())
+            .arg("--faucet-port")
+            .arg(self.faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
+            .arg("--dynamic-port-range")
+            .arg(format!("{dynamic_port_start}-{}", dynamic_port_start + 32))
+            .arg("--bind-address")
+            .arg("127.0.0.1")
+            .arg("--mint")
+            .arg(self.payer_keypair.pubkey().to_string())
+            .arg("--quiet");
+
+        let mut process = command
+            .spawn()
+            .context("failed to restart solana-test-validator")?;
+        Self::wait_for_validator_ready(
+            &mut process,
+            &self.rpc_client,
+            &self.ws_address,
+            &self.payer_keypair.pubkey(),
+        )
+        .await
+        .context("restarted solana-test-validator did not become ready")?;
+
+        // Wait for the program to be ready after the validator restart
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await
+            .context("program missing after validator restart")?;
+
+        // Wait for the validator to resume block production after restart
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut slot = self.rpc_client.get_slot().await?;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let next = self.rpc_client.get_slot().await?;
+            if next > slot {
+                self.process = process;
+                return Ok(());
+            }
+            slot = next;
+        }
+        anyhow::bail!("validator did not resume block production after restart")
+    }
+
+    pub fn get_config(&self, program_address: String) -> SolConfig {
+        SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
-            rpc_ws_url: self.ws_address.clone(),
             program_address,
+            indexer: Default::default(),
         }
     }
 
@@ -809,14 +876,61 @@ impl Solana {
         };
 
         // Wait a bit for deployment to be fully processed
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
-        // Initialize the program after deployment
-        if let Err(e) = self.initialize_program().await {
-            anyhow::bail!("program initialization failed: {e}");
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await?;
+
+        // Initialize the program after deployment, retrying transient loader races.
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            match self.initialize_program().await {
+                Ok(_) => return Ok(program_address),
+                Err(e) => {
+                    let error_message = e.to_string();
+                    if error_message.contains("Program is not deployed")
+                        || error_message.contains("Unsupported program id")
+                    {
+                        tracing::warn!(attempt, error = %error_message, "solana initialize not ready yet, retrying");
+                        last_error = Some(e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    anyhow::bail!("program initialization failed: {e}");
+                }
+            }
         }
 
-        Ok(program_address)
+        Err(anyhow::anyhow!(
+            "program initialization failed after retries: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
+    async fn wait_for_program_ready(&self, program_id: SolanaPubkey) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.rpc_client.get_account(&program_id).await {
+                Ok(account) if account.executable => {
+                    tracing::info!(attempt, %program_id, "solana program is executable");
+                    return Ok(());
+                }
+                Ok(_) => {
+                    tracing::debug!(attempt, %program_id, "waiting for solana program to become executable");
+                }
+                Err(err) => {
+                    tracing::debug!(attempt, %program_id, %err, "waiting for solana program account");
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        anyhow::bail!("solana program {program_id} did not become executable in time")
     }
 
     /// Perform real contract deployment using Solana CLI
@@ -869,29 +983,53 @@ impl Solana {
             tracing::debug!(program_id = %program_pubkey, "no existing program account closed");
         }
 
-        let deploy_output = tokio::process::Command::new("solana")
-            .args([
-                "program",
-                "deploy",
-                contract_path.to_str().unwrap(),
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
-                "--url",
-                &self.rpc_address,
-                "--program-id",
-                program_keypair_path.to_str().unwrap(),
-                "-v", // verbose output
-            ])
-            .output()
-            .await?;
+        let mut deploy_attempt = 0;
+        let mut last_failure = None;
+        let deploy_output = loop {
+            deploy_attempt += 1;
+            let deploy_output = tokio::process::Command::new("solana")
+                .args([
+                    "program",
+                    "deploy",
+                    contract_path.to_str().unwrap(),
+                    "--keypair",
+                    payer_keypair_path.to_str().unwrap(),
+                    "--url",
+                    &self.rpc_address,
+                    "--program-id",
+                    program_keypair_path.to_str().unwrap(),
+                    "-v", // verbose output
+                ])
+                .output()
+                .await?;
+
+            if deploy_output.status.success() {
+                break deploy_output;
+            }
+
+            let stderr = String::from_utf8_lossy(&deploy_output.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&deploy_output.stdout).into_owned();
+            last_failure = Some((stdout, stderr));
+
+            if deploy_attempt >= 3 {
+                break deploy_output;
+            }
+
+            tracing::warn!(attempt = deploy_attempt, rpc_address = %self.rpc_address, "solana deploy failed, retrying");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
 
         // Clean up temporary files
         let _ = std::fs::remove_file(&payer_keypair_path);
         let _ = std::fs::remove_file(&program_keypair_path);
 
         if !deploy_output.status.success() {
-            let stderr = String::from_utf8_lossy(&deploy_output.stderr);
-            let stdout = String::from_utf8_lossy(&deploy_output.stdout);
+            let (stdout, stderr) = last_failure.unwrap_or_else(|| {
+                (
+                    String::from_utf8_lossy(&deploy_output.stdout).into_owned(),
+                    String::from_utf8_lossy(&deploy_output.stderr).into_owned(),
+                )
+            });
             anyhow::bail!("failed to deploy solana program. stdout: {stdout}, stderr: {stderr}",);
         }
 
@@ -1059,6 +1197,107 @@ impl Solana {
         );
 
         Ok(signature)
+    }
+
+    /// Submit a tx whose first instruction emits a sign CPI event and whose
+    /// second instruction fails, rolling the whole
+    /// tx back. Returns the slot the failed tx landed in.
+    pub async fn sign_failed_tx(
+        &self,
+        payload: [u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> anyhow::Result<u64> {
+        let program_id = self.program_keypair.pubkey();
+        let (program_state_pda, _) =
+            SolanaPubkey::find_program_address(&[b"program-state"], &program_id);
+        let (event_authority_pda, _) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        // Emits a real sign CPI event
+        let sign_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Sign {
+                program_state: program_state_pda,
+                requester: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+                event_authority: event_authority_pda,
+                program: program_id,
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Sign {
+                payload,
+                key_version,
+                path: path.to_string(),
+                algo: "secp256k1".to_string(),
+                dest: String::new(),
+                params: String::new(),
+            }
+            .data(),
+        };
+
+        // The second instruction is a duplicate initialize, which will fail because the program-state PDA already exists.
+        let initialize_ix = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: signet_program::accounts::Initialize {
+                program_state: program_state_pda,
+                admin: self.payer_keypair.pubkey(),
+                system_program: solana_sdk::system_program::id(),
+            }
+            .to_account_metas(None),
+            data: signet_program::instruction::Initialize {
+                signature_deposit: 1_000_000,
+                chain_id: Chain::Solana.caip2_chain_id().to_string(),
+            }
+            .data(),
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[sign_ix, initialize_ix],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+
+        // Send the transaction with skip_preflight to avoid preflight checks that would prevent the transaction from being sent due to the second instruction failing.
+        let signature = self
+            .rpc_client
+            .send_transaction_with_config(
+                &transaction,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Wait for the transaction to be confirmed and check that it failed as expected.
+        for _ in 0..40 {
+            let statuses = self.rpc_client.get_signature_statuses(&[signature]).await?;
+            let confirmed = statuses
+                .value
+                .first()
+                .and_then(|status| status.as_ref())
+                .filter(|status| status.confirmation_status.is_some());
+            match confirmed {
+                Some(status) => {
+                    return match status.err {
+                        Some(_) => {
+                            tracing::info!(
+                                ?signature,
+                                slot = status.slot,
+                                "failed sign tx confirmed as expected"
+                            );
+                            Ok(status.slot)
+                        }
+                        None => anyhow::bail!("duplicate initialize unexpectedly succeeded"),
+                    }
+                }
+                None => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+
+        anyhow::bail!("failed sign tx was not confirmed in time")
     }
 
     #[allow(clippy::too_many_arguments)]

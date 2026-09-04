@@ -13,6 +13,7 @@ pub mod nodes;
 pub mod protocols;
 pub mod requests;
 pub mod storage;
+pub mod telemetry;
 
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
 static VERSION: OnceLock<String> = OnceLock::new();
@@ -206,7 +207,7 @@ impl LatencyStart for Instant {
 
 impl LatencyStart for u64 {
     fn elapsed_seconds(&self) -> f64 {
-        crate::util::unix_elapsed(*self).as_secs_f64()
+        mpc_utils::time::unix_elapsed(*self).as_secs_f64()
     }
 }
 

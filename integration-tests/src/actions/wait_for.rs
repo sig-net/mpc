@@ -5,6 +5,10 @@ use backon::ConstantBuilder;
 use backon::Retryable;
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
+use near_fetch::result::ExecutionFinalResult;
+use near_jsonrpc_client::errors::{
+    JsonRpcError, JsonRpcServerError, JsonRpcServerResponseStatusError,
+};
 use near_primitives::hash::CryptoHash;
 use near_primitives::views::ExecutionOutcomeWithIdView;
 use near_primitives::views::ExecutionStatusView;
@@ -37,15 +41,34 @@ enum Outcome {
     Signatures(Vec<FullSignature>),
 }
 
+/// Read the transaction status, treating a timed-out query as "not known yet". near-fetch
+/// intends the same but matches the timeout as a handler error, while a node that misses
+/// its polling window answers with HTTP 408, which the client surfaces as a response-status
+/// error, so near-fetch's own handling never fires.
+async fn poll_status(
+    status: &AsyncTransactionStatus,
+) -> Result<Poll<ExecutionFinalResult>, WaitForError> {
+    match status.status().await {
+        Ok(poll) => Ok(poll),
+        Err(near_fetch::Error::RpcTransactionError(err))
+            if matches!(
+                *err,
+                JsonRpcError::ServerError(JsonRpcServerError::ResponseStatusError(
+                    JsonRpcServerResponseStatusError::TimeoutError,
+                ))
+            ) =>
+        {
+            Ok(Poll::Pending)
+        }
+        Err(err) => Err(WaitForError::JsonRpc(format!("{err:?}"))),
+    }
+}
+
 pub async fn signature_responded(
     status: AsyncTransactionStatus,
 ) -> Result<FullSignature, WaitForError> {
     let is_tx_ready = || async {
-        let Poll::Ready(outcome) = status
-            .status()
-            .await
-            .map_err(|err| WaitForError::JsonRpc(format!("{err:?}")))?
-        else {
+        let Poll::Ready(outcome) = poll_status(&status).await? else {
             return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         };
 
@@ -79,22 +102,25 @@ pub async fn batch_signature_responded(
     status: AsyncTransactionStatus,
 ) -> Result<Vec<FullSignature>, WaitForError> {
     let is_tx_ready = || async {
-        let Poll::Ready(outcome) = status
-            .status()
-            .await
-            .map_err(|err| WaitForError::JsonRpc(format!("{err:?}")))?
-        else {
+        let Poll::Ready(outcome) = poll_status(&status).await? else {
             return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         };
 
+        // Retrying surfaces the last attempt's error, so a settled failure has to leave the
+        // loop as `Ok` or a later timed-out poll masks it. That is what `Outcome` is for.
+        // A status that has settled neither way is not an answer, so it keeps retrying.
+        if outcome.is_failure() {
+            return Ok(Outcome::Failed(format!("status: {:?}", outcome.status())));
+        }
         if !outcome.is_success() {
-            return Err(WaitForError::Signature(SignatureError::Failed(format!(
-                "status: {:?}",
-                outcome.status()
-            ))));
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         }
 
         let receipt_outcomes = outcome.details.receipt_outcomes();
+        if receipt_outcomes.is_empty() {
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
+        }
+
         let mut result_receipts: HashMap<CryptoHash, Vec<CryptoHash>> = HashMap::new();
         for receipt_outcome in receipt_outcomes {
             result_receipts
@@ -109,20 +135,24 @@ pub async fn batch_signature_responded(
                 .or_insert(receipt_outcome);
         }
 
-        let starting_receipts = &receipt_outcomes.first().unwrap().outcome.receipt_ids;
-
         let mut signatures: Vec<FullSignature> = vec![];
-        for receipt_id in starting_receipts {
-            if !result_receipts.contains_key(receipt_id) {
-                break;
-            }
-            let sign_receipt_id = receipt_id;
-            for receipt_id in result_receipts.get(sign_receipt_id).unwrap() {
-                let receipt_outcome = receipt_outcomes_keyed
-                    .get(receipt_id)
-                    .unwrap()
-                    .outcome
-                    .clone();
+        let mut missing_receipts = false;
+
+        let starting_receipts = &receipt_outcomes[0].outcome.receipt_ids;
+        for sign_receipt_id in starting_receipts {
+            let Some(child_receipts) = result_receipts.get(sign_receipt_id) else {
+                missing_receipts = true;
+                continue;
+            };
+
+            for receipt_id in child_receipts {
+                let Some(receipt_outcome) = receipt_outcomes_keyed.get(receipt_id) else {
+                    // Final tx can be ready while some receipt outcomes are still not returned.
+                    missing_receipts = true;
+                    continue;
+                };
+
+                let receipt_outcome = receipt_outcome.outcome.clone();
                 if receipt_outcome
                     .logs
                     .contains(&"Signature is ready.".to_string())
@@ -145,6 +175,10 @@ pub async fn batch_signature_responded(
                     }
                 }
             }
+        }
+
+        if missing_receipts {
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         }
 
         Ok(Outcome::Signatures(signatures))

@@ -1,0 +1,43 @@
+[package]
+name = "mpc-chain-midnight"
+edition = "2021"
+version.workspace = true
+description = "Midnight chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+hex.workspace = true
+jsonrpsee = { version = "0.24.10", features = ["http-client"] }
+k256.workspace = true
+memchr.workspace = true
+midnight-base-crypto.workspace = true
+# `Transaction` and the call transcripts come from these two crates; nothing in
+# the pinned set re-exports them.
+midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-onchain-runtime.workspace = true
+midnight-onchain-state.workspace = true
+midnight-serialize.workspace = true
+midnight-storage.workspace = true
+midnight-transient-crypto.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subxt = { workspace = true, features = ["native"] }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[features]
+# Gate for the node-readiness probe integration-tests use to bring up a sandbox.
+sandbox = []
+
+[dev-dependencies]
+jsonrpsee = { version = "0.24.10", features = ["server"] }
+tokio = { workspace = true, features = ["test-util"] }

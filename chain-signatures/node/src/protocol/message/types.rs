@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use threshold_signatures::participants::Participant;
 use threshold_signatures::protocol::MessageData;
 
-use crate::protocol::posit::PositAction;
+use crate::protocol::posit::{PositAction, PositRejectReason};
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
@@ -47,7 +47,7 @@ impl PositMessage {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
-            PositAction::Reject => 0,
+            PositAction::RejectWithReason(_reason) => std::mem::size_of::<PositRejectReason>(),
         }
     }
 }
@@ -189,6 +189,21 @@ impl Message {
             Message::Presignature(_) => "Presignature",
             Message::Signature(_) => "Signature",
             Message::Unknown(_) => "Unknown",
+        }
+    }
+
+    /// The participant this message claims to come from — unverified data;
+    /// the inbox checks it against the authenticated envelope sender.
+    pub fn claimed_sender(&self) -> Option<Participant> {
+        match self {
+            Message::Posit(msg) => Some(msg.from),
+            Message::Generating(msg) => Some(msg.from),
+            Message::Resharing(msg) => Some(msg.from),
+            Message::Ready(msg) => Some(msg.from),
+            Message::Triple(msg) => Some(msg.from),
+            Message::Presignature(msg) => Some(msg.from),
+            Message::Signature(msg) => Some(msg.from),
+            Message::Unknown(_) => None,
         }
     }
 

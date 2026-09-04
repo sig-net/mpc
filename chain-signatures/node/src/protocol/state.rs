@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentNodeData {
     pub epoch: u64,
     pub private_share: SecretKeyShare,
@@ -303,10 +303,6 @@ impl NodeStateWatcher {
 
     pub fn status(&self) -> NodeStatus {
         self.watcher.borrow().clone()
-    }
-
-    pub fn status_mut(&mut self) -> NodeStatus {
-        self.watcher.borrow_and_update().clone()
     }
 
     pub fn participants(&self) -> Vec<Participant> {

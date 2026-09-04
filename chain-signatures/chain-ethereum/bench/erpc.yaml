@@ -1,0 +1,53 @@
+# eRPC fronting four public Sepolia endpoints, caching finalized blocks in
+# Redis. First run populates the cache; subsequent runs read from Redis.
+
+logLevel: warn
+server:
+  httpPortV4: 4000
+metrics:
+  enabled: true
+  hostV4: 0.0.0.0
+  port: 4001
+
+database:
+  evmJsonRpcCache:
+    connectors:
+      - id: redis-cache
+        driver: redis
+        redis:
+          addr: redis://redis:6379
+    policies:
+      # Historical benchmark ranges are finalized — cache them indefinitely.
+      - network: "*"
+        method: "*"
+        finality: finalized
+        empty: allow
+        connector: redis-cache
+        ttl: 0
+
+projects:
+  - id: sepolia
+    upstreams:
+      - id: onfinality
+        type: evm
+        endpoint: https://eth-sepolia.api.onfinality.io/public
+        evm: { chainId: 11155111 }
+      - id: tenderly
+        type: evm
+        endpoint: https://gateway.tenderly.co/public/sepolia
+        evm: { chainId: 11155111 }
+      - id: drpc
+        type: evm
+        endpoint: https://sepolia.drpc.org
+        evm: { chainId: 11155111 }
+      - id: nodies
+        type: evm
+        endpoint: https://ethereum-sepolia-public.nodies.app
+        evm: { chainId: 11155111 }
+    networks:
+      - architecture: evm
+        evm: { chainId: 11155111 }
+        failsafe:
+          timeout: { duration: 30s }
+          retry: { maxAttempts: 3, delay: 500ms, backoffMaxDelay: 10s, backoffFactor: 0.3, jitter: 500ms }
+          hedge: { delay: 1000ms, maxCount: 2 }

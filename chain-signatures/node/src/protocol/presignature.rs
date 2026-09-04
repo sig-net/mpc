@@ -4,14 +4,14 @@ use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
-use crate::protocol::posit::PositInternalAction;
+use crate::protocol::posit::{PositInternalAction, PositRejectReason};
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
-use crate::storage::protocol_storage::ProtocolArtifact;
-use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
+use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
-use crate::util::{AffinePointExt, JoinMap};
+use mpc_chain_near::AffinePointExt as _;
+use mpc_utils::task::JoinMap;
 
 use chrono::Utc;
 use k256::ProjectivePoint;
@@ -204,6 +204,9 @@ impl PresignatureGenerator {
             self.render_debug(total_pokes);
 
             match action {
+                Action::Yield => {
+                    tokio::task::yield_now().await;
+                }
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
@@ -213,7 +216,9 @@ impl PresignatureGenerator {
                         }
                         break;
                     };
-                    self.protocol.message(msg.from, msg.data);
+                    if let Err(err) = self.protocol.message(msg.from, msg.data) {
+                        tracing::warn!(?err, "failed to process message in presignature protocol");
+                    }
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -314,8 +319,11 @@ pub struct PresignatureSpawner {
     /// Ongoing presignature generation protocols.
     ongoing: JoinMap<PresignatureId, ()>,
     ongoing_owned: HashSet<PresignatureId>,
-    /// The protocol posits that are currently in progress.
-    posits: Posits<FullPresignatureId, TriplesTaken>,
+    /// The protocol posits that are currently in progress. The proposer side
+    /// holds a reservation on the triple pair: the pair stays in storage until
+    /// the posit round succeeds and generation starts, so a failed round does
+    /// not waste it.
+    posits: Posits<FullPresignatureId, TriplesReserved>,
 
     me: Participant,
     threshold: usize,
@@ -420,13 +428,19 @@ impl PresignatureSpawner {
                 ?action,
                 "presignature id does not match the expected hash"
             );
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
         } else if self.contains_ongoing(id.id) {
             tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if self.contains(id.id).await {
             tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -440,7 +454,9 @@ impl PresignatureSpawner {
                 ?action,
                 "presignature required triples are not known"
             );
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::MissingArtifact,
+            ))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
@@ -479,33 +495,42 @@ impl PresignatureSpawner {
         // To ensure there is no contention between different nodes we are only using triples
         // that we own. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
+        //
+        // The pair is only reserved here and stays in storage. It is taken out of
+        // storage once the posit round succeeds and generation starts. Dropping the
+        // reservation on a failed round returns the pair to the pool.
         // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
         // of waiting for storage to respond here.
-        let Some(triples) = self.triples.take_mine().await else {
-            return;
+
+        // IDs that were found unsuitable this round (kept in storage, skipped on the next peek)
+        let mut local_skip: Vec<TripleId> = Vec::new();
+        let (reservation, participants) = loop {
+            let Some(reservation) = self.triples.peek_mine(&local_skip).await else {
+                return;
+            };
+
+            let pair_id = reservation.id;
+            // use holders (not original participants) since some nodes may have lost the artifact.
+            let participants = intersect_vec(&[active, reservation.holders()]);
+            if participants.len() < self.threshold {
+                tracing::warn!(
+                    ?pair_id,
+                    ?active,
+                    ?participants,
+                    "intersection < threshold, skipping triple pair"
+                );
+                local_skip.push(pair_id);
+                // drop: in-memory reservation released, pair stays in storage
+                continue;
+            }
+
+            break (reservation, participants);
         };
 
-        let pair_id = triples.artifact.id;
-        // use holders (not original participants) since some nodes may have lost the artifact.
-        let Some(holders) = triples.artifact.holders() else {
-            tracing::error!(?pair_id, "holders not set on taken triple pair");
-            return;
-        };
-        let participants = intersect_vec(&[active, holders]);
-        if participants.len() < self.threshold {
-            tracing::warn!(
-                ?pair_id,
-                ?active,
-                ?participants,
-                "intersection < threshold, trashing triple pair"
-            );
-            return;
-        }
-
-        let id = FullPresignatureId::from_pair(pair_id);
+        let id = FullPresignatureId::from_pair(reservation.id);
         tracing::info!(?id, "proposing protocol to generate a new presignature");
 
-        self.posits.propose(id, triples, &participants);
+        self.posits.propose(id, reservation, &participants);
         for &p in participants.iter() {
             if p == self.me {
                 continue;
@@ -550,17 +575,11 @@ impl PresignatureSpawner {
     async fn generate(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<TriplesReserved>,
         participants: &[Participant],
         timeout: Duration,
     ) -> Result<(), InitializationError> {
-        let (owner, triples) = match positor {
-            Positor::Proposer(owner, triples) => (owner, PendingTriples::Available(triples)),
-            Positor::Deliberator(owner) => (
-                owner,
-                PendingTriples::InStorage(id.pair_id, self.triples.clone()),
-            ),
-        };
+        let owner = positor.id();
         tracing::info!(
             ?id,
             ?owner,
@@ -568,10 +587,27 @@ impl PresignatureSpawner {
         );
 
         let Some(slot) = self.presignatures.create_slot(id.id, owner).await else {
+            // Dropping the positor here releases the reservation (proposer only),
+            // returning the pair to the pool.
             return Err(InitializationError::BadParameters(format!(
                 "presignature {} is already generating, in use, or stored",
                 id.id
             )));
+        };
+
+        let triples = match positor {
+            Positor::Proposer(_, reservation) => {
+                // Commit: only now that the posit round succeeded and generation is
+                // starting is the pair actually removed from storage.
+                let Some(taken) = reservation.commit().await else {
+                    return Err(InitializationError::BadParameters(format!(
+                        "failed to commit triple pair reservation {}",
+                        id.pair_id
+                    )));
+                };
+                PendingTriples::Available(taken)
+            }
+            Positor::Deliberator(_) => PendingTriples::InStorage(id.pair_id, self.triples.clone()),
         };
 
         let mut participants = participants.to_vec();
@@ -608,7 +644,7 @@ impl PresignatureSpawner {
                     triple0: (pair.triple0.share, pair.triple0.public),
                     triple1: (pair.triple1.share, pair.triple1.public),
                     keygen_out,
-                    threshold,
+                    threshold: threshold.into(),
                 },
             ) {
                 Ok(protocol) => Box::new(protocol),
@@ -655,7 +691,7 @@ impl PresignatureSpawner {
     async fn start_generation(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<TriplesReserved>,
         participants: Vec<Participant>,
         timeout: Duration,
     ) {

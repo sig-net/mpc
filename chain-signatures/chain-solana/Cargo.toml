@@ -1,0 +1,35 @@
+[package]
+name = "mpc-chain-solana"
+edition = "2021"
+version.workspace = true
+description = "Solana chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+anchor-client.workspace = true
+anchor-lang.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+borsh.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signet-program.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
+solana-client.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true
+tracing-subscriber.workspace = true

@@ -1,4 +1,5 @@
 use k256::ProjectivePoint;
+use mpc_primitives::CheckpointDigest;
 use rand::rngs::OsRng;
 use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
 use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
@@ -9,6 +10,7 @@ use threshold_signatures::frost_core::keys::SigningShare;
 use threshold_signatures::frost_core::{Element, VerifyingKey};
 use threshold_signatures::participants::Participant;
 use threshold_signatures::protocol::{Action, MessageData, Protocol};
+use tokio::sync::watch;
 
 use crate::protocol::contract::ResharingContractState;
 
@@ -22,6 +24,8 @@ pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput> + Send>
 pub type SignatureProtocol = Box<dyn Protocol<Output = Option<EcdsaSignature>> + Send>;
 
 pub type Epoch = u64;
+
+pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 
 pub struct KeygenProtocol {
     me: Participant,
@@ -42,7 +46,7 @@ impl KeygenProtocol {
             threshold,
             me,
             participants: participants.into(),
-            protocol: Box::new(threshold_signatures::keygen::<Secp256K1Sha256>(
+            protocol: Box::new(threshold_signatures::keygen::<Secp256K1Sha256, _, _>(
                 participants,
                 me,
                 threshold,
@@ -54,7 +58,7 @@ impl KeygenProtocol {
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
         use rand::rngs::OsRng;
 
-        self.protocol = Box::new(threshold_signatures::keygen::<Secp256K1Sha256>(
+        self.protocol = Box::new(threshold_signatures::keygen::<Secp256K1Sha256, _, _>(
             &self.participants,
             self.me,
             self.threshold,
@@ -68,7 +72,9 @@ impl KeygenProtocol {
     }
 
     pub fn message(&mut self, from: Participant, data: MessageData) {
-        self.protocol.message(from, data);
+        if let Err(err) = self.protocol.message(from, data) {
+            tracing::warn!(?err, "failed to process message in keygen protocol");
+        }
     }
 }
 
@@ -96,13 +102,13 @@ impl ReshareProtocol {
         let pk_element: Element<Secp256K1Sha256> = ProjectivePoint::from(contract_state.public_key);
         let verifying_key = VerifyingKey::<Secp256K1Sha256>::new(pk_element);
 
-        let protocol = Box::new(threshold_signatures::reshare::<Secp256K1Sha256>(
+        let protocol = Box::new(threshold_signatures::reshare::<Secp256K1Sha256, _, _, _>(
             &old_participants,
             contract_state.threshold,
             private_share,
             verifying_key,
             &new_participants,
-            contract_state.threshold,
+            contract_state.new_threshold,
             me,
             OsRng,
         )?);
@@ -114,6 +120,8 @@ impl ReshareProtocol {
     }
 
     pub fn message(&mut self, from: Participant, data: MessageData) {
-        self.protocol.message(from, data);
+        if let Err(err) = self.protocol.message(from, data) {
+            tracing::warn!(?err, "failed to process message in reshare protocol");
+        }
     }
 }

@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::future::IntoFuture;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::{Address, FixedBytes, U256};
@@ -11,11 +10,10 @@ use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
-use anchor_client::{Client, Cluster as AnchorCluster};
-use anyhow::Context as _;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
+use mpc_chain_ethereum::abi::{ChainSignatures, SignatureRequestedEncoding};
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -33,7 +31,6 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
 use threshold_signatures::ecdsa::Signature as FullSignature;
-use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
@@ -41,65 +38,6 @@ use crate::cluster::Cluster;
 use crate::containers;
 
 use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
-
-// ChainSignatures contract ABI
-alloy::sol! {
-    #[sol(rpc)]
-    interface ChainSignatures {
-        struct SignRequest {
-            bytes32 payload;
-            string path;
-            uint32 keyVersion;
-            string algo;
-            string dest;
-            string params;
-        }
-
-        struct AffinePoint {
-            uint256 x;
-            uint256 y;
-        }
-
-        struct Signature {
-            AffinePoint bigR;
-            uint256 s;
-            uint8 recoveryId;
-        }
-
-        function sign(SignRequest memory _request) external payable;
-        function getSignatureDeposit() external view returns (uint256);
-
-        event SignatureRequested(
-            address indexed sender,
-            bytes32 payload,
-            uint32 keyVersion,
-            uint256 deposit,
-            uint256 chainId,
-            string path,
-            string algo,
-            string dest,
-            string params
-        );
-
-        event SignatureResponded(
-            bytes32 indexed requestId,
-            address indexed responder,
-            Signature signature
-        );
-    }
-
-    // Event encoding for request_id calculation
-    event SignatureRequestedEncoding(
-        address sender,
-        bytes payload,
-        string path,
-        uint32 keyVersion,
-        uint256 chainId,
-        string algo,
-        string dest,
-        string params
-    );
-}
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -752,19 +690,76 @@ pub async fn wait_for_respond_bidirectional(
     timeout: Duration,
 ) -> anyhow::Result<SolRespondBidirectionalOutcome> {
     let program_id = solana.program_keypair.pubkey();
+    let rpc = RpcClient::new(solana.rpc_address.clone());
 
-    let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
-    let client = Client::new_with_options(
-        cluster,
-        Arc::new(solana.payer_keypair.insecure_clone()),
-        CommitmentConfig::confirmed(),
+    tracing::info!(
+        request_id = %hex::encode(expected_request_id),
+        timeout_secs = timeout.as_secs(),
+        "polling for RespondBidirectionalEvent CPI instruction...",
     );
-    let program = client.program(program_id)?;
-    let (tx, rx) = oneshot::channel();
-    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
-    let event_unsub = program
-        .on(move |_ctx, event: RespondBidirectionalEvent| {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut elapsed_secs = 0u64;
+
+    loop {
+        if let Some(outcome) =
+            scan_respond_bidirectional_events(&rpc, &program_id, expected_request_id, &mut seen)
+                .await?
+        {
+            return Ok(outcome);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timeout ({timeout:?}) waiting for respond bidirectional on solana (request_id={})",
+                hex::encode(expected_request_id),
+            );
+        }
+
+        sleep(Duration::from_secs(2)).await;
+        elapsed_secs += 2;
+        if elapsed_secs.is_multiple_of(30) {
+            tracing::info!(
+                request_id = %hex::encode(expected_request_id),
+                elapsed_secs,
+                "still waiting for RespondBidirectionalEvent..."
+            );
+        }
+    }
+}
+
+async fn scan_respond_bidirectional_events(
+    rpc: &RpcClient,
+    program_id: &Pubkey,
+    expected_request_id: [u8; 32],
+    seen: &mut HashSet<String>,
+) -> anyhow::Result<Option<SolRespondBidirectionalOutcome>> {
+    let statuses = rpc.get_signatures_for_address(program_id).await?;
+
+    for status in statuses {
+        if status.err.is_some() || seen.contains(&status.signature) {
+            continue;
+        }
+
+        let Ok(signature) = SolSignature::from_str(&status.signature) else {
+            continue;
+        };
+
+        let events = match parse_respond_bidirectional_events(rpc, &signature, program_id).await {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!(
+                    tx_signature = %status.signature,
+                    error = %e,
+                    "failed to fetch transaction for RespondBidirectionalEvent scan; will retry",
+                );
+                continue;
+            }
+        };
+        seen.insert(status.signature.clone());
+
+        for event in events {
             tracing::info!(
                 request_id = %hex::encode(event.request_id),
                 responder = ?event.responder,
@@ -773,69 +768,86 @@ pub async fn wait_for_respond_bidirectional(
             );
 
             if event.request_id != expected_request_id {
-                return;
+                continue;
             }
 
-            let signature_result = parse_sol_signature(&event.signature);
-            if let Ok(mut sender) = tx.lock() {
-                if let Some(sender) = sender.take() {
-                    let outcome = signature_result.map(|(signature, recovery_id)| {
-                        SolRespondBidirectionalOutcome {
-                            request_id: event.request_id,
-                            responder: event.responder.to_string(),
-                            serialized_output: event.serialized_output.clone(),
-                            signature,
-                            recovery_id,
-                        }
-                    });
-                    if sender.send(outcome).is_err() {
-                        tracing::error!("failed to send RespondBidirectionalEvent outcome");
-                    }
-                }
-            }
-        })
+            let (signature, recovery_id) = parse_sol_signature(&event.signature)?;
+            return Ok(Some(SolRespondBidirectionalOutcome {
+                request_id: event.request_id,
+                responder: event.responder.to_string(),
+                serialized_output: event.serialized_output,
+                signature,
+                recovery_id,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn parse_respond_bidirectional_events(
+    rpc_client: &RpcClient,
+    signature: &solana_sdk::signature::Signature,
+    program_id: &Pubkey,
+) -> anyhow::Result<Vec<RespondBidirectionalEvent>> {
+    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+
+    let tx = rpc_client
+        .get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        )
         .await?;
 
-    tracing::info!(
-        request_id = %hex::encode(expected_request_id),
-        timeout_secs = timeout.as_secs(),
-        "subscribed to RespondBidirectionalEvent, waiting for MPC response...",
-    );
+    let Some(meta) = tx.transaction.meta else {
+        return Ok(Vec::new());
+    };
 
-    // Wrap the oneshot receiver with periodic progress logging so CI
-    // output shows the test is still alive and how long it has been waiting.
-    let request_id_hex = hex::encode(expected_request_id);
-    let result = tokio::time::timeout(timeout, async {
-        let mut elapsed_secs = 0u64;
-        let mut rx = rx;
-        loop {
-            tokio::select! {
-                res = &mut rx => { return res; }
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {
-                    elapsed_secs += 15;
-                    tracing::info!(
-                        request_id = %request_id_hex,
-                        elapsed_secs,
-                        "still waiting for RespondBidirectionalEvent..."
-                    );
-                }
+    let inner_sets = match meta.inner_instructions {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(inner) => inner,
+        _ => return Ok(Vec::new()),
+    };
+
+    let target_program = program_id.to_string();
+    let mut events = Vec::new();
+
+    for inner_set in inner_sets.iter() {
+        for instruction in inner_set.instructions.iter() {
+            let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(parsed)) = instruction
+            else {
+                continue;
+            };
+
+            if parsed.program_id != target_program {
+                continue;
+            }
+
+            let Ok(ix_data) = solana_sdk::bs58::decode(&parsed.data).into_vec() else {
+                continue;
+            };
+
+            if ix_data.len() < anchor_client::anchor_lang::event::EVENT_IX_TAG_LE.len() + 8
+                || !ix_data.starts_with(anchor_client::anchor_lang::event::EVENT_IX_TAG_LE)
+            {
+                continue;
+            }
+
+            let discriminator = &ix_data[8..16];
+            if discriminator != RespondBidirectionalEvent::DISCRIMINATOR {
+                continue;
+            }
+
+            if let Ok(event) = RespondBidirectionalEvent::deserialize(&mut &ix_data[16..]) {
+                events.push(event);
             }
         }
-    })
-    .await;
-    event_unsub.unsubscribe().await;
-
-    match result {
-        Ok(Ok(Ok(outcome))) => Ok(outcome),
-        Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol respond bidirectional signature: {e}"),
-        Ok(Err(_)) => anyhow::bail!(
-            "sol respond bidirectional event channel closed unexpectedly \
-             (request_id={request_id_hex})",
-        ),
-        Err(_) => anyhow::bail!(
-            "timeout ({timeout:?}) waiting for respond bidirectional on sol (request_id={request_id_hex})",
-        ),
     }
+
+    Ok(events)
 }
 
 impl<'a> IntoFuture for SignAction<'a> {
@@ -925,7 +937,7 @@ impl SignAction<'_> {
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(self.gas)
+            .gas(near_primitives::types::Gas::from_gas(self.gas.as_gas()))
             .deposit(self.deposit)
             .transact_async()
             .await?;
@@ -964,7 +976,7 @@ fn parse_sol_signature(
 /// Ethereum contract signature request outcome
 pub struct EthSignOutcome {
     pub signer_address: Address,
-    pub contract_address: String,
+    pub contract_address: Address,
     pub eth_tx_hash: Option<String>,
     pub deposit_amount: u64,
     pub signature: FullSignature,
@@ -995,7 +1007,7 @@ impl fmt::Debug for EthSignOutcome {
 /// ETH contract signature request builder
 pub struct EthSignAction<'a> {
     sign_action: SignAction<'a>,
-    contract_addr: String,
+    contract_addr: Address,
     signer: PrivateKeySigner,
     deposit_amount: U256,
     algo: String,
@@ -1006,13 +1018,10 @@ pub struct EthSignAction<'a> {
 impl<'a> EthSignAction<'a> {
     pub fn new(sign_action: SignAction<'a>) -> Self {
         let eth = sign_action.nodes.cfg.eth.as_ref().unwrap().clone();
-        let signer = PrivateKeySigner::from_str(eth.account_sk.as_ref())
-            .with_context(|| "invalid private key")
-            .unwrap();
         Self {
             sign_action,
-            contract_addr: eth.contract_address.clone(),
-            signer,
+            contract_addr: eth.contract_address,
+            signer: eth.account_sk,
             deposit_amount: U256::from(1), // 1 wei
             algo: "ECDSA".to_string(),
             dest: "ethereum".to_string(),
@@ -1022,7 +1031,7 @@ impl<'a> EthSignAction<'a> {
 
     /// Set the ETH contract address to interact with
     pub fn contract_address(mut self, address: &str) -> Self {
-        self.contract_addr = address.to_string();
+        self.contract_addr = address.parse().expect("invalid contract address");
         self
     }
 
@@ -1095,13 +1104,9 @@ impl EthSignAction<'_> {
             .unwrap_or_else(|| rand::thread_rng().gen());
         let payload_hash = *alloy::primitives::keccak256(payload);
         let rpc_url = "https://ethereum-sepolia-rpc.publicnode.com";
-        let contract_addr: Address = self
-            .contract_addr
-            .parse()
-            .with_context(|| format!("invalid contract address {}", self.contract_addr))?;
 
         tracing::info!(
-            "calling ETH ChainSignatures contract: contract=0x{}, payload={:?}, path={}, algo={}, dest={}, params={}, deposit={}",
+            "calling ETH ChainSignatures contract: contract={}, payload={:?}, path={}, algo={}, dest={}, params={}, deposit={}",
             self.contract_addr,
             payload,
             path,
@@ -1116,7 +1121,7 @@ impl EthSignAction<'_> {
         let provider = ProviderBuilder::new()
             .wallet(self.signer)
             .connect_http(rpc_url.parse()?);
-        let contract = ChainSignatures::new(contract_addr, provider.clone());
+        let contract = ChainSignatures::new(self.contract_addr, provider.clone());
 
         // Prepare the sign request
         let sign_request = ChainSignatures::SignRequest {
@@ -1129,7 +1134,7 @@ impl EthSignAction<'_> {
         };
 
         tracing::info!(
-            contract = format!("0x{}", self.contract_addr),
+            contract = %self.contract_addr,
             from = format!("0x{:x}", signer_address),
             payload = format!("0x{}", hex::encode(payload_hash)),
             path,
@@ -1205,7 +1210,7 @@ impl EthSignAction<'_> {
 
             // filter for SignatureResponded events
             let filter = alloy::rpc::types::Filter::new()
-                .address(contract_addr)
+                .address(self.contract_addr)
                 .from_block(current_block.saturating_sub(10)) // Look back 10 blocks
                 .to_block(current_block)
                 .event_signature(alloy::primitives::keccak256(

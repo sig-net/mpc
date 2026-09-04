@@ -1,0 +1,11 @@
+{
+  // What ships: `src/` only, so `dist/main.js` is the whole entry point and
+  // `devtools/` (the deploy wallet, the seed) cannot reach the artifact at all.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

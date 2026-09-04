@@ -2,18 +2,28 @@
 name = "mpc-crypto"
 version.workspace = true
 edition = "2021"
+description = "Node-internal cryptography for the MPC network (not published; see signet-crypto for the public key-derivation primitives)"
+readme = "README.md"
+publish = false
 
 [dependencies]
 k256.workspace = true
+# TODO: replace anyhow with thiserror
 anyhow.workspace = true
 near-account-id.workspace = true
 near-sdk.workspace = true
 sha3.workspace = true
 
 mpc-primitives.workspace = true
+signet-crypto.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.12", features = ["custom"] }
+
+# `derive_delta` is only used off-chain by the node, never in the wasm contract.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hkdf.workspace = true
+near-primitives.workspace = true
 
 [dev-dependencies]
 alloy.workspace = true

@@ -33,7 +33,12 @@ pub struct MessagePrinter;
 
 impl CollectMessages for MessagePrinter {
     fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
-        let (msg, (from, to, _ts)) = msg;
+        let SendMessage {
+            message: msg,
+            from,
+            to,
+            ..
+        } = msg;
         let msg_type = message_type_str(msg);
         let action = if passed_filter {
             "Forwarded"
@@ -68,7 +73,12 @@ pub struct PerLinkCounter {
 
 impl CollectMessages for MessageCounter {
     fn observe_message(&mut self, msg: &SendMessage, passed_filter: bool) {
-        let (msg, (from, to, _ts)) = msg;
+        let SendMessage {
+            message: msg,
+            from,
+            to,
+            ..
+        } = msg;
 
         let sender_stats = self.links.entry(*from).or_default();
         let link_stats = sender_stats.entry(*to).or_default();
@@ -154,8 +164,8 @@ fn posit_id_num(posit_id: &PositProtocolId) -> u64 {
         PositProtocolId::Signature(sig_id, _presig_id, _round) => {
             // extract a 8-byte hash from a 32-byte hash
             let mut hash8: u64 = 0;
-            for chunk in sig_id.request_id.chunks_exact(8) {
-                hash8 ^= u64::from_be_bytes(chunk.try_into().unwrap());
+            for chunk in sig_id.request_id.as_chunks::<8>().0 {
+                hash8 ^= u64::from_be_bytes(*chunk);
             }
             hash8
         }

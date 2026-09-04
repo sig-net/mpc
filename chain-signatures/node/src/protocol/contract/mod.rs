@@ -1,9 +1,9 @@
 pub mod primitives;
 
-use self::primitives::{Candidates, Participants, PkVotes, Votes};
+use self::primitives::{Candidates, Participants, PkVotes, ThresholdVotes, Votes};
 use crate::{rpc::GovernanceInfo, util::NearPublicKeyExt as _};
 
-use mpc_contract::ProtocolContractState;
+use mpc_contract::ProtocolContractStateView;
 use mpc_crypto::PublicKey;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
@@ -16,8 +16,8 @@ pub struct InitializingContractState {
     pub pk_votes: PkVotes,
 }
 
-impl From<mpc_contract::InitializingContractState> for InitializingContractState {
-    fn from(value: mpc_contract::InitializingContractState) -> Self {
+impl From<mpc_contract::InitializingContractStateView> for InitializingContractState {
+    fn from(value: mpc_contract::InitializingContractStateView) -> Self {
         InitializingContractState {
             candidates: value.candidates.into(),
             threshold: value.threshold,
@@ -32,21 +32,19 @@ pub struct RunningContractState {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: Candidates,
-    pub join_votes: Votes,
     pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
 }
 
-impl From<mpc_contract::RunningContractState> for RunningContractState {
-    fn from(value: mpc_contract::RunningContractState) -> Self {
+impl From<mpc_contract::RunningContractStateView> for RunningContractState {
+    fn from(value: mpc_contract::RunningContractStateView) -> Self {
         RunningContractState {
             epoch: value.epoch,
             participants: value.participants.into(),
             threshold: value.threshold,
             public_key: value.public_key.into_affine_point(),
-            candidates: value.candidates.into(),
-            join_votes: value.join_votes.into(),
             leave_votes: value.leave_votes.into(),
+            threshold_votes: value.threshold_votes,
         }
     }
 }
@@ -56,7 +54,10 @@ pub struct ResharingContractState {
     pub old_epoch: u64,
     pub old_participants: Participants,
     pub new_participants: Participants,
+    /// Threshold of the current shares held by `old_participants`.
     pub threshold: usize,
+    /// Threshold baked into the reshared shares for `new_participants`.
+    pub new_threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
     pub cancel_votes: HashSet<AccountId>,
@@ -69,6 +70,7 @@ impl From<mpc_contract::ResharingContractState> for ResharingContractState {
             old_participants: contract_state.old_participants.into(),
             new_participants: contract_state.new_participants.into(),
             threshold: contract_state.threshold,
+            new_threshold: contract_state.new_threshold,
             public_key: contract_state.public_key.into_affine_point(),
             finished_votes: contract_state
                 .finished_votes
@@ -120,7 +122,7 @@ impl ProtocolState {
             }),
             ProtocolState::Resharing(state) => Some(GovernanceInfo {
                 me: *state.new_participants.find_participant(account_id)?,
-                threshold: state.threshold,
+                threshold: state.new_threshold,
                 epoch: state.old_epoch + 1,
                 public_key: state.public_key,
                 participants: state.new_participants.keys().copied().collect(),
@@ -131,17 +133,19 @@ impl ProtocolState {
     }
 }
 
-impl TryFrom<ProtocolContractState> for ProtocolState {
+impl TryFrom<ProtocolContractStateView> for ProtocolState {
     type Error = ();
 
-    fn try_from(value: ProtocolContractState) -> Result<Self, Self::Error> {
+    fn try_from(value: ProtocolContractStateView) -> Result<Self, Self::Error> {
         match value {
-            ProtocolContractState::Initializing(state) => {
+            ProtocolContractStateView::Initializing(state) => {
                 Ok(ProtocolState::Initializing(state.into()))
             }
-            ProtocolContractState::Running(state) => Ok(ProtocolState::Running(state.into())),
-            ProtocolContractState::Resharing(state) => Ok(ProtocolState::Resharing(state.into())),
-            ProtocolContractState::NotInitialized => Err(()),
+            ProtocolContractStateView::Running(state) => Ok(ProtocolState::Running(state.into())),
+            ProtocolContractStateView::Resharing(state) => {
+                Ok(ProtocolState::Resharing(state.into()))
+            }
+            ProtocolContractStateView::NotInitialized => Err(()),
         }
     }
 }
