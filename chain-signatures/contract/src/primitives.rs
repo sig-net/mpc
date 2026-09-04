@@ -210,16 +210,8 @@ impl Participants {
         self.account_to_participant_id.remove(account_id);
     }
 
-    pub fn get(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
-        self.participants.get(account_id)
-    }
-
     pub fn iter(&self) -> btree_map::Iter<'_, AccountId, ParticipantInfo> {
         self.participants.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> btree_map::IterMut<'_, AccountId, ParticipantInfo> {
-        self.participants.iter_mut()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &AccountId> {
@@ -241,15 +233,6 @@ impl<'a> IntoIterator for &'a Participants {
 
     fn into_iter(self) -> Self::IntoIter {
         self.participants.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut Participants {
-    type Item = (&'a AccountId, &'a mut ParticipantInfo);
-    type IntoIter = btree_map::IterMut<'a, AccountId, ParticipantInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.participants.iter_mut()
     }
 }
 
@@ -305,10 +288,6 @@ impl Candidates {
         self.candidates.iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&AccountId, &mut CandidateInfo)> {
-        self.candidates.iter_mut()
-    }
-
     pub fn len(&self) -> usize {
         self.candidates.len() as usize
     }
@@ -356,20 +335,12 @@ impl Votes {
         self.votes.entry(account_id).or_default()
     }
 
-    pub fn len(&self) -> usize {
-        self.votes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.votes.is_empty()
-    }
-
     pub fn remove(&mut self, account_id: &AccountId) {
         self.votes.remove(account_id);
     }
 
-    pub fn contains_key(&self, account_id: &AccountId) -> bool {
-        self.votes.contains_key(account_id)
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
     }
 }
 
@@ -434,11 +405,6 @@ impl ThresholdVotes {
         self.votes.values().filter(|&&t| t == threshold).count()
     }
 
-    /// Get the threshold value voted for by `voter`, if any.
-    pub fn get(&self, voter: &AccountId) -> Option<Threshold> {
-        self.votes.get(voter).copied()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.votes.is_empty()
     }
@@ -481,17 +447,5 @@ impl CheckpointVotes {
 
     pub fn entry(&mut self, checkpoint: ConsensusCheckpointDigest) -> &mut HashSet<AccountId> {
         self.votes.entry(checkpoint).or_default()
-    }
-
-    pub fn get(&self, checkpoint: &ConsensusCheckpointDigest) -> Option<&HashSet<AccountId>> {
-        self.votes.get(checkpoint)
-    }
-
-    pub fn len(&self) -> usize {
-        self.votes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.votes.is_empty()
     }
 }
