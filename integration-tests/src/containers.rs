@@ -564,7 +564,6 @@ pub struct Solana {
     pub program_keypair: SolanaKeypair,
     pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
-    pub ws_port: u16,
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
     ledger_dir: PathBuf,
@@ -681,7 +680,6 @@ impl Solana {
                         program_keypair,
                         payer_keypair,
                         rpc_port,
-                        ws_port,
                         faucet_port,
                         rpc_client,
                         ledger_dir,
@@ -827,7 +825,6 @@ impl Solana {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
-            rpc_ws_url: self.ws_address.clone(),
             program_address,
             indexer: Default::default(),
         }

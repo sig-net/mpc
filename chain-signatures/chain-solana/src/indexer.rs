@@ -141,7 +141,6 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
         let client = SolanaClient::for_indexer(
             config.rpc_http_url.clone(),
-            config.rpc_ws_url.clone(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
@@ -587,7 +586,6 @@ mod tests {
         let program_id = Pubkey::new_unique();
         let client = SolanaClient::for_indexer(
             url.to_string(),
-            url.replace("http", "ws"),
             program_id,
             Arc::new(NoopPublisherTelemetry),
         )
@@ -1718,14 +1716,12 @@ mod tests {
             .unwrap_or_else(|_| "SigDHT99hPznk4d9SAxWLoBnKWT8jcob5pV8X7ti8SM".to_string());
 
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
-        let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
         let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
             http_url.clone(),
-            ws_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
             Arc::new(NoopPublisherTelemetry),
         );
