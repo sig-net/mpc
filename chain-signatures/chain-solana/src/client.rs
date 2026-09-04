@@ -94,7 +94,6 @@ pub struct SolanaClient {
     shared_backoff: SharedBackoff,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
-    pub rpc_ws_url: String,
     pub http_client: reqwest::Client,
     pub program_id: Pubkey,
     pub payer: Arc<Keypair>,
@@ -106,8 +105,8 @@ impl SolanaClient {
     pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
-        let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
+        // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
+        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -123,7 +122,6 @@ impl SolanaClient {
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
-            rpc_ws_url: sol.rpc_ws_url.clone(),
             http_client: reqwest::Client::new(),
             program_id,
             payer,
@@ -133,13 +131,13 @@ impl SolanaClient {
 
     pub fn for_indexer(
         rpc_http_url: String,
-        rpc_ws_url: String,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
-        let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), rpc_ws_url.clone());
+        // Empty ws slot: nothing subscribes.
+        let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -153,7 +151,6 @@ impl SolanaClient {
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url,
-            rpc_ws_url,
             http_client: reqwest::Client::new(),
             program_id: program_address,
             payer,
@@ -552,7 +549,6 @@ mod tests {
     fn test_client(url: &str) -> SolanaClient {
         SolanaClient::for_indexer(
             url.to_string(),
-            url.replace("http", "ws"),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
         )
