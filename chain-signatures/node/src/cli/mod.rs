@@ -114,9 +114,6 @@ pub enum Cli {
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
-        /// referer header for mainnet whitelist
-        #[arg(long, env("MPC_CLIENT_HEADER_REFERER"), default_value(None))]
-        client_header_referer: Option<String>,
         #[clap(flatten)]
         mesh_options: mesh::Options,
         #[clap(flatten)]
@@ -144,7 +141,6 @@ impl Cli {
                 storage_options,
                 log_options,
                 override_config,
-                client_header_referer,
                 mesh_options,
                 message_options,
             } => {
@@ -176,9 +172,6 @@ impl Cli {
                     ]);
                 }
 
-                if let Some(client_header_referer) = client_header_referer {
-                    args.extend(["--client-header-referer".to_string(), client_header_referer]);
-                }
                 if let Some(web_port) = web_port {
                     args.extend(["--web-port".to_string(), web_port.to_string()]);
                 }
@@ -217,7 +210,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             storage_options,
             log_options,
             override_config,
-            client_header_referer,
             mesh_options,
             message_options,
         } => {
@@ -265,7 +257,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
-                let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
+                let rpc_client = near_fetch::Client::new(&near_rpc);
                 mpc_chain_near::run(
                     &mpc_contract_id,
                     &account_id,
@@ -606,21 +598,6 @@ fn log_startup(
         midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
         "starting node",
     );
-}
-
-fn setup_rpc_client(
-    near_rpc_url: &str,
-    client_header_referer: Option<String>,
-) -> near_fetch::Client {
-    let mut rpc_client = near_fetch::Client::new(near_rpc_url);
-    if let Some(referer) = client_header_referer {
-        rpc_client
-            .inner_mut()
-            .headers_mut()
-            .insert(http::header::REFERER, referer.parse().unwrap());
-    }
-    tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
-    rpc_client
 }
 
 struct MeshHandles {
