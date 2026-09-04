@@ -306,18 +306,12 @@ async fn test_channel_contention_show_limit() {
     check_channel_contention(6, 50, 75, None).await;
 }
 
-// TODO(jakmeier): find out how to make this test work in CI, is is working just
-// fine locally
-#[ignore = "fails in CI"]
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_10k_requests() {
     // sending 100 x 100 requests at once
     check_channel_contention(100, 100, 75, None).await;
 }
 
-// TODO(jakmeier): find out how to make this test work in CI, is is working just
-// fine locally
-#[ignore = "fails in CI"]
 #[test(tokio::test(flavor = "multi_thread"))]
 #[allow(non_snake_case)]
 async fn test_channel_contention_1M_requests() {
