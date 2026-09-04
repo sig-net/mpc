@@ -47,8 +47,6 @@ use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-const DEFAULT_WEB_PORT: u16 = 3000;
-
 /// Capacity of the SignCommand channel that feeds chain sign events from the
 /// indexers/streams into the SignatureSpawner.
 const MAX_SIGN_COMMANDS: usize = 16384;
@@ -76,7 +74,7 @@ pub enum Cli {
         /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
-        web_port: Option<u16>,
+        web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -179,9 +177,7 @@ impl Cli {
                 if let Some(client_header_referer) = client_header_referer {
                     args.extend(["--client-header-referer".to_string(), client_header_referer]);
                 }
-                if let Some(web_port) = web_port {
-                    args.extend(["--web-port".to_string(), web_port.to_string()]);
-                }
+                args.extend(["--web-port".to_string(), web_port.to_string()]);
 
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
@@ -254,7 +250,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 let my_ip = local_ip().unwrap();
