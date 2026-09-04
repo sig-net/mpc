@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
@@ -83,55 +84,65 @@ pub(crate) async fn process_respond_event(
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id);
     let source_chain = respond_event.chain;
-    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
+
+    if let Some(entry) = ctx
+        .backlog
+        .get_by::<Sign<AnyProgress>>(source_chain, &sign_id)
+        .await
+    {
+        entry.verify_signature(root_pk, &respond_event.signature)?;
+        tracing::info!(?sign_id, "sign request completed successfully");
+        entry.complete().await;
+        ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+        return Ok(());
+    }
+
+    if let Some(entry) = ctx
+        .backlog
+        .get_by::<Bidirectional<Initial<AnyProgress>>>(source_chain, &sign_id)
+        .await
+    {
+        entry.verify_signature(root_pk, &respond_event.signature)?;
+        let event = match &entry.request().kind {
+            SignKind::SignBidirectional(event) => event.clone(),
+            _ => anyhow::bail!("unexpected sign kind for bidirectional initial entry"),
+        };
+        return advance_bidirectional_to_execution(entry, &event, respond_event, sign_id, root_pk)
+            .await;
+    }
+
+    if ctx
+        .backlog
+        .get_by::<Bidirectional<Executing>>(source_chain, &sign_id)
+        .await
+        .is_some()
+    {
         tracing::info!(
             ?sign_id,
             ?source_chain,
-            "respond event is already finalized or pruned; skipping"
+            "respond event backlog entry is already advanced; treating as processed"
         );
         return Ok(());
-    };
-
-    entry.verify_signature(root_pk, &respond_event.signature)?;
-
-    match &entry.request.kind {
-        SignKind::Sign => {
-            tracing::info!(?sign_id, "sign request completed successfully");
-            ctx.backlog.remove(source_chain, &sign_id).await;
-            ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
-            Ok(())
-        }
-        SignKind::SignBidirectional(event) => {
-            advance_bidirectional_to_execution(&entry, event, respond_event, sign_id, root_pk, ctx)
-                .await
-        }
-        SignKind::RespondBidirectional(_) => {
-            anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
-        }
     }
+
+    tracing::info!(
+        ?sign_id,
+        ?source_chain,
+        "respond event is already finalized or pruned; skipping"
+    );
+    Ok(())
 }
 
 /// Advance a bidirectional sign request from "signature responded" to
 /// "pending execution".
 async fn advance_bidirectional_to_execution(
-    entry: &crate::backlog::BacklogEntry,
+    entry: SignEntry<Bidirectional<Initial<AnyProgress>>>,
     event: &SignBidirectionalEvent,
     respond_event: SignatureRespondedEvent,
     sign_id: SignId,
     root_pk: mpc_primitives::PublicKey,
-    ctx: &StreamContext,
 ) -> anyhow::Result<()> {
     let source_chain = respond_event.chain;
-
-    if entry.execution_tx().is_some() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            entry_type = %entry.typename(),
-            "respond event backlog entry is already advanced; treating as processed"
-        );
-        return Ok(());
-    }
 
     // Admission validates the same derivations, but entries can enter the backlog
     // without passing admission (checkpoint recovery restores them wholesale). One
@@ -146,7 +157,7 @@ async fn advance_bidirectional_to_execution(
             ?err,
             "quarantining bidirectional request that can never advance"
         );
-        ctx.backlog.remove(source_chain, &sign_id).await;
+        entry.complete().await;
         return Ok(());
     }
 
@@ -197,8 +208,8 @@ async fn advance_bidirectional_to_execution(
         "bidirectional tx details before advancement",
     );
 
-    ctx.backlog
-        .advance(source_chain, sign_id, bidirectional_tx)
+    entry
+        .advance(bidirectional_tx)
         .await
         .with_context(|| {
             format!(
@@ -224,21 +235,18 @@ pub(crate) async fn process_respond_bidirectional_event(
     let source_chain = event.chain;
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
 
-    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
+    let Some(entry) = ctx
+        .backlog
+        .get_by::<Bidirectional<Final<AnyProgress>>>(source_chain, &sign_id)
+        .await
+    else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
         return Ok(());
     };
 
-    if !matches!(entry.request().kind, SignKind::RespondBidirectional(_)) {
-        anyhow::bail!(
-            "unexpected sign type for RespondBidirectionalEvent: {:?}",
-            entry.request().kind
-        );
-    }
-
     entry.verify_signature(root_pk, &event.signature)?;
 
-    if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
+    if entry.complete().await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
@@ -297,14 +305,23 @@ pub async fn process_execution_confirmed(
     }
     let source_chain = pending_tx.source_chain;
 
-    let chain_ctx = ctx
+    let Some(entry) = ctx
         .backlog
-        .get(pending_tx.source_chain, &unwatched_sign_id)
+        .get_by::<Bidirectional<Executing>>(source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match &entry.request.kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
-            _ => None,
-        });
+    else {
+        tracing::warn!(
+            ?tx_id,
+            ?unwatched_sign_id,
+            "executing bidirectional entry not found in backlog"
+        );
+        return Ok(());
+    };
+
+    let chain_ctx = match &entry.request().kind {
+        SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
+        _ => None,
+    };
 
     let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
 
@@ -319,20 +336,19 @@ pub async fn process_execution_confirmed(
     };
 
     let sign_request = Arc::new(sign_request);
-    let updated_tx = ctx
-        .backlog
-        .respond(
-            pending_tx.source_chain,
-            &unwatched_sign_id,
-            Arc::clone(&sign_request),
-        )
+    entry
+        .advance(Arc::clone(&sign_request))
         .await
         .with_context(|| {
             format!(
                 "failed to transition pending tx to final response for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
-    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "transitioned transaction to final response");
+    tracing::info!(
+        ?tx_id,
+        ?unwatched_sign_id,
+        "transitioned transaction to final response"
+    );
 
     let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up

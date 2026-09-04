@@ -1,7 +1,11 @@
 use super::{Backlog, BacklogEntry, BacklogError};
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use anyhow::Context as _;
 use mpc_primitives::{BidirectionalTx, Chain, IndexedSignRequest, PublicKey, SignId, Signature};
 use std::sync::Arc;
+
+/// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
+pub type AnyProgress = SignProgress;
 
 // --- Typestate Markers ---
 
@@ -31,10 +35,7 @@ pub struct Executing(pub Arc<BidirectionalTx>);
 
 /// Typestate marker: Phase 2 signing the final respond transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Final<P = Generating> {
-    pub respond_request: Arc<IndexedSignRequest>,
-    pub progress: P,
-}
+pub struct Final<P = Generating>(pub P);
 
 // --- SignEntry Typestate Handle ---
 
@@ -99,12 +100,37 @@ impl<State> SignEntry<State> {
     pub async fn complete(self) -> Option<BacklogEntry> {
         self.backlog.remove(self.chain, &self.request.id).await
     }
+
+    /// Check that a respond event's signature is valid for this entry's active sign request.
+    pub fn verify_signature(
+        &self,
+        root_public_key: PublicKey,
+        signature: &Signature,
+    ) -> anyhow::Result<()> {
+        mpc_crypto::verify_signature(
+            root_public_key,
+            self.request.args.epsilon,
+            self.request.args.payload,
+            signature,
+        )
+        .with_context(|| {
+            format!(
+                "respond event carried invalid signature for sign id {:?}",
+                self.sign_id()
+            )
+        })
+    }
 }
 
 // --- Single-phase Sign Transitions ---
 
 impl SignEntry<Sign<Generating>> {
-    pub fn new_sign(chain: Chain, request: Arc<IndexedSignRequest>, backlog: Backlog) -> Self {
+    pub async fn new_sign(
+        chain: Chain,
+        request: Arc<IndexedSignRequest>,
+        backlog: Backlog,
+    ) -> Self {
+        backlog.insert(Arc::clone(&request)).await;
         Self {
             chain,
             request,
@@ -129,29 +155,17 @@ impl SignEntry<Sign<Publishing>> {
     pub fn publish_state(&self) -> &Arc<PublishState> {
         &self.state.0 .0
     }
-
-    pub fn verify_signature(
-        &self,
-        root_public_key: PublicKey,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
-        mpc_crypto::verify_signature(
-            root_public_key,
-            self.request.args.epsilon,
-            self.request.args.payload,
-            signature,
-        )
-    }
 }
 
 // --- Bidirectional Transitions ---
 
 impl SignEntry<Bidirectional<Initial<Generating>>> {
-    pub fn new_bidirectional(
+    pub async fn new_bidirectional(
         chain: Chain,
         request: Arc<IndexedSignRequest>,
         backlog: Backlog,
     ) -> Self {
+        backlog.insert(Arc::clone(&request)).await;
         Self {
             chain,
             request,
@@ -172,9 +186,13 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
     }
 }
 
-impl<P> SignEntry<Bidirectional<Initial<P>>> {
+impl SignEntry<Bidirectional<Initial<Publishing>>> {
+    pub fn publish_state(&self) -> &Arc<PublishState> {
+        &self.state.0 .0 .0
+    }
+
     /// Advance Phase 1 into destination-chain `Executing`.
-    pub async fn advance_to_execution(
+    pub async fn advance(
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
@@ -185,30 +203,16 @@ impl<P> SignEntry<Bidirectional<Initial<P>>> {
     }
 }
 
-impl SignEntry<Bidirectional<Initial<Publishing>>> {
-    pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0 .0 .0
-    }
-
-    pub fn verify_signature(
-        &self,
-        root_public_key: PublicKey,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
-        mpc_crypto::verify_signature(
-            root_public_key,
-            self.request.args.epsilon,
-            self.request.args.payload,
-            signature,
-        )
-    }
-
+impl SignEntry<Bidirectional<Initial<SignProgress>>> {
     /// Advance Phase 1 into destination-chain `Executing`.
     pub async fn advance(
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.advance_to_execution(tx).await
+        self.backlog
+            .advance(self.chain, self.request.id, Arc::clone(&tx))
+            .await?;
+        Ok(self.transition(Bidirectional(Executing(tx))))
     }
 }
 
@@ -225,18 +229,16 @@ impl SignEntry<Bidirectional<Executing>> {
         self.backlog
             .respond(self.chain, &self.request.id, Arc::clone(&respond_request))
             .await?;
-        Ok(self.transition(Bidirectional(Final {
-            respond_request,
-            progress: Generating,
-        })))
+        Ok(SignEntry {
+            chain: self.chain,
+            request: respond_request,
+            state: Bidirectional(Final(Generating)),
+            backlog: self.backlog,
+        })
     }
 }
 
 impl SignEntry<Bidirectional<Final<Generating>>> {
-    pub fn respond_request(&self) -> &Arc<IndexedSignRequest> {
-        &self.state.0.respond_request
-    }
-
     /// Advance Phase 2 from `Generating` to `Publishing`.
     pub async fn advance(
         self,
@@ -245,36 +247,19 @@ impl SignEntry<Bidirectional<Final<Generating>>> {
         self.backlog
             .publish(self.chain, &self.request.id, Arc::clone(&publish))
             .await?;
-        Ok(self.map_state(|state| {
-            Bidirectional(Final {
-                respond_request: state.0.respond_request,
-                progress: Publishing(publish),
-            })
-        }))
+        Ok(self.transition(Bidirectional(Final(Publishing(publish)))))
+    }
+}
+
+impl<P> SignEntry<Bidirectional<Final<P>>> {
+    pub fn respond_request(&self) -> &Arc<IndexedSignRequest> {
+        &self.request
     }
 }
 
 impl SignEntry<Bidirectional<Final<Publishing>>> {
-    pub fn respond_request(&self) -> &Arc<IndexedSignRequest> {
-        &self.state.0.respond_request
-    }
-
     pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0.progress.0
-    }
-
-    pub fn verify_signature(
-        &self,
-        root_public_key: PublicKey,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
-        let active = self.respond_request();
-        mpc_crypto::verify_signature(
-            root_public_key,
-            active.args.epsilon,
-            active.args.payload,
-            signature,
-        )
+        &self.state.0 .0 .0
     }
 }
 
@@ -342,12 +327,9 @@ impl SignState for Bidirectional<Final<Generating>> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Bidirectional(BidirectionalProgress::Final {
-                respond_request,
                 progress: SignProgress::Generating,
-            }) => Some(Bidirectional(Final {
-                respond_request: Arc::clone(respond_request),
-                progress: Generating,
-            })),
+                ..
+            }) => Some(Bidirectional(Final(Generating))),
             _ => None,
         }
     }
@@ -357,12 +339,40 @@ impl SignState for Bidirectional<Final<Publishing>> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Bidirectional(BidirectionalProgress::Final {
-                respond_request,
                 progress: SignProgress::Publishing(publish),
-            }) => Some(Bidirectional(Final {
-                respond_request: Arc::clone(respond_request),
-                progress: Publishing(Arc::clone(publish)),
-            })),
+                ..
+            }) => Some(Bidirectional(Final(Publishing(Arc::clone(publish))))),
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Sign<SignProgress> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Sign(progress) => Some(Sign(progress.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Bidirectional<Initial<SignProgress>> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)) => {
+                Some(Bidirectional(Initial(progress.clone())))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Bidirectional<Final<SignProgress>> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                Some(Bidirectional(Final(progress.clone())))
+            }
             _ => None,
         }
     }
@@ -379,10 +389,26 @@ impl Backlog {
         let state = State::try_from_status(&entry.status)?;
         Some(SignEntry {
             chain,
-            request: entry.request,
+            request: Arc::clone(entry.request()),
             state,
             backlog: self.clone(),
         })
+    }
+
+    /// Insert a single-phase sign request into the backlog and return its initial [`SignEntry`].
+    pub async fn insert_sign(
+        &self,
+        request: Arc<IndexedSignRequest>,
+    ) -> SignEntry<Sign<Generating>> {
+        SignEntry::new_sign(request.chain, request, self.clone()).await
+    }
+
+    /// Insert a two-phase bidirectional sign request into the backlog and return its initial [`SignEntry`].
+    pub async fn insert_bidirectional(
+        &self,
+        request: Arc<IndexedSignRequest>,
+    ) -> SignEntry<Bidirectional<Initial<Generating>>> {
+        SignEntry::new_bidirectional(request.chain, request, self.clone()).await
     }
 }
 
@@ -476,17 +502,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plain_sign_typestate_advance_and_complete() {
+    async fn test_plain_sign_typestate_advance_all_the_way_till_completion() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([1u8; 32]);
         let req = test_plain_request(sign_id, Chain::Ethereum);
 
-        backlog.insert(Arc::clone(&req)).await;
-
-        let entry = backlog
-            .get_by::<Sign<Generating>>(Chain::Ethereum, &sign_id)
-            .await
-            .expect("should find generating sign entry");
+        // 1. Initial entry via Backlog::insert_sign
+        let entry = backlog.insert_sign(Arc::clone(&req)).await;
+        assert_eq!(entry.sign_id(), sign_id);
+        assert_eq!(entry.state(), &Sign(Generating));
 
         // Verify that querying with the wrong state returns None
         assert!(backlog
@@ -494,7 +518,7 @@ mod tests {
             .await
             .is_none());
 
-        // advance to publishing
+        // 2. Advance to publishing
         let pub_entry = entry
             .advance(test_publish_state())
             .await
@@ -503,9 +527,35 @@ mod tests {
         assert_eq!(pub_entry.sign_id(), sign_id);
         assert_eq!(pub_entry.request().id, sign_id);
 
-        // complete and remove
+        // 3. Verify signature
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let valid_sig = mpc_crypto::generate_signature(&root_sk, &req.args);
+        pub_entry
+            .verify_signature(root_sk.public_key().into(), &valid_sig)
+            .expect("signature should verify");
+
+        // 4. Complete removing from backlog
         let removed = pub_entry.complete().await;
         assert!(removed.is_some());
+        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_plain_sign_entry_new_sign_chained_advance() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([11u8; 32]);
+        let req = test_plain_request(sign_id, Chain::Ethereum);
+
+        // Chained advance from new_sign all the way till completion
+        let completed = SignEntry::new_sign(Chain::Ethereum, req, backlog.clone())
+            .await
+            .advance(test_publish_state())
+            .await
+            .expect("advance to publishing should succeed")
+            .complete()
+            .await;
+
+        assert!(completed.is_some());
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
     }
 
@@ -515,19 +565,23 @@ mod tests {
         let sign_id = SignId::new([2u8; 32]);
         let req = test_bidi_request(sign_id, Chain::Solana);
 
-        backlog.insert(Arc::clone(&req)).await;
-
-        // 1. Initial Generating
-        let bidi_entry = backlog
-            .get_by::<Bidirectional<Initial<Generating>>>(Chain::Solana, &sign_id)
-            .await
-            .expect("should find bidi initial");
+        // 1. Initial Generating via insert_bidirectional
+        let bidi_entry = backlog.insert_bidirectional(Arc::clone(&req)).await;
+        assert_eq!(bidi_entry.sign_id(), sign_id);
+        assert_eq!(bidi_entry.state(), &Bidirectional(Initial(Generating)));
 
         // 2. Advance to Publishing
         let pub_entry = bidi_entry
             .advance(test_publish_state())
             .await
             .expect("should advance to publishing");
+
+        // Verify phase 1 signature
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let sig1 = mpc_crypto::generate_signature(&root_sk, &req.args);
+        pub_entry
+            .verify_signature(root_sk.public_key().into(), &sig1)
+            .expect("sig1 should verify");
 
         // 3. Advance to Executing
         let tx = test_bidirectional_tx(sign_id, Chain::Solana);
@@ -564,6 +618,10 @@ mod tests {
             .await
             .expect("should advance to final");
         assert_eq!(final_entry.request().id, sign_id);
+        assert_eq!(
+            final_entry.request().args.payload,
+            response_request.args.payload
+        );
 
         // Verify get_by can retrieve Final<Generating> state directly from backlog
         assert!(backlog
@@ -578,8 +636,79 @@ mod tests {
             .expect("should advance final to publishing");
         assert_eq!(final_pub_entry.respond_request().id, sign_id);
 
-        // 6. Complete
-        final_pub_entry.complete().await;
+        // Verify phase 2 signature against response_request
+        let sig2 = mpc_crypto::generate_signature(&root_sk, &response_request.args);
+        final_pub_entry
+            .verify_signature(root_sk.public_key().into(), &sig2)
+            .expect("sig2 should verify");
+
+        // 6. Complete removing from backlog
+        let completed = final_pub_entry.complete().await;
+        assert!(completed.is_some());
         assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_entry_new_bidirectional_chained_advances() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([22u8; 32]);
+        let req = test_bidi_request(sign_id, Chain::Solana);
+        let tx = test_bidirectional_tx(sign_id, Chain::Solana);
+        let response_request = Arc::new(IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            test_sign_args(5),
+            Chain::Solana,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![1, 2],
+                chain_ctx: None,
+            },
+        ));
+
+        // Start from initial entry, and keep calling advance all the way till completion!
+        let completed = SignEntry::new_bidirectional(Chain::Solana, req, backlog.clone())
+            .await
+            .advance(test_publish_state())
+            .await
+            .expect("advance to initial publishing")
+            .advance(tx)
+            .await
+            .expect("advance to executing")
+            .advance(response_request)
+            .await
+            .expect("advance to final generating")
+            .advance(test_publish_state())
+            .await
+            .expect("advance to final publishing")
+            .complete()
+            .await;
+
+        assert!(completed.is_some());
+        assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_any_progress_completion() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([33u8; 32]);
+        let req = test_plain_request(sign_id, Chain::Ethereum);
+
+        let entry = backlog.insert_sign(req).await;
+        let _ = entry
+            .advance(test_publish_state())
+            .await
+            .expect("advance to publishing");
+
+        // Query with wildcard AnyProgress typestate
+        let entry = backlog
+            .get_by::<Sign<AnyProgress>>(Chain::Ethereum, &sign_id)
+            .await
+            .expect("should match AnyProgress");
+
+        // Complete removing from backlog
+        let completed = entry.complete().await;
+        assert!(completed.is_some());
+        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
     }
 }

@@ -528,18 +528,17 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         )))
         .await;
     seeded_backlog
-        .set_status(
+        .publish(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature,
-                    participants: vec![Participant::from(0u32)],
-                    is_proposer: true,
-                }),
-            },
+            Arc::new(PublishState {
+                signature,
+                participants: vec![Participant::from(0u32)],
+                is_proposer: true,
+            }),
         )
-        .await;
+        .await
+        .unwrap();
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
         .await;

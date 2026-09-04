@@ -551,22 +551,17 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         nonce: checkpoint_nonce,
     };
     backlog
-        .set_status(
+        .publish(
             execution_tx.source_chain,
             &execution_sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                }),
-            },
+            Arc::new(PublishState {
+                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: true,
+            }),
         )
-        .await;
+        .await
+        .unwrap();
     backlog
         .advance(Chain::Solana, execution_sign_id, Arc::new(execution_tx))
         .await
@@ -896,22 +891,17 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         )))
         .await;
     backlog
-        .set_status(
+        .publish(
             tx.source_chain,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                }),
-            },
+            Arc::new(PublishState {
+                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: true,
+            }),
         )
-        .await;
+        .await
+        .unwrap();
     backlog
         .advance(Chain::Solana, sign_id, Arc::new(tx))
         .await
@@ -1039,22 +1029,17 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
 
     // Set the status to PendingPublish so the watcher is active
     backlog
-        .set_status(
+        .publish(
             tx.source_chain,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                }),
-            },
+            Arc::new(PublishState {
+                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: true,
+            }),
         )
-        .await;
+        .await
+        .unwrap();
 
     // Advance the sign request to execution
     backlog
@@ -1099,22 +1084,17 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
 
     // Set the status of the replacement sign request to PendingPublish
     backlog
-        .set_status(
+        .publish(
             Chain::Solana,
             &replacement_sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                }),
-            },
+            Arc::new(PublishState {
+                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: true,
+            }),
         )
-        .await;
+        .await
+        .unwrap();
 
     // Advance the replacement sign request
     backlog

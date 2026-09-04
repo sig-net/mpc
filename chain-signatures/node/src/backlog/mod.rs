@@ -2,7 +2,9 @@ mod checkpoints;
 pub mod consensus;
 pub mod request;
 
-pub use request::SignEntry;
+pub use request::{
+    AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
+};
 
 use crate::sign_bidirectional::{
     BidirectionalProgress, PublishState, SignBidirectionalEventExt, SignProgress, SignStatus,
@@ -461,32 +463,6 @@ impl Backlog {
             .map(|watcher| (watcher.sign_id, watcher.tx))
     }
 
-    /// Update the status of a tracked bidirectional transaction on the source chain.
-    ///
-    /// Test-only; see the note on [`Backlog::set_request`].
-    #[cfg(any(test, feature = "test-feature"))]
-    pub async fn set_status(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        status: SignStatus,
-    ) -> Option<BacklogEntry> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            tracing::warn!(
-                ?chain,
-                ?id,
-                ?status,
-                "set_status: tx id not found in chain pending requests"
-            );
-            return None;
-        };
-        tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
-        entry.set_status(status);
-        Some(entry.clone())
-    }
-
     /// Advances a `Sign` transaction to its execution phase and register execution watcher.
     /// This is called after the protocol generates the signature for a SignBidirectional request.
     pub async fn advance(
@@ -840,14 +816,6 @@ impl BacklogEntry {
         self.status.clone()
     }
 
-    /// Set the status of this transaction
-    ///
-    /// Test-only; see the note on [`Backlog::set_request`].
-    #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_status(&mut self, status: SignStatus) {
-        self.status = status;
-    }
-
     /// Test-only; see the note on [`Backlog::set_request`].
     #[cfg(any(test, feature = "test-feature"))]
     pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
@@ -1136,10 +1104,12 @@ mod tests {
         dest: &str,
     ) {
         let sign_id = SignId::new(tx.request_id);
-        backlog
-            .insert(create_bidirectional_request(sign_id, chain, dest, 0))
-            .await;
-        backlog.set_status(chain, &sign_id, status).await;
+        let request = create_bidirectional_request(sign_id, chain, dest, 0);
+        let mut pending = backlog.pending(&chain).write().await;
+        let entry = BacklogEntry::with_status(request, status);
+        if pending.insert(sign_id, entry).is_none() {
+            backlog.total_pending.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[tokio::test]
@@ -1915,15 +1885,9 @@ mod tests {
             ))
             .await;
         backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::Bidirectional(BidirectionalProgress::Final {
-                    respond_request: completion_request,
-                    progress: SignProgress::Generating,
-                }),
-            )
-            .await;
+            .respond(Chain::Solana, &sign_id, completion_request)
+            .await
+            .unwrap();
 
         let requeued = backlog.take_requeueable_requests(Chain::Solana).await;
         assert_eq!(requeued.len(), 1);
@@ -1987,15 +1951,9 @@ mod tests {
             ))
             .await;
         backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::Bidirectional(BidirectionalProgress::Final {
-                    respond_request: completion_request,
-                    progress: SignProgress::Generating,
-                }),
-            )
-            .await;
+            .respond(Chain::Solana, &sign_id, completion_request)
+            .await
+            .expect("should transition to final generating");
 
         backlog
             .publish(Chain::Solana, &sign_id, test_publish_state(true))
@@ -2016,7 +1974,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watch_unwatch_and_set_status() {
+    async fn test_watch_unwatch_and_respond() {
         use k256::Scalar;
         let backlog = Backlog::new();
         let tx = create_test_tx(7);
@@ -2053,7 +2011,7 @@ mod tests {
         assert_eq!(s, sign_id);
         assert_eq!(watched_tx.id, tx.id);
 
-        // set_status should update the sign request status
+        // respond should transition to final response signing
         let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
             sign_id,
             create_test_args(sign_id.request_id[0]),
@@ -2066,15 +2024,9 @@ mod tests {
             },
         ));
         backlog
-            .set_status(
-                tx.source_chain,
-                &sign_id,
-                SignStatus::Bidirectional(BidirectionalProgress::Final {
-                    respond_request: completion_request,
-                    progress: SignProgress::Generating,
-                }),
-            )
-            .await;
+            .respond(tx.source_chain, &sign_id, completion_request)
+            .await
+            .expect("respond should transition to final generating");
         let successes = backlog
             .pending_generation_bidirectionals(tx.source_chain)
             .await;
@@ -2332,14 +2284,9 @@ mod tests {
             ))
             .await;
         backlog
-            .set_status(
-                tx.source_chain,
-                &sign_id,
-                SignStatus::Bidirectional(BidirectionalProgress::Initial(
-                    SignProgress::Publishing(test_publish_state(true)),
-                )),
-            )
-            .await;
+            .publish(tx.source_chain, &sign_id, test_publish_state(true))
+            .await
+            .expect("should transition to publishing");
 
         backlog
             .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
