@@ -18,7 +18,6 @@ members = [
     "chain-signatures/chain-midnight",
     "chain-signatures/utils",
 ]
-exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
