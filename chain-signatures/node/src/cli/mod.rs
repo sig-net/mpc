@@ -82,7 +82,7 @@ pub enum Cli {
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
-        sign_sk: Option<SecretKey>,
+        sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[clap(flatten)]
         eth: EthArgs,
@@ -163,9 +163,7 @@ impl Cli {
                     "--redis-url".to_string(),
                     storage_options.redis_url.to_string(),
                 ];
-                if let Some(sign_sk) = sign_sk {
-                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                }
+                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -255,7 +253,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
             let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
-            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 let my_ip = local_ip().unwrap();
                 Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
@@ -404,10 +401,9 @@ fn configuration_digest(
     account_id: AccountId,
     account_sk: SecretKey,
     cipher_pk: String,
-    sign_sk: Option<SecretKey>,
+    sign_sk: SecretKey,
     eth: EthArgs,
 ) -> i64 {
-    let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
         mpc_contract_id,
@@ -1202,6 +1198,8 @@ mod tests {
             "--account-id",
             "test.near",
             "--account-sk",
+            &account_sk,
+            "--sign-sk",
             &account_sk,
             "--cipher-sk",
             "cipher",
