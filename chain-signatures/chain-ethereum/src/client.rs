@@ -209,22 +209,20 @@ impl EthereumClient {
         eth: EthConfig,
         shared_backoff: SharedBackoff,
     ) -> anyhow::Result<EthereumClient> {
+        // Without the `helios` feature the CLI already forces `light_client`
+        // to false (with a warning), so only the direct-RPC client exists.
+        #[cfg(feature = "helios")]
         let inner = if eth.light_client {
-            #[cfg(feature = "helios")]
-            {
-                EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
-            }
-            #[cfg(not(feature = "helios"))]
-            {
-                anyhow::bail!(
-                    "ethereum light client requested, but mpc-node was built without helios feature"
-                );
-            }
+            EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
         } else {
             EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
                 eth.execution_rpc_http_url,
             ))
         };
+        #[cfg(not(feature = "helios"))]
+        let inner = EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
+            eth.execution_rpc_http_url,
+        ));
 
         Ok(Self {
             inner,

@@ -62,7 +62,7 @@ fn catchup_retry_strategy() -> RetryConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
     Block(UiConfirmedBlock),
     Missing,
@@ -184,21 +184,6 @@ impl SolanaClient {
             commitment: Some(CommitmentConfig::finalized()),
             max_supported_transaction_version: Some(0),
         }
-    }
-
-    pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
-            SOL_RPC_TIMEOUT,
-            self.rpc_retry,
-            self.shared_backoff,
-            "get_slot",
-            {
-                self.rpc_client
-                    .get_slot()
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
-            }
-        )
     }
 
     /// Get the latest finalized slot from the Solana RPC.

@@ -6,7 +6,6 @@ use crate::{execute, utils, NodeConfig};
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
-use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
 use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
@@ -64,9 +63,6 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = NearIndexerOptions {
-            running_threshold: 120,
-        };
         let eth = EthArgs::from_config(cfg.eth.clone());
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
@@ -87,7 +83,6 @@ impl Node {
             hydration,
             canton,
             midnight,
-            indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
@@ -167,9 +162,6 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-        let indexer_options = NearIndexerOptions {
-            running_threshold: 120,
-        };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = SolArgs::from_config(config.cfg.sol.clone());
@@ -189,7 +181,6 @@ impl Node {
             hydration,
             canton,
             midnight,
-            indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
