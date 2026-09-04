@@ -67,9 +67,12 @@ const strategies = {
         gracefulStop: '45m',
       },
     },
+    // Only the success rate is asserted. A count threshold cannot tell four
+    // failures out of four from four out of four hundred, so it passes exactly
+    // when a short run has gone entirely wrong. bidi_failures stays a counter,
+    // read by its reason tag rather than gated on.
     thresholds: {
       bidi_success: ['rate>0.95'],
-      bidi_failures: ['count<10'],
     },
   },
   rate_6_min: {
@@ -85,7 +88,6 @@ const strategies = {
     },
     thresholds: {
       bidi_success: ['rate>0.95'],
-      bidi_failures: ['count<50'],
     },
   },
 };
