@@ -1014,6 +1014,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         holders.sort();
         holders
     }
+
+    #[cfg(feature = "test-feature")]
+    pub async fn fetch_participants(&self, id: A::Id) -> Vec<Participant> {
+        use deadpool_redis::redis::AsyncCommands;
+        let mut conn = self.redis_pool.get().await.unwrap();
+        let artifact: A = conn.hget(&self.artifact_key, id).await.unwrap();
+        let mut participants = artifact.participants().to_vec();
+        participants.sort();
+        participants
+    }
 }
 
 #[cfg(test)]

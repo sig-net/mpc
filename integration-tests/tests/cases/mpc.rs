@@ -1321,3 +1321,93 @@ fn test_truncate_per_owner_insufficient() {
     data.insert(p, BTreeMap::from([(p, vec![dummy_pair(1)])]));
     truncate_per_owner(data, 2);
 }
+
+/// Generate triples with all nodes available. Verify that every generated
+/// artifact lists all nodes as participants and holders, and that every other
+/// node also stores its share.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_everybody_participate_triple_protocol() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_triples()
+        .with_node_min_triples(1)
+        .build()
+        .await;
+
+    network.assert_triples(1, Duration::from_secs(180)).await;
+
+    let all_participants = network.sorted_participants();
+
+    for node in &network.nodes {
+        for id in &node.owned_triples().await {
+            let holders = node.triple_storage.fetch_holders(*id).await;
+            assert_eq!(
+                holders, all_participants,
+                "triple {id} on {:?} should have all participants as holders",
+                node.me
+            );
+
+            let participants = node.triple_storage.fetch_participants(*id).await;
+            assert_eq!(
+                participants, all_participants,
+                "triple {id} on {:?} should list all nodes as participants",
+                node.me
+            );
+
+            for peer in &network.nodes {
+                assert!(
+                    peer.triple_storage.contains_by_owner(*id, node.me).await,
+                    "triple {id} owned by {:?} should be present on {:?}",
+                    node.me,
+                    peer.me
+                );
+            }
+        }
+    }
+}
+
+/// Generate presignatures with all nodes available. Verify that every generated
+/// artifact lists all nodes as participants and holders, and that every other
+/// node also stores its share.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_everybody_participate_presignature_protocol() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_presignatures()
+        .with_node_min_presignatures(1)
+        .build()
+        .await;
+
+    network
+        .assert_presignatures(1, Duration::from_secs(180))
+        .await;
+
+    let all_participants = network.sorted_participants();
+
+    for node in &network.nodes {
+        for id in &node.owned_presignatures().await {
+            let holders = node.presignature_storage.fetch_holders(*id).await;
+            assert_eq!(
+                holders, all_participants,
+                "presignature {id} on {:?} should have all participants as holders",
+                node.me
+            );
+
+            let participants = node.presignature_storage.fetch_participants(*id).await;
+            assert_eq!(
+                participants, all_participants,
+                "presignature {id} on {:?} should list all nodes as participants",
+                node.me
+            );
+
+            for peer in &network.nodes {
+                assert!(
+                    peer.presignature_storage
+                        .contains_by_owner(*id, node.me)
+                        .await,
+                    "presignature {id} owned by {:?} should be present on {:?}",
+                    node.me,
+                    peer.me
+                );
+            }
+        }
+    }
+}
