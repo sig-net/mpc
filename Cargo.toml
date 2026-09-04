@@ -16,6 +16,7 @@ members = [
     "chain-signatures/chain-near",
     "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
+    "chain-signatures/compact-hashing",
     "chain-signatures/utils",
 ]
 resolver = "2"
@@ -86,6 +87,7 @@ midnight-onchain-runtime = "4.0.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
+midnight-transient-crypto = "3.0.0"
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -96,6 +98,7 @@ mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
+mpc-compact-hashing = { path = "./chain-signatures/compact-hashing" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }

@@ -21,6 +21,7 @@ midnight-onchain-runtime.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true
 midnight-storage.workspace = true
+midnight-transient-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
@@ -39,5 +40,4 @@ sandbox = []
 
 [dev-dependencies]
 jsonrpsee = { version = "0.24.10", features = ["server"] }
-midnight-transient-crypto = "3.0.0"
 tokio = { workspace = true, features = ["test-util"] }

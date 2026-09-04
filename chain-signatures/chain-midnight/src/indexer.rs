@@ -659,7 +659,9 @@ mod tests {
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
         record.request_nonce = nonce;
-        let rid = crate::request_id::compute_request_id(&record);
+        let rid = crate::hashing::compute_request_id(
+            &crate::test_utils::aligned_value_from_record(&record),
+        );
         (record, rid)
     }
 
@@ -1099,7 +1101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_entry_decodes_resolves_and_converts() {
+    async fn captured_cell_decodes_resolves_and_converts_under_transient_id() {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
@@ -1115,7 +1117,7 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
-        let notification = decode_notification(&emission.payload);
+        let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
             .expect("captured caller state decodes");
@@ -1126,6 +1128,53 @@ mod tests {
             caller_tree,
         );
 
+        let legacy_request = direct_indexer()
+            .await
+            .process_entry(
+                &source,
+                notification.clone(),
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
+            .await
+            .expect("captured entry processing does not hold");
+        assert!(
+            legacy_request.is_none(),
+            "the pre-transient captured ID must not bypass the request-ID gate"
+        );
+
+        let captured_tree = source
+            .states
+            .get(&(hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()))
+            .expect("captured caller state is installed");
+        let requests_path = unpack_notification_v1(&notification)
+            .expect("captured notification unpacks")
+            .requests_path;
+        let StateValue::Map(entries) = signet_field_node_by_path(captured_tree, &requests_path)
+            .expect("captured requests field resolves")
+        else {
+            panic!("captured requests field is not a map");
+        };
+        let entry = entries
+            .get(&key_of(hex_32(CAPTURE_REQUEST_ID)))
+            .expect("captured request entry exists");
+        let StateValue::Cell(cell) = &*entry else {
+            panic!("captured request entry is not a cell");
+        };
+        let request_id = crate::hashing::compute_request_id(cell);
+        notification.request_id = request_id;
+        source.states.insert(
+            (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![(key_of(request_id), (*entry).clone())]),
+            ]),
+        );
+
         let request = direct_indexer()
             .await
             .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
@@ -1133,7 +1182,7 @@ mod tests {
             .expect("captured entry processing does not hold")
             .expect("captured entry produces a request");
 
-        assert_eq!(request.id, SignId::new(hex_32(CAPTURE_REQUEST_ID)));
+        assert_eq!(request.id, SignId::new(request_id));
         assert_eq!(request.args.key_version, 1);
         assert_eq!(
             request.args.path,
@@ -1566,7 +1615,9 @@ mod tests {
         let mut bad_record = sample_record();
         bad_record.request_nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::request_id::compute_request_id(&bad_record);
+        let bad_rid = crate::hashing::compute_request_id(
+            &crate::test_utils::aligned_value_from_record(&bad_record),
+        );
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,

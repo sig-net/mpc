@@ -7,12 +7,12 @@
 mod config;
 mod convert;
 pub mod emissions;
+mod hashing;
 mod indexer;
 mod intent_gen;
 mod publisher;
 mod reader;
 pub mod records;
-mod request_id;
 mod rpc;
 mod source;
 mod state;
