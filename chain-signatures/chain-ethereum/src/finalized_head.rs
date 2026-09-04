@@ -156,12 +156,6 @@ impl FinalizedHeadTracker {
         }
     }
 
-    /// Cached finalized block number.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn current(&self) -> Option<u64> {
-        *self.head.borrow()
-    }
-
     /// Force the cached head to `n` (used by tests to bypass the watcher).
     #[cfg(test)]
     pub fn set_head(&self, n: u64) {
@@ -170,7 +164,7 @@ impl FinalizedHeadTracker {
 
     #[cfg(test)]
     async fn wait_for(&self, block_number: u64) -> anyhow::Result<()> {
-        if self.current().is_some_and(|head| head >= block_number) {
+        if (*self.head.borrow()).is_some_and(|head| head >= block_number) {
             return Ok(());
         }
         let mut rx = self.head.subscribe();

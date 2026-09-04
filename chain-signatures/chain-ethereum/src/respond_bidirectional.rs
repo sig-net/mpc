@@ -66,16 +66,12 @@ impl Output {
 
 #[derive(Debug)]
 pub struct TransactionOutput {
-    // TODO: consider if we need this field or use Output alone
-    #[allow(dead_code)]
-    pub success: bool,
     pub output: Output,
 }
 
 impl TransactionOutput {
     pub fn non_contract_call_output() -> Self {
         Self {
-            success: true,
             output: Output {
                 fields: HashMap::new(),
                 from_contract_call: false,
@@ -107,7 +103,6 @@ impl TransactionOutput {
         }
 
         Ok(TransactionOutput {
-            success: true,
             output: Output {
                 fields: output_map,
                 from_contract_call: true,

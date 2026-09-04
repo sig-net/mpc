@@ -4,6 +4,8 @@ use sha3::Digest;
 
 use crate::Chain;
 
+/// A checkpoint digest submitted for consensus voting and tracked by the
+/// contract.
 #[derive(
     BorshDeserialize,
     BorshSerialize,
@@ -18,14 +20,14 @@ use crate::Chain;
     Ord,
     Hash,
 )]
-pub struct ConsensusCheckpointDigest {
+pub struct CheckpointDigest {
     pub chain: Chain,
     pub height: u64,
     #[serde(with = "serde_bytes")]
     pub digest: [u8; 32],
 }
 
-impl ConsensusCheckpointDigest {
+impl CheckpointDigest {
     pub fn new(chain: Chain, height: u64, digest: [u8; 32]) -> Self {
         Self {
             chain,
@@ -33,12 +35,6 @@ impl ConsensusCheckpointDigest {
             digest,
         }
     }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointDigest {
-    pub height: u64,
-    pub digest: [u8; 32],
 }
 
 /// Digest of a backlog checkpoint.
