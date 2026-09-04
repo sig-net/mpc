@@ -287,11 +287,7 @@ async fn test_respond_event_advances_to_pending_execution() {
             Chain::Solana,
             &sign_id,
             SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
-                Arc::new(PublishState {
-                    signature: mpc_sig,
-                    participants: vec![],
-                    is_proposer: true,
-                }),
+                Arc::new(PublishState::new(mpc_sig, vec![], true)),
             ))),
         )
         .await;
@@ -560,11 +556,11 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState {
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
                 signature,
-                participants: vec![Participant::from(0u32)],
-                is_proposer: true,
-            }))),
+                vec![Participant::from(0u32)],
+                true,
+            )))),
         )
         .await;
 
@@ -642,11 +638,11 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState {
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
                 signature,
-                participants: vec![Participant::from(0u32)],
-                is_proposer: false,
-            }))),
+                vec![Participant::from(0u32)],
+                false,
+            )))),
         )
         .await;
 

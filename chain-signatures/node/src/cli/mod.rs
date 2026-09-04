@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::{self, NodeClient};
@@ -14,7 +13,7 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
 use crate::protocol::request::SignatureSpawnerTask;
 use crate::protocol::state::{Node, NodeStateWatcher};
-use crate::protocol::sync::SyncTask;
+use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -28,7 +27,6 @@ pub use args::{
     solana::SolArgs,
 };
 
-use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
 use enum_map::EnumMap;
@@ -36,6 +34,7 @@ use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
+use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
@@ -289,7 +288,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state,
                 contract_watcher,
                 contract_state_tx,
-                synced_peer_tx,
+                sync_report_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
@@ -322,7 +321,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 contract_watcher.clone(),
-                synced_peer_tx,
+                sync_report_tx.clone(),
             );
 
             log_startup(
@@ -357,6 +356,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 rpc_channel.clone(),
                 backlog.clone(),
+                sync_report_tx,
             )
             .await;
 
@@ -636,7 +636,7 @@ struct MeshHandles {
     mesh_state: watch::Receiver<MeshState>,
     contract_watcher: ContractStateWatcher,
     contract_state_tx: watch::Sender<Option<ProtocolState>>,
-    synced_peer_tx: mpsc::Sender<Participant>,
+    sync_report_tx: SyncReportSender,
 }
 
 impl MeshHandles {
@@ -646,8 +646,8 @@ impl MeshHandles {
         account_id: &AccountId,
     ) -> Self {
         let node_client = NodeClient::new(&message_options);
-        let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, synced_peer_rx);
+        let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
+        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -656,7 +656,7 @@ impl MeshHandles {
             mesh_state,
             contract_watcher,
             contract_state_tx,
-            synced_peer_tx,
+            sync_report_tx,
         }
     }
 }
@@ -763,6 +763,7 @@ impl ProtocolHandles {
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
         backlog: Backlog,
+        sync_report_tx: SyncReportSender,
     ) -> Self {
         let config = Config::new(LocalConfig {
             over: override_config.unwrap_or_default(),
@@ -789,6 +790,7 @@ impl ProtocolHandles {
             message_channel.clone(),
             rpc_channel,
             backlog,
+            sync_report_tx,
         );
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
@@ -904,15 +906,21 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
-        tokio::spawn(indexer_hydration::run(
-            hydration_config,
-            sign_tx.clone(),
-            backlog.clone(),
+        let hydration_indexer =
+            HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
+        tracing::info!("hydration indexer created successfully");
+        tokio::spawn(run_supervised(
+            hydration_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Hydration].clone(),
+            ),
             hydration_telemetry,
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            node_client.clone(),
-            checkpoints_rx[Chain::Hydration].clone(),
         ));
     }
 

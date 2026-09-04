@@ -1,0 +1,33 @@
+[package]
+name = "mpc-chain-hydration"
+edition = "2021"
+version.workspace = true
+description = "Hydration chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+# TODO: replace with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+k256.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+mpc-utils.workspace = true
+parity-scale-codec = { version = "3", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+sp-core = { version = "38.1", default-features = false, features = ["std"] }
+sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
+sp-state-machine = { version = "0.48", default-features = false, features = ["std"] }
+sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
+subxt = { version = "0.44", default-features = false, features = ["jsonrpsee", "native"] }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true
+tracing-subscriber.workspace = true

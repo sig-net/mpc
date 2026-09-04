@@ -261,7 +261,8 @@ Peers that respond and are participating in the MPC network are first listed as
 `Syncing` and receive a sync request. Only after the response for that has been
 answered, can the connection status transition to `Active`. Only peers with a
 connection status `Active` are valid for inclusion in the participant list of
-any protocol invocations.
+any protocol invocations. An `Active` peer goes back to `Syncing` when we learn
+our record of what it stores is wrong, see below.
 
 ### Share holder directory
 
@@ -288,7 +289,10 @@ from that without causing instability. That's why we have state sync, which
 updates the directory used for participant selection.
 
 State sync runs everytime a node connects to another, either after a fresh boot,
-or when re-connecting after the connection was lost for another reason.
+or when re-connecting after the connection was lost for another reason. It also
+runs when a peer rejects a proposal for an artifact we list it as holding: that
+reject is proof our record for that peer is stale, and re-syncing it repairs
+every artifact it is missing, not only the one that happened to be proposed.
 
 ![graph](./graphs/state_sync.svg)
 

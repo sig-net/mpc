@@ -56,8 +56,4 @@ impl MessageFilter {
             crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
         }
     }
-
-    pub fn clear(&mut self) {
-        self.filter.clear();
-    }
 }

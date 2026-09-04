@@ -14,7 +14,6 @@ axum-extra = "0.9.6"
 backon.workspace = true
 chrono = "0.4.24"
 dashmap = "6.1"
-google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
 highway = "1.1.0"
 hkdf = "0.12.4"
@@ -39,7 +38,6 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
 ] }
 opentelemetry-appender-tracing = "0.29.1"
 ed25519-zebra = { version = "4.1", default-features = false, features = ["alloc"] }
-subxt = { workspace = true, features = ["jsonrpsee", "native", "unstable-light-client"] }
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
 sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
@@ -70,7 +68,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 futures-util.workspace = true
-parity-scale-codec.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
@@ -85,6 +82,7 @@ mpc-chain-canton.workspace = true
 mpc-chain-ethereum.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-near.workspace = true
+mpc-chain-hydration.workspace = true
 mpc-chain-midnight.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
