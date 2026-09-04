@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
@@ -11,7 +11,6 @@ use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
-use bollard::container::LogsOptions;
 use bollard::errors::Error as DockerError;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
@@ -21,7 +20,6 @@ use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
 use elliptic_curve::rand_core::OsRng;
-use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_chain_solana::SolConfig;
@@ -49,7 +47,6 @@ use testcontainers::{
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
-use tokio::io::AsyncWriteExt;
 use tokio::runtime::Builder;
 use tokio::time::sleep;
 use tracing;
@@ -170,55 +167,6 @@ impl DockerClient {
             }) => Ok(()),
             Err(e) => Err(e.into()),
         }
-    }
-
-    pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-
-        // Asynchronous process that pipes docker attach output into stdout.
-        // Will die automatically once Docker container output is closed.
-        tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
-
-            while let Some(Ok(output)) = output.next().await {
-                stdout
-                    .write_all(output.into_bytes().as_ref())
-                    .await
-                    .unwrap();
-                stdout.flush().await.unwrap();
-            }
-        });
-
-        Ok(())
-    }
-
-    pub async fn output_logs(&self, id: &str, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
-            id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-
-        let mut out = std::fs::File::create(path)?;
-        tokio::spawn(async move {
-            while let Some(Ok(output)) = output.next().await {
-                std::io::Write::write_all(&mut out, output.into_bytes().as_ref()).unwrap();
-            }
-        });
-
-        Ok(())
     }
 
     /// Try and remove the docker network
@@ -616,7 +564,6 @@ pub struct Solana {
     pub program_keypair: SolanaKeypair,
     pub payer_keypair: SolanaKeypair,
     pub rpc_port: u16,
-    pub ws_port: u16,
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
     ledger_dir: PathBuf,
@@ -624,7 +571,6 @@ pub struct Solana {
 
 impl Solana {
     /// Program ID hardcoded in the solana program/contract.
-    pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
 
@@ -734,7 +680,6 @@ impl Solana {
                         program_keypair,
                         payer_keypair,
                         rpc_port,
-                        ws_port,
                         faucet_port,
                         rpc_client,
                         ledger_dir,
@@ -880,7 +825,6 @@ impl Solana {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
-            rpc_ws_url: self.ws_address.clone(),
             program_address,
             indexer: Default::default(),
         }

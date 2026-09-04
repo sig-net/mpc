@@ -390,12 +390,6 @@ impl MpcFixtureBuilder {
     }
 
     /// Set protocol config
-    pub fn with_triple_timeout_ms(mut self, ms: u64) -> Self {
-        self.fixture_config.triple_timeout_ms = ms;
-        self
-    }
-
-    /// Set protocol config
     pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
         self.fixture_config.presignature_timeout_ms = ms;
         self

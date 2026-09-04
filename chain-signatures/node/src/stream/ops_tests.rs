@@ -81,7 +81,7 @@ async fn recover_backlog_requeues_pending_signs() {
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
     wait_threshold_active(&mut mesh_rx, threshold).await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    backlog.recover_by_checkpoint(checkpoint).await.unwrap();
+    backlog.recover_by_checkpoint(&checkpoint).await;
 
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     requeue_pending_sign_requests(&ctx, Chain::Solana)
@@ -379,7 +379,8 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     // Simulate consensus confirmation so storage has the checkpoint
     assert_matches!(
         ctx.backlog
-            .confirm_consensus(tx.source_chain, checkpoint.digest())
+            .checkpoints()
+            .confirm(tx.source_chain, checkpoint.digest())
             .await,
         Ok(true)
     );
@@ -394,12 +395,13 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let recovered = Backlog::persisted(storage.clone());
 
     let checkpoint = recovered
-        .checkpoint_storage()
+        .checkpoints()
+        .storage()
         .load_latest(tx.source_chain)
         .await
         .unwrap()
         .unwrap();
-    recovered.recover_by_checkpoint(checkpoint).await.unwrap();
+    recovered.recover_by_checkpoint(&checkpoint).await;
 
     let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
     requeue_pending_sign_requests(&recovered_ctx, tx.source_chain)
@@ -1326,7 +1328,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
 
     // Slots should still be available — no pending checkpoints created
     assert!(
-        ctx.backlog.has_checkpoint_slot(chain).await,
+        ctx.backlog.checkpoints().has_slot(chain),
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );

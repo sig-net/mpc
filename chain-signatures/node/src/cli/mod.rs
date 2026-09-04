@@ -98,9 +98,6 @@ pub enum Cli {
         /// Midnight Indexer options
         #[clap(flatten)]
         midnight: MidnightArgs,
-        /// NEAR requests options
-        #[clap(flatten)]
-        indexer_options: mpc_chain_near::Options,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
         /// testnet nodes: this should be set to their http://ip:web_port
@@ -143,7 +140,6 @@ impl Cli {
                 hydration,
                 canton,
                 midnight,
-                indexer_options,
                 my_address,
                 storage_options,
                 log_options,
@@ -192,7 +188,6 @@ impl Cli {
                 args.extend(hydration.into_str_args());
                 args.extend(canton.into_str_args());
                 args.extend(midnight.into_str_args());
-                args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
@@ -218,7 +213,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             hydration,
             canton,
             midnight,
-            indexer_options,
             my_address,
             storage_options,
             log_options,
@@ -273,7 +267,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             if storage_options.env == "integration-tests" {
                 let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
                 mpc_chain_near::run(
-                    &indexer_options,
                     &mpc_contract_id,
                     &account_id,
                     sign_tx.clone(),
@@ -717,7 +710,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(account_id, storage_options).await?;
+        let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
         let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;

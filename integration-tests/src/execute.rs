@@ -79,10 +79,6 @@ pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf>
     Some(executable)
 }
 
-pub fn spawn_node(release: bool, node: &str, cli: mpc_node::cli::Cli) -> anyhow::Result<Child> {
-    spawn_node_with_binary(None, release, node, cli)
-}
-
 pub fn spawn_node_with_binary(
     binary_path: Option<PathBuf>,
     release: bool,

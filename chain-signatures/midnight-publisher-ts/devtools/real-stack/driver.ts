@@ -22,6 +22,7 @@ import {
   parseRequestIdHex,
   parseSecp256k1PublicKey,
   requestIdBytes,
+  respondBidirectionalEventToCircuitInput,
   serializeRespondOutput,
   signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
@@ -290,7 +291,7 @@ async function dispatch(request: Request): Promise<unknown> {
     );
     await active.caller.callTx.verifyResponse(
       requestIdBytes(requestId),
-      response,
+      respondBidirectionalEventToCircuitInput(response),
       serializedOutput,
     );
     await waitFor("the caller request to be removed", async () =>

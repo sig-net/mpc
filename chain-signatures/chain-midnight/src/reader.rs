@@ -5,11 +5,11 @@ use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, V
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::DefaultDB;
 
+use crate::hashing::compute_request_id;
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams,
     SignBidirectionalEventNotification, SignBidirectionalRecord,
 };
-use crate::request_id::compute_request_id;
 use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 
 /// Atoms of an evmType2 record excluding its capacity-scaled vectors. The calldata
@@ -166,13 +166,19 @@ fn ensure_evm_type2_param_type(cell: &AlignedValue) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Decode a stored request record in one pass, refusing a cell whose declared widths
-/// are not a signet record's.
-pub fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
-    let cell = cell_of(node, "request record")?;
+/// Decode a borrowed request-record cell in one pass, refusing declared widths that
+/// do not describe a signet record.
+fn decode_record_cell(cell: &AlignedValue) -> anyhow::Result<SignBidirectionalRecord> {
     ensure_evm_type2_param_type(cell)?;
     let widths = declared_widths(cell, "request record")?;
     decode_sign_bidirectional(cell, &widths, &evm_type2_capacities(&widths)?)
+}
+
+/// Decode a stored request record in one pass, refusing a cell whose declared widths
+/// are not a signet record's.
+#[cfg(test)]
+fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
+    decode_record_cell(cell_of(node, "request record")?)
 }
 
 /// The recompute-and-drop gate. The decode never sees `request_id`, so this comparison
@@ -189,7 +195,16 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
     let Some(entry) = entries.get(&AlignedValue::from(request_id)) else {
         return Resolved::Absent;
     };
-    let record = match decode_record(&entry) {
+    let cell = match cell_of(&entry, "request record") {
+        Ok(cell) => cell,
+        Err(err) => {
+            return Resolved::Dropped {
+                reason: "record-undecodable",
+                detail: format!("{err:#}"),
+            };
+        }
+    };
+    let record = match decode_record_cell(cell) {
         Ok(record) => record,
         Err(err) => {
             return Resolved::Dropped {
@@ -198,7 +213,7 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
             };
         }
     };
-    let recomputed = compute_request_id(&record);
+    let recomputed = compute_request_id(cell);
     if recomputed != request_id {
         return Resolved::Dropped {
             reason: "rid-mismatch",
@@ -884,9 +899,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_verified_record_drops_spoofed_filing() {
+    fn resolve_verified_record_accepts_transient_id_and_rejects_legacy_id() {
         let record = sample_record();
-        let rid = compute_request_id(&record);
+        let rid = hex_32("db879820adcaca1d5e38c36a3d8de6cc0918273268fdde87b8258ac77ca11e00");
+        let legacy = hex_32("b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf");
         let cell = cell_from_record(&record);
 
         let map = map_of(vec![(key_of(rid), cell.clone())]);
@@ -895,15 +911,13 @@ mod tests {
             Resolved::Found(Box::new(record))
         );
 
-        // Spoofed filing: the same record bytes stored under an id they do NOT hash to.
-        let spoofed = [0x99; 32];
         assert!(
             decode_record(&cell).is_ok(),
             "the decode never sees the id, so only the gate can drop this"
         );
-        let map = map_of(vec![(key_of(spoofed), cell)]);
+        let map = map_of(vec![(key_of(legacy), cell)]);
         assert!(matches!(
-            resolve_verified_record(&map, spoofed),
+            resolve_verified_record(&map, legacy),
             Resolved::Dropped {
                 reason: "rid-mismatch",
                 ..
@@ -914,7 +928,7 @@ mod tests {
     #[test]
     fn resolve_verified_record_reports_absent_and_dropped() {
         let record = sample_record();
-        let rid = compute_request_id(&record);
+        let rid = compute_request_id(&crate::test_utils::aligned_value_from_record(&record));
         let poisoned = [0x55; 32];
         let map = map_of(vec![
             (

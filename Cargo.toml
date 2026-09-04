@@ -16,9 +16,9 @@ members = [
     "chain-signatures/chain-near",
     "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
+    "chain-signatures/compact-hashing",
     "chain-signatures/utils",
 ]
-exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
@@ -65,12 +65,10 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
     "fmt",
 ] }
 url = { version = "2.4.0", features = ["serde"] }
-wasmtimer = "0.4.3"
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
 solana-sdk = "2.3.1"
 solana-transaction-status = "2.3.13"
-secp256k1 = "0.28.2"
 rlp = "0.5"
 solana-client = "2.3.13"
 futures-util = "0.3.31"
@@ -89,6 +87,7 @@ midnight-onchain-runtime = "4.0.0"
 midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
+midnight-transient-crypto = "3.0.0"
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -99,6 +98,7 @@ mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
+mpc-compact-hashing = { path = "./chain-signatures/compact-hashing" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }
