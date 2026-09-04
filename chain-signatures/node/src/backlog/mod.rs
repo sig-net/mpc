@@ -1,5 +1,8 @@
 mod checkpoints;
 pub mod consensus;
+pub mod request;
+
+pub use request::SignEntry;
 
 use crate::sign_bidirectional::{
     BidirectionalProgress, PublishState, SignBidirectionalEventExt, SignProgress, SignStatus,
