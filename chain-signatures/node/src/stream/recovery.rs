@@ -24,10 +24,13 @@ pub(crate) async fn recover_backlog(
 ) -> Result<(), crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
-    // Hydrate local checkpoint state before aligning: initializes the pending count
-    // and recovers from the latest durable checkpoint if one exists.
+    // Hydrate the in-memory pending checkpoint counter from storage on every
+    // recovery pass so any counter drift self-heals across restarts.
+    backlog.checkpoints().hydrate(chain).await?;
+
+    // Hydrate local backlog state from durable storage on initial startup.
     if load_local {
-        match backlog.hydrate(chain).await? {
+        match backlog.recover_local(chain).await? {
             Some(checkpoint) => {
                 tracing::info!(
                     ?chain,
