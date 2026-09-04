@@ -828,7 +828,7 @@ mod tests {
     fn block_fetch_config_sets_max_supported_transaction_version() {
         let config = SolanaClient::block_fetch_config();
 
-        assert_eq!(config.max_supported_transaction_version, Some(0));
+        assert_eq!(config.max_supported_transaction_version, Some(u8::MAX));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
         assert_eq!(config.encoding, Some(UiTransactionEncoding::JsonParsed));
         assert_eq!(config.rewards, Some(false));
