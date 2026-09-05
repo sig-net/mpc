@@ -92,21 +92,10 @@ pub(crate) fn publish_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cait_sith::protocol::Participant;
-    use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::Signature;
+    use crate::backlog::mock::mock_publishing_since;
 
     fn account(name: &str) -> AccountId {
         name.parse().unwrap()
-    }
-
-    fn publish_state(participants: usize, publishing_since: Option<u64>) -> Publishing {
-        Publishing::with_publishing_since(
-            Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
-            (0..participants as u32).map(Participant::from).collect::<Vec<_>>(),
-            false,
-            publishing_since,
-        )
     }
 
     const LAG: Option<Duration> = None;
@@ -146,7 +135,7 @@ mod tests {
         let deadline = |since, who: &AccountId| {
             publish_deadline(
                 &sign_id,
-                &publish_state(3, since),
+                &mock_publishing_since(3, since),
                 who,
                 observe_lag(Chain::Solana, LAG),
             )

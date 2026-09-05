@@ -90,7 +90,8 @@ pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
         if entry.publish_dispatched() {
             continue;
         }
-        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag) else {
+        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag)
+        else {
             continue;
         };
         if now < deadline {

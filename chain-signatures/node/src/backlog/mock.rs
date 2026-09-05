@@ -114,6 +114,27 @@ pub fn mock_publishing_with_proposer(is_proposer: bool) -> Publishing {
     Publishing::new(mock_signature(), mock_participants(), is_proposer)
 }
 
+/// Create a mock publishing state with participants count, proposer flag, and publishing_since timestamp.
+pub fn mock_publishing_with(
+    participants: usize,
+    is_proposer: bool,
+    publishing_since: Option<u64>,
+) -> Publishing {
+    Publishing::with_publishing_since(
+        mock_signature(),
+        (0..participants as u32)
+            .map(Participant::from)
+            .collect::<Vec<_>>(),
+        is_proposer,
+        publishing_since,
+    )
+}
+
+/// Create a mock publishing state with participants count and publishing_since timestamp (non-proposer).
+pub fn mock_publishing_since(participants: usize, publishing_since: Option<u64>) -> Publishing {
+    mock_publishing_with(participants, false, publishing_since)
+}
+
 /// Helper to construct a pending execution status for a bidirectional tx.
 pub fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
     SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::new(tx.clone())))

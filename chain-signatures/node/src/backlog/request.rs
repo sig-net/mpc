@@ -11,6 +11,7 @@ use mpc_primitives::{
     Signature,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
@@ -34,14 +35,27 @@ pub struct Generating;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Publishing(Arc<PublishData>);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct PublishData {
     signature: Signature,
     participants: Vec<Participant>,
     is_proposer: bool,
     #[serde(default)]
     publishing_since: Option<u64>,
+    #[serde(skip)]
+    publish_dispatched: AtomicBool,
 }
+
+impl PartialEq for PublishData {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+            && self.participants == other.participants
+            && self.is_proposer == other.is_proposer
+            && self.publishing_since == other.publishing_since
+    }
+}
+
+impl Eq for PublishData {}
 
 impl Publishing {
     pub fn new(
@@ -68,6 +82,7 @@ impl Publishing {
             participants: participants.into(),
             is_proposer,
             publishing_since,
+            publish_dispatched: AtomicBool::new(false),
         }))
     }
 
@@ -85,6 +100,14 @@ impl Publishing {
 
     pub fn publishing_since(&self) -> Option<u64> {
         self.0.publishing_since
+    }
+
+    pub fn publish_dispatched(&self) -> bool {
+        self.0.publish_dispatched.load(Ordering::Acquire)
+    }
+
+    pub fn mark_publish_dispatched(&self) -> bool {
+        !self.0.publish_dispatched.swap(true, Ordering::AcqRel)
     }
 }
 
@@ -113,7 +136,6 @@ pub struct SignEntry<State = SignStatus> {
     pub(crate) request: Arc<IndexedSignRequest>,
     pub(crate) state: State,
     pub(crate) backlog: Backlog,
-    pub(crate) publish_dispatched: bool,
 }
 
 impl<State> SignEntry<State> {
@@ -145,28 +167,18 @@ impl<State> SignEntry<State> {
         &self.backlog
     }
 
-    pub fn publish_dispatched(&self) -> bool {
-        self.publish_dispatched
-    }
-
-    pub async fn mark_publish_dispatched(&self) -> bool {
-        self.backlog.mark_publish_dispatched(self.chain, &self.sign_id()).await
-    }
-
     fn map_state<Next>(self, f: impl FnOnce(State) -> Next) -> SignEntry<Next> {
         let SignEntry {
             chain,
             request,
             state,
             backlog,
-            publish_dispatched,
         } = self;
         SignEntry {
             chain,
             request,
             state: f(state),
             backlog,
-            publish_dispatched,
         }
     }
 
@@ -188,7 +200,6 @@ impl<State> SignEntry<State> {
             | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
             | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 *progress = SignProgress::Publishing(publish);
-                entry.publish_dispatched = false;
             }
             SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
         }
@@ -204,7 +215,7 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.enter_status(SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)));
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
         Ok(())
     }
 
@@ -220,10 +231,10 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.enter_status(SignStatus::Bidirectional(BidirectionalProgress::Final {
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request,
             progress: SignProgress::Generating,
-        }));
+        });
         Ok(())
     }
 
@@ -271,7 +282,6 @@ impl SignEntry<Generating> {
             request,
             state: Generating,
             backlog: backlog.clone(),
-            publish_dispatched: false,
         }
     }
 
@@ -319,6 +329,14 @@ impl SignEntry<Publishing> {
     pub fn publishing_since(&self) -> Option<u64> {
         self.state.publishing_since()
     }
+
+    pub fn publish_dispatched(&self) -> bool {
+        self.state.publish_dispatched()
+    }
+
+    pub async fn mark_publish_dispatched(&self) -> bool {
+        self.state.mark_publish_dispatched()
+    }
 }
 
 // --- Single-phase Sign Transitions ---
@@ -342,7 +360,6 @@ impl SignEntry<Sign<Generating>> {
             request,
             state: Sign(Generating),
             backlog: backlog.clone(),
-            publish_dispatched: false,
         }
     }
 
@@ -405,7 +422,6 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
             request,
             state: Bidirectional(Initial(Generating)),
             backlog: backlog.clone(),
-            publish_dispatched: false,
         }
     }
 
@@ -498,13 +514,10 @@ impl SignEntry<Bidirectional<Executing>> {
 
         let completed_tx = CompletedTx::new(Arc::clone(self.execution_tx()));
         let sign_request = match outcome {
-            ExecutionOutcome::Success { output } => completed_tx
-                .create_sign_request_from_serialized_output(output, chain_ctx)?,
-            ExecutionOutcome::Failed => {
-                completed_tx
-                    .create_failed_sign_request(chain_ctx)
-                    .await?
+            ExecutionOutcome::Success { output } => {
+                completed_tx.create_sign_request_from_serialized_output(output, chain_ctx)?
             }
+            ExecutionOutcome::Failed => completed_tx.create_failed_sign_request(chain_ctx).await?,
         };
 
         let respond_request = Arc::new(sign_request);
@@ -514,7 +527,6 @@ impl SignEntry<Bidirectional<Executing>> {
             request: respond_request,
             state: Bidirectional(Final(Generating)),
             backlog: self.backlog,
-            publish_dispatched: false,
         })
     }
 }
@@ -595,9 +607,7 @@ impl SignState for Sign<Generating> {
 impl SignState for Sign<Publishing> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
-            SignStatus::Sign(SignProgress::Publishing(publish)) => {
-                Some(Sign(publish.clone()))
-            }
+            SignStatus::Sign(SignProgress::Publishing(publish)) => Some(Sign(publish.clone())),
             _ => None,
         }
     }
@@ -732,7 +742,6 @@ impl SignEntry<SignStatus> {
             request: Arc::clone(&self.request),
             state,
             backlog: self.backlog.clone(),
-            publish_dispatched: self.publish_dispatched,
         })
     }
 
@@ -744,7 +753,6 @@ impl SignEntry<SignStatus> {
                 request: self.request,
                 state,
                 backlog: self.backlog,
-                publish_dispatched: self.publish_dispatched,
             })
         } else {
             Err(self)

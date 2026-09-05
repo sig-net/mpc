@@ -87,9 +87,7 @@ impl SignStatus {
     pub fn publishing(&self) -> Option<&Publishing> {
         match self {
             Self::Sign(progress) => progress.publishing(),
-            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => {
-                progress.publishing()
-            }
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => progress.publishing(),
             Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 progress.publishing()
             }
@@ -489,8 +487,8 @@ mod tests {
 
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
-        use crate::backlog::Publishing;
         use super::{BidirectionalProgress, SignProgress, SignStatus};
+        use crate::backlog::Publishing;
         use k256::Scalar;
         use mpc_primitives::{
             BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalTx,

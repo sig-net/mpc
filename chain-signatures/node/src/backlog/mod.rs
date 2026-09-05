@@ -86,7 +86,6 @@ impl PendingRequests {
                         request: Arc::clone(entry.request()),
                         state: Bidirectional(Executing(Arc::clone(tx))),
                         backlog: backlog.clone(),
-                        publish_dispatched: entry.publish_dispatched,
                     })
                 }
                 _ => None,
@@ -245,7 +244,6 @@ impl Backlog {
             request: Arc::clone(entry.request()),
             state: entry.status,
             backlog: self.clone(),
-            publish_dispatched: entry.publish_dispatched,
         })
     }
 
@@ -280,7 +278,6 @@ impl Backlog {
                 request: Arc::clone(entry.request()),
                 state: Generating,
                 backlog: self.clone(),
-                publish_dispatched: entry.publish_dispatched,
             })
             .collect();
 
@@ -312,7 +309,6 @@ impl Backlog {
                     request: Arc::clone(entry.request()),
                     state: publish.clone(),
                     backlog: self.clone(),
-                    publish_dispatched: entry.publish_dispatched,
                 })
             })
             .collect();
@@ -345,12 +341,14 @@ impl Backlog {
     /// pending-publish episode, returning `false` if one was already dispatched or
     /// the entry is gone.
     pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
-        let mut pending = self.pending(&chain).write().await;
+        let pending = self.pending(&chain).read().await;
 
         pending
             .requests
-            .get_mut(id)
-            .is_some_and(BacklogEntry::mark_publish_dispatched)
+            .get(id)
+            .and_then(|entry| entry.status.publishing())
+            .map(|publishing| publishing.mark_publish_dispatched())
+            .unwrap_or(false)
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -588,22 +586,11 @@ pub enum BacklogError {
     InvalidSignature,
 }
 
-#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(from = "migration::MigratableBacklogEntry")]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
-    /// Whether this node has dispatched a publish for this entry. Node-local, so it
-    /// is not serialized, and checkpoint recovery resets it.
-    #[serde(skip)]
-    publish_dispatched: bool,
-}
-
-/// Node-local state is not part of an entry's identity to avoid divergence.
-impl PartialEq for BacklogEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.request == other.request && self.status == other.status
-    }
 }
 
 impl BacklogEntry {
@@ -620,19 +607,11 @@ impl BacklogEntry {
                 })
             }
         };
-        Self {
-            request,
-            status,
-            publish_dispatched: false,
-        }
+        Self { request, status }
     }
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
-        Self {
-            request,
-            status,
-            publish_dispatched: false,
-        }
+        Self { request, status }
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -657,19 +636,6 @@ impl BacklogEntry {
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         self.status.clone()
-    }
-
-    /// The single place a status is assigned. Every transition ends the current
-    /// pending-publish episode, so no dispatch flag may survive one.
-    pub(crate) fn enter_status(&mut self, status: SignStatus) {
-        self.status = status;
-        self.publish_dispatched = false;
-    }
-
-    /// Record that this node dispatched a publish for the current episode,
-    /// returning `false` if one was already dispatched.
-    pub(crate) fn mark_publish_dispatched(&mut self) -> bool {
-        !std::mem::replace(&mut self.publish_dispatched, true)
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
