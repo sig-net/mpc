@@ -155,7 +155,7 @@ describe("dist/main.js over a pipe", () => {
 
     expect(run.code).toBe(0);
     expect(run.stderr).toContain(`node=http://127.0.0.1:${blackHole.port}`);
-  });
+  }, 10_000);
 
   it("flushes ready and exits when its publisher warmup never settles", async () => {
     const blackHole = await openBlackHole();

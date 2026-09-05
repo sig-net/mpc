@@ -1,9 +1,10 @@
 use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
+use std::time::Duration;
 
 /// CLI arguments for the Midnight integration. The node url requires the whole
-/// publisher group; only `--midnight-intent-gen-command` has a default.
+/// required publisher group. GCS output storage is optional.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_midnight_options")]
 pub struct MidnightArgs {
@@ -60,11 +61,36 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<String>,
+    /// Optional GCS bucket. When set, execution output uploads before the on-chain response.
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET"),
+        requires = "midnight_node_url"
+    )]
+    pub midnight_output_storage_bucket: Option<String>,
+    /// Object prefix within the bucket (default: v1).
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX"),
+        requires = "midnight_node_url"
+    )]
+    pub midnight_output_storage_prefix: Option<String>,
+    /// Maximum time for storing one output, in seconds (default: 30).
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS"),
+        requires = "midnight_node_url"
+    )]
+    pub midnight_output_storage_timeout_secs: Option<u64>,
+    /// Local GCS emulator endpoint for integration tests; uses anonymous credentials.
+    #[cfg(feature = "test-feature")]
+    #[arg(long, requires = "midnight_node_url")]
+    pub midnight_output_storage_emulator_endpoint: Option<String>,
 }
 
 impl MidnightArgs {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(14);
+        let mut args = Vec::with_capacity(20);
         if let Some(v) = self.midnight_node_url {
             args.extend(["--midnight-node-url".to_string(), v]);
         }
@@ -88,6 +114,22 @@ impl MidnightArgs {
         }
         if let Some(v) = self.midnight_indexer_ws_url {
             args.extend(["--midnight-indexer-ws-url".to_string(), v]);
+        }
+        if let Some(v) = self.midnight_output_storage_bucket {
+            args.extend(["--midnight-output-storage-bucket".to_string(), v]);
+        }
+        if let Some(v) = self.midnight_output_storage_prefix {
+            args.extend(["--midnight-output-storage-prefix".to_string(), v]);
+        }
+        if let Some(v) = self.midnight_output_storage_timeout_secs {
+            args.extend([
+                "--midnight-output-storage-timeout-secs".to_string(),
+                v.to_string(),
+            ]);
+        }
+        #[cfg(feature = "test-feature")]
+        if let Some(v) = self.midnight_output_storage_emulator_endpoint {
+            args.extend(["--midnight-output-storage-emulator-endpoint".to_string(), v]);
         }
         args
     }
@@ -118,8 +160,17 @@ impl MidnightArgs {
             proof_server_url,
             indexer_url,
             indexer_ws_url,
+            output_storage_bucket: self.midnight_output_storage_bucket,
+            #[cfg(feature = "test-feature")]
+            output_storage_emulator_endpoint: self.midnight_output_storage_emulator_endpoint,
             ..Default::default()
         };
+        if let Some(prefix) = self.midnight_output_storage_prefix {
+            publisher.output_storage_prefix = prefix;
+        }
+        if let Some(timeout_secs) = self.midnight_output_storage_timeout_secs {
+            publisher.output_storage_timeout = Duration::from_secs(timeout_secs);
+        }
         if let Some(command) = self.midnight_intent_gen_command {
             publisher.intent_gen_command = serde_json::from_str(&command).with_context(|| {
                 format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
@@ -135,14 +186,15 @@ impl MidnightArgs {
             indexer: Default::default(),
         };
         config.validate()?;
+        config.publisher.validate_output_storage()?;
         Ok(Some(config))
     }
 
     pub fn from_config(config: Option<MidnightConfig>) -> Self {
         match config {
             Some(c) => {
-                // No flags for the tuning fields. Destructured in full so a new
-                // field fails to compile here rather than silently miss the round trip.
+                // Cargo can enable the dependency's sandbox without this crate's
+                // test-feature, so its test-only fields may be present but not forwarded.
                 let MidnightConfig {
                     node_url,
                     central_address,
@@ -153,9 +205,12 @@ impl MidnightArgs {
                             proof_server_url,
                             indexer_url,
                             indexer_ws_url,
-                            request_timeout: _,
-                            submit_timeout: _,
-                            restart_backoff: _,
+                            output_storage_bucket,
+                            output_storage_prefix,
+                            output_storage_timeout,
+                            #[cfg(feature = "test-feature")]
+                            output_storage_emulator_endpoint,
+                            ..
                         },
                     rpc: _,
                     indexer: _,
@@ -171,6 +226,11 @@ impl MidnightArgs {
                     midnight_proof_server_url: Some(proof_server_url),
                     midnight_indexer_url: Some(indexer_url),
                     midnight_indexer_ws_url: Some(indexer_ws_url),
+                    midnight_output_storage_bucket: output_storage_bucket,
+                    midnight_output_storage_prefix: Some(output_storage_prefix),
+                    midnight_output_storage_timeout_secs: Some(output_storage_timeout.as_secs()),
+                    #[cfg(feature = "test-feature")]
+                    midnight_output_storage_emulator_endpoint: output_storage_emulator_endpoint,
                 }
             }
             None => MidnightArgs {
@@ -181,6 +241,11 @@ impl MidnightArgs {
                 midnight_proof_server_url: None,
                 midnight_indexer_url: None,
                 midnight_indexer_ws_url: None,
+                midnight_output_storage_bucket: None,
+                midnight_output_storage_prefix: None,
+                midnight_output_storage_timeout_secs: None,
+                #[cfg(feature = "test-feature")]
+                midnight_output_storage_emulator_endpoint: None,
             },
         }
     }
@@ -191,7 +256,6 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use mpc_chain_midnight::IndexerConfig;
-    use std::time::Duration;
 
     /// Publisher fields all distinguishable from their defaults, so an
     /// assertion cannot pass on a dropped flag.
@@ -210,6 +274,9 @@ mod tests {
                 proof_server_url: "http://127.0.0.1:6300".into(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
+                output_storage_bucket: Some("midnight-results".into()),
+                output_storage_prefix: "staging/testnet".into(),
+                output_storage_timeout: Duration::from_secs(47),
                 ..Default::default()
             },
             rpc: Default::default(),
@@ -235,8 +302,8 @@ mod tests {
 
     #[test]
     fn tuning_fields_do_not_survive_the_cli_round_trip() {
-        // Known limitation, pinned deliberately: no tuning traverses a process
-        // restart. Adding real flags flips this into a round-trip assert.
+        // Indexer and submission tuning have no CLI flags and do not traverse
+        // a process restart. Adding flags flips this into a round-trip assert.
         crate::cli::tests::assert_midnight_env_unset();
 
         let mut cfg = configured();
@@ -263,12 +330,12 @@ mod tests {
         assert_eq!(
             reparsed.indexer,
             IndexerConfig::default(),
-            "tuning does not traverse the CLI; if this fails, flags were added and this test should become a round-trip assert"
+            "indexer tuning does not traverse the CLI; if this fails, flags were added and this test should become a round-trip assert"
         );
         assert_eq!(
             reparsed.publisher.submit_timeout,
             PublisherConfig::default().submit_timeout,
-            "publisher tuning does not traverse the CLI either"
+            "publisher submission timeout does not traverse the CLI"
         );
     }
 
@@ -301,6 +368,39 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-feature")]
+    #[test]
+    fn storage_emulator_endpoint_survives_the_cli_round_trip() {
+        crate::cli::tests::assert_midnight_env_unset();
+        let mut args = MidnightArgs::from_config(Some(configured())).into_str_args();
+        args.extend([
+            "--midnight-output-storage-emulator-endpoint".into(),
+            "http://127.0.0.1:4443".into(),
+        ]);
+        let config = MidnightArgs::try_parse_from(std::iter::once("test".into()).chain(args))
+            .expect("test builds accept the Midnight storage emulator endpoint")
+            .into_config()
+            .unwrap();
+        let forwarded = MidnightArgs::from_config(config).into_str_args();
+        assert!(forwarded.windows(2).any(|args| args
+            == [
+                "--midnight-output-storage-emulator-endpoint",
+                "http://127.0.0.1:4443"
+            ]));
+    }
+
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn production_cli_rejects_the_storage_emulator_endpoint() {
+        let error = MidnightArgs::try_parse_from([
+            "test",
+            "--midnight-output-storage-emulator-endpoint",
+            "http://127.0.0.1:4443",
+        ])
+        .expect_err("production nodes must not accept anonymous emulator configuration");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
     #[test]
     fn the_midnight_flags_are_all_or_nothing() {
         // A publisher flag accepted on its own would let a node carry a funding
@@ -313,8 +413,11 @@ mod tests {
             "--midnight-proof-server-url",
             "--midnight-indexer-url",
             "--midnight-indexer-ws-url",
+            "--midnight-output-storage-bucket",
+            "--midnight-output-storage-prefix",
+            "--midnight-output-storage-timeout-secs",
         ] {
-            let err = MidnightArgs::try_parse_from(["test", flag, "x"])
+            let err = MidnightArgs::try_parse_from(["test", flag, "1"])
                 .expect_err("clap must reject a publisher flag supplied on its own");
             assert!(
                 err.to_string().contains("midnight-node-url"),
@@ -342,6 +445,29 @@ mod tests {
                 "clap must name {flag} as missing: {err}"
             );
         }
+    }
+
+    #[test]
+    fn midnight_output_storage_bucket_is_optional() {
+        crate::cli::tests::assert_midnight_env_unset();
+        let mut args = MidnightArgs::from_config(Some(configured())).into_str_args();
+        let index = args
+            .iter()
+            .position(|arg| arg == "--midnight-output-storage-bucket")
+            .expect("configured Midnight args include the storage bucket");
+        args.drain(index..=index + 1);
+        let parsed = MidnightArgs::try_parse_from(std::iter::once("test".to_owned()).chain(args))
+            .expect("Midnight can run without GCS storage");
+        assert!(parsed.midnight_output_storage_bucket.is_none());
+        let config = parsed
+            .into_config()
+            .unwrap()
+            .expect("Midnight remains enabled");
+        assert_eq!(config.node_url, configured().node_url);
+        let forwarded = MidnightArgs::from_config(Some(config)).into_str_args();
+        assert!(!forwarded
+            .iter()
+            .any(|arg| arg == "--midnight-output-storage-bucket"));
     }
 
     #[test]
