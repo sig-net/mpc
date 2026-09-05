@@ -29,6 +29,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -75,19 +81,13 @@ jobs:
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Build eth contract
-        working-directory: ./chain-signatures/contract-eth
-        run: npm ci && npx hardhat compile
-
-      - name: Presetup binaries
-        run: ./setup.sh
-        env:
-          MPC_ENABLE_HELIOS: 1
+        run: just build eth
 
       - name: Build nightly
-        run: cargo build -p integration-tests --tests --features helios
+        run: just build tests helios=1
 
       - name: Run nightly
-        run: cargo test -p integration-tests --features helios --test lib -- cases::nightly --show-output --ignored
+        run: just test-nightly
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

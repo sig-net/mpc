@@ -2,6 +2,11 @@
 
 ## Prerequisites
 
+Run `just setup-check` to verify your system (Linux/macOS) without installing
+anything, or `just setup` to install missing dependencies automatically
+(`just setup-check all` / `just setup "" all` cover extended chain tooling:
+Solana/Anchor, Java/dpm, Compact). Manual install notes follow.
+
 1. Install [cargo-nextest](https://nexte.st) for race-free parallelization:
 
 ```bash
@@ -31,7 +36,9 @@ cargo install just
 
 ## Basic guide
 
-Running integration tests requires you to have redis and sandbox docker images present on your machine:
+Running integration tests requires a running Docker daemon (`just setup` installs
+Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.2` image is pulled
+automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
 docker pull redis:7.4.2
@@ -73,22 +80,13 @@ In addition to the prerequisites above, it requires:
 - [cargo-near](https://github.com/near/cargo-near)
 - Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/midnight.yml) for the pinned Linux installation
 
-From the repository root, prepare the TypeScript publisher and test caller:
+From the repository root, prepare the TypeScript publisher and test caller,
+then build the MPC contract and host node and run the ignored test:
 
 ```bash
-cd chain-signatures/midnight-publisher-ts
-npm ci
-npm run build
-npm run compile:real-stack-caller
-npm run typecheck:real-stack
-cd ../..
-```
-
-Build the MPC contract and host node, then run the ignored test:
-
-```bash
-./setup.sh
-cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+just build midnight
+just setup
+just test-midnight
 ```
 
 The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.

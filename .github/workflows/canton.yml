@@ -31,6 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -91,17 +97,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build eth contract
-        working-directory: ./chain-signatures/contract-eth
-        run: npm ci && npx hardhat compile
-
-      - name: Presetup binaries
-        run: ./setup.sh
+        run: just build eth
 
       - name: Build integration tests
-        run: cargo build -p integration-tests --tests
+        run: just build tests
 
       - name: Run Canton ${{ matrix.suite.name }} tests
-        run: cargo test -p integration-tests --test lib -- ${{ matrix.suite.filter }} --ignored --nocapture --test-threads 1
+        run: just test-canton ${{ matrix.suite.filter }}
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
