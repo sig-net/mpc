@@ -21,6 +21,7 @@ pub(crate) struct BlockProofSeed {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateTransactionEmissions {
+    pub ledger_tx_hash: [u8; 32],
     pub extrinsic_index: u32,
     pub calls: Vec<SingletonCallEmissions>,
 }
@@ -121,6 +122,7 @@ mod proof_seed_tests {
                 scale_system_events: vec![0x61, 0x62, 0x63],
             },
             candidates: vec![CandidateTransactionEmissions {
+                ledger_tx_hash: [0x55; 32],
                 extrinsic_index: 1,
                 calls: vec![SingletonCallEmissions {
                     call_index: 1,
