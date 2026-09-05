@@ -127,6 +127,7 @@ impl SignState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::Backlog;
 
     fn request() -> IndexedSignRequest {
         IndexedSignRequest::sign(

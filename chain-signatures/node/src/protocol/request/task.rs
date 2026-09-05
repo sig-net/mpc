@@ -84,7 +84,7 @@ impl GeneratingPhase {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            state.entry.clone(),
+            state.entry.request(),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -101,7 +101,7 @@ impl GeneratingPhase {
         // Drive generation while answering posit traffic: peers proposing this
         // signature get a Reject so they don't wait for us. The generator itself
         // knows nothing about posits.
-        let generation = generator.run(&gen_ctx);
+        let generation = generator.run(&gen_ctx, state.entry.clone());
         tokio::pin!(generation);
         let result = loop {
             tokio::select! {

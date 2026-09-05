@@ -1,5 +1,6 @@
 use super::*;
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
+use crate::types::SignCommand;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -95,13 +96,13 @@ async fn recover_backlog_requeues_pending_signs() {
 
     match msg.expect("sign_rx should contain a message") {
         SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.args, args);
-            assert_eq!(req.chain, Chain::Solana);
-            assert_eq!(req.kind, SignKind::Sign);
+            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request().args, args);
+            assert_eq!(req.chain(), Chain::Solana);
+            assert_eq!(req.request().kind, SignKind::Sign);
             // Verify that the unix_timestamp_indexed is preserved from the original entry
-            assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
-            assert!(req.unix_timestamp_indexed <= current_unix_timestamp());
+            assert_eq!(req.request().unix_timestamp_indexed, unix_timestamp_indexed);
+            assert!(req.request().unix_timestamp_indexed <= current_unix_timestamp());
         }
         other => panic!("unexpected message: {:?}", other),
     }
@@ -198,7 +199,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.kind {
+            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.request().kind {
                 assert_eq!(res.tx_id, tx.id);
             } else {
                 panic!("Expected RespondBidirectional request");
@@ -262,7 +263,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         .unwrap();
     match first {
         SignCommand::Request(req) => {
-            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
+            assert_matches!(req.request().kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected one sign request, got {other:?}"),
     }
@@ -334,7 +335,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
         other => panic!("expected sign request, got {other:?}"),
     }
 }
@@ -416,8 +417,8 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
+            assert_eq!(req.sign_id(), sign_id);
+            assert_matches!(req.request().kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected recovered final respond request, got {other:?}"),
     }
@@ -709,7 +710,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
         .expect("requeue should enqueue the pending request")
         .expect("sign channel open")
     {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
         other => panic!("expected a single requeued request, got {other:?}"),
     }
     assert!(
@@ -1068,7 +1069,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.kind {
+            if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.request().kind {
                 assert_eq!(res.tx_id, tx.id);
                 // Expect the serialized output to begin with MAGIC_ERROR_PREFIX
                 assert!(res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
@@ -1148,8 +1149,8 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.chain, Chain::Solana);
-            assert_matches!(req.kind, mpc_primitives::SignKind::RespondBidirectional(_));
+            assert_eq!(req.chain(), Chain::Solana);
+            assert_matches!(req.request().kind, mpc_primitives::SignKind::RespondBidirectional(_));
         }
         other => panic!("expected cross-chain follow-up request, got {other:?}"),
     }
@@ -1215,9 +1216,9 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.chain, tx.source_chain);
-            match &req.kind {
+            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.chain(), tx.source_chain);
+            match &req.request().kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx.id);
                     assert_eq!(res.output, vec![1]);
@@ -1274,7 +1275,7 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.id, solana_sign_id),
+        SignCommand::Request(req) => assert_eq!(req.sign_id(), solana_sign_id),
         other => panic!("unexpected message: {other:?}"),
     }
 

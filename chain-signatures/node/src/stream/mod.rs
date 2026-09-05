@@ -15,8 +15,10 @@ use crate::types::CheckpointWatcher;
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
-use mpc_primitives::{Chain, ChainEvent, SignCommand};
+use mpc_primitives::{Chain, ChainEvent};
 use tokio::sync::{mpsc, watch};
+
+pub use crate::types::SignCommand;
 
 /// Shared, per-chain dependencies
 pub struct StreamContext {

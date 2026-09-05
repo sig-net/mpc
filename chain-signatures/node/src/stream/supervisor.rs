@@ -6,9 +6,10 @@ use super::{handle_chain_event, StreamContext};
 
 use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
+use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -245,10 +246,11 @@ mod tests {
     use crate::mesh::MeshState;
     use crate::rpc::RpcAction;
     use crate::stream::test_utils::make_test_stream_context;
+    use crate::types::SignCommand;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-    use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+    use mpc_primitives::{Chain, CheckpointDigest};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};
 

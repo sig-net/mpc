@@ -7,6 +7,8 @@ use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{supervisor::run_supervised, StreamContext};
+use crate::types::SignCommand;
+
 use alloy::primitives::{Address, B256};
 use cait_sith::protocol::Participant;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
@@ -15,8 +17,8 @@ use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest,
-    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind,
-    Signature, SignatureRespondedEvent,
+    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;

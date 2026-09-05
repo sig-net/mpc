@@ -9,6 +9,7 @@ use crate::types::CheckpointWatcher;
 
 pub use config::HydrationConfig;
 
+use crate::types::SignCommand;
 use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -19,9 +20,8 @@ use mpc_chain_integration_core::{
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent,
-    SignCommand, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};

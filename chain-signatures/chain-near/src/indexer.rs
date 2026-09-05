@@ -1,6 +1,6 @@
 use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignCommand, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
 use mpc_utils::time::current_unix_timestamp;
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +8,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+/// Commands emitted by the NEAR indexer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignCommand {
+    Request(Arc<IndexedSignRequest>),
+    Completion(SignId),
+}
 
 /// Configures the NEAR indexer.
 #[derive(Debug, Clone, clap::Parser)]

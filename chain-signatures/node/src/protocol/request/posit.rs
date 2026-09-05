@@ -455,6 +455,7 @@ impl PositPhase {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::backlog::Backlog;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
     use crate::rpc::RpcAction;

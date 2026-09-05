@@ -168,6 +168,14 @@ impl<State> SignEntry<State> {
     }
 }
 
+impl<State: PartialEq> PartialEq for SignEntry<State> {
+    fn eq(&self, other: &Self) -> bool {
+        self.chain == other.chain && self.request == other.request && self.state == other.state
+    }
+}
+
+impl<State: Eq> Eq for SignEntry<State> {}
+
 // --- General Transitions ---
 
 impl SignEntry<Generating> {
@@ -289,6 +297,17 @@ impl SignEntry<Bidirectional<Executing>> {
             state: Bidirectional(Final(Generating)),
             backlog: self.backlog,
         })
+    }
+}
+
+impl From<SignEntry<Bidirectional<Final<Generating>>>> for SignEntry<Generating> {
+    fn from(entry: SignEntry<Bidirectional<Final<Generating>>>) -> Self {
+        SignEntry {
+            chain: entry.chain,
+            request: entry.request,
+            state: Generating,
+            backlog: entry.backlog,
+        }
     }
 }
 
@@ -485,12 +504,22 @@ impl Backlog {
         self.insert(Arc::clone(&request)).await;
         SignEntry::bidirectional(request, self)
     }
+
+    /// Insert any sign request into the backlog and return its handle in [`Generating`] state.
+    pub async fn insert_generating(
+        &self,
+        request: Arc<IndexedSignRequest>,
+    ) -> SignEntry<Generating> {
+        self.insert(Arc::clone(&request)).await;
+        SignEntry::generating(request, self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
+        SignEntry,
     };
     use crate::backlog::mock::{
         mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_publish_state,
@@ -737,5 +766,20 @@ mod tests {
             .await
             .expect("advance to Publishing");
         assert!(pub3.publish_state().is_proposer);
+    }
+
+    #[tokio::test]
+    async fn test_from_bidirectional_final_generating() {
+        let backlog = Backlog::new();
+        let id = SignId::from_u8(3);
+        let tx = mock_bidirectional_tx(id, Chain::Ethereum);
+        backlog.insert_mock_final(&tx).await;
+        let final_entry = backlog
+            .get_by::<Bidirectional<Final<Generating>>>(Chain::Ethereum, &id)
+            .await
+            .expect("should find Final Generating");
+        let gen: SignEntry<Generating> = final_entry.into();
+        assert_eq!(gen.sign_id(), id);
+        assert_eq!(gen.state(), &Generating);
     }
 }

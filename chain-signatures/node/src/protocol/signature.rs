@@ -49,7 +49,6 @@ pub(crate) struct SignGenerator {
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
     sign_id: SignId,
-    entry: Option<SignEntry<Generating>>,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
@@ -66,7 +65,7 @@ impl SignGenerator {
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
-        entry: SignEntry<Generating>,
+        request: &IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -80,7 +79,7 @@ impl SignGenerator {
                 ))
             })?;
 
-        let sign_id = entry.sign_id();
+        let sign_id = request.id;
         tracing::info!(
             me = ?ctx.governance.me,
             ?sign_id,
@@ -90,23 +89,20 @@ impl SignGenerator {
 
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = mpc_crypto::kdf::derive_delta(
-            entry.request().id.request_id,
-            entry.request().args.entropy,
-            big_r,
-        );
+        let delta =
+            mpc_crypto::kdf::derive_delta(request.id.request_id, request.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
             k: k * delta.invert().unwrap(),
-            sigma: (sigma + entry.request().args.epsilon * k) * delta.invert().unwrap(),
+            sigma: (sigma + request.args.epsilon * k) * delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
             &participants,
             ctx.governance.me,
-            derive_key(ctx.governance.public_key, entry.request().args.epsilon),
+            derive_key(ctx.governance.public_key, request.args.epsilon),
             output,
-            entry.request().args.payload,
+            request.args.payload,
         )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
         Ok(Self {
@@ -115,7 +111,6 @@ impl SignGenerator {
             participants,
             proposer,
             sign_id,
-            entry: Some(entry),
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -169,7 +164,11 @@ impl SignGenerator {
 
     /// Poke-drive the protocol to completion: relay messages, and on `Return`
     /// publish the signature (proposer) and mark the request publishing.
-    pub(crate) async fn run(mut self, ctx: &GenerateCtx) -> Result<(), SignError> {
+    pub(crate) async fn run(
+        mut self,
+        ctx: &GenerateCtx,
+        entry: SignEntry<Generating>,
+    ) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
@@ -284,7 +283,6 @@ impl SignGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
                     let is_proposer = self.proposer == me;
-                    let entry = self.entry.take().expect("sign entry present");
                     let Some(publish) = build_publish_state(
                         ctx.governance.public_key,
                         entry.request(),

@@ -1,18 +1,17 @@
-use std::sync::Arc;
-
-use anyhow::Context;
-
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
+use crate::types::SignCommand;
+
+use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind,
-    SignatureRespondedEvent,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
+use std::sync::Arc;
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
@@ -41,7 +40,8 @@ pub(crate) async fn process_sign_request(
         .await
         .is_none();
 
-    ctx.try_enqueue(SignCommand::Request(sign_request)).await?;
+    let entry = SignEntry::generating(sign_request, &ctx.backlog);
+    ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
     Ok(is_new)
 }
@@ -53,8 +53,9 @@ pub(crate) async fn requeue_pending_sign_requests(
     for sign_request in ctx.backlog.take_requeueable_requests(source_chain).await {
         let sign_id = sign_request.id;
         let source_chain = sign_request.chain;
+        let entry = SignEntry::generating(sign_request, &ctx.backlog);
         ctx.sign_tx
-            .send(SignCommand::Request(sign_request))
+            .send(SignCommand::Request(entry))
             .await
             .with_context(|| {
                 format!(
@@ -335,9 +336,9 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    let sign_request = Arc::new(sign_request);
-    entry
-        .advance(Arc::clone(&sign_request))
+    let chain = sign_request.chain;
+    let entry = entry
+        .advance(Arc::new(sign_request))
         .await
         .with_context(|| {
             format!(
@@ -349,14 +350,12 @@ pub async fn process_execution_confirmed(
         ?unwatched_sign_id,
         "transitioned transaction to final response"
     );
-
-    let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
     if ctx.caught_up || chain != target_chain {
         ctx.sign_tx
-            .send(SignCommand::Request(sign_request))
+            .send(SignCommand::Request(entry.into()))
             .await
             .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
     }

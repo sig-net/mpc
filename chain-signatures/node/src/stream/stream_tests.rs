@@ -9,14 +9,13 @@ use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
     test_rpc_channel, test_sign_args,
 };
+use crate::types::SignCommand;
 use async_trait::async_trait;
 use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
-use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
-};
+use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature};
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::sync::Arc;
@@ -136,7 +135,7 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg1 {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
         _ => panic!("expected request"),
     }
 
@@ -252,7 +251,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         .unwrap();
 
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
         other => panic!("expected SignCommand::Request, got {other:?}"),
     }
 
@@ -403,10 +402,10 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(
-                req.id, sign_id,
+                req.sign_id(), sign_id,
                 "follow-up request should reuse the sign id"
             );
-            match &req.kind {
+            match &req.request().kind {
                 SignKind::RespondBidirectional(rb) => {
                     assert_eq!(rb.tx_id, tx_id, "tx_id should match the watched tx");
                     assert_eq!(
@@ -526,8 +525,8 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         .expect("replacement request should be requeued");
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
+            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request().unix_timestamp_indexed, replayed_timestamp);
         }
         other => panic!("expected replacement request after catchup, got {other:?}"),
     }
