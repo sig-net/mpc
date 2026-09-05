@@ -1,5 +1,4 @@
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
-use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -307,26 +306,8 @@ pub async fn process_execution_confirmed(
         return Ok(());
     };
 
-    let chain_ctx = match &entry.request().kind {
-        SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
-        _ => None,
-    };
-
-    let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
-
-    let sign_request = match result {
-        ExecutionOutcome::Success { output } => completed_tx
-            .create_sign_request_from_serialized_output(source_chain, output, chain_ctx)?,
-        ExecutionOutcome::Failed => {
-            completed_tx
-                .create_failed_sign_request(source_chain, chain_ctx)
-                .await?
-        }
-    };
-
-    let chain = sign_request.chain;
     let entry = entry
-        .advance(Arc::new(sign_request))
+        .advance(result)
         .await
         .with_context(|| {
             format!(
@@ -338,6 +319,7 @@ pub async fn process_execution_confirmed(
         ?unwatched_sign_id,
         "transitioned transaction to final response"
     );
+    let chain = entry.chain;
     // Execution confirmations are observed on the target chain, but the follow-up
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.

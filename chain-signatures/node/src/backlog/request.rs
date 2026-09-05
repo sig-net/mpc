@@ -1,11 +1,15 @@
 use super::{Backlog, BacklogEntry, BacklogError};
+use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
-use mpc_primitives::{BidirectionalTx, Chain, IndexedSignRequest, PublicKey, SignId, Signature};
+use mpc_primitives::{
+    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey, SignId, SignKind,
+    Signature,
+};
 use std::sync::Arc;
 
 /// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
@@ -149,7 +153,10 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.respond(respond_request)?;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request,
+            progress: SignProgress::Generating,
+        });
         Ok(())
     }
 
@@ -359,11 +366,33 @@ impl SignEntry<Bidirectional<Executing>> {
         self.backlog.watch_execution(self).await
     }
 
-    /// Advance destination-chain `Executing` into Phase 2 response signing.
+    /// Advance destination-chain `Executing` into Phase 2 response signing based on
+    /// the target-chain execution outcome.
+    ///
+    /// The response sign request is constructed directly from the entry's execution
+    /// transaction and original sign request context, guaranteeing by construction
+    /// that the sign ID, chain, and `RespondBidirectional` kind match.
     pub async fn advance(
         self,
-        respond_request: Arc<IndexedSignRequest>,
-    ) -> Result<SignEntry<Bidirectional<Final<Generating>>>, BacklogError> {
+        outcome: ExecutionOutcome,
+    ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
+        let chain_ctx = match &self.request.kind {
+            SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
+            _ => None,
+        };
+
+        let completed_tx = CompletedTx::new(Arc::clone(self.execution_tx()));
+        let sign_request = match outcome {
+            ExecutionOutcome::Success { output } => completed_tx
+                .create_sign_request_from_serialized_output(self.chain, output, chain_ctx)?,
+            ExecutionOutcome::Failed => {
+                completed_tx
+                    .create_failed_sign_request(self.chain, chain_ctx)
+                    .await?
+            }
+        };
+
+        let respond_request = Arc::new(sign_request);
         self.responding(Arc::clone(&respond_request)).await?;
         Ok(SignEntry {
             chain: self.chain,

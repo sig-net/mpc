@@ -7,7 +7,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey,
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
     RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use std::sync::Arc;
@@ -73,10 +73,9 @@ impl BacklogTestExt for Backlog {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Final<Generating>>> {
-        let completion_request = mock_bidi_response(tx);
         self.insert_mock_executing(tx)
             .await
-            .advance(completion_request)
+            .advance(ExecutionOutcome::Success { output: vec![] })
             .await
             .expect("advance to final generating")
     }
@@ -269,12 +268,7 @@ pub fn mock_execution_entry_with_timestamp(
         Arc::new(req)
     };
 
-    match &status {
-        SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
-            BacklogEntry::pending_execution(request, Arc::clone(tx))
-        }
-        _ => BacklogEntry::with_status(request, status),
-    }
+    BacklogEntry::with_status(request, status)
 }
 
 /// Builds a checkpoint for a chain with exactly one backlog entry at height 100.

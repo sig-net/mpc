@@ -3,15 +3,14 @@ use super::{
     Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
-    bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidi_response_request,
-    mock_bidirectional_tx, mock_execution_entry, mock_execution_entry_with_timestamp,
-    mock_participants, mock_publish_state, mock_publish_state_with_proposer, mock_sign_request,
-    mock_signature_output, mock_tx, pending_execution_status, single_entry_checkpoint,
-    BacklogTestExt,
+    bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
+    mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants,
+    mock_publish_state, mock_publish_state_with_proposer, mock_sign_request, mock_signature_output,
+    mock_tx, pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{Chain, ChainConfig as _, SignId, SignKind};
+use mpc_primitives::{Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
 
 fn digest_hex(hex_str: &str) -> [u8; 32] {
@@ -56,45 +55,45 @@ async fn test_backlog_chain_isolation() {
 async fn test_backlog_filter_by_status() {
     let backlog = Backlog::new();
 
-    // Add transactions with different statuses to Ethereum
+    // Add transactions with different statuses to Solana
     let sign_id0 = SignId::from_u8(0);
     let sign_id1 = SignId::from_u8(1);
-    let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Ethereum);
-    let tx3 = mock_bidirectional_tx(SignId::from_u8(3), Chain::Ethereum);
+    let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Solana);
+    let tx3 = mock_bidirectional_tx(SignId::from_u8(3), Chain::Solana);
 
     backlog
-        .insert_mock_bidirectional(sign_id1, Chain::Ethereum)
+        .insert_mock_bidirectional(sign_id1, Chain::Solana)
         .await;
     backlog.insert_mock_final(&tx2).await;
     backlog.insert_mock_executing(&tx3).await;
 
-    // Add transactions to Solana
-    let tx4 = mock_tx(4);
+    // Add transaction to Canton
+    let tx4 = mock_bidirectional_tx(SignId::from_u8(4), Chain::Canton);
     backlog.insert_mock_executing(&tx4).await;
-
-    // Filter Ethereum by Pending execution
-    let eth_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Ethereum, &tx3.sign_id())
-        .await;
-    assert!(eth_pending.is_some());
-
-    // Filter Ethereum by Initial Generating
-    let eth_awaiting = backlog
-        .get_by::<Bidirectional<Initial<Generating>>>(Chain::Ethereum, &sign_id1)
-        .await;
-    assert!(eth_awaiting.is_some());
-
-    // Filter Ethereum by bidirectional completion awaiting final respond
-    let eth_completion = backlog
-        .get_by::<Bidirectional<Final<Generating>>>(Chain::Ethereum, &tx2.sign_id())
-        .await;
-    assert!(eth_completion.is_some());
 
     // Filter Solana by Pending execution
     let sol_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx4.sign_id())
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx3.sign_id())
         .await;
     assert!(sol_pending.is_some());
+
+    // Filter Solana by Initial Generating
+    let sol_awaiting = backlog
+        .get_by::<Bidirectional<Initial<Generating>>>(Chain::Solana, &sign_id1)
+        .await;
+    assert!(sol_awaiting.is_some());
+
+    // Filter Solana by bidirectional completion awaiting final respond
+    let sol_completion = backlog
+        .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &tx2.sign_id())
+        .await;
+    assert!(sol_completion.is_some());
+
+    // Filter Canton by Pending execution
+    let canton_pending = backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Canton, &tx4.sign_id())
+        .await;
+    assert!(canton_pending.is_some());
 
     // Filter non-existent chain returns empty
     let near_pending = backlog
@@ -296,21 +295,21 @@ async fn test_boundary_crossing_rules() {
 async fn test_checkpoint_creation() {
     let backlog = Backlog::new();
 
-    let tx1 = mock_bidirectional_tx(SignId::from_u8(1), Chain::Ethereum);
-    let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Ethereum);
+    let tx1 = mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana);
+    let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Solana);
 
     backlog.insert_mock_executing(&tx1).await;
     backlog.insert_mock_final(&tx2).await;
-    backlog.set_processed_block(Chain::Ethereum, 100).await;
+    backlog.set_processed_block(Chain::Solana, 100).await;
 
-    let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     assert_eq!(checkpoint.block_height, 100);
     assert_eq!(checkpoint.pending_requests.len(), 2);
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("884b11ef5550724b788b7e29e9a07e7a6fd46f94d604e6d38bae71a36816b65e")
+        digest_hex("449d3cbc30e57ae4964916e0366dc88c8b6d9678d4011f9a20da43ba07396836")
     );
 }
 
@@ -591,16 +590,11 @@ async fn test_bidirectional_typestate_lifecycle() {
         .is_none());
 
     // 4. Advance to Final Generating
-    let response_request = mock_bidi_response(&tx);
     let final_entry = exec_entry
-        .advance(Arc::clone(&response_request))
+        .advance(ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("should advance to final");
     assert_eq!(final_entry.request().id, sign_id);
-    assert_eq!(
-        final_entry.request().args.payload,
-        response_request.args.payload
-    );
 
     // Verify get_by can retrieve Final<Generating> state directly from backlog
     assert!(backlog
@@ -609,14 +603,14 @@ async fn test_bidirectional_typestate_lifecycle() {
         .is_some());
 
     // 5. Advance to Final Publishing & verify phase 2 signature
-    let (pk2, output2) = mock_signature_output(&response_request.args);
+    let (pk2, output2) = mock_signature_output(&final_entry.request().args);
     let final_pub_entry = final_entry
         .advance(pk2, &output2, mock_participants(), true)
         .await
         .expect("advance call should succeed");
     assert_eq!(final_pub_entry.respond_request().id, sign_id);
 
-    let sig2 = mpc_crypto::generate_signature(&root_sk, &response_request.args);
+    let sig2 = mpc_crypto::generate_signature(&root_sk, &final_pub_entry.respond_request().args);
     final_pub_entry
         .verify_signature(root_sk.public_key().into(), &sig2)
         .expect("sig2 should verify");
@@ -630,11 +624,9 @@ async fn test_bidirectional_typestate_lifecycle() {
     let sign_id2 = SignId::from_u8(22);
     let req2 = mock_bidi_request(sign_id2, Chain::Solana);
     let tx2 = Arc::new(mock_bidirectional_tx(sign_id2, Chain::Solana));
-    let resp2 = mock_bidi_response(&tx2);
     let (cpk1, cout1) = mock_signature_output(&req2.args);
-    let (cpk2, cout2) = mock_signature_output(&resp2.args);
 
-    let chained_done = backlog
+    let bidi_final_gen = backlog
         .insert_bidirectional(req2)
         .await
         .advance(cpk1, &cout1, mock_participants(), true)
@@ -643,9 +635,12 @@ async fn test_bidirectional_typestate_lifecycle() {
         .advance(tx2)
         .await
         .expect("chained advance to executing")
-        .advance(resp2)
+        .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .expect("chained advance to final generating")
+        .expect("chained advance to final generating");
+
+    let (cpk2, cout2) = mock_signature_output(&bidi_final_gen.request().args);
+    let chained_done = bidi_final_gen
         .advance(cpk2, &cout2, mock_participants(), true)
         .await
         .expect("chained advance to final publishing")
@@ -657,28 +652,46 @@ async fn test_bidirectional_typestate_lifecycle() {
 }
 
 #[tokio::test]
-async fn test_backlog_entry_rejections() {
+async fn test_bidirectional_executing_advance_outcomes() {
     let backlog = Backlog::new();
     let tx = mock_tx(20);
     let sign_id = tx.sign_id();
 
-    // Executing entry rejects response request with mismatched ID via BacklogEntry
-    let mut exec_entry = mock_execution_entry(&tx, Chain::Ethereum, pending_execution_status(&tx));
-    let mismatched_req = mock_bidi_response_request(SignId::from_u8(99), tx.id, Chain::Ethereum);
-    let err = exec_entry.respond(mismatched_req).unwrap_err();
-    assert_matches!(err, BacklogError::InvalidBidirectionalResponseTransition);
-    assert_eq!(exec_entry.sign_id(), sign_id);
+    let entry = backlog.insert_mock_executing(&tx).await;
 
-    // Also verify rejection via typed SignEntry::advance
-    backlog.insert_mock_executing(&tx).await;
-    let entry = backlog
-        .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
+    // Test Success outcome
+    let success_entry = entry
+        .advance(ExecutionOutcome::Success {
+            output: vec![0x01, 0x02],
+        })
         .await
-        .expect("executing entry exists");
-    let mismatched_req2 =
-        mock_bidi_response_request(SignId::from_u8(99), tx.id, tx.source_chain);
-    let err2 = entry.advance(mismatched_req2).await.unwrap_err();
-    assert_matches!(err2, BacklogError::InvalidBidirectionalResponseTransition);
+        .expect("advance success");
+
+    // Verified: sign_id and chain match invariant by construction
+    assert_eq!(success_entry.sign_id(), sign_id);
+    assert_eq!(success_entry.chain, tx.source_chain);
+    let SignKind::RespondBidirectional(respond) = &success_entry.request().kind else {
+        panic!("expected RespondBidirectional kind");
+    };
+    assert_eq!(respond.tx_id, tx.id);
+    assert_eq!(respond.output, vec![0x01, 0x02]);
+
+    // Test Failed outcome
+    let tx2 = mock_tx(21);
+    let sign_id2 = tx2.sign_id();
+    let entry2 = backlog.insert_mock_executing(&tx2).await;
+    let failed_entry = entry2
+        .advance(ExecutionOutcome::Failed)
+        .await
+        .expect("advance failed");
+
+    assert_eq!(failed_entry.sign_id(), sign_id2);
+    assert_eq!(failed_entry.chain, tx2.source_chain);
+    let SignKind::RespondBidirectional(respond2) = &failed_entry.request().kind else {
+        panic!("expected RespondBidirectional kind");
+    };
+    assert_eq!(respond2.tx_id, tx2.id);
+    assert!(respond2.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
 }
 
 #[tokio::test]
@@ -711,13 +724,12 @@ async fn test_watch_unwatch_and_respond() {
     assert_eq!(watched_tx2.id, tx.id);
 
     // Advance executing entry to final response signing
-    let completion_request = mock_bidi_response(&tx);
     let entry = backlog
         .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
         .await
         .expect("executing entry exists");
     entry
-        .advance(completion_request)
+        .advance(ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("respond should transition to final generating");
     assert!(backlog

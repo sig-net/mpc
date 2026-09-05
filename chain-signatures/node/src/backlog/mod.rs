@@ -595,8 +595,6 @@ impl StateManager for Backlog {
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
     NotFound { chain: Chain, id: SignId },
-    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
-    InvalidBidirectionalResponseTransition,
     #[error("failed to reconstruct signature")]
     InvalidSignature,
 }
@@ -628,13 +626,6 @@ impl BacklogEntry {
         Self { request, status }
     }
 
-    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
-        Self::with_status(
-            request,
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)),
-        )
-    }
-
     pub fn sign_id(&self) -> SignId {
         self.request.id
     }
@@ -657,28 +648,6 @@ impl BacklogEntry {
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         self.status.clone()
-    }
-
-    /// Move this entry into the final-response request produced by a confirmed
-    /// target-chain execution.
-    ///
-    /// Rejects a request whose id differs from this entry's. Callers look the entry
-    /// up by `SignId`, so accepting a mismatch would leave `request.id` disagreeing
-    /// with the key it is stored under, and `checkpoint` commits to the key while
-    /// diagnostics report the id. `Backlog::watch_execution` warns when the two
-    /// identifiers diverge, which is the only way to reach this rejection.
-    pub fn respond(&mut self, request: Arc<IndexedSignRequest>) -> Result<(), BacklogError> {
-        if self.request.id != request.id
-            || !matches!(&request.kind, SignKind::RespondBidirectional(_))
-        {
-            return Err(BacklogError::InvalidBidirectionalResponseTransition);
-        }
-
-        self.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
-            respond_request: request,
-            progress: SignProgress::Generating,
-        });
-        Ok(())
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
