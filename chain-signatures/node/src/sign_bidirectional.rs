@@ -1,43 +1,19 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address};
 use anyhow::Context as _;
-use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
+};
 use rlp::{Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishState {
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub is_proposer: bool,
-    /// Unix seconds at which this entry entered pending-publish on this node.
-    /// On the proposer this is when it dispatched its publish and elsewhere is
-    /// when that node finished generation.
-    ///
-    /// `None` on entries written before this field existed, which never fail over:
-    /// a numeric default would put every entry already stuck in pending-publish
-    /// past its deadline at once, and jitter cannot spread deadlines in the past.
-    #[serde(default)]
-    pub publishing_since: Option<u64>,
-}
-
-impl PublishState {
-    pub fn new(signature: Signature, participants: Vec<Participant>, is_proposer: bool) -> Self {
-        Self {
-            signature,
-            participants,
-            is_proposer,
-            publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
-        }
-    }
-}
+use crate::backlog::Publishing;
 
 /// Progress of an active Cait-Sith MPC signing round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +21,7 @@ pub enum SignProgress {
     /// Actively running or awaiting MPC signing.
     Generating,
     /// Signature produced; ready to publish or awaiting on-chain inclusion.
-    Publishing(Arc<PublishState>),
+    Publishing(Publishing),
 }
 
 impl SignProgress {
@@ -53,23 +29,10 @@ impl SignProgress {
         matches!(self, Self::Generating)
     }
 
-    pub fn publish_state(&self) -> Option<&Arc<PublishState>> {
+    pub fn publishing(&self) -> Option<&Publishing> {
         match self {
             Self::Publishing(publish) => Some(publish),
             Self::Generating => None,
-        }
-    }
-
-    pub fn publish(
-        &mut self,
-        publish: Arc<PublishState>,
-    ) -> Result<(), crate::backlog::BacklogError> {
-        match self {
-            Self::Generating => {
-                *self = Self::Publishing(publish);
-                Ok(())
-            }
-            Self::Publishing(_) => Err(crate::backlog::BacklogError::InvalidPublishingTransition),
         }
     }
 }
@@ -123,14 +86,12 @@ impl SignStatus {
         }
     }
 
-    pub fn publish_state(&self) -> Option<&Arc<PublishState>> {
+    pub fn publishing(&self) -> Option<&Publishing> {
         match self {
-            Self::Sign(progress) => progress.publish_state(),
-            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => {
-                progress.publish_state()
-            }
+            Self::Sign(progress) => progress.publishing(),
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => progress.publishing(),
             Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                progress.publish_state()
+                progress.publishing()
             }
             Self::Bidirectional(BidirectionalProgress::Executing(_)) => None,
         }
@@ -161,6 +122,14 @@ pub trait SignBidirectionalEventExt {
     /// path's failure handling (quarantine): both must agree on what "can never
     /// advance" means.
     fn validate(&self) -> anyhow::Result<()>;
+
+    /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -212,6 +181,41 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         Ok(())
+    }
+
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        let epsilon = self.epsilon()?;
+        let from_address = derive_user_address(root_pk, epsilon);
+        let (signed_tx_hash, nonce) =
+            sign_and_hash_transaction(&self.serialized_transaction, mpc_sig)?;
+
+        Ok(BidirectionalTx {
+            id: BidirectionalTxId(signed_tx_hash),
+            sender: self.sender,
+            serialized_transaction: self.serialized_transaction.clone(),
+            source_chain: self.chain,
+            target_chain,
+            caip2_id: self.caip2_id.clone(),
+            key_version: self.key_version,
+            deposit: self.deposit,
+            path: self.path.clone(),
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+            output_deserialization_schema: self.output_deserialization_schema.clone(),
+            respond_serialization_schema: self.respond_serialization_schema.clone(),
+            request_id,
+            from_address: **from_address,
+            nonce,
+        })
     }
 }
 
@@ -528,58 +532,15 @@ mod tests {
 
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
-        use super::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
-        use k256::Scalar;
-        use mpc_primitives::{
-            BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalTx,
-            SignArgs, SignId, SignKind, Signature,
-        };
+        use super::{BidirectionalProgress, SignProgress, SignStatus};
+        use crate::backlog::mock::{mock_bidi_response, mock_publishing, mock_tx};
 
-        let dummy_sig = Signature {
-            big_r: k256::ProjectivePoint::GENERATOR.to_affine(),
-            s: k256::Scalar::ONE,
-            recovery_id: 0,
-        };
-        let dummy_tx = Arc::new(BidirectionalTx {
-            id: BidirectionalTxId([1u8; 32]),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: String::new(),
-            key_version: 0,
-            deposit: 0,
-            path: String::new(),
-            algo: String::new(),
-            dest: String::new(),
-            params: String::new(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: [1u8; 32],
-            from_address: [0u8; 20],
-            nonce: 0,
-        });
-        let publish = || Arc::new(PublishState::new(dummy_sig, vec![], true));
-        let dummy_respond_req = Arc::new(IndexedSignRequest::new(
-            SignId::new([1u8; 32]),
-            SignArgs {
-                entropy: [0u8; 32],
-                epsilon: Scalar::ONE,
-                payload: Scalar::ONE,
-                path: String::new(),
-                key_version: 0,
-            },
-            Chain::Solana,
-            0,
-            SignKind::RespondBidirectional(RespondBidirectionalTx {
-                tx_id: dummy_tx.id,
-                output: vec![],
-                chain_ctx: None,
-            }),
-        ));
+        let dummy_tx = Arc::new(mock_tx(1));
+        let dummy_respond_req = mock_bidi_response(&dummy_tx);
 
         let generation_tag = SignStatus::Sign(SignProgress::Generating).consensus_tag();
-        let publish_tag = SignStatus::Sign(SignProgress::Publishing(publish())).consensus_tag();
+        let publish_tag =
+            SignStatus::Sign(SignProgress::Publishing(mock_publishing())).consensus_tag();
         assert_eq!(
             generation_tag, publish_tag,
             "Generating and Publishing must produce identical consensus tags"
@@ -602,7 +563,7 @@ mod tests {
         .consensus_tag();
         let pub_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: dummy_respond_req,
-            progress: SignProgress::Publishing(publish()),
+            progress: SignProgress::Publishing(mock_publishing()),
         })
         .consensus_tag();
         assert_eq!(

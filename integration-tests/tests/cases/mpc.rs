@@ -3,11 +3,13 @@ use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use mpc_node::backlog::{Backlog, SignEntry};
 use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::{Chain, IndexedSignRequest, SignCommand, SignId};
+use mpc_node::types::SignCommand;
+use mpc_primitives::{Chain, IndexedSignRequest, SignId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Arc;
@@ -282,12 +284,13 @@ async fn test_sign_request_during_resharing() {
 }
 
 fn sign_request(seed: u8) -> SignCommand {
-    SignCommand::Request(Arc::new(IndexedSignRequest::sign(
+    let req = Arc::new(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
         super::helpers::test_sign_arg(seed),
         Chain::NEAR,
         0,
-    )))
+    ));
+    SignCommand::Request(SignEntry::generating(req, &Backlog::new()))
 }
 
 /// Drive the network through a threshold-change resharing via the real

@@ -1,10 +1,9 @@
 //! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
-use crate::backlog::Backlog;
+use crate::backlog::{BacklogError, Generating, SignEntry};
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::PresignatureId;
 use crate::rpc::{GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -16,8 +15,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::IndexedSignRequest;
-use std::sync::Arc;
+use mpc_primitives::{IndexedSignRequest, SignId};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -33,8 +31,6 @@ pub(crate) struct GenerateCtx {
     pub msg: MessageChannel,
     /// Publishes the finished signature (proposer only).
     pub rpc: RpcChannel,
-    /// Marks the request as publishing once a signature is produced.
-    pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -50,7 +46,7 @@ pub(crate) struct SignGenerator {
     participants: Vec<Participant>,
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    request: Arc<IndexedSignRequest>,
+    sign_id: SignId,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
@@ -67,7 +63,7 @@ impl SignGenerator {
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
-        request: Arc<IndexedSignRequest>,
+        request: &IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -112,7 +108,7 @@ impl SignGenerator {
             dropper,
             participants,
             proposer,
-            request,
+            sign_id,
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -134,7 +130,7 @@ impl SignGenerator {
     /// Receive the next protocol message, erroring out on timeout. `seen` lists the
     /// participants already heard from, so an abort log can name who it waits on.
     async fn recv(&mut self, seen: &[Participant]) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.request.id;
+        let sign_id = self.sign_id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
             self.timeout.saturating_sub(self.created.elapsed()),
@@ -166,11 +162,15 @@ impl SignGenerator {
 
     /// Poke-drive the protocol to completion: relay messages, and on `Return`
     /// publish the signature (proposer) and mark the request publishing.
-    pub(crate) async fn run(mut self, ctx: &GenerateCtx) -> Result<(), SignError> {
+    pub(crate) async fn run(
+        mut self,
+        ctx: &GenerateCtx,
+        entry: SignEntry<Generating>,
+    ) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
-        let sign_id = self.request.id;
+        let sign_id = self.sign_id;
         let presignature_id = self.dropper.id;
 
         let mut total_wait = Duration::from_millis(0);
@@ -280,36 +280,37 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGN_GENERATION_LATENCY
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
-
                     let is_proposer = self.proposer == me;
-                    if let Some(publish) = build_publish_state(
-                        ctx.governance.public_key,
-                        &self.request,
-                        &output,
-                        &self.participants,
-                        is_proposer,
-                    ) {
-                        if let Err(err) = ctx
-                            .backlog
-                            .publish(self.request.chain, &sign_id, Arc::clone(&publish))
-                            .await
-                        {
+                    let entry = match entry
+                        .advance(
+                            ctx.governance.public_key,
+                            &output,
+                            self.participants.clone(),
+                            is_proposer,
+                        )
+                        .await
+                    {
+                        Ok(entry) => entry,
+                        Err(BacklogError::InvalidSignature) => {
+                            tracing::error!(
+                                ?sign_id,
+                                "failed to validate signature; trashing publish request",
+                            );
+                            break Ok(());
+                        }
+                        Err(err) => {
                             tracing::warn!(
                                 ?sign_id,
                                 ?err,
                                 "failed to mark publishing for sign request"
                             );
+                            break Ok(());
                         }
-                    }
+                    };
 
                     if is_proposer {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        ctx.rpc.publish(
-                            ctx.governance.public_key,
-                            Arc::clone(&self.request),
-                            output,
-                            self.participants.clone(),
-                        );
+                        ctx.rpc.publish(entry);
                     }
 
                     break Ok(());
@@ -337,32 +338,11 @@ fn awaited_peers(participants: &[Participant], seen: &[Participant]) -> Vec<Part
         .collect()
 }
 
-/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
-fn build_publish_state(
-    public_key: mpc_crypto::PublicKey,
-    request: &IndexedSignRequest,
-    output: &cait_sith::FullSignature<Secp256k1>,
-    participants: &[Participant],
-    is_proposer: bool,
-) -> Option<Arc<PublishState>> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
-    let signature = mpc_crypto::reconstruct_signature(
-        &expected_public_key,
-        &output.big_r,
-        &output.s,
-        request.args.payload,
-    )
-    .ok()?;
-    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
-
-    Some(Arc::new(publish))
-}
-
 impl Drop for SignGenerator {
     /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {
         let msg = self.msg.clone();
-        let sign_id = self.request.id;
+        let sign_id = self.sign_id;
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
             msg.unsubscribe_signature(sign_id, presignature_id).await;

@@ -21,6 +21,7 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
+use crate::types::SignCommand;
 use crate::{logs, storage, web};
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
@@ -40,7 +41,7 @@ use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -266,10 +267,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
                 let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
+                let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
                     &account_id,
-                    sign_tx.clone(),
+                    near_sign_tx,
                     rpc_client,
                     backlog.clone(),
                 )?;
@@ -348,7 +350,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 rpc_channel.clone(),
-                backlog.clone(),
                 sync_report_tx,
             )
             .await;
@@ -755,7 +756,6 @@ impl ProtocolHandles {
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
-        backlog: Backlog,
         sync_report_tx: SyncReportSender,
     ) -> Self {
         let config = Config::new(LocalConfig {
@@ -782,7 +782,6 @@ impl ProtocolHandles {
             mesh_state.clone(),
             message_channel.clone(),
             rpc_channel,
-            backlog,
             sync_report_tx,
         );
         let protocol = MpcSignProtocol {

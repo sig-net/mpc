@@ -208,15 +208,20 @@ pub(crate) async fn find_consensus_checkpoint(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::backlog::Backlog;
+    use crate::backlog::consensus::{align_backlog_with_consensus, query_peers_checkpoint};
+    use crate::backlog::mock::{mock_sign_request, BacklogTestExt};
+    use crate::backlog::{Backlog, BacklogEntry, Checkpoint};
     use crate::mesh::connection::NodeStatus;
-    use crate::node_client::Options as NodeClientOptions;
-
-    use crate::backlog::BacklogEntry;
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
+    use crate::mesh::MeshState;
+    use crate::node_client::{NodeClient, Options as NodeClientOptions};
+    use crate::protocol::ParticipantInfo;
+    use cait_sith::protocol::Participant;
+    use mpc_chain_integration_core::StateManager;
+    use mpc_primitives::{Chain, CheckpointDigest, SignId};
+    use near_account_id::AccountId;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::watch;
 
     struct AlignFixture {
         chain: Chain,
@@ -371,19 +376,10 @@ mod tests {
             let mut local_digests = Vec::new();
             if !case.local_checkpoints.is_empty() {
                 if case.local_has_pending_tx {
-                    let tx = IndexedSignRequest::sign(
-                        SignId::new([1u8; 32]),
-                        SignArgs {
-                            entropy: [1u8; 32],
-                            epsilon: k256::Scalar::ONE,
-                            payload: k256::Scalar::ONE,
-                            path: "test".to_string(),
-                            key_version: 0,
-                        },
-                        chain,
-                        0,
-                    );
-                    fixture.backlog.insert(Arc::new(tx)).await;
+                    fixture
+                        .backlog
+                        .insert_mock_sign(SignId::new([1u8; 32]), chain)
+                        .await;
                 }
 
                 for &height in &case.local_checkpoints {
@@ -403,20 +399,10 @@ mod tests {
             let mut peer_digest = [0u8; 32];
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
-                    vec![BacklogEntry::new(Arc::new(IndexedSignRequest::sign(
-                        // Distinct from the local entry's id, so a peer
-                        // checkpoint holding a request diverges from ours.
+                    vec![BacklogEntry::new(mock_sign_request(
                         SignId::new([2u8; 32]),
-                        SignArgs {
-                            entropy: [1u8; 32],
-                            epsilon: k256::Scalar::ONE,
-                            payload: k256::Scalar::ONE,
-                            path: "test".to_string(),
-                            key_version: 0,
-                        },
                         chain,
-                        0,
-                    )))]
+                    ))]
                 } else {
                     vec![]
                 };
@@ -614,8 +600,6 @@ mod tests {
 
     #[tokio::test]
     async fn align_applies_a_reset_without_any_peer() {
-        use mpc_chain_integration_core::StateManager as _;
-
         let chain = Chain::Ethereum;
         let mut fixture = AlignFixture::new(None);
 

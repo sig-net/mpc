@@ -2,18 +2,16 @@
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
+use mpc_node::backlog::mock::BacklogTestExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{
-    Chain, ChainConfig as _, CheckpointDigest, IndexedSignRequest, SignArgs, SignId,
-};
+use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, SignId};
 use near_sdk::AccountId;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 use test_log::test;
 
@@ -317,19 +315,8 @@ async fn test_reset_converges_divergent_nodes() {
     // which is exactly the state that makes post-reset digests disagree if a
     // reset preserves it.
     for (index, node) in network.nodes.iter().enumerate() {
-        let request = IndexedSignRequest::sign(
-            SignId::new([index as u8 + 1; 32]),
-            SignArgs {
-                entropy: [index as u8 + 1; 32],
-                epsilon: k256::Scalar::ONE,
-                payload: k256::Scalar::ONE,
-                path: "reset".to_string(),
-                key_version: 0,
-            },
-            chain,
-            0,
-        );
-        node.backlog.insert(Arc::new(request)).await;
+        let sign_id = SignId::new([index as u8 + 1; 32]);
+        node.backlog.insert_mock_sign(sign_id, chain).await;
         node.backlog
             .set_processed_block(chain, interval * (index as u64 + 3))
             .await;

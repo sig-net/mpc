@@ -1,6 +1,4 @@
-use crate::protocol::signature::{GenerateCtx, PendingPresignature, SignError, SignGenerator};
-
-use crate::backlog::Backlog;
+use crate::backlog::{self, Generating};
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::metrics::requests::{
@@ -10,11 +8,14 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::signature::{GenerateCtx, PendingPresignature, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
 use crate::storage::PresignatureStorage;
+use crate::types::SignCommand;
+
 use mpc_utils::{
     task::JoinMap,
     time::{unix_elapsed, TimeoutBudget},
@@ -24,7 +25,7 @@ use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignCommand, SignId};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -121,7 +122,7 @@ const MAX_DEAD_IDS: usize = 4096;
 /// task incarnation and read by the deadline watcher; `round` carries the
 /// posit round across respawns.
 struct SignEntry {
-    request: Arc<IndexedSignRequest>,
+    entry: backlog::SignEntry<Generating>,
     is_proposer: Arc<AtomicBool>,
     round: Arc<AtomicUsize>,
 }
@@ -150,7 +151,6 @@ pub struct SignatureSpawner {
 
     msg: MessageChannel,
     rpc: RpcChannel,
-    backlog: Backlog,
     node_account_id: near_account_id::AccountId,
     /// Reports a peer as out-of-sync to the mesh, so state sync runs against it
     /// before we use it again. Cloned into each spawned sign task.
@@ -167,25 +167,26 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: Arc<IndexedSignRequest>,
+        entry: backlog::SignEntry<Generating>,
         cfg: ProtocolConfig,
     ) {
-        let sign_id = request.id;
+        let sign_id = entry.sign_id();
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.dead_ids.pop(&sign_id);
         let is_proposer = Arc::new(AtomicBool::new(false));
+        let chain = entry.chain();
+        let request = Arc::clone(entry.request());
         self.requests.insert(
             sign_id,
             SignEntry {
-                request: Arc::clone(&request),
+                entry,
                 is_proposer: Arc::clone(&is_proposer),
                 round: Arc::new(AtomicUsize::new(0)),
             },
         );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
-        let chain = request.chain;
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
@@ -216,10 +217,16 @@ impl SignatureSpawner {
         let sign_id = request.id;
         tracing::info!(?sign_id, "spawning signature task");
 
-        let (is_proposer, round) = self
+        let (is_proposer, round, entry) = self
             .requests
             .get(&sign_id)
-            .map(|entry| (Arc::clone(&entry.is_proposer), Arc::clone(&entry.round)))
+            .map(|q| {
+                (
+                    Arc::clone(&q.is_proposer),
+                    Arc::clone(&q.round),
+                    q.entry.clone(),
+                )
+            })
             .expect("sign request entry must exist when spawning its task");
 
         // Take (or create) the posit mailbox; it may already hold messages
@@ -236,7 +243,6 @@ impl SignatureSpawner {
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
-            backlog: self.backlog.clone(),
             cfg,
             is_proposer,
             round,
@@ -247,7 +253,7 @@ impl SignatureSpawner {
 
         // Spawn the async task with organizing loop
         self.tasks
-            .spawn(sign_id, task.run(request, self.mesh_state.clone(), mailbox));
+            .spawn(sign_id, task.run(entry, self.mesh_state.clone(), mailbox));
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
@@ -257,7 +263,7 @@ impl SignatureSpawner {
         let requests: Vec<Arc<IndexedSignRequest>> = self
             .requests
             .values()
-            .map(|entry| Arc::clone(&entry.request))
+            .map(|q| Arc::clone(q.entry.request()))
             .collect();
         tracing::info!(
             count = requests.len(),
@@ -359,7 +365,7 @@ impl SignatureSpawner {
                 let to_abort: Vec<SignId> = self
                     .requests
                     .iter()
-                    .filter(|(_, entry)| entry.request.chain == chain)
+                    .filter(|(_, q)| q.entry.chain() == chain)
                     .map(|(id, _)| *id)
                     .collect();
                 for sign_id in to_abort {
@@ -367,8 +373,8 @@ impl SignatureSpawner {
                     self.tasks.abort(sign_id);
                 }
             }
-            SignCommand::Request(request) => {
-                let sign_id = request.id;
+            SignCommand::Request(entry) => {
+                let sign_id = entry.sign_id();
 
                 // Skip requests we already track. Use the request map rather than
                 // the mailbox map, which may already hold buffered messages (e.g. a
@@ -380,13 +386,13 @@ impl SignatureSpawner {
                 }
 
                 record_request_latency_since(
-                    request.chain,
+                    entry.chain(),
                     SignRequestStep::AwaitingGeneration,
                     "ok",
-                    request.unix_timestamp_indexed,
+                    entry.request().unix_timestamp_indexed,
                 );
 
-                self.add_request(governance, request, cfg.clone());
+                self.add_request(governance, entry, cfg.clone());
             }
         }
 
@@ -487,7 +493,6 @@ impl SignatureSpawnerTask {
         mesh_state: watch::Receiver<MeshState>,
         msg_channel: MessageChannel,
         rpc_channel: RpcChannel,
-        backlog: Backlog,
         sync_report_tx: SyncReportSender,
     ) -> Self {
         let delay_monitor = DelayMonitor::spawn();
@@ -503,7 +508,6 @@ impl SignatureSpawnerTask {
             limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
-            backlog,
             node_account_id: my_account_id,
             sync_report_tx,
         };
@@ -585,29 +589,17 @@ mod tests {
             limiters: EnumMap::from_fn(|_| SignLimiter::new(MAX_CONCURRENT_PROPOSERS)),
             msg: msg_channel,
             rpc: rpc_channel,
-            backlog: Backlog::new(),
             node_account_id: account_id,
             sync_report_tx,
         };
+        let backlog = crate::backlog::Backlog::new();
 
         let cfg = ProtocolConfig::default();
         let sign_id = SignId::new([42u8; 32]);
-        let args = mpc_primitives::SignArgs {
-            entropy: [1u8; 32],
-            epsilon: k256::Scalar::from(1u64),
-            payload: k256::Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
-        let request = Arc::new(IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0));
+        let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
 
         let probe_id = SignId::new([43u8; 32]);
-        let probe_request = IndexedSignRequest::sign(
-            probe_id,
-            request.args.clone(),
-            Chain::Solana,
-            request.unix_timestamp_indexed,
-        );
+        let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
         let dropped = Arc::new(Notify::new());
         struct DropProbe(Arc<Notify>);
         impl Drop for DropProbe {
@@ -616,10 +608,11 @@ mod tests {
             }
         }
         let probe = DropProbe(Arc::clone(&dropped));
+        let entry = backlog::SignEntry::generating(probe_request, &backlog);
         spawner.requests.insert(
             probe_id,
             SignEntry {
-                request: Arc::new(probe_request),
+                entry,
                 is_proposer: Arc::new(AtomicBool::new(false)),
                 round: Arc::new(AtomicUsize::new(0)),
             },
@@ -630,7 +623,8 @@ mod tests {
         });
 
         // Step 1: Spawn → mailbox created, request retained, not dead
-        spawner.add_request(&governance, Arc::clone(&request), cfg.clone());
+        let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
@@ -651,7 +645,8 @@ mod tests {
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
-        spawner.add_request(&governance, request, cfg.clone());
+        let entry = backlog::SignEntry::generating(request, &backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 

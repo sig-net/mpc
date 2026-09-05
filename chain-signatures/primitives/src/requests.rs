@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -8,15 +6,6 @@ pub enum SignKind {
     Sign,
     SignBidirectional(SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
-}
-
-/// Messages sent into the node's sign-request processing queue.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum SignCommand {
-    Request(Arc<IndexedSignRequest>),
-    Completion(SignId),
-    AbortChain(Chain),
 }
 
 /// All relevant info pertaining to an indexed sign request.

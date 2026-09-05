@@ -16,7 +16,7 @@
 //! not, and a second attempt is wanted. Skipping it would make the schedule
 //! depend on `is_proposer`, a local role that checkpoint recovery overwrites.
 
-use crate::sign_bidirectional::PublishState;
+use crate::backlog::Publishing;
 
 use mpc_primitives::{Chain, ChainConfig as _, SignId};
 use near_account_id::AccountId;
@@ -77,36 +77,25 @@ fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
 /// [`PublishState::publishing_since`].
 pub(crate) fn publish_deadline(
     sign_id: &SignId,
-    publish: &PublishState,
+    publish: &Publishing,
     me: &AccountId,
     lag: Duration,
 ) -> Option<u64> {
     let delay = failover_delay(
-        publish.participants.len(),
+        publish.participants().len(),
         failover_jitter(sign_id, me),
         lag,
     );
-    Some(publish.publishing_since? + delay.as_secs())
+    Some(publish.publishing_since()? + delay.as_secs())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cait_sith::protocol::Participant;
-    use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::Signature;
+    use crate::backlog::mock::mock_publishing_since;
 
     fn account(name: &str) -> AccountId {
         name.parse().unwrap()
-    }
-
-    fn publish_state(participants: usize, publishing_since: Option<u64>) -> PublishState {
-        PublishState {
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
-            participants: (0..participants as u32).map(Participant::from).collect(),
-            is_proposer: false,
-            publishing_since,
-        }
     }
 
     const LAG: Option<Duration> = None;
@@ -146,7 +135,7 @@ mod tests {
         let deadline = |since, who: &AccountId| {
             publish_deadline(
                 &sign_id,
-                &publish_state(3, since),
+                &mock_publishing_since(3, since),
                 who,
                 observe_lag(Chain::Solana, LAG),
             )

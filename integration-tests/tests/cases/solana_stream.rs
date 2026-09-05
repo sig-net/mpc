@@ -7,19 +7,20 @@ use mpc_chain_integration_core::{
     PublishAction, StateManager,
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
-use mpc_crypto::ScalarExt;
+use mpc_node::backlog::mock::{mock_bidi_response_request, mock_signature_output, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignProgress, SignStatus};
+
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalTx, SignArgs,
-    SignCommand, SignId, Signature, LATEST_MPC_KEY_VERSION,
+    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, ScalarExt, SignId, Signature,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -87,7 +88,7 @@ async fn next_sign_command(
 ) -> Result<Arc<IndexedSignRequest>> {
     loop {
         match timeout(FINALIZED_EVENT_TIMEOUT, sign_rx.recv()).await {
-            Ok(Some(SignCommand::Request(request))) => return Ok(request),
+            Ok(Some(SignCommand::Request(request))) => return Ok(request.into_request()),
             Ok(Some(other)) => {
                 tracing::debug!(?other, "ignoring non-request sign command")
             }
@@ -510,34 +511,16 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([77u8; 32]);
-    let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
-
-    seeded_backlog
-        .insert(Arc::new(IndexedSignRequest::sign(
-            sign_id,
-            SignArgs {
-                entropy: [9u8; 32],
-                epsilon: Scalar::from(1u64),
-                payload: Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: LATEST_MPC_KEY_VERSION,
-            },
-            Chain::Solana,
-            0,
-        )))
+    let entry = seeded_backlog
+        .insert_mock_sign(sign_id, Chain::Solana)
         .await;
-    seeded_backlog
-        .set_status(
-            Chain::Solana,
-            &sign_id,
-            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
-                signature,
-                vec![Participant::from(0u32)],
-                true,
-            )))),
-        )
-        .await;
+    let (pk, output) = mock_signature_output(&entry.request().args);
+    let pub_entry = entry
+        .advance(pk, &output, vec![Participant::from(0u32)], true)
+        .await
+        .unwrap();
+    let expected_sig = *pub_entry.signature();
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
         .await;
@@ -614,7 +597,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
         if let SignCommand::Request(req) = &message {
-            if req.id == sign_id {
+            if req.sign_id() == sign_id {
                 anyhow::bail!("recovered publish request was incorrectly requeued for signing");
             }
         }
@@ -624,7 +607,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         RpcAction::Publish(action) => {
             assert_eq!(action.request.id, sign_id);
             assert_eq!(action.request.chain, Chain::Solana);
-            assert_eq!(action.signature, signature);
+            assert_eq!(action.signature, expected_sig);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }
         RpcAction::VoteCheckpoint { checkpoint, .. } => {
@@ -703,23 +686,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
     let sign_id = SignId::new([9u8; 32]);
-    let request = Arc::new(IndexedSignRequest::respond_bidirectional(
-        sign_id,
-        SignArgs {
-            entropy: [7u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-        },
-        Chain::Solana,
-        0,
-        RespondBidirectionalTx {
-            tx_id: BidirectionalTxId([1u8; 32]),
-            output: vec![0xde, 0xad, 0xbe, 0xef],
-            chain_ctx: None,
-        },
-    ));
+    let request = mock_bidi_response_request(sign_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
 
     let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
     publisher
@@ -891,7 +858,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let drain_until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < drain_until {
         match timeout(drain_until - Instant::now(), sign_rx.recv()).await {
-            Ok(Some(SignCommand::Request(request))) => seen.push(request.id),
+            Ok(Some(SignCommand::Request(request))) => seen.push(request.sign_id()),
             Ok(_) | Err(_) => break,
         }
     }
@@ -1011,7 +978,7 @@ async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Resul
     while Instant::now() < drain_until {
         match timeout(drain_until - Instant::now(), sign_rx2.recv()).await {
             Ok(Some(SignCommand::Request(request))) => {
-                payloads.push(<[u8; 32]>::from(request.args.payload.to_bytes()))
+                payloads.push(<[u8; 32]>::from(request.request().args.payload.to_bytes()))
             }
             Ok(_) | Err(_) => break,
         }
