@@ -1,5 +1,6 @@
 mod checkpoints;
 pub mod consensus;
+pub(crate) mod migration;
 
 use crate::sign_bidirectional::{
     BidirectionalProgress, PublishState, SignBidirectionalEventExt, SignProgress, SignStatus,
@@ -738,6 +739,7 @@ pub enum BacklogError {
 }
 
 #[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "migration::MigratableBacklogEntry")]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
