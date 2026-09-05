@@ -552,7 +552,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         .advance(pk, &output, vec![Participant::from(0u32)], true)
         .await
         .unwrap();
-    let expected_sig = pub_entry.publish_state().signature;
+    let expected_sig = *pub_entry.signature();
 
     let indexer = SolanaTestIndexer::new(vec![Some(ChainEvent::CatchupCompleted), None]);
     let (sign_tx, mut sign_rx) = mpsc::channel(4);

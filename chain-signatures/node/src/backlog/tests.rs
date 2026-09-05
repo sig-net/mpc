@@ -5,7 +5,7 @@ use super::{
 use crate::backlog::mock::{
     bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
     mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants,
-    mock_publish_state, mock_publish_state_with_proposer, mock_sign_request, mock_signature_output,
+    mock_publishing, mock_publishing_with_proposer, mock_sign_request, mock_signature_output,
     mock_tx, pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
@@ -389,14 +389,14 @@ fn test_checkpoint_consensus_projection() {
         &tx,
         Chain::Ethereum,
         SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
-            mock_publish_state(),
+            mock_publishing(),
         ))),
     ));
     let publish_other = single_entry_checkpoint(mock_execution_entry(
         &tx,
         Chain::Ethereum,
         SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
-            mock_publish_state_with_proposer(false),
+            mock_publishing_with_proposer(false),
         ))),
     ));
     assert_eq!(generation.digest(), publish.digest());
@@ -407,7 +407,7 @@ fn test_checkpoint_consensus_projection() {
     let plain_generation = single_entry_checkpoint(BacklogEntry::new(Arc::clone(&plain)));
     let plain_publish = single_entry_checkpoint(BacklogEntry::with_status(
         plain,
-        SignStatus::Sign(SignProgress::Publishing(mock_publish_state())),
+        SignStatus::Sign(SignProgress::Publishing(mock_publishing())),
     ));
     assert_eq!(plain_generation.digest(), plain_publish.digest());
 
@@ -431,7 +431,7 @@ fn test_checkpoint_consensus_projection() {
         origin_request,
         SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: response_request,
-            progress: SignProgress::Publishing(mock_publish_state()),
+            progress: SignProgress::Publishing(mock_publishing()),
         }),
     ));
     assert_eq!(execution.digest(), gen_bidirectional.digest());
@@ -892,9 +892,9 @@ async fn test_publishable_requests() {
     let publishable = backlog.publishable_requests(chain).await;
     assert_eq!(publishable.len(), 2);
     assert_eq!(publishable[0].sign_id(), SignId::from_u8(1));
-    assert!(publishable[0].publish_state().is_proposer);
+    assert!(publishable[0].is_proposer());
     assert_eq!(publishable[1].sign_id(), SignId::from_u8(3));
-    assert!(!publishable[1].publish_state().is_proposer);
+    assert!(!publishable[1].is_proposer());
 }
 
 #[tokio::test]
@@ -947,7 +947,7 @@ async fn test_dynamic_entry_cast_and_is() {
     // Owned conversion via try_into
     let typed = dyn_entry.try_into::<Sign<Publishing>>().expect("matches");
     assert_eq!(typed.sign_id(), sign_id);
-    assert!(typed.publish_state().is_proposer);
+    assert!(typed.is_proposer());
 }
 
 #[tokio::test]

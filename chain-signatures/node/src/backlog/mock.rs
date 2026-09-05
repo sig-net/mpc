@@ -1,8 +1,8 @@
 use crate::backlog::{
     Backlog, BacklogEntry, Bidirectional, Checkpoint, Executing, Final, Generating, Initial,
-    PendingRequests, Sign, SignEntry,
+    PendingRequests, Publishing, Sign, SignEntry,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -104,18 +104,14 @@ pub fn mock_participants() -> Vec<Participant> {
     vec![Participant::from(0u32), Participant::from(1u32)]
 }
 
-/// Create a mock publish state with proposer set to true for tests.
-pub fn mock_publish_state() -> Arc<PublishState> {
-    mock_publish_state_with_proposer(true)
+/// Create a mock publishing state with proposer set to true for tests.
+pub fn mock_publishing() -> Publishing {
+    mock_publishing_with_proposer(true)
 }
 
-/// Create a mock publish state with explicit proposer flag for tests.
-pub fn mock_publish_state_with_proposer(is_proposer: bool) -> Arc<PublishState> {
-    Arc::new(PublishState {
-        signature: mock_signature(),
-        participants: mock_participants(),
-        is_proposer,
-    })
+/// Create a mock publishing state with explicit proposer flag for tests.
+pub fn mock_publishing_with_proposer(is_proposer: bool) -> Publishing {
+    Publishing::new(mock_signature(), mock_participants(), is_proposer)
 }
 
 /// Helper to construct a pending execution status for a bidirectional tx.

@@ -303,11 +303,11 @@ impl Backlog {
             .requests
             .values()
             .filter_map(|entry| {
-                let publish = entry.status.publish_state()?;
+                let publish = entry.status.publishing()?;
                 Some(SignEntry {
                     chain,
                     request: Arc::clone(entry.request()),
-                    state: Publishing(Arc::clone(publish)),
+                    state: publish.clone(),
                     backlog: self.clone(),
                 })
             })

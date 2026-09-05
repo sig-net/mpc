@@ -1,6 +1,6 @@
 use super::{Backlog, BacklogError};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -10,6 +10,7 @@ use mpc_primitives::{
     BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey, SignId, SignKind,
     Signature,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
@@ -30,8 +31,41 @@ pub struct Bidirectional<P>(pub P);
 pub struct Generating;
 
 /// Typestate marker: signature has been produced and is ready to publish / awaiting confirmation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Publishing(pub Arc<PublishState>);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Publishing(Arc<PublishData>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PublishData {
+    signature: Signature,
+    participants: Vec<Participant>,
+    is_proposer: bool,
+}
+
+impl Publishing {
+    pub fn new(
+        signature: Signature,
+        participants: impl Into<Vec<Participant>>,
+        is_proposer: bool,
+    ) -> Self {
+        Self(Arc::new(PublishData {
+            signature,
+            participants: participants.into(),
+            is_proposer,
+        }))
+    }
+
+    pub fn signature(&self) -> &Signature {
+        &self.0.signature
+    }
+
+    pub fn participants(&self) -> &[Participant] {
+        &self.0.participants
+    }
+
+    pub fn is_proposer(&self) -> bool {
+        self.0.is_proposer
+    }
+}
 
 /// Typestate marker: Phase 1 of bidirectional signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +142,7 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
-    async fn publishing(&self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+    async fn record_publishing(&self, publish: Publishing) -> Result<(), BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
             .requests
@@ -225,19 +259,27 @@ impl SignEntry<Generating> {
         )
         .map_err(|_| BacklogError::InvalidSignature)?;
 
-        let publish = Arc::new(PublishState {
-            signature,
-            participants: participants.into(),
-            is_proposer,
-        });
-        self.publishing(Arc::clone(&publish)).await?;
-        Ok(self.transition(Publishing(publish)))
+        let publish = Publishing::new(signature, participants, is_proposer);
+        self.record_publishing(publish.clone()).await?;
+        Ok(self.transition(publish))
     }
 }
 
 impl SignEntry<Publishing> {
-    pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0
+    pub fn publishing(&self) -> &Publishing {
+        &self.state
+    }
+
+    pub fn signature(&self) -> &Signature {
+        self.state.signature()
+    }
+
+    pub fn participants(&self) -> &[Participant] {
+        self.state.participants()
+    }
+
+    pub fn is_proposer(&self) -> bool {
+        self.state.is_proposer()
     }
 }
 
@@ -282,8 +324,20 @@ impl SignEntry<Sign<Generating>> {
 }
 
 impl SignEntry<Sign<Publishing>> {
-    pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0 .0
+    pub fn publishing(&self) -> &Publishing {
+        &self.state.0
+    }
+
+    pub fn signature(&self) -> &Signature {
+        self.state.0.signature()
+    }
+
+    pub fn participants(&self) -> &[Participant] {
+        self.state.0.participants()
+    }
+
+    pub fn is_proposer(&self) -> bool {
+        self.state.0.is_proposer()
     }
 }
 
@@ -328,8 +382,20 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
 }
 
 impl SignEntry<Bidirectional<Initial<Publishing>>> {
-    pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0 .0 .0
+    pub fn publishing(&self) -> &Publishing {
+        &self.state.0 .0
+    }
+
+    pub fn signature(&self) -> &Signature {
+        self.state.0 .0.signature()
+    }
+
+    pub fn participants(&self) -> &[Participant] {
+        self.state.0 .0.participants()
+    }
+
+    pub fn is_proposer(&self) -> bool {
+        self.state.0 .0.is_proposer()
     }
 
     /// Advance Phase 1 into destination-chain `Executing`.
@@ -440,8 +506,20 @@ impl<P> SignEntry<Bidirectional<Final<P>>> {
 }
 
 impl SignEntry<Bidirectional<Final<Publishing>>> {
-    pub fn publish_state(&self) -> &Arc<PublishState> {
-        &self.state.0 .0 .0
+    pub fn publishing(&self) -> &Publishing {
+        &self.state.0 .0
+    }
+
+    pub fn signature(&self) -> &Signature {
+        self.state.0 .0.signature()
+    }
+
+    pub fn participants(&self) -> &[Participant] {
+        self.state.0 .0.participants()
+    }
+
+    pub fn is_proposer(&self) -> bool {
+        self.state.0 .0.is_proposer()
     }
 }
 
@@ -465,7 +543,7 @@ impl SignState for Sign<Publishing> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Sign(SignProgress::Publishing(publish)) => {
-                Some(Sign(Publishing(Arc::clone(publish))))
+                Some(Sign(publish.clone()))
             }
             _ => None,
         }
@@ -484,7 +562,7 @@ impl SignState for Generating {
 
 impl SignState for Publishing {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
-        status.publish_state().map(|p| Publishing(Arc::clone(p)))
+        status.publishing().cloned()
     }
 }
 
@@ -504,7 +582,7 @@ impl SignState for Bidirectional<Initial<Publishing>> {
         match status {
             SignStatus::Bidirectional(BidirectionalProgress::Initial(
                 SignProgress::Publishing(publish),
-            )) => Some(Bidirectional(Initial(Publishing(Arc::clone(publish))))),
+            )) => Some(Bidirectional(Initial(publish.clone()))),
             _ => None,
         }
     }
@@ -539,7 +617,7 @@ impl SignState for Bidirectional<Final<Publishing>> {
             SignStatus::Bidirectional(BidirectionalProgress::Final {
                 progress: SignProgress::Publishing(publish),
                 ..
-            }) => Some(Bidirectional(Final(Publishing(Arc::clone(publish))))),
+            }) => Some(Bidirectional(Final(publish.clone()))),
             _ => None,
         }
     }

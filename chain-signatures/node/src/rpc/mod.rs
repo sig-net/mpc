@@ -101,8 +101,7 @@ impl RpcChannel {
 
     pub fn publish(&self, entry: SignEntry<Publishing>) {
         let request = Arc::clone(entry.request());
-        let publish = entry.publish_state();
-        self.publish_signature(request, publish.signature, publish.participants.clone());
+        self.publish_signature(request, *entry.signature(), entry.participants().to_vec());
     }
 
     fn publish_signature(

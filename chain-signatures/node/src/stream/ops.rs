@@ -59,7 +59,7 @@ pub(crate) async fn requeue_pending_sign_requests(
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
     for entry in ctx.backlog.publishable_requests(source_chain).await {
-        if !entry.publish_state().is_proposer {
+        if !entry.is_proposer() {
             continue;
         }
 

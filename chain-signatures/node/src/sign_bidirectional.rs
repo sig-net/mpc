@@ -1,7 +1,6 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes};
 use anyhow::Context as _;
-use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
@@ -12,12 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishState {
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub is_proposer: bool,
-}
+use crate::backlog::Publishing;
 
 /// Progress of an active Cait-Sith MPC signing round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +19,7 @@ pub enum SignProgress {
     /// Actively running or awaiting MPC signing.
     Generating,
     /// Signature produced; ready to publish or awaiting on-chain inclusion.
-    Publishing(Arc<PublishState>),
+    Publishing(Publishing),
 }
 
 impl SignProgress {
@@ -33,7 +27,7 @@ impl SignProgress {
         matches!(self, Self::Generating)
     }
 
-    pub fn publish_state(&self) -> Option<&Arc<PublishState>> {
+    pub fn publishing(&self) -> Option<&Publishing> {
         match self {
             Self::Publishing(publish) => Some(publish),
             Self::Generating => None,
@@ -90,14 +84,14 @@ impl SignStatus {
         }
     }
 
-    pub fn publish_state(&self) -> Option<&Arc<PublishState>> {
+    pub fn publishing(&self) -> Option<&Publishing> {
         match self {
-            Self::Sign(progress) => progress.publish_state(),
+            Self::Sign(progress) => progress.publishing(),
             Self::Bidirectional(BidirectionalProgress::Initial(progress)) => {
-                progress.publish_state()
+                progress.publishing()
             }
             Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                progress.publish_state()
+                progress.publishing()
             }
             Self::Bidirectional(BidirectionalProgress::Executing(_)) => None,
         }
@@ -505,7 +499,8 @@ mod tests {
 
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
-        use super::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+        use crate::backlog::Publishing;
+        use super::{BidirectionalProgress, SignProgress, SignStatus};
         use k256::Scalar;
         use mpc_primitives::{
             BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalTx,
@@ -536,13 +531,7 @@ mod tests {
             from_address: [0u8; 20],
             nonce: 0,
         });
-        let publish = || {
-            Arc::new(PublishState {
-                signature: dummy_sig,
-                participants: vec![],
-                is_proposer: true,
-            })
-        };
+        let publish = || Publishing::new(dummy_sig, vec![], true);
         let dummy_respond_req = Arc::new(IndexedSignRequest::new(
             SignId::new([1u8; 32]),
             SignArgs {
