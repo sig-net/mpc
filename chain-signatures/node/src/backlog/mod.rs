@@ -250,20 +250,26 @@ impl Backlog {
 
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
-    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
+    pub async fn requeueable_requests(&self, chain: Chain) -> Vec<SignEntry<Generating>> {
         let pending = self.pending(&chain).read().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| Arc::clone(entry.request()))
+            .map(|entry| SignEntry {
+                chain,
+                request: Arc::clone(entry.request()),
+                state: Generating,
+                backlog: self.clone(),
+            })
             .collect();
 
         requeueable.sort_by(|left, right| {
-            left.unix_timestamp_indexed
-                .cmp(&right.unix_timestamp_indexed)
-                .then_with(|| left.id.request_id.cmp(&right.id.request_id))
+            left.request()
+                .unix_timestamp_indexed
+                .cmp(&right.request().unix_timestamp_indexed)
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         requeueable
@@ -271,10 +277,7 @@ impl Backlog {
 
     /// Returns backlog requests for a chain that are ready to be published.
     /// Sorted by indexed timestamp and request id.
-    pub async fn publishable_requests(
-        &self,
-        chain: Chain,
-    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>)> {
+    pub async fn publishable_requests(&self, chain: Chain) -> Vec<SignEntry<Publishing>> {
         // Read-only scan; the backup sweep calls this every second per chain, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
@@ -284,15 +287,20 @@ impl Backlog {
             .values()
             .filter_map(|entry| {
                 let publish = entry.status.publish_state()?;
-                Some((Arc::clone(entry.request()), Arc::clone(publish)))
+                Some(SignEntry {
+                    chain,
+                    request: Arc::clone(entry.request()),
+                    state: Publishing(Arc::clone(publish)),
+                    backlog: self.clone(),
+                })
             })
             .collect();
 
         publishable.sort_by(|left, right| {
-            left.0
+            left.request()
                 .unix_timestamp_indexed
-                .cmp(&right.0.unix_timestamp_indexed)
-                .then_with(|| left.0.id.request_id.cmp(&right.0.id.request_id))
+                .cmp(&right.request().unix_timestamp_indexed)
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         publishable

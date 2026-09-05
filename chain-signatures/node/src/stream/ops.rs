@@ -50,10 +50,9 @@ pub(crate) async fn requeue_pending_sign_requests(
     ctx: &StreamContext,
     source_chain: Chain,
 ) -> anyhow::Result<()> {
-    for sign_request in ctx.backlog.take_requeueable_requests(source_chain).await {
-        let sign_id = sign_request.id;
-        let source_chain = sign_request.chain;
-        let entry = SignEntry::generating(sign_request, &ctx.backlog);
+    for entry in ctx.backlog.requeueable_requests(source_chain).await {
+        let sign_id = entry.sign_id();
+        let source_chain = entry.chain();
         ctx.sign_tx
             .send(SignCommand::Request(entry))
             .await
@@ -67,13 +66,13 @@ pub(crate) async fn requeue_pending_sign_requests(
 }
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
-    for (sign_request, publish) in ctx.backlog.publishable_requests(source_chain).await {
-        if !publish.is_proposer {
+    for entry in ctx.backlog.publishable_requests(source_chain).await {
+        if !entry.publish_state().is_proposer {
             continue;
         }
 
-        let sign_id = sign_request.id;
-        ctx.rpc.publish_with_state(sign_request, &publish);
+        let sign_id = entry.sign_id();
+        ctx.rpc.publish(entry);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }

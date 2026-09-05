@@ -6,7 +6,6 @@ use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use crate::sign_bidirectional::PublishState;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -127,10 +126,6 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
-    }
-
-    pub fn publish_with_state(&self, request: Arc<IndexedSignRequest>, publish: &PublishState) {
-        self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 }
 

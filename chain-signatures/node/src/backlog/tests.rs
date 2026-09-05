@@ -784,9 +784,12 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
     let recovered = Backlog::new();
     recovered.recover_by_checkpoint(checkpoint).await;
 
-    let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
+    let requeued = recovered.requeueable_requests(Chain::Solana).await;
     assert_eq!(requeued.len(), 1);
-    assert_matches!(requeued[0].kind, SignKind::RespondBidirectional(_));
+    assert_matches!(
+        requeued[0].request().kind,
+        SignKind::RespondBidirectional(_)
+    );
 }
 
 #[tokio::test]
