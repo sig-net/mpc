@@ -18,19 +18,17 @@ pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
 ) -> anyhow::Result<bool> {
-    if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
-        anyhow::bail!("Unexpected sign request kind");
-    }
-
-    // Reject malformed bidirectional requests at ingestion, running the same
-    // deterministic derivations the respond event will need later. A request
-    // admitted here but failing there can never advance: its entry sticks in
-    // pending-publish forever, and every node publishes a leg-1 response
-    // whose second leg will never come.
-    if let SignKind::SignBidirectional(event) = &sign_request.kind {
-        event.validate().with_context(|| {
+    match &sign_request.kind {
+        SignKind::RespondBidirectional(_) => anyhow::bail!("Unexpected sign request kind"),
+        // Reject malformed bidirectional requests at ingestion, running the same
+        // deterministic derivations the respond event will need later. A request
+        // admitted here but failing there can never advance: its entry sticks in
+        // pending-publish forever, and every node publishes a leg-1 response
+        // whose second leg will never come.
+        SignKind::SignBidirectional(event) => event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
-        })?;
+        })?,
+        SignKind::Sign => {}
     }
 
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
@@ -219,14 +217,8 @@ pub(crate) async fn process_respond_bidirectional_event(
     };
 
     entry.verify_signature(root_pk, &event.signature)?;
-
-    if entry.complete().await {
-        tracing::info!(?sign_id, "bidirectional tx completed");
-    } else {
-        tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-        return Ok(());
-    }
-
+    entry.complete().await;
+    tracing::info!(?sign_id, "bidirectional tx completed");
     ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
