@@ -5,7 +5,9 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
+};
 use rlp::{Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +122,14 @@ pub trait SignBidirectionalEventExt {
     /// path's failure handling (quarantine): both must agree on what "can never
     /// advance" means.
     fn validate(&self) -> anyhow::Result<()>;
+
+    /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -171,6 +181,41 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         Ok(())
+    }
+
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        let epsilon = self.epsilon()?;
+        let from_address = derive_user_address(root_pk, epsilon);
+        let (signed_tx_hash, nonce) =
+            sign_and_hash_transaction(&self.serialized_transaction, mpc_sig)?;
+
+        Ok(BidirectionalTx {
+            id: BidirectionalTxId(signed_tx_hash),
+            sender: self.sender,
+            serialized_transaction: self.serialized_transaction.clone(),
+            source_chain: self.chain,
+            target_chain,
+            caip2_id: self.caip2_id.clone(),
+            key_version: self.key_version,
+            deposit: self.deposit,
+            path: self.path.clone(),
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+            output_deserialization_schema: self.output_deserialization_schema.clone(),
+            respond_serialization_schema: self.respond_serialization_schema.clone(),
+            request_id,
+            from_address: **from_address,
+            nonce,
+        })
     }
 }
 

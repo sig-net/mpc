@@ -10,8 +10,8 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    Chain, ExecutionOutcome, IndexedSignRequest, RespondBidirectionalEvent, SignId, SignKind,
+    SignatureRespondedEvent,
 };
 
 pub(crate) async fn process_sign_request(
@@ -138,12 +138,7 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Bidirectional<Initial<AnyProgress>>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
-        let event = match &entry.request().kind {
-            SignKind::SignBidirectional(event) => event.clone(),
-            _ => anyhow::bail!("unexpected sign kind for bidirectional initial entry"),
-        };
-        return advance_bidirectional_to_execution(entry, &event, respond_event, sign_id, root_pk)
-            .await;
+        return advance_bidirectional_to_execution(entry, respond_event, root_pk).await;
     }
 
     if entry.is::<Bidirectional<Executing>>() {
@@ -167,12 +162,12 @@ pub(crate) async fn process_respond_event(
 /// "pending execution".
 async fn advance_bidirectional_to_execution(
     entry: SignEntry<Bidirectional<Initial<AnyProgress>>>,
-    event: &SignBidirectionalEvent,
     respond_event: SignatureRespondedEvent,
-    sign_id: SignId,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let source_chain = respond_event.chain;
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain();
+    let event = entry.sign_bidirectional_event();
 
     // Admission validates the same derivations, but entries can enter the backlog
     // without passing admission (checkpoint recovery restores them wholesale). One
@@ -191,68 +186,17 @@ async fn advance_bidirectional_to_execution(
         return Ok(());
     }
 
-    tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event
-        .target_chain()
-        .with_context(|| format!("failed to process respond event for sign id: {sign_id:?}"))?;
+    let tx = Arc::new(event.to_bidirectional_tx(
+        respond_event.request_id,
+        respond_event.signature,
+        root_pk,
+    )?);
 
-    // Get the MPC public key and derive the from_address.
-    let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
+    entry.advance(tx).await.with_context(|| {
+        format!("advance bidirectional tx to execution failed for sign id {sign_id:?}")
+    })?;
 
-    let mpc_sig = respond_event.signature;
-
-    // Sign and hash the transaction to get the correct tx_id and nonce
-    let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
-        &event.serialized_transaction,
-        mpc_sig,
-    )?;
-
-    let tx_id = BidirectionalTxId(signed_tx_hash);
-
-    let bidirectional_tx = Arc::new(BidirectionalTx {
-        id: tx_id,
-        sender: event.sender,
-        serialized_transaction: event.serialized_transaction.clone(),
-        source_chain,
-        target_chain,
-        caip2_id: event.caip2_id.clone(),
-        key_version: event.key_version,
-        deposit: event.deposit,
-        path: event.path.clone(),
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-        output_deserialization_schema: event.output_deserialization_schema.clone(),
-        respond_serialization_schema: event.respond_serialization_schema.clone(),
-        request_id: respond_event.request_id,
-        from_address: **from_address,
-        nonce,
-    });
-
-    tracing::info!(
-        ?sign_id,
-        ?tx_id,
-        nonce = ?bidirectional_tx.nonce,
-        from_address = ?bidirectional_tx.from_address,
-        "bidirectional tx details before advancement",
-    );
-
-    entry
-        .advance(bidirectional_tx)
-        .await
-        .with_context(|| {
-            format!(
-                "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}"
-            )
-        })?;
-    tracing::info!(
-        ?sign_id,
-        ?tx_id,
-        ?target_chain,
-        "advance bidirectional tx to execution successful"
-    );
-
+    tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
     Ok(())
 }
 

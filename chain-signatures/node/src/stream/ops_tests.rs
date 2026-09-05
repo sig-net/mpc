@@ -23,7 +23,8 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainConfig as _, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignKind, Signature,
+    BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
+    SignBidirectionalEvent, SignKind, Signature,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
