@@ -2,6 +2,11 @@
 
 ## Prerequisites
 
+Run `just setup-check` to verify your system (Linux/macOS) without installing
+anything, or `just setup` to install missing dependencies automatically
+(`just setup-check all` / `just setup "" all` cover extended chain tooling:
+Solana/Anchor, Java/dpm, Compact). Manual install notes follow.
+
 1. Install [cargo-nextest](https://nexte.st) for race-free parallelization:
 
 ```bash
@@ -31,7 +36,9 @@ cargo install just
 
 ## Basic guide
 
-Running integration tests requires you to have redis and sandbox docker images present on your machine:
+Running integration tests requires a running Docker daemon (`just setup` installs
+Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.2` image is pulled
+automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
 docker pull redis:7.4.2
