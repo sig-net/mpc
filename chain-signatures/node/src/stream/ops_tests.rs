@@ -83,7 +83,7 @@ async fn recover_backlog_requeues_pending_signs() {
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
     wait_threshold_active(&mut mesh_rx, threshold).await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    backlog.recover_by_checkpoint(checkpoint).await.unwrap();
+    backlog.recover_by_checkpoint(checkpoint).await;
 
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     requeue_pending_sign_requests(&ctx, Chain::Solana)
@@ -401,7 +401,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .await
         .unwrap()
         .unwrap();
-    recovered.recover_by_checkpoint(checkpoint).await.unwrap();
+    recovered.recover_by_checkpoint(checkpoint).await;
 
     let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
     requeue_pending_sign_requests(&recovered_ctx, tx.source_chain)

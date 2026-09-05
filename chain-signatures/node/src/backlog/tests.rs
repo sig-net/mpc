@@ -741,10 +741,7 @@ async fn test_recovery_restores_state_and_watchers() {
         .persist(&checkpoint)
         .await
         .unwrap();
-    recovered
-        .recover_by_checkpoint(checkpoint.clone())
-        .await
-        .expect("failed to recover");
+    recovered.recover_by_checkpoint(checkpoint.clone()).await;
 
     // Restores execution entry
     let entry = recovered
@@ -785,10 +782,7 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let recovered = Backlog::new();
-    recovered
-        .recover_by_checkpoint(checkpoint)
-        .await
-        .expect("failed to recover");
+    recovered.recover_by_checkpoint(checkpoint).await;
 
     let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
     assert_eq!(requeued.len(), 1);
@@ -810,7 +804,7 @@ async fn test_recovery_preserves_pending_checkpoints() {
 
     // Recovery does not discard pending checkpoints needed for consensus matching
     let recovery_cp = Checkpoint::reset(chain, interval / 2);
-    backlog.recover_by_checkpoint(recovery_cp).await.unwrap();
+    backlog.recover_by_checkpoint(recovery_cp).await;
     assert_eq!(backlog.pending_checkpoint_count(chain).await, 2);
 }
 
@@ -828,10 +822,7 @@ async fn test_total_pending_on_recovery() {
     // Clean recovery updates count from 0 to 3
     let clean = Backlog::new();
     assert_eq!(clean.len(), 0);
-    clean
-        .recover_by_checkpoint(checkpoint.clone())
-        .await
-        .unwrap();
+    clean.recover_by_checkpoint(checkpoint.clone()).await;
     assert_eq!(clean.len(), 3);
 
     // Dirty recovery overwrites pre-existing state to match checkpoint size exactly
@@ -840,6 +831,6 @@ async fn test_total_pending_on_recovery() {
         .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
         .await;
     assert_eq!(dirty.len(), 1);
-    dirty.recover_by_checkpoint(checkpoint).await.unwrap();
+    dirty.recover_by_checkpoint(checkpoint).await;
     assert_eq!(dirty.len(), 3);
 }

@@ -92,15 +92,15 @@ impl PendingRequests {
         self.processed_block_height = Some(height);
     }
 
-    fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
+    fn from_checkpoint(checkpoint: &Checkpoint) -> Self {
         let mut requests = HashMap::new();
         for entry in &checkpoint.pending_requests {
             requests.insert(entry.sign_id(), entry.clone());
         }
-        Ok(Self {
+        Self {
             requests,
             processed_block_height: Some(checkpoint.block_height),
-        })
+        }
     }
 }
 
@@ -225,7 +225,7 @@ impl Backlog {
         let entry = self.pending(&chain).read().await.get(id).cloned()?;
         Some(SignEntry {
             chain,
-            request: entry.request,
+            request: Arc::clone(entry.request()),
             state: entry.status,
             backlog: self.clone(),
         })
@@ -251,7 +251,7 @@ impl Backlog {
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
-        let pending = self.pending(&chain).write().await;
+        let pending = self.pending(&chain).read().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
@@ -450,7 +450,7 @@ impl Backlog {
     async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         // Decode the checkpoint before the durable write so a malformed peer
         // checkpoint cannot leave storage regressed while memory stays put.
-        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+        let restored = PendingRequests::from_checkpoint(&checkpoint);
         self.checkpoints.regress(&checkpoint).await?;
         self.apply_checkpoint(checkpoint, restored).await;
         Ok(())
@@ -487,10 +487,9 @@ impl Backlog {
 
     /// Recover backlog state from a checkpoint.
     /// This is called when a node restarts or when it needs to align/regress to consensus.
-    pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
-        let restored = PendingRequests::from_checkpoint(&checkpoint)?;
+    pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) {
+        let restored = PendingRequests::from_checkpoint(&checkpoint);
         self.apply_checkpoint(checkpoint, restored).await;
-        Ok(())
     }
 
     /// Apply an already-decoded checkpoint to the backlog.
@@ -574,10 +573,6 @@ impl StateManager for Backlog {
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
     NotFound { chain: Chain, id: SignId },
-    #[error("chain not initialized: {chain:?}")]
-    ChainNotInitialized { chain: Chain },
-    #[error("transaction not found")]
-    TransactionNotFound,
     #[error("cannot advance sign request: status must be pending generation or publishing")]
     InvalidAdvanceTransition,
     #[error("cannot mark publishing: status must be pending generation")]

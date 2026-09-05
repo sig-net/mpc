@@ -335,9 +335,7 @@ pub async fn run<T: ChainTelemetry>(
                 height = checkpoint.block_height,
                 "loaded local checkpoint"
             );
-            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                tracing::warn!(chain = ?Chain::Hydration, %err, "failed to recover from local checkpoint");
-            }
+            backlog.recover_by_checkpoint(checkpoint).await;
         }
         Ok(None) => {
             tracing::info!(chain = ?Chain::Hydration, "no local checkpoint found");
