@@ -125,8 +125,7 @@ impl<State> SignEntry<State> {
 // --- Single-phase Sign Transitions ---
 
 impl SignEntry<Sign<Generating>> {
-    pub async fn sign(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
-        backlog.insert(Arc::clone(&request)).await;
+    pub fn sign(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
         Self {
             chain: request.chain,
             request,
@@ -156,8 +155,7 @@ impl SignEntry<Sign<Publishing>> {
 // --- Bidirectional Transitions ---
 
 impl SignEntry<Bidirectional<Initial<Generating>>> {
-    pub async fn bidirectional(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
-        backlog.insert(Arc::clone(&request)).await;
+    pub fn bidirectional(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
         Self {
             chain: request.chain,
             request,
@@ -392,7 +390,8 @@ impl Backlog {
         &self,
         request: Arc<IndexedSignRequest>,
     ) -> SignEntry<Sign<Generating>> {
-        SignEntry::sign(request, self).await
+        self.insert(Arc::clone(&request)).await;
+        SignEntry::sign(request, self)
     }
 
     /// Insert a two-phase bidirectional sign request into the backlog and return its initial [`SignEntry`].
@@ -400,14 +399,15 @@ impl Backlog {
         &self,
         request: Arc<IndexedSignRequest>,
     ) -> SignEntry<Bidirectional<Initial<Generating>>> {
-        SignEntry::bidirectional(request, self).await
+        self.insert(Arc::clone(&request)).await;
+        SignEntry::bidirectional(request, self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::backlog::mock::{
-        mock_bidi_request, mock_bidi_response_request, mock_bidirectional_tx, mock_publish_state,
+        mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_publish_state,
         mock_sign_request, BacklogTestExt,
     };
     use crate::backlog::request::{
@@ -437,7 +437,7 @@ mod tests {
 
         // 2. Advance to publishing
         let pub_entry = entry
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("should advance to publishing");
 
@@ -464,9 +464,10 @@ mod tests {
         let req = mock_sign_request(sign_id, Chain::Ethereum);
 
         // Chained advance from sign all the way till completion
-        let completed = SignEntry::sign(req, &backlog)
+        let completed = backlog
+            .insert_sign(req)
             .await
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("advance to publishing should succeed")
             .complete()
@@ -489,7 +490,7 @@ mod tests {
 
         // 2. Advance to Publishing
         let pub_entry = bidi_entry
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("should advance to publishing");
 
@@ -519,7 +520,7 @@ mod tests {
             .is_none());
 
         // 4. Advance to Final Generating
-        let response_request = mock_bidi_response_request(sign_id, tx.id, Chain::Solana);
+        let response_request = mock_bidi_response(&tx);
         let final_entry = exec_entry
             .advance(Arc::clone(&response_request))
             .await
@@ -538,7 +539,7 @@ mod tests {
 
         // 5. Advance to Final Publishing
         let final_pub_entry = final_entry
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("should advance final to publishing");
         assert_eq!(final_pub_entry.respond_request().id, sign_id);
@@ -561,12 +562,13 @@ mod tests {
         let sign_id = SignId::from_u8(22);
         let req = mock_bidi_request(sign_id, Chain::Solana);
         let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
-        let response_request = mock_bidi_response_request(sign_id, tx.id, Chain::Solana);
+        let response_request = mock_bidi_response(&tx);
 
         // Start from initial entry, and keep calling advance all the way till completion!
-        let completed = SignEntry::bidirectional(req, &backlog)
+        let completed = backlog
+            .insert_bidirectional(req)
             .await
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("advance to initial publishing")
             .advance(tx)
@@ -575,7 +577,7 @@ mod tests {
             .advance(response_request)
             .await
             .expect("advance to final generating")
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("advance to final publishing")
             .complete()
@@ -592,7 +594,7 @@ mod tests {
 
         let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
         let _ = entry
-            .advance(mock_publish_state(true))
+            .advance(mock_publish_state())
             .await
             .expect("advance to publishing");
 

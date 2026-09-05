@@ -76,6 +76,24 @@ impl Checkpoint {
             self.cumulative_digest,
         )
     }
+
+    /// Captures the current request state as a deterministic checkpoint.
+    pub fn snapshot(requests: &PendingRequests, chain: Chain) -> Self {
+        let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
+        pending_requests.sort_by_key(|entry| entry.sign_id());
+
+        let mut cumulative = sha3::Sha3_256::new();
+        for entry in &pending_requests {
+            cumulative.update([entry.status().consensus_tag()]);
+        }
+
+        Checkpoint {
+            chain,
+            block_height: requests.processed_block_height.unwrap_or(0),
+            pending_requests,
+            cumulative_digest: cumulative.finalize().into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,24 +186,6 @@ impl Checkpoints {
         drop(pending);
         self.observe(chain, len);
         Ok(())
-    }
-
-    /// Captures the current request state as a deterministic checkpoint.
-    pub(super) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
-        let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
-        pending_requests.sort_by_key(|entry| entry.sign_id());
-
-        let mut cumulative = sha3::Sha3_256::new();
-        for entry in &pending_requests {
-            cumulative.update([entry.status().consensus_tag()]);
-        }
-
-        Checkpoint {
-            chain,
-            block_height: requests.processed_block_height.unwrap_or(0),
-            pending_requests,
-            cumulative_digest: cumulative.finalize().into(),
-        }
     }
 
     /// Removes pending checkpoints through `height` after a confirmed checkpoint advances state.

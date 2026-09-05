@@ -1,4 +1,7 @@
-use super::{Backlog, BacklogEntry, Bidirectional, Generating, Initial, Sign, SignEntry};
+use crate::backlog::{
+    Backlog, BacklogEntry, Bidirectional, Checkpoint, Executing, Final, Generating, Initial,
+    PendingRequests, Sign, SignEntry,
+};
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Scalar};
@@ -23,6 +26,16 @@ pub trait BacklogTestExt: sealed::Sealed {
         id: SignId,
         chain: Chain,
     ) -> SignEntry<Bidirectional<Initial<Generating>>>;
+
+    async fn insert_mock_executing(
+        &self,
+        tx: &BidirectionalTx,
+    ) -> SignEntry<Bidirectional<Executing>>;
+
+    async fn insert_mock_final(
+        &self,
+        tx: &BidirectionalTx,
+    ) -> SignEntry<Bidirectional<Final<Generating>>>;
 }
 
 impl BacklogTestExt for Backlog {
@@ -38,6 +51,32 @@ impl BacklogTestExt for Backlog {
         self.insert_bidirectional(mock_bidi_request(id, chain))
             .await
     }
+
+    async fn insert_mock_executing(
+        &self,
+        tx: &BidirectionalTx,
+    ) -> SignEntry<Bidirectional<Executing>> {
+        self.insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
+            .await
+            .advance(mock_publish_state())
+            .await
+            .expect("advance to publishing")
+            .advance(Arc::new(tx.clone()))
+            .await
+            .expect("advance to executing")
+    }
+
+    async fn insert_mock_final(
+        &self,
+        tx: &BidirectionalTx,
+    ) -> SignEntry<Bidirectional<Final<Generating>>> {
+        let completion_request = mock_bidi_response(tx);
+        self.insert_mock_executing(tx)
+            .await
+            .advance(completion_request)
+            .await
+            .expect("advance to final generating")
+    }
 }
 
 /// Create a mock signature for tests.
@@ -45,8 +84,13 @@ pub fn mock_signature() -> Signature {
     Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
 }
 
-/// Create a mock publish state for tests.
-pub fn mock_publish_state(is_proposer: bool) -> Arc<PublishState> {
+/// Create a mock publish state with proposer set to true for tests.
+pub fn mock_publish_state() -> Arc<PublishState> {
+    mock_publish_state_with_proposer(true)
+}
+
+/// Create a mock publish state with explicit proposer flag for tests.
+pub fn mock_publish_state_with_proposer(is_proposer: bool) -> Arc<PublishState> {
     Arc::new(PublishState {
         signature: mock_signature(),
         participants: vec![Participant::from(0u32), Participant::from(1u32)],
@@ -175,6 +219,11 @@ pub fn mock_bidi_response_request(
     ))
 }
 
+/// Create a mock bidirectional final response request from a [`BidirectionalTx`].
+pub fn mock_bidi_response(tx: &BidirectionalTx) -> Arc<IndexedSignRequest> {
+    mock_bidi_response_request(tx.sign_id(), tx.id, tx.source_chain)
+}
+
 /// Helper to create a backlog entry with an arbitrary status for bidirectional requests.
 pub fn mock_execution_entry(
     tx: &BidirectionalTx,
@@ -205,4 +254,12 @@ pub fn mock_execution_entry_with_timestamp(
         }
         _ => BacklogEntry::with_status(request, status),
     }
+}
+
+/// Builds a checkpoint for a chain with exactly one backlog entry at height 100.
+pub fn single_entry_checkpoint(entry: BacklogEntry) -> Checkpoint {
+    let mut pending = PendingRequests::new();
+    pending.insert(entry.sign_id(), entry);
+    pending.set_processed_block(100);
+    Checkpoint::snapshot(&pending, Chain::Ethereum)
 }
