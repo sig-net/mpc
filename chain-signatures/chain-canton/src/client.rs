@@ -4,7 +4,7 @@ use crate::{
     daml::{CantonSignature, EcdsaSigData},
     ledger_api::{
         ActiveContractEntry, Command, CumulativeFilter, EventFormat, GetActiveContractsRequest,
-        IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+        IdentifierFilter, JsCantonError, JsCommands, LedgerEndResponse, PartyFilter,
         SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
         TemplateFilterValue,
     },
@@ -21,6 +21,11 @@ const CANTON_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const CANTON_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const CANTON_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const CANTON_RPC_MAX_RETRIES: usize = 5;
+
+enum SubmissionOutcome {
+    Transaction(SubmitAndWaitForTransactionResponse),
+    AlreadyAccepted,
+}
 
 /// Default retry strategy for Canton JSON Ledger API RPC calls.
 fn default_canton_rpc_retry_strategy() -> RetryConfig {
@@ -206,6 +211,19 @@ impl CantonClient {
         commands: JsCommands,
         context: &str,
     ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
+        match self.submit_and_wait_outcome(commands, context).await? {
+            SubmissionOutcome::Transaction(transaction) => Ok(transaction),
+            SubmissionOutcome::AlreadyAccepted => {
+                anyhow::bail!("{context} already accepted; transaction response unavailable")
+            }
+        }
+    }
+
+    async fn submit_and_wait_outcome(
+        &self,
+        commands: JsCommands,
+        context: &str,
+    ) -> anyhow::Result<SubmissionOutcome> {
         let max_attempts = self.retry_strategy.max_times;
         retry_rpc!(
             CANTON_RPC_TIMEOUT,
@@ -229,8 +247,19 @@ impl CantonClient {
                     })
                     .send()
                     .await?;
-                let resp = check_response(resp, context).await?;
-                Ok(resp.json().await?)
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    if status == reqwest::StatusCode::CONFLICT
+                        && serde_json::from_str::<JsCantonError>(&body)
+                            .is_ok_and(|error| error.code == "DUPLICATE_COMMAND")
+                    {
+                        // Acceptance ends submission retries; verified ledger events still settle the request.
+                        return Ok(SubmissionOutcome::AlreadyAccepted);
+                    }
+                    anyhow::bail!("{context} failed: {status} {body}");
+                }
+                Ok(SubmissionOutcome::Transaction(resp.json().await?))
             }
         )
     }
@@ -240,7 +269,7 @@ impl CantonClient {
         command_id: &str,
         choice: &str,
         choice_argument: serde_json::Value,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SubmissionOutcome> {
         let commands = JsCommands {
             command_id: command_id.to_string(),
             user_id: self.config.ledger_api_user.clone(),
@@ -254,9 +283,8 @@ impl CantonClient {
             }],
             disclosed_contracts: vec![],
         };
-        self.submit_and_wait(commands, &format!("canton {choice}"))
-            .await?;
-        Ok(())
+        self.submit_and_wait_outcome(commands, &format!("canton {choice}"))
+            .await
     }
 }
 
@@ -335,7 +363,8 @@ impl ChainPublisher for CantonClient {
             ),
         };
 
-        self.exercise_choice(&command_id, choice, choice_argument)
+        let outcome = self
+            .exercise_choice(&command_id, choice, choice_argument)
             .await
             .inspect_err(|err| {
                 tracing::error!(
@@ -347,14 +376,24 @@ impl ChainPublisher for CantonClient {
                 );
             })?;
 
-        tracing::info!(
-            ?sign_id,
-            choice,
-            elapsed = ?timestamp.elapsed(),
-            "published canton {choice} successfully"
-        );
-
-        self.telemetry.record_publish_metrics(action);
+        match outcome {
+            SubmissionOutcome::Transaction(_) => {
+                tracing::info!(
+                    ?sign_id,
+                    choice,
+                    elapsed = ?timestamp.elapsed(),
+                    "published canton {choice} successfully"
+                );
+                self.telemetry.record_publish_metrics(action);
+            }
+            SubmissionOutcome::AlreadyAccepted => {
+                tracing::info!(
+                    ?sign_id,
+                    choice,
+                    "canton {choice} already accepted; stopped submission retries"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -413,6 +452,248 @@ mod tests {
         server
     }
 
+    const DUPLICATE_COMMAND: &str = include_str!("testdata/duplicate_command.json");
+
+    #[derive(Default)]
+    struct PublishCounter(std::sync::atomic::AtomicUsize);
+
+    impl PublisherTelemetry for PublishCounter {
+        fn record_publish_metrics(&self, _action: &PublishAction) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn final_response_action() -> PublishAction {
+        make_publish_action(
+            Chain::Canton,
+            SignKind::RespondBidirectional(RespondBidirectionalTx {
+                tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
+                output: vec![1, 2, 3],
+                chain_ctx: Some(
+                    borsh::to_vec(&CantonChainCtx {
+                        sign_event_contract_id: "cid".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            }),
+            SignId::new([0; 32]),
+        )
+    }
+
+    fn initial_response_action() -> PublishAction {
+        make_publish_action(
+            Chain::Canton,
+            SignKind::SignBidirectional(SignBidirectionalEvent {
+                sender: [0; 32],
+                serialized_transaction: vec![],
+                caip2_id: "canton:global".to_string(),
+                key_version: 1,
+                deposit: 0,
+                path: String::new(),
+                algo: String::new(),
+                dest: String::new(),
+                params: String::new(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+                chain: Chain::Canton,
+                chain_ctx: Some(
+                    borsh::to_vec(&CantonChainCtx {
+                        sign_event_contract_id: "cid".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            }),
+            SignId::new([0; 32]),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_duplicate_command_stops_retrying() {
+        for (action, prefix, choice) in [
+            (initial_response_action(), "mpc-respond-", "Respond"),
+            (
+                final_response_action(),
+                "mpc-respond-bidir-",
+                "RespondBidirectional",
+            ),
+        ] {
+            let mut server = setup_mock_server_with_auth().await;
+            let duplicate = server
+                .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+                .match_body(Matcher::PartialJson(json!({"commands": {
+                    "commandId": format!("{prefix}{}", hex::encode(action.request.id.request_id)),
+                    "userId": "test-user",
+                    "actAs": ["test-party"],
+                    "commands": [{"ExerciseCommand": {"choice": choice}}],
+                }})))
+                .with_status(409)
+                .with_body(DUPLICATE_COMMAND)
+                .expect(1)
+                .create_async()
+                .await;
+            let telemetry = Arc::new(PublishCounter::default());
+            let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
+                .await
+                .unwrap()
+                .with_retry_strategy(fast_retry_strategy());
+
+            let result = client.publish_signature(&action).await;
+
+            assert!(result.is_ok(), "already accepted command: {result:?}");
+            duplicate.assert_async().await;
+            assert_eq!(telemetry.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_timeout_then_duplicate_stops_both_retry_layers() {
+        let mut server = setup_mock_server_with_auth().await;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_requests = requests.clone();
+        let retry_requests = requests.clone();
+        let (release, held_response) = std::sync::mpsc::channel::<()>();
+        let held_response = std::sync::Mutex::new(held_response);
+        let timeout = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .match_request(move |request| {
+                first_requests
+                    .lock()
+                    .unwrap()
+                    .push(request.body().unwrap().to_vec());
+                true
+            })
+            .with_status(200)
+            .with_chunked_body(move |writer| {
+                // Outlast the RPC deadline; mockito joins this writer when the client disconnects.
+                let _ = held_response
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(CANTON_RPC_TIMEOUT + Duration::from_secs(1));
+                writer.write_all(br#"{"transaction":{"offset":1,"events":[]}}"#)
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let duplicate = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .match_request(move |request| {
+                retry_requests
+                    .lock()
+                    .unwrap()
+                    .push(request.body().unwrap().to_vec());
+                true
+            })
+            .with_status(409)
+            .with_body(DUPLICATE_COMMAND)
+            .expect(1)
+            .create_async()
+            .await;
+        let archived = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .with_status(404)
+            .with_body(r#"{"code":"CONTRACT_NOT_FOUND"}"#)
+            .expect(0)
+            .create_async()
+            .await;
+        let telemetry = Arc::new(PublishCounter::default());
+        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+        let action = final_response_action();
+
+        let result = retry_rpc!(Duration::MAX, fast_retry_strategy(), "publish", {
+            client.publish_signature(&action).await
+        });
+        drop(release);
+
+        assert!(result.is_ok(), "accepted retry: {result:?}");
+        timeout.assert_async().await;
+        duplicate.assert_async().await;
+        archived.assert_async().await;
+        let requests = requests.lock().unwrap();
+        assert!(requests.len() >= 2);
+        assert!(requests.iter().all(|request| request == &requests[0]));
+        assert_eq!(telemetry.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_does_not_accept_other_errors() {
+        for (status, body) in [
+            (409, r#"{"code":"SUBMISSION_ALREADY_IN_FLIGHT"}"#),
+            (409, r#"{"code":"DUPLICATE_CONTRACT_KEY"}"#),
+            (409, r#"{"context":{"accepted":"true"}}"#),
+            (409, r#"{"code":"OTHER","cause":"DUPLICATE_COMMAND"}"#),
+            (409, "DUPLICATE_COMMAND"),
+            (404, DUPLICATE_COMMAND),
+            (500, DUPLICATE_COMMAND),
+            (200, "{}"),
+        ] {
+            let mut server = setup_mock_server_with_auth().await;
+            let response = server
+                .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+                .with_status(status)
+                .with_body(body)
+                .expect(1)
+                .create_async()
+                .await;
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(RetryConfig {
+                max_times: 0,
+                ..fast_retry_strategy()
+            });
+
+            assert!(
+                client
+                    .publish_signature(&final_response_action())
+                    .await
+                    .is_err(),
+                "must not accept status {status}: {body}"
+            );
+            response.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_wait_duplicate_cannot_fabricate_transaction() {
+        let mut server = setup_mock_server_with_auth().await;
+        let response = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .with_status(409)
+            .with_body(DUPLICATE_COMMAND)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        assert!(client
+            .submit_and_wait(
+                JsCommands {
+                    command_id: "command".to_string(),
+                    user_id: "test-user".to_string(),
+                    act_as: vec!["test-party".to_string()],
+                    read_as: vec![],
+                    commands: vec![],
+                    disclosed_contracts: vec![],
+                },
+                "command"
+            )
+            .await
+            .is_err());
+        response.assert_async().await;
+    }
+
     #[tokio::test]
     async fn test_publish_canton_sign_bidirectional_success() {
         let mut server = setup_mock_server_with_auth().await;
@@ -425,13 +706,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = CantonClient::new(
-            &mock_canton_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        )
-        .await
-        .unwrap()
-        .with_retry_strategy(fast_retry_strategy());
+        let telemetry = Arc::new(PublishCounter::default());
+        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -460,6 +739,7 @@ mod tests {
         );
         assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
+        assert_eq!(telemetry.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
