@@ -149,7 +149,7 @@ async fn test_backlog_concurrent_access() {
     // Wait for all removals
     for handle in handles {
         let removed = handle.await.unwrap();
-        assert!(removed.is_some());
+        assert!(removed);
     }
 
     // Verify Ethereum chain is now empty, but Solana still has data
@@ -181,14 +181,14 @@ async fn test_total_pending_accounting() {
     assert_eq!(backlog.len(), 2);
 
     // Removing non-existent ID does not decrement
-    backlog.remove(Chain::Ethereum, &sign_id_missing).await;
+    assert!(!backlog.remove(Chain::Ethereum, &sign_id_missing).await);
     assert_eq!(backlog.len(), 2);
 
     // Decrements on valid remove
-    backlog.remove(Chain::Ethereum, &sign_id1).await;
+    assert!(backlog.remove(Chain::Ethereum, &sign_id1).await);
     assert_eq!(backlog.len(), 1);
 
-    backlog.remove(Chain::Solana, &sign_id2).await;
+    assert!(backlog.remove(Chain::Solana, &sign_id2).await);
     assert_eq!(backlog.len(), 0);
     assert!(backlog.is_empty());
 }
@@ -513,7 +513,7 @@ async fn test_plain_sign_typestate_lifecycle() {
         .await
         .expect("should match AnyProgress");
     let removed = any_entry.complete().await;
-    assert!(removed.is_some());
+    assert!(removed);
     assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
 
     // 5. Chained advance from insert to complete
@@ -528,7 +528,7 @@ async fn test_plain_sign_typestate_lifecycle() {
         .expect("chained advance should succeed")
         .complete()
         .await;
-    assert!(completed.is_some());
+    assert!(completed);
     assert!(backlog.get(Chain::Ethereum, &sign_id2).await.is_none());
 
     // 6. Invalid signature rejection
@@ -617,7 +617,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 
     // 6. Complete removing from backlog
     let completed = final_pub_entry.complete().await;
-    assert!(completed.is_some());
+    assert!(completed);
     assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
 
     // 7. Full method-chained bidirectional advancement
@@ -647,7 +647,7 @@ async fn test_bidirectional_typestate_lifecycle() {
         .complete()
         .await;
 
-    assert!(chained_done.is_some());
+    assert!(chained_done);
     assert!(backlog.get(Chain::Solana, &sign_id2).await.is_none());
 }
 

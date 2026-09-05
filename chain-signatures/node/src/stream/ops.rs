@@ -234,7 +234,7 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     entry.verify_signature(root_pk, &event.signature)?;
 
-    if entry.complete().await.is_some() {
+    if entry.complete().await {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");

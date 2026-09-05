@@ -1,4 +1,4 @@
-use super::{Backlog, BacklogEntry, BacklogError};
+use super::{Backlog, BacklogError};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use anyhow::Context as _;
@@ -161,7 +161,8 @@ impl<State> SignEntry<State> {
     }
 
     /// Complete and remove this request from the backlog.
-    pub async fn complete(self) -> Option<BacklogEntry> {
+    /// Returns `true` if the entry was removed, `false` otherwise.
+    pub async fn complete(self) -> bool {
         self.backlog.remove(self.chain, &self.request.id).await
     }
 

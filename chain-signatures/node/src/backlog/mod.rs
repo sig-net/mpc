@@ -199,10 +199,7 @@ impl Backlog {
     /// Insert a new Sign request into the backlog for the specified chain.
     /// Returns the initial [`SignEntry<Generating>`] handle and a boolean indicating
     /// whether the request was newly inserted (`true`) or was already present (`false`).
-    pub async fn insert(
-        &self,
-        request: Arc<IndexedSignRequest>,
-    ) -> (SignEntry<Generating>, bool) {
+    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> (SignEntry<Generating>, bool) {
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(Arc::clone(&request));
@@ -223,15 +220,16 @@ impl Backlog {
     }
 
     /// Remove a Sign request from the backlog for the specified chain.
-    pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
+    /// Returns `true` if an entry was removed, `false` otherwise.
+    pub async fn remove(&self, chain: Chain, id: &SignId) -> bool {
         let (removed, len) = {
             let mut pending = self.pending(&chain).write().await;
             let rem = pending.remove(id);
-            (rem, pending.len())
+            (rem.is_some(), pending.len())
         };
 
         // Only decrement total pending if an entry was actually removed
-        if removed.is_some() {
+        if removed {
             self.total_pending.fetch_sub(1, Ordering::Relaxed);
         }
 
