@@ -31,6 +31,7 @@ import {
   SINGLETON,
   STUB_TX_ID,
   testConfig,
+  track,
   type StubEdges,
 } from "./support.js";
 
@@ -231,23 +232,13 @@ describe("handleSubmit: publisher preflight", () => {
       release = resolve;
     });
     vi.mocked(openFundingWallet).mockReturnValue(opening);
-    let observed: unknown;
-    const first = handleSubmit(CONFIG, 10, intent).then(
-      (landed) => {
-        observed = landed;
-        return landed;
-      },
-      (error: unknown) => {
-        observed = error;
-        return error;
-      },
-    );
+    const first = track(handleSubmit(CONFIG, 10, intent));
 
     try {
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(observed).toBeUndefined();
+      expect(first.outcome()).toBeUndefined();
       await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS - 60_000);
-      expect(observed).toMatchObject({ code: "wallet_unsynced" });
+      expect(first.outcome()).toMatchObject({ error: { code: "wallet_unsynced" } });
 
       release(wallet);
       await opening;
@@ -260,7 +251,7 @@ describe("handleSubmit: publisher preflight", () => {
       await expect(handleSubmit(CONFIG, 11, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
     } finally {
       release(wallet);
-      await first.catch(() => undefined);
+      await first.done;
     }
   });
 
@@ -283,17 +274,7 @@ describe("handleSubmit: publisher preflight", () => {
         return tx;
       },
     });
-    let observed: unknown;
-    const submission = handleSubmit(CONFIG, 14, intent).then(
-      (landed) => {
-        observed = landed;
-        return landed;
-      },
-      (error: unknown) => {
-        observed = error;
-        return error;
-      },
-    );
+    const submission = track(handleSubmit(CONFIG, 14, intent));
 
     await vi.advanceTimersByTimeAsync(29_999);
     const provedBeforeIndexing = proveTx.mock.calls.length;
@@ -301,14 +282,14 @@ describe("handleSubmit: publisher preflight", () => {
     expect(proveTx).toHaveBeenCalledOnce();
     expect(proofBudgetMs).toBe(SUBMIT_TIMEOUT_MS - 30_000);
     await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS - 30_001);
-    expect(observed).toBeUndefined();
+    expect(submission.outcome()).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
-    const outcomeAtAbsoluteDeadline = observed;
+    const outcomeAtAbsoluteDeadline = submission.outcome();
 
     releaseBalance();
-    await submission;
+    await submission.done;
     expect(provedBeforeIndexing).toBe(0);
-    expect(outcomeAtAbsoluteDeadline).toMatchObject({ code: "ambiguous_submit" });
+    expect(outcomeAtAbsoluteDeadline).toMatchObject({ error: { code: "ambiguous_submit" } });
   });
 });
 

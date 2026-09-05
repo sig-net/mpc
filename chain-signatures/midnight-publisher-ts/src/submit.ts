@@ -9,6 +9,7 @@ import {
 } from "@midnightntwrk/ledger-v9";
 
 import type { Config } from "./config.js";
+import { withDeadline } from "./deadline.js";
 import { describeFailure, PublisherError, type ErrorCode } from "./errors.js";
 import { proveTransaction, type UnboundTransaction } from "./prover.js";
 import { openFundingWallet, type FundingWallet, type Landed } from "./wallet.js";
@@ -32,26 +33,12 @@ export interface Publisher {
 export const SUBMIT_TIMEOUT_MS = 6 * 60 * 1000;
 const SHUTDOWN_TIMEOUT_MS = 1_000;
 
-// `Promise.race` handles the loser, so the abandoned attempt's own late failure surfaces nowhere.
-async function withDeadline<T>(work: Promise<T>, ms: number, timeoutError: Error): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => void (timer = setTimeout(() => reject(timeoutError), ms))),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 let publisherPromise: Promise<Publisher> | undefined;
 
 async function buildPublisher(config: Config): Promise<Publisher> {
-  const endpoints = config.endpoints;
   return {
-    proveTx: (tx, proofBudgetMs) => proveTransaction(endpoints.proofServerUrl, tx, proofBudgetMs),
-    wallet: await openFundingWallet(config.accountKeys, config.networkId, endpoints),
+    proveTx: (tx, proofBudgetMs) => proveTransaction(config.node.proofServerUrl, tx, proofBudgetMs),
+    wallet: await openFundingWallet(config.accountKeys, config.node),
   };
 }
 
@@ -190,7 +177,7 @@ export async function handleSubmit(
   try {
     // No Zswap offer: a respond moves no coins, the wallet adds the fee inputs next.
     proven = await ready.proveTx(
-      Transaction.fromParts(config.networkId, undefined, undefined, decoded),
+      Transaction.fromParts(config.node.networkId, undefined, undefined, decoded),
       proofBudgetMs,
     );
   } catch (error) {

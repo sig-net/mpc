@@ -1,4 +1,5 @@
 import { encodeContractKeyLocation } from "@midnight-ntwrk/compact-js";
+import { ZKConfigRegistry } from "@midnight-ntwrk/midnight-js-types";
 import {
   CostModel,
   createProvingPayload,
@@ -12,7 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildIntent } from "../src/intent.js";
 import { proveTransaction, provingProvider, type UnboundTransaction } from "../src/prover.js";
 import { decodeIntent } from "../src/submit.js";
-import { respondInput, SINGLETON } from "./support.js";
+import { respondInput, SINGLETON, track } from "./support.js";
 
 const NOWHERE = "http://127.0.0.1:1";
 
@@ -75,6 +76,19 @@ describe("the proving provider", () => {
       expect(material?.ir.length, circuit).toBeGreaterThan(0);
     }
     expect(await provider().lookupKey("midnight/zswap/spend")).toBeUndefined();
+  });
+
+  it("reports SDK artifact failures as contract mismatches and retains their cause", async () => {
+    const cause = new Error("artifact resolution failed");
+    vi.spyOn(ZKConfigRegistry.prototype, "get").mockRejectedValueOnce(cause);
+
+    const error = await provider()
+      .lookupKey(contractKeyLocation("respond"))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(error).toMatchObject({ code: "contract_mismatch", cause });
   });
 
   it("puts the contract address, circuit, and verifier hash in proof requests", async () => {
@@ -142,18 +156,14 @@ describe("the proving provider", () => {
           }, 121);
         }),
     );
-    let observed: { readonly result?: UnboundTransaction; readonly error?: unknown } | undefined;
-    const proving = proveTransaction("http://proof.invalid", transaction, 20).then(
-      (result) => (observed = { result }),
-      (error: unknown) => (observed = { error }),
-    );
+    const proving = track(proveTransaction("http://proof.invalid", transaction, 20));
 
     await vi.advanceTimersByTimeAsync(19);
-    expect(observed).toBeUndefined();
+    expect(proving.outcome()).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
-    const outcomeAtBudget = observed;
+    const outcomeAtBudget = proving.outcome();
     await vi.advanceTimersByTimeAsync(101);
-    await proving;
+    await proving.done;
 
     expect(outcomeAtBudget).toMatchObject({
       error: {
@@ -162,8 +172,8 @@ describe("the proving provider", () => {
       },
     });
     expect(underlyingResolved).toBe(true);
-    expect(observed).toBe(outcomeAtBudget);
-    expect(observed).not.toMatchObject({ result: lateResult });
+    expect(proving.outcome()).toBe(outcomeAtBudget);
+    expect(proving.outcome()).not.toMatchObject({ result: lateResult });
     expect(vi.getTimerCount()).toBe(0);
   });
 

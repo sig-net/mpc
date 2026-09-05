@@ -1,8 +1,7 @@
-import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-import { ContractCall, Intent, LedgerParameters } from "@midnightntwrk/ledger-v9";
+import { ContractCall, LedgerParameters } from "@midnightntwrk/ledger-v9";
 import { createConstructorContext } from "@midnight-ntwrk/compact-runtime";
 import {
   Contract as SignetContract,
@@ -10,24 +9,28 @@ import {
   witnesses,
   type SignetContractPrivateState,
 } from "@sig-net/midnight-contract";
-import { deriveAccountKeys } from "@sig-net/midnight-contract-deploy";
+import { deriveAccountKeys, signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
 import type { Config } from "../src/config.js";
 import type { BuildIntentInput } from "../src/intent.js";
-import { primePublisher, type Publisher } from "../src/submit.js";
+import { decodeIntent, primePublisher, type Publisher } from "../src/submit.js";
 import type { FundingWallet, Landed } from "../src/wallet.js";
 
 export const toHex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 
-// The real compiled assets, not the fixtures directory: a circuit run reads `keys/` and `zkir/`.
-export function managedDir(): string {
-  const { resolve } = createRequire(import.meta.url);
-  return join(dirname(resolve("@sig-net/midnight-contract")), "managed");
-}
+// The six values Rust sets on the child process, as the config and process tests need them.
+export const PUBLISHER_ENV: NodeJS.ProcessEnv = {
+  MIDNIGHT_PUB_NETWORK_ID: "undeployed",
+  MIDNIGHT_PUB_NODE_URL: "http://127.0.0.1:9944",
+  MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
+  MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
+  MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
+  MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
+};
 
 export const testConfig = (overrides: Partial<Config> = {}): Config => ({
-  networkId: "undeployed",
-  endpoints: {
+  node: {
+    networkId: "undeployed",
     nodeUrl: "http://127.0.0.1:9944/",
     proofServerUrl: "http://127.0.0.1:6300/",
     indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
@@ -36,6 +39,29 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
   accountKeys: deriveAccountKeys("ab".repeat(32), "undeployed"),
   ...overrides,
 });
+
+export type Outcome<T> = { readonly result: T } | { readonly error: unknown };
+
+export interface Tracked<T> {
+  /** The settled outcome, or `undefined` while the promise is still pending. */
+  readonly outcome: () => Outcome<T> | undefined;
+  /** Resolves once the promise has settled either way; never rejects. */
+  readonly done: Promise<void>;
+}
+
+// Lets a test inspect a promise at a chosen fake-timer tick without racing or rejecting.
+export function track<T>(promise: Promise<T>): Tracked<T> {
+  let outcome: Outcome<T> | undefined;
+  const done = promise.then(
+    (result) => {
+      outcome = { result };
+    },
+    (error: unknown) => {
+      outcome = { error };
+    },
+  );
+  return { outcome: () => outcome, done };
+}
 
 export const STUB_TX_ID = "ab".repeat(32);
 
@@ -86,9 +112,6 @@ export function primeStub(edges: StubEdges = {}): void {
   );
 }
 
-export const decodeIntent = (bytes: Uint8Array) =>
-  Intent.deserialize("signature", "pre-proof", "pre-binding", bytes);
-
 // The entry point distinguishes the two response circuits without depending on
 // compiler-generated transcript details.
 export function calledEntryPoint(bytes: Uint8Array): string {
@@ -111,7 +134,9 @@ export function initialSingletonStateHex(): Promise<string> {
     for (const circuit of ["respond", "respondBidirectional", "signBidirectional"]) {
       const operation = currentContractState.operation(circuit);
       if (operation === undefined) throw new Error(`initial state has no ${circuit} operation`);
-      operation.verifierKey = readFileSync(`${managedDir()}/keys/${circuit}.verifier`);
+      operation.verifierKey = readFileSync(
+        join(signetContractManagedPath, "keys", `${circuit}.verifier`),
+      );
       currentContractState.setOperation(circuit, operation);
     }
     return toHex(currentContractState.serialize());
