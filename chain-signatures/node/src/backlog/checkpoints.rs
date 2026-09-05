@@ -389,16 +389,15 @@ impl Checkpoints {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::backlog::checkpoints::{
+        Checkpoint, CheckpointError, CheckpointStorage, Checkpoints, MAX_PENDING_CHECKPOINTS,
+    };
+    use mpc_primitives::Chain;
+    use std::sync::Arc;
     use tokio::sync::Barrier;
 
     fn checkpoint(height: u64) -> Checkpoint {
-        Checkpoint {
-            chain: Chain::Ethereum,
-            block_height: height,
-            pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
-        }
+        Checkpoint::reset(Chain::Ethereum, height)
     }
 
     #[tokio::test]

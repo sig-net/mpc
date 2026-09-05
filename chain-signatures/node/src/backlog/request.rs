@@ -412,7 +412,6 @@ mod tests {
     };
     use crate::backlog::request::{
         AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
-        SignEntry,
     };
     use crate::backlog::Backlog;
     use mpc_primitives::{Chain, SignId};

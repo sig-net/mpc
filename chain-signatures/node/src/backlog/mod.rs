@@ -762,15 +762,9 @@ mod tests {
         Backlog, BacklogEntry, BacklogError, Bidirectional, Executing, Final, Generating, Initial,
         PendingRequests, Publishing,
     };
-    use crate::sign_bidirectional::{
-        BidirectionalProgress, SignProgress, SignStatus,
-    };
+    use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
     use mpc_chain_integration_core::StateManager;
-    use mpc_chain_solana::Pubkey;
-    use mpc_primitives::{
-        Chain, ChainConfig as _, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId,
-        SignKind,
-    };
+    use mpc_primitives::{Chain, ChainConfig as _, SignId, SignKind};
     use std::convert::TryInto;
     use std::sync::Arc;
 
@@ -940,8 +934,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_equality() {
+    #[test]
+    fn test_checkpoint_equality() {
         let tx1 = mock_tx(1);
         let tx2 = mock_tx(2);
 
@@ -1108,8 +1102,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_digest_ignores_timestamp() {
+    #[test]
+    fn test_checkpoint_digest_ignores_timestamp() {
         let tx = mock_tx(8);
 
         let entry1 = mock_execution_entry_with_timestamp(
@@ -1125,41 +1119,27 @@ mod tests {
             9999,
         );
 
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(tx.sign_id(), entry1);
-        pending1.set_processed_block(200);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(tx.sign_id(), entry2);
-        pending2.set_processed_block(200);
-
-        let checkpoint1 = Checkpoint::snapshot(&pending1, Chain::Ethereum);
-        let checkpoint2 = Checkpoint::snapshot(&pending2, Chain::Ethereum);
+        let checkpoint1 = single_entry_checkpoint(entry1);
+        let checkpoint2 = single_entry_checkpoint(entry2);
 
         assert_eq!(checkpoint1.digest(), checkpoint2.digest());
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_digest_differs_for_different_requests() {
+    #[test]
+    fn test_checkpoint_digest_differs_for_different_requests() {
         let tx1 = mock_tx(10);
         let tx2 = mock_tx(11);
 
-        let mut pending1 = PendingRequests::new();
-        pending1.insert(
-            tx1.sign_id(),
-            mock_execution_entry(&tx1, Chain::Ethereum, bidi_initial_status()),
-        );
-        pending1.set_processed_block(100);
-
-        let mut pending2 = PendingRequests::new();
-        pending2.insert(
-            tx2.sign_id(),
-            mock_execution_entry(&tx2, Chain::Ethereum, bidi_initial_status()),
-        );
-        pending2.set_processed_block(100);
-
-        let checkpoint1 = Checkpoint::snapshot(&pending1, Chain::Ethereum);
-        let checkpoint2 = Checkpoint::snapshot(&pending2, Chain::Ethereum);
+        let checkpoint1 = single_entry_checkpoint(mock_execution_entry(
+            &tx1,
+            Chain::Ethereum,
+            bidi_initial_status(),
+        ));
+        let checkpoint2 = single_entry_checkpoint(mock_execution_entry(
+            &tx2,
+            Chain::Ethereum,
+            bidi_initial_status(),
+        ));
 
         assert_ne!(checkpoint1.digest(), checkpoint2.digest());
         assert_eq!(
@@ -1168,17 +1148,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_checkpoint_serialization() {
+    #[test]
+    fn test_checkpoint_serialization() {
         let tx1 = mock_tx(1);
-
-        let mut pending = PendingRequests::new();
-        pending.insert(
-            tx1.sign_id(),
-            mock_execution_entry(&tx1, Chain::Ethereum, pending_execution_status(&tx1)),
-        );
-        pending.set_processed_block(100);
-        let checkpoint = Checkpoint::snapshot(&pending, Chain::Ethereum);
+        let checkpoint = single_entry_checkpoint(mock_execution_entry(
+            &tx1,
+            Chain::Ethereum,
+            pending_execution_status(&tx1),
+        ));
 
         // Test JSON serialization
         let json = serde_json::to_string(&checkpoint).unwrap();
@@ -1262,39 +1239,10 @@ mod tests {
     async fn test_recover_preserves_sign_kind() {
         let backlog = Backlog::new();
         let sign_id = SignId::from_u8(42);
-        let args = SignArgs {
-            entropy: [1u8; 32],
-            epsilon: k256::Scalar::from(1u64),
-            payload: k256::Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
 
-        let program_id = Pubkey::new_unique();
-        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent {
-            sender: Default::default(),
-            serialized_transaction: vec![1, 2, 3],
-            dest: "ethereum".to_string(),
-            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-            key_version: 1,
-            deposit: 10,
-            path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
-            chain: Chain::Solana,
-            chain_ctx: Some(program_id.to_bytes().to_vec()),
-            output_deserialization_schema: vec![9],
-            respond_serialization_schema: vec![8],
-        });
-
-        let req = Arc::new(IndexedSignRequest::new(
-            sign_id,
-            args,
-            Chain::Solana,
-            0,
-            sign_kind,
-        ));
-        backlog.insert_bidirectional(req).await;
+        backlog
+            .insert_mock_bidirectional(sign_id, Chain::Solana)
+            .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
 
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1796,15 +1744,8 @@ mod tests {
 
         // Recover the request backlog without discarding checkpoints that may
         // still be needed to match an on-chain consensus digest.
-        let fresh = Backlog::new();
-        let recovery_cp = fresh.set_processed_block(chain, interval / 2).await;
-        // interval/2 is not a multiple of interval → no auto-checkpoint
-        assert!(recovery_cp.is_none());
-        // Force create a checkpoint at that height
-        let fresh_cp = fresh.checkpoint(chain).await.unwrap();
-        assert_eq!(fresh_cp.block_height, interval / 2);
-
-        backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
+        let recovery_cp = Checkpoint::reset(chain, interval / 2);
+        backlog.recover_by_checkpoint(recovery_cp).await.unwrap();
         assert_eq!(
             backlog.pending_checkpoint_count(chain).await,
             2,
