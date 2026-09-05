@@ -210,9 +210,6 @@ impl MidnightArgs {
                             output_storage_timeout,
                             #[cfg(feature = "test-feature")]
                             output_storage_emulator_endpoint,
-                            request_timeout: _,
-                            submit_timeout: _,
-                            restart_backoff: _,
                             ..
                         },
                     rpc: _,
