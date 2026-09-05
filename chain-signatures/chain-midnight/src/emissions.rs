@@ -11,7 +11,7 @@ use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
-pub const MISC_NAME_LEN: usize = 32;
+const MISC_NAME_LEN: usize = 32;
 pub const MISC_PAYLOAD_LEN: usize = 256;
 const MISC_DATA_LEN: usize = MISC_NAME_LEN + MISC_PAYLOAD_LEN;
 const LOG_ITEM_VERSION: u32 = 1;
@@ -94,7 +94,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     }
 }
 
-pub fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
+fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
     anyhow::ensure!(
         item.version == LOG_ITEM_VERSION,
         "emission-schema: log item version {} is not {LOG_ITEM_VERSION}",
@@ -186,7 +186,7 @@ pub fn emissions_in(
 mod tests {
     use super::*;
 
-    use crate::test_utils::{array_of, cell_from_atoms, trim};
+    use crate::test_utils::{array_of, cell_from_atoms, hex_32, trim};
     use midnight_base_crypto::cost_model::RunningCost;
     use midnight_base_crypto::time::Timestamp;
     use midnight_ledger_v9::structure::{
@@ -218,12 +218,6 @@ mod tests {
     const RESPOND_TX_161: &[u8] = include_bytes!("../fixtures/respond-tx-161.mn");
     const RESPOND_BIDIRECTIONAL_TX_181: &[u8] =
         include_bytes!("../fixtures/respond-bidirectional-tx-181.mn");
-
-    fn hex_32(value: &str) -> [u8; 32] {
-        let mut decoded = [0u8; 32];
-        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
-        decoded
-    }
 
     const fn padded_name(text: &[u8]) -> [u8; MISC_NAME_LEN] {
         let mut padded = [0u8; MISC_NAME_LEN];

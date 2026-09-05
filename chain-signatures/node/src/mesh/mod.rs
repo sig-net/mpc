@@ -3,12 +3,13 @@ use std::time::Duration;
 use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
+use crate::protocol::sync::{SyncKind, SyncReportReceiver};
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 pub mod connection;
 mod state;
@@ -39,7 +40,7 @@ pub struct Mesh {
     connections: connection::Pool,
     state_tx: watch::Sender<MeshState>,
     state_rx: watch::Receiver<MeshState>,
-    synced_peer_rx: mpsc::Receiver<Participant>,
+    sync_report_rx: SyncReportReceiver,
     my_id: AccountId,
     me: Option<Participant>,
 }
@@ -49,7 +50,7 @@ impl Mesh {
         client: &NodeClient,
         options: Options,
         my_id: &AccountId,
-        synced_peer_rx: mpsc::Receiver<Participant>,
+        sync_report_rx: SyncReportReceiver,
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
@@ -58,7 +59,7 @@ impl Mesh {
             connections,
             state_tx,
             state_rx,
-            synced_peer_rx,
+            sync_report_rx,
             my_id: my_id.clone(),
             me: None,
         }
@@ -112,12 +113,15 @@ impl Mesh {
                         });
                     }
                 }
-                Some(participant) = self.synced_peer_rx.recv() => {
+                Some((participant, kind)) = self.sync_report_rx.recv() => {
                     if self.me == Some(participant) {
-                        tracing::warn!(?participant, "ignoring self sync report");
+                        tracing::warn!(?participant, ?kind, "ignoring self sync report");
                         continue;
                     }
-                    self.connections.report_node_synced(participant).await;
+                    match kind {
+                        SyncKind::Synced => self.connections.report_node_synced(participant).await,
+                        SyncKind::Desynced => self.connections.report_node_desynced(participant).await,
+                    }
                 }
             }
         }
@@ -162,6 +166,7 @@ mod tests {
     use crate::protocol::ProtocolState;
     use crate::util::NearPublicKeyExt as _;
     use crate::web::mock::MockServers;
+    use tokio::sync::mpsc;
 
     use test_log::test;
 
@@ -182,6 +187,30 @@ mod tests {
             }
         }
         panic!("timed out waiting for {participant:?} to become {expected:?}");
+    }
+
+    /// Wait for the mesh state to satisfy `f`. Sleeping a fixed span instead
+    /// races the connection tasks, which have to complete a real `/status`
+    /// round trip before any of our reports can take effect.
+    async fn wait_for_state(
+        mesh_state: &mut watch::Receiver<MeshState>,
+        what: &str,
+        f: impl Fn(&MeshState) -> bool,
+    ) {
+        let wait = async {
+            loop {
+                if f(&mesh_state.borrow_and_update()) {
+                    return;
+                }
+                mesh_state.changed().await.unwrap();
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .is_err()
+        {
+            panic!("timed out waiting for mesh state: {what}");
+        }
     }
 
     #[test(tokio::test)]
@@ -272,7 +301,10 @@ mod tests {
             drop(state);
 
             for idx in 0..num_nodes {
-                sync_tx.send(servers[idx].id()).await.unwrap();
+                sync_tx
+                    .send((servers[idx].id(), SyncKind::Synced))
+                    .await
+                    .unwrap();
             }
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
@@ -310,7 +342,10 @@ mod tests {
             assert!(!state.active().contains_key(&servers[1].id()));
             assert!(state.need_sync().contains_key(&servers[1].id()));
 
-            sync_tx.send(servers[1].id()).await.unwrap();
+            sync_tx
+                .send((servers[1].id(), SyncKind::Synced))
+                .await
+                .unwrap();
             tokio::time::sleep(PING_INTERVAL).await;
 
             let state = mesh_state.borrow_and_update().clone();
@@ -322,7 +357,61 @@ mod tests {
             assert!(state.active().contains_key(&me));
         }
 
+        // check that a desync report takes a peer back out of active, and that
+        // a later sync report restores it.
+        {
+            let desynced = servers[1].id();
+            sync_tx.send((desynced, SyncKind::Desynced)).await.unwrap();
+            wait_for_state(&mut mesh_state, "peer desynced", |state| {
+                state.need_sync().contains_key(&desynced)
+            })
+            .await;
+            assert!(!mesh_state.borrow().active().contains_key(&desynced));
+
+            sync_tx.send((desynced, SyncKind::Synced)).await.unwrap();
+            wait_for_state(&mut mesh_state, "peer restored", |state| {
+                state.active().contains_key(&desynced)
+            })
+            .await;
+            assert!(mesh_state.borrow().need_sync().is_empty());
+        }
+
         mesh_task.abort();
+    }
+
+    /// `report_node_desynced` only acts on a peer that is currently active.
+    /// Concurrent sign tasks all reporting the same lagging peer must collapse
+    /// into the one transition rather than waking the mesh once per report.
+    #[test(tokio::test)]
+    async fn test_pool_redundant_desync_report_is_a_noop() {
+        let num_nodes = 2;
+        let servers = MockServers::run(num_nodes).await;
+        let participants = servers.participants();
+        let my_id = servers[0].account_id().clone();
+        let peer = servers[1].id();
+
+        // A long ping interval so the statuses we observe are only the ones
+        // our reports drive: the connection task ticks once, then sleeps.
+        let mut pool = Pool::new(&servers.client(), &my_id, Duration::from_secs(60));
+        let mut watcher = pool.watch();
+        pool.connect_nodes(&participants, &mut HashSet::new()).await;
+
+        // A fresh connection syncs before it is usable.
+        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
+        pool.report_node_synced(peer).await;
+        expect_status(&mut watcher, peer, NodeStatus::Active).await;
+
+        pool.report_node_desynced(peer).await;
+        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
+
+        // Already syncing, so this one must not reach the mesh at all.
+        pool.report_node_desynced(peer).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), watcher.next())
+                .await
+                .is_err(),
+            "a repeated desync report must not notify the mesh again"
+        );
     }
 
     #[test(tokio::test)]
@@ -339,14 +428,14 @@ mod tests {
             servers.participants(),
         );
 
-        let (sync_tx, synced_peer_rx) = mpsc::channel(100);
+        let (sync_tx, sync_rx) = mpsc::channel(100);
         let mesh = Mesh::new(
             &servers.client(),
             Options {
                 ping_interval: PING_INTERVAL.as_millis() as u64,
             },
             &node_id,
-            synced_peer_rx,
+            sync_rx,
         );
         let mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
@@ -370,7 +459,10 @@ mod tests {
             let expected_participants = servers.participants();
             tokio::time::sleep(PING_INTERVAL * 3).await;
             for i in 0..num_nodes {
-                sync_tx.send(servers[i].id()).await.unwrap();
+                sync_tx
+                    .send((servers[i].id(), SyncKind::Synced))
+                    .await
+                    .unwrap();
             }
 
             tokio::time::sleep(PING_INTERVAL * 3).await;

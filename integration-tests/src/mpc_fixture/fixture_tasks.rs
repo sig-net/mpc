@@ -7,17 +7,15 @@ use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
-use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
-use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
-use mpc_node::types::SignCommand;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -37,6 +35,7 @@ pub(super) fn test_mock_network(
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
     let actions_changed = Arc::clone(&shared_output.actions_changed);
+    let publishes = Arc::clone(&shared_output.publishes);
     // Participant info as of network start, consulted for recipient's encryption key
     let initial_participants = mesh.borrow().active().clone();
 
@@ -82,25 +81,30 @@ pub(super) fn test_mock_network(
                 }
 
                 Some(rpc) = rpc_rx.recv() => {
+                    // `None` for anything that is not an action on a chain: the log is
+                    // what tests count responses with, so bookkeeping must stay out of it.
                     let action_str = match &rpc {
                         RpcAction::Publish(publish_action) => {
-                            format!(
+                            publishes.fetch_add(1, Ordering::Relaxed);
+                            Some(format!(
                                 "RpcAction::Publish({:?})",
                                 publish_action.request,
-                            )
+                            ))
                         },
                         RpcAction::VoteCheckpoint { checkpoint, .. } => {
-                            format!("RpcAction::VoteCheckpoint({checkpoint:?})")
+                            Some(format!("RpcAction::VoteCheckpoint({checkpoint:?})"))
                         },
                         RpcAction::AbortCheckpoints(chain) => {
-                            format!("RpcAction::AbortCheckpoints({chain:?})")
+                            Some(format!("RpcAction::AbortCheckpoints({chain:?})"))
                         }
                     };
-                    tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
-                    let mut actions_log = rpc_actions.lock().await;
-                    actions_log.insert(action_str);
-                    drop(actions_log);
-                    actions_changed.notify_one();
+                    if let Some(action_str) = action_str {
+                        tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
+                        let mut actions_log = rpc_actions.lock().await;
+                        actions_log.insert(action_str);
+                        drop(actions_log);
+                        actions_changed.notify_one();
+                    }
 
                     if let Some(chain) = &mock_chain {
                         chain.on_rpc_publish(&rpc).await;
@@ -117,28 +121,17 @@ pub(super) fn test_mock_network(
     })
 }
 
+/// Supervise one chain indexer per mock stream. `make_ctx` builds a fresh
+/// [`StreamContext`] per stream, so the caller decides what the streams share
+/// without every dependency travelling through this signature.
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
-    sign_tx: mpsc::Sender<SignCommand>,
-    rpc: RpcChannel,
-    backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: &watch::Receiver<MeshState>,
-    checkpoints_rx: mpc_node::types::CheckpointWatcher,
+    make_ctx: impl Fn() -> StreamContext,
 ) {
     for stream in mock_streams {
-        let indexer = MockIndexer::from_stream(stream);
         tokio::spawn(run_supervised(
-            indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                NodeClient::new(&Default::default()),
-                checkpoints_rx.clone(),
-            ),
+            MockIndexer::from_stream(stream),
+            make_ctx(),
             NoopChainTelemetry,
         ));
     }

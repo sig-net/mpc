@@ -1,6 +1,6 @@
 use crate::backlog::{
-    Backlog, BacklogEntry, Bidirectional, Checkpoint, Executing, Final, Generating, Initial,
-    PendingRequests, Publishing, Sign, SignEntry,
+    Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing, Final, Generating,
+    Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use cait_sith::protocol::Participant;
@@ -272,5 +272,5 @@ pub fn single_entry_checkpoint(entry: BacklogEntry) -> Checkpoint {
     let mut pending = PendingRequests::new();
     pending.insert(entry.sign_id(), entry);
     pending.set_processed_block(100);
-    Checkpoint::snapshot(&pending, Chain::Ethereum)
+    Checkpoints::snapshot(&pending, Chain::Ethereum)
 }

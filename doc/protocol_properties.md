@@ -63,7 +63,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * Channels are authenticated and encrypted. 
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
 * Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. The current security model assumes that the number of nodes using a specific RPC provider is below t.  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while an initial or post-reconnect state sync runs (a transient Syncing state), so "active" is strictly narrower than "reachable".
+* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by a peer rejecting a proposal for an artifact we list it as holding, so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 
@@ -174,12 +174,15 @@ Generation is skipped entirely while \< t nodes are in the active set, so the fa
 
 ### L3. Settlement
 
-*Property.* Once a signature is produced with a correct, online owner, it is eventually accepted on-chain.
+*Property.* Once a signature is produced, it is eventually accepted on-chain, whether or not the instance's proposer stays online.
 
 *Rationale.* A signature that never reaches the chain is worth no more to the user than no signature at all, while the presignature spent producing it is gone either way.
 
-*Enforcement*: The owner republishes on a timer, retrying indefinitely with backoff capped at 60 s.
-Currently not guaranteed, for two reasons. Only the successful instance's proposer publishes, and no other participant takes over, even though every participant holds the finished signature. And the retry itself lives in the publishing process, so what survives a restart is only what reached a confirmed checkpoint: on the checkpointed chains that includes the pending publish and its signature.
+*Enforcement*: The proposer publishes when generation finishes and retries indefinitely with backoff capped at 60 s. Every other participant holds the same finished signature, and publishes it itself once its own deadline passes without the response being observed on chain: a delay drawn uniformly from `[L, L + m·L/d]`, for `L` the lag until a published response is observed, `m` the participants and `d` the duplicate responses accepted per failover. The `L` offset keeps the happy path at one response; the window costs `d` extra in expectation when the proposer is silent. Duplicates are harmless, since both chains' respond entrypoints are bare event emitters and a repeated response is ignored on every node.
+
+The draw is anchored on a stamp stored with the entry, so it survives a restart rather than restarting the clock, and the sweep runs on block arrival, once the node has caught up: it is the catchup backfill that covers the window being judged, so a node that has not read that window holds fire instead of publishing blind. One participant with a healthy stream is enough.
+
+The `1 + d` cost is what a failover pays when the failover response lands, since every node still waiting observes it within `L` and drops the entry. If no response can land at all, each of the `m` participants publishes once as its own deadline passes, spread over the window.
 
 ### L4. Mesh convergence
 

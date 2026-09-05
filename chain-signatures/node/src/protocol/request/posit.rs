@@ -13,12 +13,13 @@ pub struct PositPhase {
 
 impl PositPhase {
     /// Deliberator: wait for the proposer's Propose, reply Accept.
+    #[allow(clippy::result_large_err)]
     async fn wait_for_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
         mailbox: &PositMailbox,
         proposer: Participant,
-    ) -> Result<PresignatureId, SignPhase> {
+    ) -> Result<PresignatureId, Box<SignPhase>> {
         let sign_id = ctx.sign_id;
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
@@ -34,15 +35,12 @@ impl PositPhase {
                     from,
                     action,
                     round: peer_round,
-                    stale_round,
                 } = &task_msg;
 
                 // A StaleRound reject carries the rejector's current round;
                 // remember it so our next bump catches up in one step.
-                if let (
-                    PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                    Some(peer_current),
-                ) = (action, stale_round)
+                if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) =
+                    action
                 {
                     state.record_peer_round(*peer_current);
                 }
@@ -82,9 +80,8 @@ impl PositPhase {
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::StaleRound,
+                                    PositRejectReason::StaleRound(state.round()),
                                 ),
-                                stale_round: Some(state.round()),
                             },
                         )
                         .await;
@@ -143,14 +140,13 @@ impl PositPhase {
                                     action: PositAction::RejectWithReason(
                                         PositRejectReason::MissingArtifact,
                                     ),
-                                    stale_round: None,
                                 },
                             )
                             .await;
                         continue;
                     }
 
-                    break Ok(*presignature_id);
+                    break *presignature_id;
                 } else {
                     tracing::warn!(
                         ?sign_id,
@@ -173,7 +169,6 @@ impl PositPhase {
                                 action: PositAction::RejectWithReason(
                                     PositRejectReason::InvalidRequest,
                                 ),
-                                stale_round: None,
                             },
                         )
                         .await;
@@ -182,14 +177,10 @@ impl PositPhase {
         })
         .await;
 
-        let presignature_id = match outcome {
-            Ok(Ok(id)) => id,
-            Ok(Err(phase)) => return Err(phase),
-            Err(_) => {
-                return Err(state.reorganize(&format!(
-                    "deliberator timeout waiting for Propose from {proposer:?}"
-                )));
-            }
+        let Ok(presignature_id) = outcome else {
+            return Err(Box::new(state.reorganize(&format!(
+                "deliberator timeout waiting for Propose from {proposer:?}"
+            ))));
         };
 
         // received propose, send Accept
@@ -201,7 +192,6 @@ impl PositPhase {
                     id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
-                    stale_round: None,
                 },
             )
             .await;
@@ -245,8 +235,8 @@ impl PositPhase {
 
             presignature_id = match Self::wait_for_propose(ctx, state, mailbox, proposer).await {
                 Ok(id) => id,
-                Err(phase) => return phase,
-            }
+                Err(phase) => return *phase,
+            };
         }
 
         // GUARANTEE: at least threshold participants from organizing phase.
@@ -277,7 +267,7 @@ impl PositPhase {
 
                     // A StaleRound reject carries the rejector's current round;
                     // remember it so our next bump catches up in one step.
-                    if let (PositAction::RejectWithReason(PositRejectReason::StaleRound), Some(peer_current)) = (&task_msg.action, task_msg.stale_round) {
+                    if let PositAction::RejectWithReason(PositRejectReason::StaleRound(peer_current)) = task_msg.action {
                         state.record_peer_round(peer_current);
                     }
 
@@ -303,9 +293,8 @@ impl PositPhase {
                                     ),
                                     from: ctx.governance.me,
                                     action: PositAction::RejectWithReason(
-                                        PositRejectReason::StaleRound,
+                                        PositRejectReason::StaleRound(state.round()),
                                     ),
-                                    stale_round: Some(state.round()),
                                 },
                             )
                             .await;
@@ -326,7 +315,7 @@ impl PositPhase {
                         continue;
                     }
 
-                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action, stale_round: _ } = task_msg;
+                    let SignPositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
 
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
@@ -348,6 +337,22 @@ impl PositPhase {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
+                            // A MissingArtifact reject means that holder never stored the
+                            // presignature, so our holder list for it is stale. State sync
+                            // owns holder lists, so put the peer back through it.
+                            for peer in counter.missing_artifact_rejectors() {
+                                if ctx
+                                    .sync_report_tx
+                                    .try_send((peer, SyncKind::Desynced))
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        ?sign_id,
+                                        ?peer,
+                                        "could not report desynced peer to mesh"
+                                    );
+                                }
+                            }
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
@@ -443,7 +448,6 @@ impl PositPhase {
                         id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
-                        stale_round: None,
                     },
                 )
                 .await;
@@ -458,6 +462,7 @@ pub(crate) mod tests {
     use crate::backlog::Backlog;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
+    use crate::protocol::sync::SyncReportReceiver;
     use crate::rpc::RpcAction;
     use deadpool_redis::Runtime;
     use mpc_primitives::SignKind;
@@ -468,6 +473,9 @@ pub(crate) mod tests {
         pub(crate) ctx: SignTask,
         pub(crate) state: SignState,
         pub(crate) outbox: MessageOutbox,
+        /// Desync reports the phase under test emitted. Room for several, so a
+        /// test asserting on one report cannot pass by silently dropping others.
+        pub(crate) sync_report_rx: SyncReportReceiver,
         _inbox: MessageInbox,
         _rpc_rx: mpsc::Receiver<RpcAction>,
         _mesh_tx: watch::Sender<MeshState>,
@@ -489,6 +497,7 @@ pub(crate) mod tests {
         let presignatures = Presignature::storage(&pool, &account_id);
         let (_inbox, outbox, msg_channel) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (sync_report_tx, sync_report_rx) = mpsc::channel(8);
 
         let ctx = SignTask {
             governance,
@@ -501,6 +510,7 @@ pub(crate) mod tests {
             round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),
             node_account_id: account_id,
+            sync_report_tx,
         };
 
         let request = IndexedSignRequest::new(
@@ -524,6 +534,7 @@ pub(crate) mod tests {
             ctx,
             state,
             outbox,
+            sync_report_rx,
             _inbox,
             _rpc_rx,
             _mesh_tx,
@@ -531,12 +542,12 @@ pub(crate) mod tests {
     }
 
     /// The single message sitting in the outbox, which must be a posit from
-    /// `from` to `to`; returns its stamped round, action, and stale_round.
+    /// `from` to `to`; returns its stamped round and action.
     pub(crate) fn sent_posit(
         outbox: &mut MessageOutbox,
         from: Participant,
         to: Participant,
-    ) -> (usize, PositAction, Option<usize>) {
+    ) -> (usize, PositAction) {
         let sent = outbox
             .intercept_outgoing_messages()
             .try_recv()
@@ -549,12 +560,12 @@ pub(crate) mod tests {
         let PositProtocolId::Signature(_, _, round) = posit.id else {
             panic!("expected a signature posit id");
         };
-        (round, posit.action, posit.stale_round)
+        (round, posit.action)
     }
 
     /// A deliberator that rejects a Propose from a *behind* proposer echoes the
     /// rejected round in the id (so the reject reaches the sender's current
-    /// conversation) and carries its own round in `stale_round`. Otherwise the
+    /// conversation) and carries its own round in the reject. Otherwise the
     /// behind proposer never learns it is behind and climbs one round per
     /// attempt instead of catching up in a single `bump_round`.
     #[tokio::test]
@@ -577,28 +588,26 @@ pub(crate) mod tests {
             round: propose_round,
             from: proposer,
             action: PositAction::Propose,
-            stale_round: None,
         });
 
         // Behind-proposer Propose is rejected; the call then times out waiting
         // for a valid one and reorganizes.
         let phase =
             PositPhase::wait_for_propose(&mut t.ctx, &mut t.state, &mailbox, proposer).await;
-        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+        assert!(matches!(phase, Err(p) if matches!(*p, SignPhase::Organizing(_))));
 
-        let (round, action, stale_round) = sent_posit(&mut t.outbox, me, proposer);
-        // The id echoes the round of the message being rejected.
+        let (round, action) = sent_posit(&mut t.outbox, me, proposer);
+        // The id echoes the round of the message being rejected; our round
+        // rides in the reject so the sender can catch up in one bump.
         assert_eq!(round, propose_round);
-        assert!(matches!(
+        assert_eq!(
             action,
-            PositAction::RejectWithReason(PositRejectReason::StaleRound)
-        ));
-        // Our round rides in `stale_round` so the sender can catch up in one bump.
-        assert_eq!(stale_round, Some(our_round));
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(our_round))
+        );
     }
 
     /// Receiving side of the same contract in `wait_for_propose`: the
-    /// rejector's round carried in `stale_round` is recorded and the reject
+    /// rejector's round carried in the reject is recorded and the reject
     /// itself never answered, so the next bump jumps straight to that round
     /// instead of climbing one round per attempt.
     #[tokio::test]
@@ -617,14 +626,13 @@ pub(crate) mod tests {
             presignature_id: 42,
             round: 2,
             from: peer,
-            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
-            stale_round: Some(5),
+            action: PositAction::RejectWithReason(PositRejectReason::StaleRound(5)),
         });
 
         // No Propose ever arrives, so the wait times out and reorganizes,
         // bumping the round with the recorded rejector's round.
         let phase = PositPhase::wait_for_propose(&mut t.ctx, &mut t.state, &mailbox, peer).await;
-        assert!(matches!(phase, Err(SignPhase::Organizing(_))));
+        assert!(matches!(phase, Err(p) if matches!(*p, SignPhase::Organizing(_))));
 
         // Caught up in one bump: max(2 + 1, 5) = 5.
         assert_eq!(t.state.round(), 5);
@@ -653,7 +661,6 @@ pub(crate) mod tests {
             round: 2,
             from: behind,
             action: PositAction::Accept,
-            stale_round: None,
         });
 
         let mut phase = PositPhase {
@@ -665,14 +672,13 @@ pub(crate) mod tests {
         let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
         assert!(matches!(next, SignPhase::Organizing(_)));
 
-        let (round, action, stale_round) = sent_posit(&mut t.outbox, proposer, behind);
-        // The id echoes the rejected round; ours rides in `stale_round`.
+        let (round, action) = sent_posit(&mut t.outbox, proposer, behind);
+        // The id echoes the rejected round; ours rides in the reject.
         assert_eq!(round, 2);
-        assert!(matches!(
+        assert_eq!(
             action,
-            PositAction::RejectWithReason(PositRejectReason::StaleRound)
-        ));
-        assert_eq!(stale_round, Some(5));
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(5))
+        );
     }
 
     /// The receive side inside `advance()`: a behind proposer harvests the
@@ -697,8 +703,7 @@ pub(crate) mod tests {
             presignature_id: 42,
             round: 2,
             from: rejector,
-            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
-            stale_round: Some(5),
+            action: PositAction::RejectWithReason(PositRejectReason::StaleRound(5)),
         });
 
         let mut phase = PositPhase {
@@ -714,6 +719,89 @@ pub(crate) mod tests {
         assert!(
             t.outbox.intercept_outgoing_messages().try_recv().is_err(),
             "a reject must never be answered"
+        );
+    }
+
+    /// Every MissingArtifact rejector in the round is reported, not just the
+    /// first.
+    #[tokio::test]
+    async fn advance_reports_every_missing_artifact_rejector() {
+        let proposer = Participant::from(0);
+        let first = Participant::from(1);
+        let second = Participant::from(2);
+        // Three participants at threshold 2: two rejects clear the bar.
+        let mut t = setup(proposer, first, 2);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        for from in [first, second] {
+            mailbox.push(SignPositMessage {
+                presignature_id: 42,
+                round: 0,
+                from,
+                action: PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+            });
+        }
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, first, second].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        // `rejects` is a BTreeMap, so reports come out in participant order.
+        assert_eq!(t.sync_report_rx.try_recv(), Ok((first, SyncKind::Desynced)));
+        assert_eq!(
+            t.sync_report_rx.try_recv(),
+            Ok((second, SyncKind::Desynced))
+        );
+        assert!(t.sync_report_rx.try_recv().is_err(), "no further reports");
+    }
+
+    /// With rejects of mixed reasons in one round, only the MissingArtifact
+    /// one is reported. A filter that keyed off anything but the reason would
+    /// pass the all-or-nothing cases and fail here.
+    #[tokio::test]
+    async fn advance_reports_only_the_missing_artifact_rejector() {
+        let proposer = Participant::from(0);
+        let missing = Participant::from(1);
+        let invalid = Participant::from(2);
+        let mut t = setup(proposer, missing, 2);
+        t.state.budget.reset(Duration::from_millis(200));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: missing,
+            action: PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+        });
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: invalid,
+            action: PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, missing, invalid].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = phase.advance(&mut t.ctx, &mut t.state, &mailbox).await;
+        assert!(matches!(next, SignPhase::Organizing(_)));
+
+        assert_eq!(
+            t.sync_report_rx.try_recv(),
+            Ok((missing, SyncKind::Desynced))
+        );
+        assert!(
+            t.sync_report_rx.try_recv().is_err(),
+            "the InvalidRequest rejector must not be reported"
         );
     }
 }

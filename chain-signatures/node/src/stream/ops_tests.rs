@@ -1,10 +1,10 @@
 use super::*;
-use crate::backlog::mock::mock_signature_output;
+use crate::backlog::mock::{mock_participants, mock_signature_output, mock_tx, BacklogTestExt};
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
@@ -83,7 +83,7 @@ async fn recover_backlog_requeues_pending_signs() {
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
     wait_threshold_active(&mut mesh_rx, threshold).await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    backlog.recover_by_checkpoint(checkpoint).await;
+    backlog.recover_by_checkpoint(&checkpoint).await;
 
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     requeue_pending_sign_requests(&ctx, Chain::Solana)
@@ -381,7 +381,8 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     // Simulate consensus confirmation so storage has the checkpoint
     assert_matches!(
         ctx.backlog
-            .confirm_consensus(tx.source_chain, checkpoint.digest())
+            .checkpoints()
+            .confirm(tx.source_chain, checkpoint.digest())
             .await,
         Ok(true)
     );
@@ -396,12 +397,13 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let recovered = Backlog::persisted(storage.clone());
 
     let checkpoint = recovered
-        .checkpoint_storage()
+        .checkpoints()
+        .storage()
         .load_latest(tx.source_chain)
         .await
         .unwrap()
         .unwrap();
-    recovered.recover_by_checkpoint(checkpoint).await;
+    recovered.recover_by_checkpoint(&checkpoint).await;
 
     let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
     requeue_pending_sign_requests(&recovered_ctx, tx.source_chain)
@@ -486,7 +488,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     // An unknown target chain fails the same deterministic derivation on every
     // node and every replay, so the entry is quarantined rather than errored:
-    // leaving it would park it in pending-publish with backups republishing it.
+    // leaving it would park it in pending-publish with every node republishing it.
     process_respond_event(event, &ctx, public_key)
         .await
         .expect("quarantining is not an error");
@@ -531,7 +533,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 /// Admission cannot be the only gate: checkpoint recovery restores backlog entries
 /// wholesale, so a poison entry can exist without ever passing admission. The
 /// respond path must then quarantine it (deterministically, on every node), or it
-/// parks in pending-publish forever with every backup's sweep republishing it.
+/// parks in pending-publish forever with every node publishing it.
 #[tokio::test]
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
@@ -595,7 +597,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 /// A non-empty but undecodable transaction is the same poison pill as an empty one,
 /// with a worse blast radius: admitted, it signs, publishes leg 1, then fails
 /// deterministically in respond processing before the cancel, leaving the entry in
-/// pending-publish forever while every backup's sweep fires into a retry loop that
+/// pending-publish forever while every node fires into a retry loop that
 /// nothing ends. Admission runs the same derivations respond processing will need.
 #[tokio::test]
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
@@ -1304,7 +1306,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
 
     // Slots should still be available — no pending checkpoints created
     assert!(
-        ctx.backlog.has_checkpoint_slot(chain).await,
+        ctx.backlog.checkpoints().has_slot(chain),
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );
@@ -1343,4 +1345,148 @@ async fn live_block_votes_for_checkpoint() {
     assert!(timeout(Duration::from_millis(100), sign_rx.recv())
         .await
         .is_err());
+}
+
+/// The sweep fires each entry once, and the two legs share a sign id, so only
+/// clearing the dispatch flag on re-entry keeps a fired leg 1 from suppressing
+/// leg 2.
+#[tokio::test]
+async fn publish_failover_fires_once_per_leg() {
+    let backlog = Backlog::new();
+    let tx = mock_tx(21);
+    let sign_id = tx.sign_id();
+
+    let bidi = backlog
+        .insert_mock_bidirectional(sign_id, Chain::Solana)
+        .await;
+    let (pk, output) = mock_signature_output(&bidi.request().args);
+    let pub1 = bidi
+        .advance(pk, &output, mock_participants(), false)
+        .await
+        .unwrap();
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    // No observe lag: this test is about the once-per-leg property, not the gate.
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "leg 1 publishes once past its deadline"
+    );
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "the same entry does not fire twice"
+    );
+
+    // Advance through execution into final response publishing (leg 2)
+    let exec = pub1.advance(Arc::new(tx)).await.unwrap();
+    let fin_gen = exec
+        .advance(ExecutionOutcome::Success { output: vec![] })
+        .await
+        .unwrap();
+    let (pk2, output2) = mock_signature_output(&fin_gen.request().args);
+    fin_gen
+        .advance(pk2, &output2, mock_participants(), false)
+        .await
+        .unwrap();
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "leg 2 fires on its own episode, not leg 1's history"
+    );
+}
+
+/// The rpc channel is fed from a spawned task, so a publish is not visible the
+/// instant the sweep returns.
+async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
+    tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A restarting proposer republishes from the catchup resume, and its deadline is
+/// long past by then. The resume records what it sent, so the next block does not
+/// put a second copy of the same response on chain.
+#[tokio::test]
+async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
+    let backlog = Backlog::new();
+    let sign_id = mpc_primitives::SignId::new([22u8; 32]);
+
+    let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let (pk, output) = mock_signature_output(&sign.request().args);
+    sign.advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        true,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+
+    resume_pending_publish_requests(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "the proposer republishes on catchup"
+    );
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "the sweep must not republish what the resume already dispatched"
+    );
+}
+
+/// Put an entry in pending-publish with a deadline in the past, whatever the draw.
+async fn insert_publishable(backlog: &Backlog, seed: u8) {
+    let sign_id = mpc_primitives::SignId::new([seed; 32]);
+    let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let (pk, output) = mock_signature_output(&sign.request().args);
+    sign.advance(pk, &output, mock_participants(), false)
+        .await
+        .unwrap();
+}
+
+/// The deadline being past is not enough: a node that has not caught up is not
+/// reading its chain, so it holds fire rather than guessing.
+#[tokio::test]
+async fn publish_failover_needs_catchup() {
+    let backlog = Backlog::new();
+    insert_publishable(&backlog, 23).await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (mut ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog.clone(),
+        sign_tx,
+        false,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    ctx.observe_lag = Some(Duration::ZERO);
+
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_none(),
+        "a node that has not caught up does not fail over"
+    );
+
+    ctx.caught_up = true;
+    publish_failover_due(&ctx, Chain::Solana).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "the deadline was past all along; catchup is what held it back"
+    );
 }

@@ -4,6 +4,6 @@ mod indexer;
 mod publisher;
 mod util;
 
-pub use indexer::{run, NearIndexer, Options, SignCommand};
+pub use indexer::{run, SignCommand};
 pub use publisher::NearClient;
 pub use util::AffinePointExt;

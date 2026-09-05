@@ -1,16 +1,18 @@
+use std::sync::Arc;
+
+use anyhow::Context;
+
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
+use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
-
-use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
     RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
-use std::sync::Arc;
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
@@ -22,10 +24,9 @@ pub(crate) async fn process_sign_request(
 
     // Reject malformed bidirectional requests at ingestion, running the same
     // deterministic derivations the respond event will need later. A request
-    // admitted here but failing there is worse than one never admitted: its entry
-    // sticks in pending-publish forever, and every backup's sweep fires into a
-    // duplicate-publish retry loop that no cancellation ever ends, because the
-    // failing respond processing is where the cancel lives.
+    // admitted here but failing there can never advance: its entry sticks in
+    // pending-publish forever, and every node publishes a leg-1 response
+    // whose second leg will never come.
     if let SignKind::SignBidirectional(event) = &sign_request.kind {
         event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
@@ -64,8 +65,48 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = entry.sign_id();
+        // This is the proposer's only retry for a publish that reported success but
+        // never landed, so it republishes even if it already dispatched one. Marking
+        // stops the sweep from putting a second copy on chain on the next block: the
+        // deadline was anchored before the restart, so it is already past.
+        entry.mark_publish_dispatched().await;
         ctx.rpc.publish(entry);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+    }
+}
+
+/// Publish entries whose proposer stayed silent past this node's deadline.
+///
+/// Only one of the `m` participants needs a healthy stream for failover to happen.
+pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
+    if !ctx.caught_up {
+        return;
+    }
+    let lag = observe_lag(chain, ctx.observe_lag);
+
+    let me = ctx.contract_watcher.account_id().clone();
+    let now = mpc_utils::time::current_unix_timestamp();
+    for entry in ctx.backlog.publishable_requests(chain).await {
+        if entry.publish_dispatched() {
+            continue;
+        }
+        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag) else {
+            continue;
+        };
+        if now < deadline {
+            continue;
+        }
+        let sign_id = entry.sign_id();
+        if !entry.mark_publish_dispatched().await {
+            continue;
+        }
+
+        tracing::warn!(
+            ?sign_id,
+            %chain,
+            "proposer response not observed in time; publishing failover response"
+        );
+        ctx.rpc.publish(entry);
     }
 }
 
@@ -136,7 +177,7 @@ async fn advance_bidirectional_to_execution(
     // without passing admission (checkpoint recovery restores them wholesale). One
     // that fails here fails identically on every node and on every replay, so it
     // can never advance: leaving it would park it in pending-publish forever, with
-    // every backup's sweep republishing a response that is already on chain.
+    // every node publishing a response that is already on chain.
     // Removing it is deterministic across the network, so checkpoints stay aligned.
     if let Err(err) = event.validate() {
         tracing::error!(
@@ -353,7 +394,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     let digest = checkpoint.digest();
-    let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
+    let checkpoint_digest = mpc_primitives::CheckpointDigest {
         chain,
         height: checkpoint.block_height,
         digest,
@@ -375,9 +416,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
-        Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
-            sender,
-        )),
+        Chain::Hydration => Ok(mpc_chain_hydration::ss58_address_from_account32(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }

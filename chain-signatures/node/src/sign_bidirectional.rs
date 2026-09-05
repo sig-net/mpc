@@ -1,5 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use alloy::primitives::{keccak256, Address, Bytes};
+use alloy::primitives::{keccak256, Address};
 use anyhow::Context as _;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
@@ -111,8 +111,6 @@ impl SignStatus {
     }
 }
 
-pub type RequestId = [u8; 32];
-
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
@@ -219,39 +217,18 @@ impl BidirectionalTxExt for BidirectionalTx {
     }
 }
 
-pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Bytes>> {
-    let payload = if is_eip1559 {
-        &rlp_data[1..]
-    } else {
-        &rlp_data
-    };
-
-    let rlp = rlp::Rlp::new(payload);
-
-    if !rlp.is_list() {
-        anyhow::bail!("Input is not a valid RLP list");
-    }
-
-    let mut result = Vec::new();
-
-    for i in 0..rlp.item_count()? {
-        let item = rlp.at(i)?;
-        result.push(Bytes::copy_from_slice(item.data()?));
-    }
-
-    Ok(result)
-}
-
 /// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
 /// real signature. Admission calls this so a transaction that cannot be signed at
 /// respond time is rejected before it enters the backlog; running the actual
-/// function (with a placeholder signature, whose bytes are only appended, never
-/// interpreted) is what keeps admission structurally equal to respond processing.
+/// function is what keeps admission structurally equal to respond processing. The
+/// placeholder's recovery id is 1, the strict case: the legacy `v` computation adds
+/// `y_parity`, so validating with 0 would admit the one chain id whose `v` only
+/// overflows when the real signature draws parity 1.
 fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
-        0,
+        1,
     );
     sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
 }
@@ -448,13 +425,6 @@ mod derive_tests {
     }
 }
 
-#[derive(Clone)]
-pub struct SignBidirectionalSignature {
-    pub public_key: mpc_crypto::PublicKey,
-    pub request: IndexedSignRequest,
-    pub signature: Signature,
-}
-
 #[cfg(test)]
 mod tests {
     use super::sign_and_hash_eip1559_from_unsigned;
@@ -495,6 +465,26 @@ mod tests {
 
         assert_eq!(hash, expected_hash);
         assert_eq!(nonce, 3);
+    }
+
+    /// At `chain_id = (u64::MAX - 35) / 2` the legacy `v = 2c + 35 + y_parity`
+    /// overflows only for parity 1. Admission must reject it, not admit a request
+    /// that then fails at respond time whenever the signature draws parity 1.
+    #[test]
+    fn validate_rejects_the_legacy_chain_id_that_only_overflows_on_parity_one() {
+        let legacy_tx = |chain_id: u64| {
+            let mut rlp = super::EthereumTxRlp::new_list(9);
+            for _ in 0..6 {
+                rlp.append_u64(0);
+            }
+            rlp.append_u64(chain_id);
+            rlp.append_u64(0);
+            rlp.append_u64(0);
+            rlp.into_vec()
+        };
+        let boundary = (u64::MAX - 35) / 2;
+        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
+        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
     }
 
     #[test]

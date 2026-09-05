@@ -1,6 +1,6 @@
 use super::{
-    AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Executing, Final,
-    Generating, Initial, PendingRequests, Publishing, Sign,
+    AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
+    Executing, Final, Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
     bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
@@ -331,15 +331,15 @@ fn test_checkpoint_digest_invariants() {
 
     let pending2 = pending1.clone();
 
-    let cp1 = Checkpoint::snapshot(&pending1, Chain::Ethereum);
-    let cp2 = Checkpoint::snapshot(&pending2, Chain::Ethereum);
+    let cp1 = Checkpoints::snapshot(&pending1, Chain::Ethereum);
+    let cp2 = Checkpoints::snapshot(&pending2, Chain::Ethereum);
 
     // Invariant 1: Identical data yields identical checkpoint and digest
     assert_eq!(cp1, cp2);
     assert_eq!(cp1.digest(), cp2.digest());
 
     // Invariant 2: Different block height changes equality and digest
-    let mut cp3 = Checkpoint::snapshot(&pending2, Chain::Ethereum);
+    let mut cp3 = Checkpoints::snapshot(&pending2, Chain::Ethereum);
     cp3.block_height = 101;
     assert_ne!(cp1, cp3);
 
@@ -754,11 +754,12 @@ async fn test_recovery_restores_state_and_watchers() {
 
     let recovered = Backlog::new();
     recovered
-        .checkpoint_storage()
+        .checkpoints()
+        .storage()
         .persist(&checkpoint)
         .await
         .unwrap();
-    recovered.recover_by_checkpoint(checkpoint.clone()).await;
+    recovered.recover_by_checkpoint(&checkpoint).await;
 
     // Restores execution entry
     let entry = recovered
@@ -774,7 +775,7 @@ async fn test_recovery_restores_state_and_watchers() {
 
     // Visible as latest checkpoint
     assert_eq!(
-        recovered.latest_checkpoint(Chain::Solana).await,
+        recovered.checkpoints().latest(Chain::Solana).await.unwrap(),
         Some(checkpoint)
     );
 
@@ -799,7 +800,7 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let recovered = Backlog::new();
-    recovered.recover_by_checkpoint(checkpoint).await;
+    recovered.recover_by_checkpoint(&checkpoint).await;
 
     let requeued = recovered.requeueable_requests(Chain::Solana).await;
     assert_eq!(requeued.len(), 1);
@@ -820,12 +821,12 @@ async fn test_recovery_preserves_pending_checkpoints() {
         .set_processed_block(chain, 2 * interval)
         .await
         .unwrap();
-    assert_eq!(backlog.pending_checkpoint_count(chain).await, 2);
+    assert_eq!(backlog.checkpoints().count(chain), 2);
 
     // Recovery does not discard pending checkpoints needed for consensus matching
     let recovery_cp = Checkpoint::reset(chain, interval / 2);
-    backlog.recover_by_checkpoint(recovery_cp).await;
-    assert_eq!(backlog.pending_checkpoint_count(chain).await, 2);
+    backlog.recover_by_checkpoint(&recovery_cp).await;
+    assert_eq!(backlog.checkpoints().count(chain), 2);
 }
 
 #[tokio::test]
@@ -842,7 +843,7 @@ async fn test_total_pending_on_recovery() {
     // Clean recovery updates count from 0 to 3
     let clean = Backlog::new();
     assert_eq!(clean.len(), 0);
-    clean.recover_by_checkpoint(checkpoint.clone()).await;
+    clean.recover_by_checkpoint(&checkpoint).await;
     assert_eq!(clean.len(), 3);
 
     // Dirty recovery overwrites pre-existing state to match checkpoint size exactly
@@ -851,7 +852,7 @@ async fn test_total_pending_on_recovery() {
         .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
         .await;
     assert_eq!(dirty.len(), 1);
-    dirty.recover_by_checkpoint(checkpoint).await;
+    dirty.recover_by_checkpoint(&checkpoint).await;
     assert_eq!(dirty.len(), 3);
 }
 

@@ -18,7 +18,6 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
-futures-util.workspace = true
 generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
 hyper.workspace = true
@@ -72,7 +71,7 @@ mpc-chain-integration-core.workspace = true
 mpc-chain-canton.workspace = true
 mpc-chain-solana.workspace = true
 mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
-mpc-chain-near.workspace = true
+mpc-chain-hydration.workspace = true
 mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [

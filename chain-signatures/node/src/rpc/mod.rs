@@ -1,4 +1,3 @@
-mod hydration;
 mod near_governance;
 
 use crate::backlog::{Publishing, SignEntry};
@@ -10,8 +9,7 @@ use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-// TODO: move clients elsewhere
-pub use hydration::HydrationClient;
+pub use mpc_chain_hydration::HydrationClient;
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
@@ -22,7 +20,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -36,7 +34,7 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 // Publish retry constants
-const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
+pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 
 /// The maximum time to wait for a checkpoint vote to complete before retrying
@@ -48,6 +46,26 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
     jitter: true,
 };
 
+/// Which response a publish carries. The two legs of a bidirectional request
+/// share a sign id, so this is what keeps the dispatch loop's in-flight set from
+/// treating a second leg as a duplicate of its first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PublishKind {
+    /// The signed transaction (an ordinary request's only response, or leg 1).
+    Response,
+    /// The signed execution outcome (leg 2).
+    BidirectionalResponse,
+}
+
+impl PublishKind {
+    fn of(kind: &SignKind) -> Self {
+        match kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => PublishKind::Response,
+            SignKind::RespondBidirectional(_) => PublishKind::BidirectionalResponse,
+        }
+    }
+}
+
 // `PublishAction` makes this enum relatively large, but boxing it is not worth
 // the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
 // enum storage), and these values are not copied on a performance-critical path.
@@ -55,7 +73,7 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
 pub enum RpcAction {
     Publish(PublishAction),
     VoteCheckpoint {
-        checkpoint: ConsensusCheckpointDigest,
+        checkpoint: CheckpointDigest,
         created_at: Instant,
     },
     AbortCheckpoints(Chain),
@@ -77,7 +95,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub fn vote_checkpoint(&self, checkpoint: ConsensusCheckpointDigest) {
+    pub fn vote_checkpoint(&self, checkpoint: CheckpointDigest) {
         let tx = self.tx.clone();
         let created_at = Instant::now();
         tokio::spawn(async move {
@@ -231,10 +249,6 @@ impl ContractStateWatcher {
         }
     }
 
-    pub fn mark_changed(&mut self) {
-        self.contract_state.mark_changed();
-    }
-
     pub fn participants(&self) -> Option<Participants> {
         match self.borrow_state().as_ref()? {
             ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
@@ -254,24 +268,6 @@ impl ContractStateWatcher {
                 .new_participants
                 .find_participant(&self.account_id)
                 .copied(),
-        }
-    }
-
-    pub async fn threshold(&self) -> Option<usize> {
-        match self.state()? {
-            ProtocolState::Initializing(_) => None,
-            ProtocolState::Running(state) => Some(state.threshold),
-            ProtocolState::Resharing(state) => Some(state.threshold),
-        }
-    }
-
-    /// Wait until the MPC threshold is available and return it
-    pub async fn wait_threshold(&mut self) -> usize {
-        loop {
-            if let Some(threshold) = self.threshold().await {
-                return threshold;
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -330,16 +326,6 @@ impl ContractStateWatcher {
                 state.new_participants.clone(),
                 state.old_participants.clone(),
             ),
-        }
-    }
-
-    /// Waits till the contract is in the running state.
-    pub async fn wait_running(&mut self) -> RunningContractState {
-        loop {
-            if let Some(ProtocolState::Running(state)) = self.borrow_state().as_ref() {
-                return state.clone();
-            }
-            let _ = self.contract_state.changed().await;
         }
     }
 
@@ -423,8 +409,10 @@ impl RpcExecutor {
     ) {
         let mut checkpoint_cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
         let mut checkpoint_abort_times = HashMap::<Chain, Instant>::new();
-        // Keep track of in-flight publish requests to avoid duplicate publishes for the same sign_id.
-        let in_flight: Arc<DashSet<SignId>> = Arc::new(DashSet::new());
+        // Keep track of in-flight publish requests to avoid duplicate publishes.
+        // Keyed by publish kind too: the two legs of a bidirectional request share
+        // a sign id, and a first leg still retrying must not block its second.
+        let in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -440,7 +428,8 @@ impl RpcExecutor {
                     };
 
                     let sign_id = action.request.id;
-                    if !in_flight.insert(sign_id) {
+                    let key = (chain, sign_id, PublishKind::of(&action.request.kind));
+                    if !in_flight.insert(key) {
                         tracing::info!(
                             ?sign_id,
                             ?chain,
@@ -452,10 +441,7 @@ impl RpcExecutor {
                     let publisher = publisher.clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
-                        let _guard = InFlightGuard {
-                            in_flight,
-                            id: sign_id,
-                        };
+                        let _guard = InFlightGuard { in_flight, id: key };
                         execute_publish(publisher, action).await;
                     });
                 }
@@ -557,10 +543,7 @@ async fn update_contract_data(
 
     if let Some(signed_checkpoints) = checkpoints_view {
         for (chain, tx) in &checkpoints {
-            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
-                height: sc.height,
-                digest: sc.digest,
-            });
+            let new_digest = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
@@ -575,8 +558,8 @@ async fn update_contract_data(
 /// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
 /// including during a panic unwind, so the slot is always freed for re-publish.
 struct InFlightGuard {
-    in_flight: Arc<DashSet<SignId>>,
-    id: SignId,
+    in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>>,
+    id: (Chain, SignId, PublishKind),
 }
 
 impl Drop for InFlightGuard {
@@ -632,10 +615,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
-async fn execute_vote_checkpoint(
-    near: NearGovernanceClient,
-    checkpoint: ConsensusCheckpointDigest,
-) {
+async fn execute_vote_checkpoint(near: NearGovernanceClient, checkpoint: CheckpointDigest) {
     vote_checkpoint_with_retry(
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
@@ -647,7 +627,7 @@ async fn execute_vote_checkpoint(
 
 /// Submit a checkpoint vote under a bounded retry policy.
 async fn vote_checkpoint_with_retry<F, Fut>(
-    checkpoint: &ConsensusCheckpointDigest,
+    checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
     vote: F,
@@ -707,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn vote_checkpoint_with_retry_terminates_when_rpc_hangs() {
-        let checkpoint = ConsensusCheckpointDigest {
+        let checkpoint = CheckpointDigest {
             chain: Chain::Ethereum,
             height: 1,
             digest: [0; 32],
@@ -1087,7 +1067,7 @@ mod tests {
         });
 
         tx.send(RpcAction::VoteCheckpoint {
-            checkpoint: ConsensusCheckpointDigest {
+            checkpoint: CheckpointDigest {
                 chain: Chain::Ethereum,
                 height: 10,
                 digest: [7; 32],

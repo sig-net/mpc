@@ -22,10 +22,11 @@ pub async fn align_backlog_with_consensus(
     node_client: &NodeClient,
     my_account_id: &AccountId,
 ) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+    let checkpoint_digest = *checkpoints_rx.borrow_and_update().as_ref()?;
 
     match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
+        .checkpoints()
+        .confirm(chain, checkpoint_digest.digest)
         .await
     {
         Ok(found) => {
@@ -73,14 +74,12 @@ pub async fn align_backlog_with_consensus(
         .await?
     };
 
-    let height = fetched_checkpoint.block_height;
-
-    if let Err(err) = backlog.regress(fetched_checkpoint).await {
+    if let Err(err) = backlog.regress(&fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 
-    Some(height)
+    Some(fetched_checkpoint.block_height)
 }
 
 async fn fetch_peer_checkpoint(
@@ -457,6 +456,7 @@ mod tests {
             }
 
             let msg = remote_digest.map(|digest| CheckpointDigest {
+                chain,
                 height: case.remote_height,
                 digest,
             });
@@ -476,7 +476,8 @@ mod tests {
             // 6. Assert persisted state
             let persisted = fixture
                 .backlog
-                .checkpoint_storage()
+                .checkpoints()
+                .storage()
                 .load_latest(chain)
                 .await
                 .unwrap();
@@ -493,7 +494,13 @@ mod tests {
                     case.name
                 );
                 if case.remote_use_peer_digest {
-                    let latest = fixture.backlog.latest_checkpoint(chain).await.unwrap();
+                    let latest = fixture
+                        .backlog
+                        .checkpoints()
+                        .latest(chain)
+                        .await
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(
                         latest.digest(), remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
@@ -503,7 +510,7 @@ mod tests {
             } else if case.local_checkpoints.is_empty() {
                 assert!(persisted.is_none(), "Test case failed: {}", case.name);
             } else {
-                let latest = fixture.backlog.latest_checkpoint(chain).await;
+                let latest = fixture.backlog.checkpoints().latest(chain).await.unwrap();
                 assert!(latest.is_some(), "Test case failed: {}", case.name);
                 assert_eq!(
                     latest.unwrap().block_height,
@@ -602,7 +609,8 @@ mod tests {
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
         assert!(fixture
             .backlog
-            .confirm_consensus(chain, stale.digest())
+            .checkpoints()
+            .confirm(chain, stale.digest())
             .await
             .unwrap());
 
@@ -612,6 +620,7 @@ mod tests {
         fixture
             .checkpoints_tx
             .send(Some(CheckpointDigest {
+                chain,
                 height: 42,
                 digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
             }))
@@ -623,7 +632,7 @@ mod tests {
 
         assert_eq!(result, Some(42));
         assert_eq!(
-            fixture.backlog.latest_checkpoint(chain).await,
+            fixture.backlog.checkpoints().latest(chain).await.unwrap(),
             Some(Checkpoint::reset(chain, 42)),
             "local state should be the canonical reset checkpoint"
         );
@@ -658,6 +667,7 @@ mod tests {
         fixture
             .checkpoints_tx
             .send(Some(CheckpointDigest {
+                chain,
                 height: 42,
                 digest: mpc_primitives::reset_checkpoint_digest(chain, 42),
             }))
@@ -679,6 +689,7 @@ mod tests {
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
         let fixture = AlignFixture::new(Some(CheckpointDigest {
+            chain,
             height: 100,
             digest: [0xabu8; 32],
         }));

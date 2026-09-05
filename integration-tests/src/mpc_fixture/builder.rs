@@ -34,6 +34,7 @@ use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
@@ -85,6 +86,9 @@ struct FixtureConfig {
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
+
+    /// Overrides the publish failover schedule's observe lag; `None` is production.
+    observe_lag: Option<std::time::Duration>,
 }
 
 /// Context required to start a fixture node.
@@ -97,6 +101,7 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
+    observe_lag: Option<std::time::Duration>,
 
     #[allow(dead_code)]
     node_account_id: AccountId,
@@ -135,6 +140,7 @@ impl FixtureConfig {
             max_concurrent_generation: defaults.max_concurrent_generation,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
+            observe_lag: None,
             triple_timeout_ms: min_to_ms(10),
         }
     }
@@ -266,6 +272,7 @@ impl MpcFixtureBuilder {
                 redis_pool: redis_container.pool(),
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
+                observe_lag: self.fixture_config.observe_lag,
                 node_account_id: node.participant_info.account_id.clone(),
             };
 
@@ -383,12 +390,6 @@ impl MpcFixtureBuilder {
     }
 
     /// Set protocol config
-    pub fn with_triple_timeout_ms(mut self, ms: u64) -> Self {
-        self.fixture_config.triple_timeout_ms = ms;
-        self
-    }
-
-    /// Set protocol config
     pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
         self.fixture_config.presignature_timeout_ms = ms;
         self
@@ -409,6 +410,13 @@ impl MpcFixtureBuilder {
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_outgoing_message_filter(mut self, node_idx: usize, filter: MessageFilter) -> Self {
         self.prepared_nodes[node_idx].messaging.filter = filter;
+        self
+    }
+
+    /// Pin the publish failover schedule's observe lag for every node, for tests
+    /// that assert the failover itself rather than its production timing.
+    pub fn with_observe_lag(mut self, lag: std::time::Duration) -> Self {
+        self.fixture_config.observe_lag = Some(lag);
         self
     }
 
@@ -587,15 +595,18 @@ impl MpcFixtureNodeBuilder {
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         let (checkpoint_tx, checkpoints_rx) = watch::channel(None);
-        fixture_tasks::start_mock_stream_tasks(
-            &flat_mock_streams,
-            sign_tx.clone(),
-            rpc_channel.clone(),
-            backlog.clone(),
-            context.contract_state.clone(),
-            &mesh_rx,
-            checkpoints_rx,
-        );
+        fixture_tasks::start_mock_stream_tasks(&flat_mock_streams, || {
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                context.contract_state.clone(),
+                mesh_rx.clone(),
+                NodeClient::new(&Default::default()),
+                checkpoints_rx.clone(),
+            )
+            .with_observe_lag(context.observe_lag)
+        });
 
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
@@ -618,7 +629,7 @@ impl MpcFixtureNodeBuilder {
             presignature_storage.clone(),
             mesh_rx.clone(),
             context.contract_state,
-            mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
+            mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
         );
         tokio::spawn(sync_task.run());
 

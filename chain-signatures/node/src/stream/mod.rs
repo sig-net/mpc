@@ -8,17 +8,16 @@ use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
-    process_respond_event, process_sign_request, requeue_pending_sign_requests,
-    resume_pending_publish_requests,
+    process_respond_event, process_sign_request, publish_failover_due,
+    requeue_pending_sign_requests, resume_pending_publish_requests,
 };
-use crate::types::CheckpointWatcher;
+use crate::types::{CheckpointWatcher, SignCommand};
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_primitives::{Chain, ChainEvent};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-
-pub use crate::types::SignCommand;
 
 /// Shared, per-chain dependencies
 pub struct StreamContext {
@@ -30,6 +29,9 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
+    /// pin it.
+    pub observe_lag: Option<Duration>,
 }
 
 impl StreamContext {
@@ -51,7 +53,15 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            observe_lag: None,
         }
+    }
+
+    /// Pin the publish failover schedule's observe lag, for fixtures that assert
+    /// the failover itself rather than its production timing.
+    pub fn with_observe_lag(mut self, lag: Option<Duration>) -> Self {
+        self.observe_lag = lag;
+        self
     }
 
     /// Forward a sign command to the signing pipeline, but only when caught up.
@@ -122,6 +132,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
+            publish_failover_due(ctx, chain).await;
             process_block_event(chain, block, ctx, telemetry)
                 .await
                 .context("failed to process block event")?;

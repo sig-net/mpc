@@ -1,5 +1,6 @@
 mod checkpoints;
 pub mod consensus;
+pub(crate) mod migration;
 #[cfg(any(test, feature = "test-feature"))]
 pub mod mock;
 pub mod request;
@@ -10,8 +11,7 @@ pub use request::{
 
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-pub(crate) use checkpoints::CheckpointError;
-use checkpoints::Checkpoints;
+pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
@@ -23,8 +23,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-pub use checkpoints::Checkpoint;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -88,6 +86,7 @@ impl PendingRequests {
                         request: Arc::clone(entry.request()),
                         state: Bidirectional(Executing(Arc::clone(tx))),
                         backlog: backlog.clone(),
+                        publish_dispatched: entry.publish_dispatched,
                     })
                 }
                 _ => None,
@@ -106,10 +105,11 @@ impl PendingRequests {
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> Self {
-        let mut requests = HashMap::new();
-        for entry in &checkpoint.pending_requests {
-            requests.insert(entry.sign_id(), entry.clone());
-        }
+        let requests = checkpoint
+            .pending_requests
+            .iter()
+            .map(|entry| (entry.sign_id(), entry.clone()))
+            .collect();
         Self {
             requests,
             processed_block_height: Some(checkpoint.block_height),
@@ -245,6 +245,7 @@ impl Backlog {
             request: Arc::clone(entry.request()),
             state: entry.status,
             backlog: self.clone(),
+            publish_dispatched: entry.publish_dispatched,
         })
     }
 
@@ -279,6 +280,7 @@ impl Backlog {
                 request: Arc::clone(entry.request()),
                 state: Generating,
                 backlog: self.clone(),
+                publish_dispatched: entry.publish_dispatched,
             })
             .collect();
 
@@ -292,10 +294,11 @@ impl Backlog {
         requeueable
     }
 
-    /// Returns backlog requests for a chain that are ready to be published.
+    /// Returns backlog requests for a chain that are ready to be published, each
+    /// with whether this node already dispatched a publish for it.
     /// Sorted by indexed timestamp and request id.
     pub async fn publishable_requests(&self, chain: Chain) -> Vec<SignEntry<Publishing>> {
-        // Read-only scan; the backup sweep calls this every second per chain, so a
+        // Read-only scan; the publish failover sweep calls this on every block, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
 
@@ -309,6 +312,7 @@ impl Backlog {
                     request: Arc::clone(entry.request()),
                     state: publish.clone(),
                     backlog: self.clone(),
+                    publish_dispatched: entry.publish_dispatched,
                 })
             })
             .collect();
@@ -335,6 +339,18 @@ impl Backlog {
     /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
         self.pending(&chain).read().await.len()
+    }
+
+    /// Record that this node dispatched a publish for `id`'s current
+    /// pending-publish episode, returning `false` if one was already dispatched or
+    /// the entry is gone.
+    pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
+        let mut pending = self.pending(&chain).write().await;
+
+        pending
+            .requests
+            .get_mut(id)
+            .is_some_and(BacklogEntry::mark_publish_dispatched)
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -413,116 +429,87 @@ impl Backlog {
         // boundary. On restart/recovery, the node still resumes from the latest
         // confirmed checkpoint and replays only the post-checkpoint same-bucket
         // tail.
-        if height / interval > prev / interval {
-            let tx_count = pending.len();
-            drop(pending);
-            match self.checkpoint(chain).await {
-                Ok(checkpoint) => {
-                    tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
-                    Some(checkpoint)
-                }
-                Err(CheckpointError::PendingCap { .. }) => {
-                    tracing::warn!(
-                        ?chain,
-                        height,
-                        tx_count,
-                        "checkpoint creation stalled (pending cap reached)"
-                    );
-                    None
-                }
-                Err(err @ CheckpointError::Storage { .. }) => {
-                    tracing::error!(?chain, %err, "failed to create checkpoint");
-                    None
-                }
+        if height / interval <= prev / interval {
+            return None;
+        }
+
+        drop(pending);
+        match self.checkpoint(chain).await {
+            Ok(checkpoint) => {
+                tracing::info!(
+                    ?chain,
+                    height,
+                    tx_count = checkpoint.len(),
+                    ?checkpoint,
+                    "creating checkpoint"
+                );
+                Some(checkpoint)
             }
-        } else {
-            None
+            Err(CheckpointError::PendingCap { tx_count, .. }) => {
+                tracing::warn!(
+                    ?chain,
+                    height,
+                    tx_count,
+                    "checkpoint creation stalled (pending cap reached)"
+                );
+                None
+            }
+            Err(err @ CheckpointError::Storage { .. }) => {
+                tracing::error!(?chain, %err, "failed to create checkpoint");
+                None
+            }
         }
     }
 
     /// Create a checkpoint of the current backlog state for a specific chain.
-    ///
     pub async fn checkpoint(&self, chain: Chain) -> Result<Checkpoint, CheckpointError> {
         let checkpoint = {
             let requests = self.pending(&chain).read().await;
-            Checkpoint::snapshot(&requests, chain)
+            Checkpoints::snapshot(&requests, chain)
         };
         self.checkpoints.persist_pending(&checkpoint).await?;
         Ok(checkpoint)
     }
 
-    /// Confirm a locally available checkpoint against an on-chain consensus digest.
-    ///
-    /// Returns `Ok(true)` when the digest matched a local checkpoint and it was
-    /// promoted, `Ok(false)` when no local checkpoint matches, and an error when
-    /// storage was unavailable.
-    pub async fn confirm_consensus(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> Result<bool, CheckpointError> {
-        self.checkpoints.confirm(chain, digest).await
+    /// Hydrate the backlog from storage: initializes the pending checkpoint counter
+    /// and recovers local backlog state from the latest durable checkpoint if one exists.
+    pub async fn hydrate(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
+        self.checkpoints.hydrate(chain).await?;
+        self.recover_local(chain).await
     }
 
-    /// Load the durable checkpoint state and return the newest checkpoint.
-    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
-        self.checkpoints.load_local(chain).await
+    /// Recovers local backlog state from the latest durable checkpoint if one exists.
+    pub async fn recover_local(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
+        let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
+            return Ok(None);
+        };
+        self.recover_by_checkpoint(&checkpoint).await;
+        Ok(Some(checkpoint))
     }
 
-    /// Replace the local backlog with a consensus checkpoint after divergence.
-    async fn regress(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
-        // Decode the checkpoint before the durable write so a malformed peer
-        // checkpoint cannot leave storage regressed while memory stays put.
-        let restored = PendingRequests::from_checkpoint(&checkpoint);
-        self.checkpoints.regress(&checkpoint).await?;
-        self.apply_checkpoint(checkpoint, restored).await;
+    /// Replace the local backlog with a consensus checkpoint after divergence:
+    /// resets durable storage to consensus, zeroes pending counts, and restores in-memory state.
+    pub async fn regress(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        self.checkpoints.regress(checkpoint).await?;
+        self.recover_by_checkpoint(checkpoint).await;
         Ok(())
     }
 
-    /// Get the latest checkpoint for a specific chain.
-    pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        self.checkpoints.latest(chain).await
+    /// Access the checkpoint subsystem.
+    pub fn checkpoints(&self) -> &Checkpoints {
+        &self.checkpoints
     }
 
-    /// Check if the chain backlog has an available checkpoint slot.
-    pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
-        self.checkpoints.has_slot(chain).await
-    }
-
-    /// Number of pending checkpoints for a chain.
-    pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
-        self.checkpoints.count(chain).await
-    }
-
-    #[cfg(test)]
-    pub(crate) fn checkpoint_storage(&self) -> &CheckpointStorage {
-        self.checkpoints.storage()
-    }
-
-    /// Find a checkpoint by its consensus digest.
-    pub async fn find_checkpoint_by_digest(
-        &self,
-        chain: Chain,
-        digest: [u8; 32],
-    ) -> Option<Checkpoint> {
-        self.checkpoints.find(chain, digest).await
-    }
-
-    /// Recover backlog state from a checkpoint.
-    /// This is called when a node restarts or when it needs to align/regress to consensus.
-    pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) {
-        let restored = PendingRequests::from_checkpoint(&checkpoint);
-        self.apply_checkpoint(checkpoint, restored).await;
-    }
-
-    /// Apply an already-decoded checkpoint to the backlog.
-    async fn apply_checkpoint(&self, checkpoint: Checkpoint, restored: PendingRequests) {
+    /// Recover backlog state from a checkpoint into memory.
+    /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
+    pub async fn recover_by_checkpoint(&self, checkpoint: &Checkpoint) {
+        let restored = PendingRequests::from_checkpoint(checkpoint);
         let chain = checkpoint.chain;
         let checkpoint_height = checkpoint.block_height;
         tracing::info!(
             ?chain,
             height = checkpoint_height,
-            num_pending = checkpoint.pending_requests.len(),
+            num_pending = checkpoint.len(),
             "recovering backlog to checkpoint"
         );
 
@@ -536,9 +523,13 @@ impl Backlog {
             *pending = restored;
 
             // Update total pending count based on the difference between cleared and restored requests
-            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
-            self.total_pending
-                .fetch_add(restored_len, Ordering::Relaxed);
+            if restored_len > cleared {
+                self.total_pending
+                    .fetch_add(restored_len - cleared, Ordering::Relaxed);
+            } else if cleared > restored_len {
+                self.total_pending
+                    .fetch_sub(cleared - restored_len, Ordering::Relaxed);
+            }
 
             tracing::info!(
                 ?chain,
@@ -597,10 +588,22 @@ pub enum BacklogError {
     InvalidSignature,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "migration::MigratableBacklogEntry")]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
+    /// Whether this node has dispatched a publish for this entry. Node-local, so it
+    /// is not serialized, and checkpoint recovery resets it.
+    #[serde(skip)]
+    publish_dispatched: bool,
+}
+
+/// Node-local state is not part of an entry's identity to avoid divergence.
+impl PartialEq for BacklogEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request && self.status == other.status
+    }
 }
 
 impl BacklogEntry {
@@ -617,11 +620,19 @@ impl BacklogEntry {
                 })
             }
         };
-        Self { request, status }
+        Self {
+            request,
+            status,
+            publish_dispatched: false,
+        }
     }
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
-        Self { request, status }
+        Self {
+            request,
+            status,
+            publish_dispatched: false,
+        }
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -646,6 +657,19 @@ impl BacklogEntry {
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         self.status.clone()
+    }
+
+    /// The single place a status is assigned. Every transition ends the current
+    /// pending-publish episode, so no dispatch flag may survive one.
+    pub(crate) fn enter_status(&mut self, status: SignStatus) {
+        self.status = status;
+        self.publish_dispatched = false;
+    }
+
+    /// Record that this node dispatched a publish for the current episode,
+    /// returning `false` if one was already dispatched.
+    pub(crate) fn mark_publish_dispatched(&mut self) -> bool {
+        !std::mem::replace(&mut self.publish_dispatched, true)
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {

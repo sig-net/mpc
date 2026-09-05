@@ -152,6 +152,7 @@ async fn test_consensus_alignment_peer_fetch() {
     );
 
     let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+        chain,
         height: expected_height,
         digest,
     }));
@@ -188,7 +189,7 @@ async fn test_consensus_alignment_peer_fetch() {
     assert_eq!(result.unwrap(), expected_height);
 
     // Verify fresh backlog has the checkpoint
-    let latest = fresh_backlog.latest_checkpoint(chain).await;
+    let latest = fresh_backlog.checkpoints().latest(chain).await.unwrap();
     assert!(latest.is_some());
     assert_eq!(latest.unwrap().block_height, expected_height);
 
@@ -235,6 +236,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Start with a non-matching digest; we'll change it to zero to abort the fetch loop.
     let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
+        chain,
         height: 9999,
         digest: [0xabu8; 32],
     }));
@@ -275,7 +277,12 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
         "should return None when consensus digest changes to None"
     );
 
-    assert!(fresh_backlog.latest_checkpoint(chain).await.is_none());
+    assert!(fresh_backlog
+        .checkpoints()
+        .latest(chain)
+        .await
+        .unwrap()
+        .is_none());
     let persisted = fresh_storage.load_latest(chain).await.unwrap();
     assert!(persisted.is_none());
 }
@@ -331,6 +338,7 @@ async fn test_reset_converges_divergent_nodes() {
     // Governance settles the canonical reset checkpoint. Each node aligns
     // against it with no peer reachable.
     let settled = CheckpointDigest {
+        chain,
         height: resume_after,
         digest: mpc_primitives::reset_checkpoint_digest(chain, resume_after),
     };
@@ -338,7 +346,7 @@ async fn test_reset_converges_divergent_nodes() {
     let node_client = NodeClient::new(&NodeClientOptions::default());
 
     for node in &network.nodes {
-        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled.clone()));
+        let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled));
         let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(MeshState::default());
 
         let applied = tokio::time::timeout(
@@ -364,8 +372,10 @@ async fn test_reset_converges_divergent_nodes() {
     for node in &network.nodes {
         checkpoints_after.push(
             node.backlog
-                .latest_checkpoint(chain)
+                .checkpoints()
+                .latest(chain)
                 .await
+                .unwrap()
                 .expect("every node should hold the reset checkpoint"),
         );
     }

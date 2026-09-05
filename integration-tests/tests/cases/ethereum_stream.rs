@@ -22,6 +22,7 @@ use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
@@ -348,7 +349,8 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
-            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
         Ok(true)
     ));
@@ -480,7 +482,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
-            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
         Ok(true)
     ));

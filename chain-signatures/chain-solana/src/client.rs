@@ -62,7 +62,7 @@ fn catchup_retry_strategy() -> RetryConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
     Block(UiConfirmedBlock),
     Missing,
@@ -94,7 +94,6 @@ pub struct SolanaClient {
     shared_backoff: SharedBackoff,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
-    pub rpc_ws_url: String,
     pub http_client: reqwest::Client,
     pub program_id: Pubkey,
     pub payer: Arc<Keypair>,
@@ -106,8 +105,8 @@ impl SolanaClient {
     pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
-        let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
+        // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
+        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -123,7 +122,6 @@ impl SolanaClient {
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
-            rpc_ws_url: sol.rpc_ws_url.clone(),
             http_client: reqwest::Client::new(),
             program_id,
             payer,
@@ -133,13 +131,13 @@ impl SolanaClient {
 
     pub fn for_indexer(
         rpc_http_url: String,
-        rpc_ws_url: String,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
-        let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), rpc_ws_url.clone());
+        // Empty ws slot: nothing subscribes.
+        let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -153,7 +151,6 @@ impl SolanaClient {
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url,
-            rpc_ws_url,
             http_client: reqwest::Client::new(),
             program_id: program_address,
             payer,
@@ -184,21 +181,6 @@ impl SolanaClient {
             commitment: Some(CommitmentConfig::finalized()),
             max_supported_transaction_version: Some(0),
         }
-    }
-
-    pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
-            SOL_RPC_TIMEOUT,
-            self.rpc_retry,
-            self.shared_backoff,
-            "get_slot",
-            {
-                self.rpc_client
-                    .get_slot()
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
-            }
-        )
     }
 
     /// Get the latest finalized slot from the Solana RPC.
@@ -475,10 +457,11 @@ impl ChainPublisher for SolanaClient {
             "Solana publish signature: dispatching request"
         );
 
+        let (event_authority, _) =
+            Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+
         match &action.request.kind {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
-                let (event_authority, _) =
-                    Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
                 let tx = program
                     .request()
                     .signer(self.payer.clone())
@@ -522,6 +505,8 @@ impl ChainPublisher for SolanaClient {
                     .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
                         responder: self.payer.pubkey(),
+                        event_authority,
+                        program: self.program_id,
                     })
                     .args(SolanaRespondBidirectional {
                         request_id: request_ids[0],
@@ -556,6 +541,7 @@ impl ChainPublisher for SolanaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{signature_entry, signatures_response};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use solana_sdk::pubkey::Pubkey;
     use solana_sdk::signature::Signature;
@@ -564,7 +550,6 @@ mod tests {
     fn test_client(url: &str) -> SolanaClient {
         SolanaClient::for_indexer(
             url.to_string(),
-            url.replace("http", "ws"),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
         )
@@ -590,28 +575,6 @@ mod tests {
                 "rewards": []
             }
         })
-    }
-
-    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
-    fn signature_entry(slot: u64, sig: &str) -> serde_json::Value {
-        serde_json::json!({
-            "signature": sig,
-            "slot": slot,
-            "err": null,
-            "memo": null,
-            "blockTime": null,
-            "confirmationStatus": "confirmed"
-        })
-    }
-
-    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
-    fn signatures_response(entries: &[serde_json::Value]) -> String {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": entries
-        })
-        .to_string()
     }
 
     #[test]

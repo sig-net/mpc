@@ -50,7 +50,7 @@ pub mod signet_program {
         // - nonce too low
         // - balance too low
         // - literal on chain error
-        emit!(RespondBidirectionalEvent {
+        emit_cpi!(RespondBidirectionalEvent {
             request_id,
             responder: *ctx.accounts.responder.key,
             serialized_output,
@@ -161,6 +161,7 @@ pub struct Respond<'info> {
     pub responder: Signer<'info>,
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct RespondBidirectional<'info> {
     pub responder: Signer<'info>,

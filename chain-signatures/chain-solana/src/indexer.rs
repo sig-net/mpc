@@ -141,7 +141,6 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
         let client = SolanaClient::for_indexer(
             config.rpc_http_url.clone(),
-            config.rpc_ws_url.clone(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
@@ -567,6 +566,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
 
+    use crate::test_utils::{signatures_response, unique_signature_entry as signature_entry};
+
     use super::*;
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
@@ -587,7 +588,6 @@ mod tests {
         let program_id = Pubkey::new_unique();
         let client = SolanaClient::for_indexer(
             url.to_string(),
-            url.replace("http", "ws"),
             program_id,
             Arc::new(NoopPublisherTelemetry),
         )
@@ -599,28 +599,6 @@ mod tests {
             state_manager,
             telemetry: NoopChainTelemetry,
         }
-    }
-
-    /// Create a mock signature entry for testing, with a given slot.
-    fn signature_entry(slot: u64) -> serde_json::Value {
-        serde_json::json!({
-            "signature": Signature::new_unique().to_string(),
-            "slot": slot,
-            "err": null,
-            "memo": null,
-            "blockTime": null,
-            "confirmationStatus": "confirmed"
-        })
-    }
-
-    /// Create a mock JSON-RPC response for a list of signature entries.
-    fn signatures_response(entries: &[serde_json::Value]) -> String {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": entries
-        })
-        .to_string()
     }
 
     /// Create a mock JSON-RPC response for a block at a given slot.
@@ -1715,17 +1693,15 @@ mod tests {
         };
 
         let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
-            .unwrap_or_else(|_| "SigDuEPNeDjh3oJv7MUraPN7zaTFomS6ZWfpXwjUg4B".to_string());
+            .unwrap_or_else(|_| "SigDHT99hPznk4d9SAxWLoBnKWT8jcob5pV8X7ti8SM".to_string());
 
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
-        let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
         let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
             http_url.clone(),
-            ws_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
             Arc::new(NoopPublisherTelemetry),
         );
