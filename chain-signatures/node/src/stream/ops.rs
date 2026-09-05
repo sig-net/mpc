@@ -228,13 +228,28 @@ pub(crate) async fn process_respond_bidirectional_event(
 /// The target chain is the chain where the execution was observed.
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
-    sign_id: SignId,
-    source_chain: Chain,
     block_height: u64,
     result: ExecutionOutcome,
     ctx: &StreamContext,
     target_chain: Chain,
 ) -> anyhow::Result<()> {
+    tracing::debug!(
+        ?tx_id,
+        ?target_chain,
+        block_height,
+        "received execution confirmation event"
+    );
+
+    let Some(entry) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
+        tracing::warn!(
+            ?tx_id,
+            "executing bidirectional entry not found (maybe already processed)"
+        );
+        return Ok(());
+    };
+
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain;
     tracing::info!(
         ?tx_id,
         ?sign_id,
@@ -244,57 +259,18 @@ pub async fn process_execution_confirmed(
         "handling execution confirmation"
     );
 
-    // Remove the watcher; if it's not found, it might have been processed already
-    let Some((unwatched_sign_id, pending_tx)) =
-        ctx.backlog.unwatch_execution(target_chain, &tx_id).await
-    else {
-        tracing::warn!(
-            ?tx_id,
-            "execution watcher not found (maybe already processed)"
-        );
-        return Ok(());
-    };
-    if unwatched_sign_id != sign_id {
-        tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
-    }
-    // The watched transaction is the source of truth for the source chain. The
-    // follow-up request's chain decides which backlog bucket, publish key, and
-    // cancellation key it lives under, and all of them must agree; an execution
-    // watcher filling the event's field differently must not split them.
-    if source_chain != pending_tx.source_chain {
-        tracing::warn!(
-            ?tx_id,
-            event = ?source_chain,
-            watcher = ?pending_tx.source_chain,
-            "source_chain mismatch between event and watcher; using the watcher's"
-        );
-    }
-    let source_chain = pending_tx.source_chain;
-
-    let Some(entry) = ctx
-        .backlog
-        .get_by::<Bidirectional<Executing>>(source_chain, &unwatched_sign_id)
-        .await
-    else {
-        tracing::warn!(
-            ?tx_id,
-            ?unwatched_sign_id,
-            "executing bidirectional entry not found in backlog"
-        );
-        return Ok(());
-    };
-
     let entry = entry
         .advance(result)
         .await
         .with_context(|| {
             format!(
-                "failed to transition pending tx to final response for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+                "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
     tracing::info!(
         ?tx_id,
-        ?unwatched_sign_id,
+        ?sign_id,
+        ?source_chain,
         "transitioned transaction to final response"
     );
     let chain = entry.chain;

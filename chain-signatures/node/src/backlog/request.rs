@@ -503,8 +503,8 @@ impl SignEntry<Bidirectional<Executing>> {
     }
 
     /// Watch execution of this bidirectional transaction on its target chain.
-    pub async fn watch_execution(&self) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        self.backlog.watch_execution(self).await
+    pub async fn watch_execution(&self) {
+        self.backlog.watch_execution(self).await;
     }
 
     /// Advance destination-chain `Executing` into Phase 2 response signing based on

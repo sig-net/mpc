@@ -699,35 +699,31 @@ async fn test_watch_unwatch_and_respond() {
     let tx = mock_tx(7);
     let sign_id = tx.sign_id();
 
-    let entry = backlog.insert_mock_executing(&tx).await;
+    backlog.insert_mock_executing(&tx).await;
 
-    // Unwatch returns the watcher (automatically registered on advance to executing)
-    let (watched_id, watched_tx) = backlog
+    // Unwatch returns the executing SignEntry (automatically registered on advance to executing)
+    let executing_entry = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watcher present");
-    assert_eq!(watched_id, sign_id);
-    assert_eq!(watched_tx.id, tx.id);
+    assert_eq!(executing_entry.sign_id(), sign_id);
+    assert_eq!(executing_entry.execution_tx().id, tx.id);
 
     // Watch execution on target chain using typed SignEntry
-    backlog.watch_execution(&entry).await;
+    backlog.watch_execution(&executing_entry).await;
 
     // Also verify entry.watch_execution() method
-    entry.watch_execution().await;
+    executing_entry.watch_execution().await;
 
-    let (watched_id2, watched_tx2) = backlog
+    let executing_entry = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watcher present");
-    assert_eq!(watched_id2, sign_id);
-    assert_eq!(watched_tx2.id, tx.id);
+    assert_eq!(executing_entry.sign_id(), sign_id);
+    assert_eq!(executing_entry.execution_tx().id, tx.id);
 
     // Advance executing entry to final response signing
-    let entry = backlog
-        .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
-        .await
-        .expect("executing entry exists");
-    entry
+    executing_entry
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("respond should transition to final generating");

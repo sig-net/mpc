@@ -371,8 +371,6 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 
     crate::stream::ops::process_execution_confirmed(
         tx_id,
-        sign_id,
-        Chain::Solana,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,

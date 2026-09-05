@@ -131,8 +131,6 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     process_execution_confirmed(
         tx_id,
-        sign_id,
-        tx.source_chain,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
@@ -181,7 +179,6 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -189,8 +186,6 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
@@ -201,8 +196,6 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         124u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
@@ -233,54 +226,6 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 }
 
 #[tokio::test]
-async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
-    let backlog = Backlog::new();
-    let tx = test_bidirectional_tx(8, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
-    let mismatched_sign_id = SignId::new([88u8; 32]);
-    backlog.insert_mock_executing(&tx).await;
-
-    let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-
-    process_execution_confirmed(
-        tx.id,
-        mismatched_sign_id,
-        tx.source_chain,
-        321u64,
-        ExecutionOutcome::Failed,
-        &ctx,
-        tx.target_chain,
-    )
-    .await
-    .unwrap();
-
-    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert_matches!(
-        tx_after.status(),
-        SignStatus::Bidirectional(BidirectionalProgress::Final {
-            progress: SignProgress::Generating,
-            ..
-        })
-    );
-    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
-
-    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    match msg {
-        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
-        other => panic!("expected sign request, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_failure() {
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
@@ -294,8 +239,6 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         444u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
@@ -861,8 +804,6 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         456u64,
         ExecutionOutcome::Failed,
         &ctx,
@@ -909,15 +850,12 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     let backlog = Backlog::new();
 
     let tx = test_bidirectional_tx(4, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         789u64,
         ExecutionOutcome::Failed,
         &ctx,
@@ -958,8 +896,6 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
 
     process_execution_confirmed(
         tx.id,
-        sign_id,
-        tx.source_chain,
         456u64,
         ExecutionOutcome::Success { output: vec![1] },
         &ctx,
