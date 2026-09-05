@@ -291,7 +291,7 @@ impl SignGenerator {
                     ) {
                         if let Err(err) = ctx
                             .backlog
-                            .mark_publishing(self.request.chain, &sign_id, Arc::clone(&publish))
+                            .publish(self.request.chain, &sign_id, Arc::clone(&publish))
                             .await
                         {
                             tracing::warn!(

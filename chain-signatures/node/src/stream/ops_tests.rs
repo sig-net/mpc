@@ -4,7 +4,7 @@ use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
-use crate::sign_bidirectional::{PublishState, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -166,16 +166,14 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let maybe_tx = ctx.backlog.get(tx.source_chain, &sign_id).await;
     assert!(maybe_tx.is_some(), "expected sign tx to still exist");
     let tx_after = maybe_tx.unwrap();
-    assert_eq!(
+    assert_matches!(
         tx_after.status(),
-        SignStatus::PendingGenerationBidirectional,
-        "expected PendingGenerationBidirectional but found status: {:?}",
-        tx_after.status()
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
     );
-    assert!(matches!(
-        tx_after.request.kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
 
     // A sign request should have been sent to the sign queue
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -252,13 +250,13 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         .unwrap();
     match first {
         SignCommand::Request(req) => {
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)))
+            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected one sign request, got {other:?}"),
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
-    assert!(matches!(no_second, Err(_) | Ok(None)));
+    assert_matches!(no_second, Err(_) | Ok(None));
 
     assert!(ctx
         .backlog
@@ -309,14 +307,14 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
     .unwrap();
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert_eq!(
+    assert_matches!(
         tx_after.status(),
-        SignStatus::PendingGenerationBidirectional
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
     );
-    assert!(matches!(
-        tx_after.request.kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
     assert!(ctx
         .backlog
         .get_execution_watchers(tx.target_chain)
@@ -379,13 +377,13 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
 
     // Simulate consensus confirmation so storage has the checkpoint
-    assert!(matches!(
+    assert_matches!(
         ctx.backlog
             .checkpoints()
             .confirm(tx.source_chain, checkpoint.digest())
             .await,
         Ok(true)
-    ));
+    );
 
     let threshold = 1;
     let mut mesh_state = MeshState::default();
@@ -417,7 +415,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
+            assert_matches!(req.kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected recovered final respond request, got {other:?}"),
     }
@@ -813,7 +811,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     }
 
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
-    assert!(matches!(no_second, Err(_) | Ok(None)));
+    assert_matches!(no_second, Err(_) | Ok(None));
 }
 
 #[tokio::test]
@@ -965,8 +963,8 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .set_status(
             Chain::Ethereum,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: Signature::new(
                         ProjectivePoint::GENERATOR.to_affine(),
                         Scalar::ONE,
@@ -976,7 +974,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
                     is_proposer: true,
                     publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
-            },
+            ))),
         )
         .await;
 
@@ -1004,10 +1002,10 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .get(Chain::Ethereum, &sign_id)
         .await
         .expect("entry should remain in backlog");
-    assert!(matches!(
+    assert_matches!(
         entry.status(),
-        SignStatus::PendingExecution { .. }
-    ));
+        SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
+    );
     let execution_tx_id = entry
         .execution_tx()
         .expect("pending execution entries should store the execution transaction")
@@ -1075,10 +1073,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     assert!(waiting.contains_key(&sign_id));
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert!(matches!(
-        tx_after.request.kind,
-        SignKind::RespondBidirectional(_)
-    ));
+    assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
 
     // A sign request should have been sent
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -1168,10 +1163,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.chain, Chain::Solana);
-            assert!(matches!(
-                req.kind,
-                mpc_primitives::SignKind::RespondBidirectional(_)
-            ));
+            assert_matches!(req.kind, mpc_primitives::SignKind::RespondBidirectional(_));
         }
         other => panic!("expected cross-chain follow-up request, got {other:?}"),
     }
@@ -1223,11 +1215,14 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await
         .is_empty());
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
-    assert_eq!(
+    assert_matches!(
         tx_after.status(),
-        SignStatus::PendingGenerationBidirectional
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
     );
-    match &tx_after.request.kind {
+    match &tx_after.request().kind {
         SignKind::RespondBidirectional(res) => {
             assert_eq!(res.tx_id, tx.id);
             assert_eq!(res.output, vec![1]);
@@ -1405,7 +1400,7 @@ async fn publish_failover_fires_once_per_leg() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish { publish: publish() },
+            SignStatus::Sign(SignProgress::Publishing(publish())),
         )
         .await;
 
@@ -1439,7 +1434,7 @@ async fn publish_failover_fires_once_per_leg() {
             &sign_id,
             Arc::new(IndexedSignRequest::respond_bidirectional(
                 sign_id,
-                args,
+                args.clone(),
                 Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
@@ -1455,7 +1450,20 @@ async fn publish_failover_fires_once_per_leg() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublishBidirectional { publish: publish() },
+            SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request: Arc::new(IndexedSignRequest::respond_bidirectional(
+                    sign_id,
+                    args.clone(),
+                    Chain::Solana,
+                    current_unix_timestamp(),
+                    RespondBidirectionalTx {
+                        tx_id: mpc_primitives::BidirectionalTxId([0u8; 32]),
+                        output: vec![],
+                        chain_ctx: None,
+                    },
+                )),
+                progress: SignProgress::Publishing(publish()),
+            }),
         )
         .await;
 
@@ -1495,19 +1503,13 @@ async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: Signature::new(
-                        ProjectivePoint::GENERATOR.to_affine(),
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                    // Deadline far in the past, whatever this node's draw.
-                    publishing_since: Some(0),
-                }),
-            },
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState {
+                signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: true,
+                // Deadline far in the past, whatever this node's draw.
+                publishing_since: Some(0),
+            }))),
         )
         .await;
 
@@ -1548,18 +1550,12 @@ async fn insert_publishable(backlog: &Backlog, seed: u8) {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
-                    signature: Signature::new(
-                        ProjectivePoint::GENERATOR.to_affine(),
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: false,
-                    publishing_since: Some(0),
-                }),
-            },
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState {
+                signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+                participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                is_proposer: false,
+                publishing_since: Some(0),
+            }))),
         )
         .await;
 }

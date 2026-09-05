@@ -22,7 +22,7 @@ use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignStatus};
+use mpc_node::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::{
@@ -556,8 +556,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         .set_status(
             execution_tx.source_chain,
             &execution_sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -567,7 +567,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                     is_proposer: true,
                     publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
-            },
+            ))),
         )
         .await;
     backlog
@@ -902,8 +902,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         .set_status(
             tx.source_chain,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -913,7 +913,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                     is_proposer: true,
                     publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
-            },
+            ))),
         )
         .await;
     backlog
@@ -1046,8 +1046,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         .set_status(
             tx.source_chain,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -1057,7 +1057,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     is_proposer: true,
                     publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
-            },
+            ))),
         )
         .await;
 
@@ -1107,8 +1107,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         .set_status(
             Chain::Solana,
             &replacement_sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState {
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState {
                     signature: mpc_primitives::Signature::new(
                         AffinePoint::GENERATOR,
                         Scalar::ONE,
@@ -1118,7 +1118,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     is_proposer: true,
                     publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
-            },
+            ))),
         )
         .await;
 

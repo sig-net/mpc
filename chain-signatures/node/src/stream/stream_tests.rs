@@ -3,7 +3,7 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
-use crate::sign_bidirectional::{PublishState, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
@@ -262,10 +262,10 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         .await
         .expect("bidirectional sign request should be tracked in the backlog");
 
-    assert!(matches!(
+    assert_matches!(
         entry.request.kind,
         mpc_primitives::SignKind::SignBidirectional(_)
-    ));
+    );
 }
 
 /// A `ChainEvent::Respond` against an entry that is already in `PendingPublish`
@@ -286,9 +286,9 @@ async fn test_respond_event_advances_to_pending_execution() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState::new(mpc_sig, vec![], true)),
-            },
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(
+                Arc::new(PublishState::new(mpc_sig, vec![], true)),
+            ))),
         )
         .await;
 
@@ -334,8 +334,11 @@ async fn test_respond_event_advances_to_pending_execution() {
         .await
         .expect("entry should remain in backlog after respond event");
     assert!(
-        matches!(entry.status(), SignStatus::PendingExecution { .. }),
-        "expected PendingExecution, got {:?}",
+        matches!(
+            entry.status(),
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
+        ),
+        "expected Bidirectional Executing, got {:?}",
         entry.status()
     );
 
@@ -553,13 +556,11 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState::new(
-                    signature,
-                    vec![Participant::from(0u32)],
-                    true,
-                )),
-            },
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
+                signature,
+                vec![Participant::from(0u32)],
+                true,
+            )))),
         )
         .await;
 
@@ -637,13 +638,11 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState::new(
-                    signature,
-                    vec![Participant::from(0u32)],
-                    false,
-                )),
-            },
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
+                signature,
+                vec![Participant::from(0u32)],
+                false,
+            )))),
         )
         .await;
 
