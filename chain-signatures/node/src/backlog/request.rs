@@ -509,21 +509,68 @@ impl SignState for Bidirectional<Final<AnyProgress>> {
     }
 }
 
+impl SignState for SignStatus {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        Some(status.clone())
+    }
+}
+
+impl SignEntry<SignStatus> {
+    /// Return a reference to the entry's [`SignStatus`].
+    pub fn status(&self) -> &SignStatus {
+        &self.state
+    }
+
+    /// Try to cast a borrowed dynamic entry into a specific typestate.
+    pub fn cast<State: SignState>(&self) -> Option<SignEntry<State>> {
+        let state = State::try_from_status(&self.state)?;
+        Some(SignEntry {
+            chain: self.chain,
+            request: Arc::clone(&self.request),
+            state,
+            backlog: self.backlog.clone(),
+        })
+    }
+
+    /// Consume and convert this dynamic entry into a specific typestate.
+    pub fn try_into<State: SignState>(self) -> Result<SignEntry<State>, Self> {
+        if let Some(state) = State::try_from_status(&self.state) {
+            Ok(SignEntry {
+                chain: self.chain,
+                request: self.request,
+                state,
+                backlog: self.backlog,
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Check if this dynamic entry matches a specific typestate without cloning.
+    pub fn is<State: SignState>(&self) -> bool {
+        State::try_from_status(&self.state).is_some()
+    }
+}
+
 impl Backlog {
+    /// Retrieve an in-flight entry with dynamic [`SignStatus`] for inspection or casting.
+    pub async fn get_entry(&self, chain: Chain, id: &SignId) -> Option<SignEntry<SignStatus>> {
+        let entry = self.get(chain, id).await?;
+        Some(SignEntry {
+            chain,
+            request: entry.request,
+            state: entry.status,
+            backlog: self.clone(),
+        })
+    }
+
     /// Retrieve an in-flight entry matching the requested typestate `State`.
     pub async fn get_by<State: SignState>(
         &self,
         chain: Chain,
         id: &SignId,
     ) -> Option<SignEntry<State>> {
-        let entry = self.get(chain, id).await?;
-        let state = State::try_from_status(&entry.status)?;
-        Some(SignEntry {
-            chain,
-            request: Arc::clone(entry.request()),
-            state,
-            backlog: self.clone(),
-        })
+        self.get_entry(chain, id).await?.try_into().ok()
     }
 
     /// Insert a single-phase sign request into the backlog and return its initial [`SignEntry`].

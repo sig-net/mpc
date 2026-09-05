@@ -86,11 +86,16 @@ pub(crate) async fn process_respond_event(
     let sign_id = SignId::new(respond_event.request_id);
     let source_chain = respond_event.chain;
 
-    if let Some(entry) = ctx
-        .backlog
-        .get_by::<Sign<AnyProgress>>(source_chain, &sign_id)
-        .await
-    {
+    let Some(entry) = ctx.backlog.get_entry(source_chain, &sign_id).await else {
+        tracing::info!(
+            ?sign_id,
+            ?source_chain,
+            "respond event is already finalized or pruned; skipping"
+        );
+        return Ok(());
+    };
+
+    if let Some(entry) = entry.cast::<Sign<AnyProgress>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
         tracing::info!(?sign_id, "sign request completed successfully");
         entry.complete().await;
@@ -98,11 +103,7 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     }
 
-    if let Some(entry) = ctx
-        .backlog
-        .get_by::<Bidirectional<Initial<AnyProgress>>>(source_chain, &sign_id)
-        .await
-    {
+    if let Some(entry) = entry.cast::<Bidirectional<Initial<AnyProgress>>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
         let event = match &entry.request().kind {
             SignKind::SignBidirectional(event) => event.clone(),
@@ -112,12 +113,7 @@ pub(crate) async fn process_respond_event(
             .await;
     }
 
-    if ctx
-        .backlog
-        .get_by::<Bidirectional<Executing>>(source_chain, &sign_id)
-        .await
-        .is_some()
-    {
+    if entry.is::<Bidirectional<Executing>>() {
         tracing::info!(
             ?sign_id,
             ?source_chain,
