@@ -153,6 +153,9 @@ impl ChainPublisher for MidnightPublisher {
         if let (Some(store), SignKind::RespondBidirectional(response)) =
             (&self.output_store, &action.request.kind)
         {
+            // Compact circuit byte payloads need a compile-time size, but serialized
+            // execution outcomes vary in length across requests. Cache the exact attested
+            // bytes off-chain before publishing the fixed-size signature on-chain.
             store
                 .ensure_output(&call.request_id, &response.output)
                 .await?;
