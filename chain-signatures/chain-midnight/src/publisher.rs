@@ -12,6 +12,7 @@ use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
+use crate::output_storage::{GcsOutputStore, OutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
 const RESPOND: &str = "respond";
@@ -75,6 +76,7 @@ pub struct MidnightPublisher {
     config: PublisherConfig,
     reads: Arc<dyn PinnedReads>,
     client: Arc<dyn IntentClient>,
+    output_store: Option<Arc<dyn OutputStore>>,
     central_address: MidnightAddress,
     telemetry: Arc<dyn PublisherTelemetry>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
@@ -88,13 +90,19 @@ impl MidnightPublisher {
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> anyhow::Result<Self> {
+        config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
+        let output_store =
+            GcsOutputStore::connect(&config.publisher, rpc.network_id(), config.central_address)
+                .await?
+                .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
         Ok(Self::new(
             &config.publisher,
             config.central_address,
             rpc,
             intent_gen,
+            output_store,
             telemetry,
         ))
     }
@@ -104,6 +112,7 @@ impl MidnightPublisher {
         central_address: MidnightAddress,
         reads: Arc<dyn PinnedReads>,
         client: Arc<dyn IntentClient>,
+        output_store: Option<Arc<dyn OutputStore>>,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         Self {
@@ -111,6 +120,7 @@ impl MidnightPublisher {
             central_address,
             reads,
             client,
+            output_store,
             telemetry,
             flow: tokio::sync::Mutex::new(()),
         }
@@ -140,6 +150,13 @@ impl ChainPublisher for MidnightPublisher {
     // Retries currently operate per request.
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let call = respond_call(action)?;
+        if let (Some(store), SignKind::RespondBidirectional(response)) =
+            (&self.output_store, &action.request.kind)
+        {
+            store
+                .ensure_output(&call.request_id, &response.output)
+                .await?;
+        }
         let _flow = self.flow.lock().await;
         let central_address = self.central_address.to_hex();
         let sign_id = action.request.id;
@@ -210,8 +227,8 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 signature,
             })
         }
-        // The output never travels: the contract stores a bare signature, and the
-        // attestation already commits to the output.
+        // The on-chain event carries only the signature; output storage is handled
+        // by the publisher, when configured, before it builds this circuit call.
         SignKind::RespondBidirectional(_) => Ok(RespondCall {
             circuit: RespondCircuit::RespondBidirectional,
             request_id,
@@ -484,8 +501,27 @@ mod tests {
             MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
             reads,
             client,
+            Some(Arc::new(StubOutputStore::default())),
             Arc::new(NoopPublisherTelemetry),
         )
+    }
+
+    #[derive(Default)]
+    struct StubOutputStore {
+        outputs: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+        failure: bool,
+    }
+
+    #[async_trait]
+    impl OutputStore for StubOutputStore {
+        async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+            anyhow::ensure!(!self.failure, "output storage unavailable");
+            self.outputs
+                .lock()
+                .unwrap()
+                .push((*request_id, output.to_vec()));
+            Ok(())
+        }
     }
 
     fn sign_event(chain: Chain) -> SignBidirectionalEvent {
@@ -524,6 +560,103 @@ mod tests {
             }),
             SignId::new(REQUEST_ID),
         )
+    }
+
+    #[tokio::test]
+    async fn final_response_requires_output_storage_before_reading_the_chain() {
+        let reads = StubReads::new();
+        let client = StubClient::new();
+        let mut publisher = publisher(reads.clone(), client.clone());
+        publisher.output_store = Some(Arc::new(StubOutputStore {
+            failure: true,
+            ..Default::default()
+        }));
+        let result = publisher
+            .publish_signature(&bidirectional_action(vec![0xde, 0xad, 0xbe, 0xef, 1]))
+            .await;
+
+        assert!(result.is_err(), "final response needs an output store");
+        assert!(reads.reads().is_empty());
+        assert!(client.built().is_empty());
+        assert_eq!(client.submissions(), 0);
+    }
+
+    #[tokio::test]
+    async fn final_response_publishes_when_output_storage_is_disabled() {
+        let client = StubClient::new();
+        let mut publisher = publisher(StubReads::new(), client.clone());
+        publisher.output_store = None;
+        publisher
+            .publish_signature(&bidirectional_action(vec![0, 255, 0]))
+            .await
+            .unwrap();
+        assert_eq!(client.submissions(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_final_responses_store_the_exact_output() {
+        let store = Arc::new(StubOutputStore::default());
+        let mut publisher = publisher(StubReads::new(), StubClient::new());
+        publisher.output_store = Some(store.clone());
+        publisher
+            .publish_signature(&respond_action())
+            .await
+            .unwrap();
+        assert!(store.outputs.lock().unwrap().is_empty());
+        for output in [vec![], vec![0, 255, 0], vec![0xde, 0xad, 0xbe, 0xef, 1]] {
+            publisher
+                .publish_signature(&bidirectional_action(output.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                store.outputs.lock().unwrap().pop(),
+                Some((REQUEST_ID, output))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_finishes_before_chain_reads_without_holding_the_wallet_lock() {
+        #[derive(Default)]
+        struct BlockingStore {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl OutputStore for BlockingStore {
+            async fn ensure_output(&self, _: &[u8; 32], _: &[u8]) -> anyhow::Result<()> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(())
+            }
+        }
+        let store = Arc::new(BlockingStore::default());
+        let reads = StubReads::new();
+        let client = StubClient::new();
+        let mut publisher = publisher(reads.clone(), client.clone());
+        publisher.output_store = Some(store.clone());
+        let publisher = Arc::new(publisher);
+        let task_publisher = publisher.clone();
+        let task = tokio::spawn(async move {
+            task_publisher
+                .publish_signature(&bidirectional_action(vec![1]))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), store.entered.notified())
+            .await
+            .unwrap();
+        assert!(reads.reads().is_empty());
+        assert!(client.built().is_empty());
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            publisher.publish_signature(&respond_action()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        store.release.notify_one();
+        task.await.unwrap().unwrap();
+        assert_eq!(client.submissions(), 2);
     }
 
     #[tokio::test]
@@ -784,8 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
-        // The contract's RespondBidirectionalEvent is a bare Signature: the output never
-        // travels, so the two circuits differ in the request by name alone.
+        // Output storage does not change the signature-only circuit arguments.
         let client = StubClient::new();
         let publisher = publisher(StubReads::new(), client.clone());
 

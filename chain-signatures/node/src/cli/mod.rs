@@ -1175,6 +1175,9 @@ mod tests {
             "MPC_MIDNIGHT_PROOF_SERVER_URL",
             "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS",
         ] {
             assert!(
                 std::env::var_os(var).is_none(),
@@ -1225,6 +1228,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1243,6 +1252,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ] {
             assert!(
                 out.contains(&expected.to_string()),

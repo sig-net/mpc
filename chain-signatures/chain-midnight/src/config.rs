@@ -57,6 +57,13 @@ impl Default for IndexerConfig {
 /// Runs the out-of-process intent builder, the piece that stays TypeScript for its proving stack.
 #[derive(Clone, PartialEq)]
 pub struct PublisherConfig {
+    /// Optional GCS bucket; when absent, final responses only publish on-chain.
+    pub output_storage_bucket: Option<String>,
+    /// Object namespace; use a distinct prefix for deployments that reset chain state.
+    pub output_storage_prefix: String,
+    pub output_storage_timeout: Duration,
+    #[cfg(feature = "sandbox")]
+    pub output_storage_emulator_endpoint: Option<String>,
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,
     /// Funds respond transactions.
@@ -77,6 +84,11 @@ pub struct PublisherConfig {
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
+            output_storage_bucket: None,
+            output_storage_prefix: "v1".to_string(),
+            output_storage_timeout: Duration::from_secs(30),
+            #[cfg(feature = "sandbox")]
+            output_storage_emulator_endpoint: None,
             // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
@@ -102,6 +114,9 @@ impl Default for PublisherConfig {
 impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublisherConfig")
+            .field("output_storage_bucket", &self.output_storage_bucket)
+            .field("output_storage_prefix", &self.output_storage_prefix)
+            .field("output_storage_timeout", &self.output_storage_timeout)
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
             .field("proof_server_url", &self.proof_server_url)
@@ -167,6 +182,28 @@ impl MidnightConfig {
 }
 
 impl PublisherConfig {
+    pub fn validate_output_storage(&self) -> anyhow::Result<()> {
+        if let Some(bucket) = &self.output_storage_bucket {
+            anyhow::ensure!(
+                !bucket.trim().is_empty(),
+                "midnight config: publisher.output_storage_bucket must not be empty"
+            );
+        }
+        anyhow::ensure!(
+            !self
+                .output_storage_prefix
+                .trim_matches('/')
+                .trim()
+                .is_empty(),
+            "midnight config: publisher.output_storage_prefix is required"
+        );
+        anyhow::ensure!(
+            !self.output_storage_timeout.is_zero(),
+            "midnight config: publisher.output_storage_timeout must be greater than zero"
+        );
+        Ok(())
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         let program = self
             .intent_gen_command

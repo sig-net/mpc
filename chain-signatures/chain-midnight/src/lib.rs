@@ -10,6 +10,7 @@ pub mod emissions;
 mod hashing;
 mod indexer;
 mod intent_gen;
+mod output_storage;
 mod publisher;
 mod reader;
 pub mod records;

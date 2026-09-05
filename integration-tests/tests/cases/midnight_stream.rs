@@ -156,7 +156,12 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         )
         .await
         .context("waiting for the finalized respondBidirectional entry")?;
-    midnight.settle_response(request_id).await?;
+    let output = midnight.stored_output(request_id).await?;
+    anyhow::ensure!(
+        !output.is_empty(),
+        "the executed bool result must have stored bytes"
+    );
+    midnight.settle_response(request_id, &output).await?;
     let ChainEvent::Block(final_block) = events
         .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
         .await
