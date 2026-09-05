@@ -74,11 +74,24 @@ impl PendingRequests {
         self.requests.len()
     }
 
-    fn pending_executions(&self) -> Vec<(SignId, BacklogEntry)> {
+    fn pending_executions(
+        &self,
+        chain: Chain,
+        backlog: &Backlog,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         self.requests
-            .iter()
-            .filter(|(_, entry)| entry.status().is_pending_execution())
-            .map(|(&id, entry)| (id, entry.clone()))
+            .values()
+            .filter_map(|entry| match &entry.status {
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
+                    Some(SignEntry {
+                        chain,
+                        request: Arc::clone(entry.request()),
+                        state: Bidirectional(Executing(Arc::clone(tx))),
+                        backlog: backlog.clone(),
+                    })
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -312,40 +325,38 @@ impl Backlog {
         publishable
     }
 
+    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    pub async fn pending_executions(
+        &self,
+        chain: Chain,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let pending = self.pending(&chain).read().await;
+        pending.pending_executions(chain, self)
+    }
+
     /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
         self.pending(&chain).read().await.len()
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
-    ///
-    /// The watcher's `sign_id` and `tx.request_id` are expected to agree: on
-    /// confirmation the final-response request is rebuilt from `tx.request_id` while
-    /// the backlog entry is looked up by `sign_id`, and
-    /// `BacklogEntry::respond` rejects the pair when they
-    /// disagree. Warn here, where the divergence originates, rather than leaving only
-    /// a stalled request at confirmation time.
     pub async fn watch_execution(
         &self,
-        chain: Chain,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
+        entry: &SignEntry<Bidirectional<Executing>>,
     ) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        if sign_id != tx.sign_id() {
-            tracing::warn!(
-                ?chain,
-                ?sign_id,
-                request_id = ?tx.sign_id(),
-                tx_id = ?tx.id,
-                "execution watcher sign_id disagrees with tx request_id; the final \
-                 response transition will be rejected for this request"
-            );
-        }
+        let tx = entry.execution_tx();
+        let target_chain = tx.target_chain;
+        let sign_id = entry.sign_id();
+        let mut watchers = self.watchers(&target_chain).write().await;
 
-        let mut entry = self.watchers(&chain).write().await;
-
-        entry
-            .insert(tx.id, ExecutionWatcher { sign_id, tx })
+        watchers
+            .insert(
+                tx.id,
+                ExecutionWatcher {
+                    sign_id,
+                    tx: Arc::clone(tx),
+                },
+            )
             .map(|previous| (previous.sign_id, previous.tx))
     }
 
@@ -539,7 +550,7 @@ impl Backlog {
                 restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
-            pending.pending_executions()
+            pending.pending_executions(chain, self)
         };
 
         // Clear execution watchers whose source chain is the recovered chain
@@ -551,11 +562,8 @@ impl Backlog {
         }
 
         // now repopulate our execution watchers
-        for (sign_id, entry) in execution_to_watch {
-            // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = entry.execution_tx().cloned() {
-                self.watch_execution(tx.target_chain, sign_id, tx).await;
-            }
+        for entry in execution_to_watch {
+            self.watch_execution(&entry).await;
         }
     }
 }

@@ -687,20 +687,28 @@ async fn test_watch_unwatch_and_respond() {
     let tx = mock_tx(7);
     let sign_id = tx.sign_id();
 
-    backlog.insert_mock_executing(&tx).await;
+    let entry = backlog.insert_mock_executing(&tx).await;
 
-    // Watch execution on target chain
-    backlog
-        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
-        .await;
-
-    // Unwatch returns the watcher
+    // Unwatch returns the watcher (automatically registered on advance to executing)
     let (watched_id, watched_tx) = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watcher present");
     assert_eq!(watched_id, sign_id);
     assert_eq!(watched_tx.id, tx.id);
+
+    // Watch execution on target chain using typed SignEntry
+    backlog.watch_execution(&entry).await;
+
+    // Also verify entry.watch_execution() method
+    entry.watch_execution().await;
+
+    let (watched_id2, watched_tx2) = backlog
+        .unwatch_execution(tx.target_chain, &tx.id)
+        .await
+        .expect("watcher present");
+    assert_eq!(watched_id2, sign_id);
+    assert_eq!(watched_tx2.id, tx.id);
 
     // Advance executing entry to final response signing
     let completion_request = mock_bidi_response(&tx);
@@ -955,4 +963,32 @@ async fn test_initial_any_progress_advance() {
         .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
         .await
         .is_some());
+}
+
+#[tokio::test]
+async fn test_pending_executions_typestate() {
+    let backlog = Backlog::new();
+    let mut tx1 = mock_tx(11);
+    tx1.source_chain = Chain::Ethereum;
+    tx1.target_chain = Chain::Solana;
+    let mut tx2_sol = mock_tx(12);
+    tx2_sol.source_chain = Chain::Solana;
+    tx2_sol.target_chain = Chain::Ethereum;
+
+    let _ = backlog.insert_mock_executing(&tx1).await;
+    let _ = backlog.insert_mock_executing(&tx2_sol).await;
+
+    // Plain sign on Ethereum (should not appear in pending executions)
+    let plain_req = mock_sign_request(SignId::from_u8(99), Chain::Ethereum);
+    let _ = backlog.insert_sign(plain_req).await;
+
+    let eth_execs = backlog.pending_executions(Chain::Ethereum).await;
+    assert_eq!(eth_execs.len(), 1);
+    assert_eq!(eth_execs[0].sign_id(), tx1.sign_id());
+    assert_eq!(eth_execs[0].execution_tx().id, tx1.id);
+
+    let sol_execs = backlog.pending_executions(Chain::Solana).await;
+    assert_eq!(sol_execs.len(), 1);
+    assert_eq!(sol_execs[0].sign_id(), tx2_sol.sign_id());
+    assert_eq!(sol_execs[0].execution_tx().id, tx2_sol.id);
 }

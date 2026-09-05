@@ -133,12 +133,7 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::clone(&tx)));
-        let target_chain = tx.target_chain;
-        drop(pending);
-        self.backlog
-            .watch_execution(target_chain, self.request.id, tx)
-            .await;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
         Ok(())
     }
 
@@ -335,7 +330,9 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
         self.executing(Arc::clone(&tx)).await?;
-        Ok(self.transition(Bidirectional(Executing(tx))))
+        let entry = self.transition(Bidirectional(Executing(tx)));
+        entry.watch_execution().await;
+        Ok(entry)
     }
 }
 
@@ -346,13 +343,20 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
         self.executing(Arc::clone(&tx)).await?;
-        Ok(self.transition(Bidirectional(Executing(tx))))
+        let entry = self.transition(Bidirectional(Executing(tx)));
+        entry.watch_execution().await;
+        Ok(entry)
     }
 }
 
 impl SignEntry<Bidirectional<Executing>> {
     pub fn execution_tx(&self) -> &Arc<BidirectionalTx> {
         &self.state.0 .0
+    }
+
+    /// Watch execution of this bidirectional transaction on its target chain.
+    pub async fn watch_execution(&self) -> Option<(SignId, Arc<BidirectionalTx>)> {
+        self.backlog.watch_execution(self).await
     }
 
     /// Advance destination-chain `Executing` into Phase 2 response signing.

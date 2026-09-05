@@ -691,10 +691,8 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         from_address: **ctx.wallet,
         nonce: 0,
     };
-    let sign_id = SignId::new([7u8; 32]);
-    backlog
-        .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
-        .await;
+    let sign_id = tx.sign_id();
+    let _entry = backlog.insert_mock_executing(&tx).await;
 
     let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
 
