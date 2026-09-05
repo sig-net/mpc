@@ -14,9 +14,19 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  canton-tests:
-    name: Canton Stream Tests
+  canton:
+    name: Canton ${{ matrix.suite.name }} Tests
     runs-on: warp-ubuntu-latest-x64-4x
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: Stream
+            filter: canton_stream
+            cache-key: canton-test
+          - name: E2E
+            filter: cases::canton
+            cache-key: canton-e2e-test
 
     steps:
       - uses: actions/checkout@v6
@@ -79,7 +89,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: canton-test
+          shared-key: ${{ matrix.suite.cache-key }}
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -91,91 +101,8 @@ jobs:
       - name: Build integration tests
         run: just build tests
 
-      - name: Run Canton stream tests
-        run: just test-canton
-        env:
-          RUST_LOG: info,workspaces=warn
-          RUST_BACKTRACE: 1
-
-  canton-e2e:
-    name: Canton E2E Tests
-    runs-on: warp-ubuntu-latest-x64-4x
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install just
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.cargo/bin"
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull Redis
-        run: docker pull redis:7.4.2
-
-      - name: Install Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Install dpm (Canton CLI)
-        run: |
-          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
-          echo "$HOME/.dpm/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.dpm/bin:$PATH"
-          # Pin the SDK (the harness uses the globally active one; the installer defaults to latest).
-          dpm install 3.5.1
-          dpm --version
-
-      - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.93.0
-          target: wasm32-unknown-unknown
-
-      - name: Install cargo-near
-        run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
-          fi
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
-
-      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: canton-e2e-test
-          cache-targets: true
-          cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
-
-      - name: Build eth contract
-        run: just build eth
-
-      - name: Build integration tests
-        run: just build tests
-
-      - name: Run Canton E2E tests
-        run: just test-canton cases::canton
+      - name: Run Canton ${{ matrix.suite.name }} tests
+        run: just test-canton ${{ matrix.suite.filter }}
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
