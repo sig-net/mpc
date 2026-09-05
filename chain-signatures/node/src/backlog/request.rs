@@ -485,24 +485,18 @@ impl Backlog {
         self.insert(Arc::clone(&request)).await;
         SignEntry::bidirectional(request, self)
     }
-
-    /// Insert any sign request into the backlog and return its handle in [`Generating`] state.
-    pub async fn insert_generating(
-        &self,
-        request: Arc<IndexedSignRequest>,
-    ) -> SignEntry<Generating> {
-        self.insert(Arc::clone(&request)).await;
-        SignEntry::generating(request, self)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
+    };
     use crate::backlog::mock::{
         mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_publish_state,
         mock_sign_request, BacklogTestExt,
     };
+    use crate::backlog::Backlog;
     use mpc_primitives::{Chain, SignId};
     use std::sync::Arc;
 

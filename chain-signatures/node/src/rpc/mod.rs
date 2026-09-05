@@ -1,6 +1,7 @@
 mod hydration;
 mod near_governance;
 
+use crate::backlog::{Publishing, SignEntry};
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
@@ -15,9 +16,8 @@ pub use hydration::HydrationClient;
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
-use cait_sith::FullSignature;
 use dashmap::DashSet;
-use k256::{AffinePoint, Secp256k1};
+use k256::AffinePoint;
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
@@ -100,27 +100,10 @@ impl RpcChannel {
         }
     }
 
-    pub fn publish(
-        &self,
-        public_key: mpc_crypto::PublicKey,
-        request: Arc<IndexedSignRequest>,
-        output: FullSignature<Secp256k1>,
-        participants: Vec<Participant>,
-    ) {
-        let sign_id = request.id;
-        let Some(action) = PublishAction::new(public_key, request, output, participants) else {
-            tracing::error!(
-                ?sign_id,
-                "failed to validate signature; trashing publish request",
-            );
-            return;
-        };
-        let rpc = self.clone();
-        tokio::spawn(async move {
-            if let Err(err) = rpc.tx.send(RpcAction::Publish(action)).await {
-                tracing::error!(%err, "failed to send publish action");
-            }
-        });
+    pub fn publish(&self, entry: SignEntry<Publishing>) {
+        let request = Arc::clone(entry.request());
+        let publish = entry.publish_state();
+        self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 
     pub fn publish_signature(

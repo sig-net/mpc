@@ -163,15 +163,16 @@ impl SignatureSpawner {
     fn add_request(
         &mut self,
         governance: &GovernanceInfo,
-        request: Arc<IndexedSignRequest>,
+        entry: backlog::SignEntry<Generating>,
         cfg: ProtocolConfig,
     ) {
-        let sign_id = request.id;
+        let sign_id = entry.sign_id();
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.dead_ids.pop(&sign_id);
         let is_proposer = Arc::new(AtomicBool::new(false));
-        let entry = backlog::SignEntry::generating(Arc::clone(&request), &self.backlog);
+        let chain = entry.chain();
+        let request = Arc::clone(entry.request());
         self.requests.insert(
             sign_id,
             SignEntry {
@@ -182,7 +183,6 @@ impl SignatureSpawner {
         );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
-        let chain = request.chain;
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
@@ -389,7 +389,8 @@ impl SignatureSpawner {
                     request.unix_timestamp_indexed,
                 );
 
-                self.add_request(governance, request, cfg.clone());
+                let entry = backlog::SignEntry::generating(request, &self.backlog);
+                self.add_request(governance, entry, cfg.clone());
             }
         }
 
@@ -631,7 +632,8 @@ mod tests {
         });
 
         // Step 1: Spawn → mailbox created, request retained, not dead
-        spawner.add_request(&governance, Arc::clone(&request), cfg.clone());
+        let entry = backlog::SignEntry::generating(Arc::clone(&request), &spawner.backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(spawner.test_posit_mailboxes_contains(&sign_id));
         assert!(spawner.test_requests_contains(&sign_id));
@@ -659,7 +661,8 @@ mod tests {
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
-        spawner.add_request(&governance, request, cfg.clone());
+        let entry = backlog::SignEntry::generating(request, &spawner.backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
         assert!(spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
