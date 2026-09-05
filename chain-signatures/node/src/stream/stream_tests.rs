@@ -261,7 +261,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         .expect("bidirectional sign request should be tracked in the backlog");
 
     assert_matches!(
-        entry.request.kind,
+        entry.request().kind,
         mpc_primitives::SignKind::SignBidirectional(_)
     );
 }
@@ -531,7 +531,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         .get(Chain::Ethereum, &sign_id)
         .await
         .expect("replayed entry should remain in backlog");
-    assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
+    assert_eq!(entry.request().unix_timestamp_indexed, replayed_timestamp);
 }
 
 #[tokio::test]

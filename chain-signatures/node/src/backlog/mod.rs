@@ -220,9 +220,15 @@ impl Backlog {
         removed
     }
 
-    /// Get a Sign request from the backlog for the specified chain.
-    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.pending(&chain).read().await.get(id).cloned()
+    /// Get an in-flight sign request entry from the backlog for the specified chain.
+    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<SignEntry> {
+        let entry = self.pending(&chain).read().await.get(id).cloned()?;
+        Some(SignEntry {
+            chain,
+            request: entry.request,
+            state: entry.status,
+            backlog: self.clone(),
+        })
     }
 
     /// Returns the number of pending requests in total
@@ -1184,7 +1190,10 @@ mod tests {
             .await
             .expect("missing recovered entry");
 
-        assert_matches!(recovered_entry.request.kind, SignKind::SignBidirectional(_));
+        assert_matches!(
+            recovered_entry.request().kind,
+            SignKind::SignBidirectional(_)
+        );
     }
 
     #[tokio::test]
@@ -1476,11 +1485,14 @@ mod tests {
         let tx = mock_tx(8);
         let sign_id = tx.sign_id();
 
-        let _entry = backlog.insert_mock_sign(sign_id, tx.source_chain).await;
+        backlog.insert_mock_sign(sign_id, tx.source_chain).await;
 
         let mut entry = backlog
-            .get(tx.source_chain, &sign_id)
+            .pending(&tx.source_chain)
+            .read()
             .await
+            .get(&sign_id)
+            .cloned()
             .expect("entry should be found");
         let err = entry
             .advance(Arc::new(tx))
@@ -1495,7 +1507,7 @@ mod tests {
         let tx = mock_tx(9);
         let sign_id = tx.sign_id();
 
-        let _entry = backlog
+        backlog
             .insert_mock_bidirectional(sign_id, tx.source_chain)
             .await;
 

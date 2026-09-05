@@ -49,11 +49,11 @@ pub struct Final<P = Generating>(pub P);
 /// keeping the underlying `Backlog` storage in sync automatically without requiring
 /// callers to pass raw `Backlog` references across handler functions.
 #[derive(Debug, Clone)]
-pub struct SignEntry<State> {
-    chain: Chain,
-    request: Arc<IndexedSignRequest>,
-    state: State,
-    backlog: Backlog,
+pub struct SignEntry<State = SignStatus> {
+    pub(crate) chain: Chain,
+    pub(crate) request: Arc<IndexedSignRequest>,
+    pub(crate) state: State,
+    pub(crate) backlog: Backlog,
 }
 
 impl<State> SignEntry<State> {
@@ -521,6 +521,11 @@ impl SignEntry<SignStatus> {
         &self.state
     }
 
+    /// Return the execution transaction if this entry is in the executing state.
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
+        self.state.execution_tx()
+    }
+
     /// Try to cast a borrowed dynamic entry into a specific typestate.
     pub fn cast<State: SignState>(&self) -> Option<SignEntry<State>> {
         let state = State::try_from_status(&self.state)?;
@@ -553,24 +558,13 @@ impl SignEntry<SignStatus> {
 }
 
 impl Backlog {
-    /// Retrieve an in-flight entry with dynamic [`SignStatus`] for inspection or casting.
-    pub async fn get_entry(&self, chain: Chain, id: &SignId) -> Option<SignEntry<SignStatus>> {
-        let entry = self.get(chain, id).await?;
-        Some(SignEntry {
-            chain,
-            request: entry.request,
-            state: entry.status,
-            backlog: self.clone(),
-        })
-    }
-
     /// Retrieve an in-flight entry matching the requested typestate `State`.
     pub async fn get_by<State: SignState>(
         &self,
         chain: Chain,
         id: &SignId,
     ) -> Option<SignEntry<State>> {
-        self.get_entry(chain, id).await?.try_into().ok()
+        self.get(chain, id).await?.try_into().ok()
     }
 
     /// Insert a single-phase sign request into the backlog and return its initial [`SignEntry`].

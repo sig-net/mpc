@@ -86,7 +86,7 @@ pub(crate) async fn process_respond_event(
     let sign_id = SignId::new(respond_event.request_id);
     let source_chain = respond_event.chain;
 
-    let Some(entry) = ctx.backlog.get_entry(source_chain, &sign_id).await else {
+    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
         tracing::info!(
             ?sign_id,
             ?source_chain,
