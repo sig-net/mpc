@@ -578,6 +578,8 @@ pub enum BacklogError {
     InvalidPublishingTransition,
     #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
     InvalidBidirectionalResponseTransition,
+    #[error("failed to reconstruct signature")]
+    InvalidSignature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -696,8 +698,9 @@ mod tests {
     use crate::backlog::mock::{
         bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidi_response_request,
         mock_bidirectional_tx, mock_execution_entry, mock_execution_entry_with_timestamp,
-        mock_publish_state, mock_publish_state_with_proposer, mock_sign_request, mock_tx,
-        pending_execution_status, single_entry_checkpoint, BacklogTestExt,
+        mock_participants, mock_publish_state, mock_publish_state_with_proposer,
+        mock_sign_request, mock_signature_output, mock_tx, pending_execution_status,
+        single_entry_checkpoint, BacklogTestExt,
     };
     use crate::backlog::{
         AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Executing, Final,
@@ -1233,8 +1236,9 @@ mod tests {
             .insert_mock_bidirectional(sign_id, Chain::Solana)
             .await;
 
+        let (pk, output) = mock_signature_output(&entry.request().args);
         let entry = entry
-            .advance(mock_publish_state())
+            .advance(pk, &output, mock_participants(), true)
             .await
             .expect("pending generation should transition to publishing");
 
@@ -1254,8 +1258,11 @@ mod tests {
 
         let entry = backlog
             .insert_mock_final(&tx)
-            .await
-            .advance(mock_publish_state())
+            .await;
+
+        let (pk, output) = mock_signature_output(&entry.request().args);
+        let entry = entry
+            .advance(pk, &output, mock_participants(), true)
             .await
             .expect("final publishing");
 

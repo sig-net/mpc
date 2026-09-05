@@ -1,6 +1,10 @@
 use super::{Backlog, BacklogEntry, BacklogError};
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use anyhow::Context as _;
+use cait_sith::protocol::Participant;
+use cait_sith::FullSignature;
+use k256::Secp256k1;
+use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{BidirectionalTx, Chain, IndexedSignRequest, PublicKey, SignId, Signature};
 use std::sync::Arc;
 
@@ -188,11 +192,29 @@ impl SignEntry<Generating> {
         }
     }
 
-    /// Advance from `Generating` to `Publishing`.
+    /// Advance from `Generating` to `Publishing`, reconstructing and validating the signature
+    /// against the derived key.
     pub async fn advance(
         self,
-        publish: Arc<PublishState>,
+        public_key: PublicKey,
+        output: &FullSignature<Secp256k1>,
+        participants: impl Into<Vec<Participant>>,
+        is_proposer: bool,
     ) -> Result<SignEntry<Publishing>, BacklogError> {
+        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
+        let signature = reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            self.request.args.payload,
+        )
+        .map_err(|_| BacklogError::InvalidSignature)?;
+
+        let publish = Arc::new(PublishState {
+            signature,
+            participants: participants.into(),
+            is_proposer,
+        });
         self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Publishing(publish)))
     }
@@ -216,11 +238,29 @@ impl SignEntry<Sign<Generating>> {
         }
     }
 
-    /// Advance from `Generating` to `Publishing`.
+    /// Advance from `Generating` to `Publishing`, reconstructing and validating the signature
+    /// against the derived key.
     pub async fn advance(
         self,
-        publish: Arc<PublishState>,
+        public_key: PublicKey,
+        output: &FullSignature<Secp256k1>,
+        participants: impl Into<Vec<Participant>>,
+        is_proposer: bool,
     ) -> Result<SignEntry<Sign<Publishing>>, BacklogError> {
+        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
+        let signature = reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            self.request.args.payload,
+        )
+        .map_err(|_| BacklogError::InvalidSignature)?;
+
+        let publish = Arc::new(PublishState {
+            signature,
+            participants: participants.into(),
+            is_proposer,
+        });
         self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Sign(Publishing(publish))))
     }
@@ -244,11 +284,29 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
         }
     }
 
-    /// Advance Phase 1 from `Generating` to `Publishing`.
+    /// Advance Phase 1 from `Generating` to `Publishing`, reconstructing and validating the signature
+    /// against the derived key.
     pub async fn advance(
         self,
-        publish: Arc<PublishState>,
+        public_key: PublicKey,
+        output: &FullSignature<Secp256k1>,
+        participants: impl Into<Vec<Participant>>,
+        is_proposer: bool,
     ) -> Result<SignEntry<Bidirectional<Initial<Publishing>>>, BacklogError> {
+        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
+        let signature = reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            self.request.args.payload,
+        )
+        .map_err(|_| BacklogError::InvalidSignature)?;
+
+        let publish = Arc::new(PublishState {
+            signature,
+            participants: participants.into(),
+            is_proposer,
+        });
         self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Bidirectional(Initial(Publishing(publish)))))
     }
@@ -312,11 +370,29 @@ impl From<SignEntry<Bidirectional<Final<Generating>>>> for SignEntry<Generating>
 }
 
 impl SignEntry<Bidirectional<Final<Generating>>> {
-    /// Advance Phase 2 from `Generating` to `Publishing`.
+    /// Advance Phase 2 from `Generating` to `Publishing`, reconstructing and validating the signature
+    /// against the derived key.
     pub async fn advance(
         self,
-        publish: Arc<PublishState>,
+        public_key: PublicKey,
+        output: &FullSignature<Secp256k1>,
+        participants: impl Into<Vec<Participant>>,
+        is_proposer: bool,
     ) -> Result<SignEntry<Bidirectional<Final<Publishing>>>, BacklogError> {
+        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
+        let signature = reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            self.request.args.payload,
+        )
+        .map_err(|_| BacklogError::InvalidSignature)?;
+
+        let publish = Arc::new(PublishState {
+            signature,
+            participants: participants.into(),
+            is_proposer,
+        });
         self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Bidirectional(Final(Publishing(publish)))))
     }
@@ -491,10 +567,10 @@ mod tests {
         AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
     };
     use crate::backlog::mock::{
-        mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_publish_state,
-        mock_sign_request, BacklogTestExt,
+        mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_participants,
+        mock_sign_request, mock_signature_output, BacklogTestExt,
     };
-    use crate::backlog::Backlog;
+    use crate::backlog::{Backlog, BacklogError};
     use mpc_primitives::{Chain, SignId};
     use std::sync::Arc;
 
@@ -516,10 +592,11 @@ mod tests {
             .is_none());
 
         // 2. Advance to publishing
+        let (pk, output) = mock_signature_output(&req.args);
         let pub_entry = entry
-            .advance(mock_publish_state())
+            .advance(pk, &output, mock_participants(), true)
             .await
-            .expect("should advance to publishing");
+            .expect("advance call should succeed");
 
         assert_eq!(pub_entry.sign_id(), sign_id);
         assert_eq!(pub_entry.request().id, sign_id);
@@ -544,12 +621,13 @@ mod tests {
         let req = mock_sign_request(sign_id, Chain::Ethereum);
 
         // Chained advance from sign all the way till completion
+        let (pk, output) = mock_signature_output(&req.args);
         let completed = backlog
             .insert_sign(req)
             .await
-            .advance(mock_publish_state())
+            .advance(pk, &output, mock_participants(), true)
             .await
-            .expect("advance to publishing should succeed")
+            .expect("advance call should succeed")
             .complete()
             .await;
 
@@ -569,10 +647,11 @@ mod tests {
         assert_eq!(bidi_entry.state(), &Bidirectional(Initial(Generating)));
 
         // 2. Advance to Publishing
+        let (pk1, output1) = mock_signature_output(&req.args);
         let pub_entry = bidi_entry
-            .advance(mock_publish_state())
+            .advance(pk1, &output1, mock_participants(), true)
             .await
-            .expect("should advance to publishing");
+            .expect("advance call should succeed");
 
         // Verify phase 1 signature
         let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -618,10 +697,11 @@ mod tests {
             .is_some());
 
         // 5. Advance to Final Publishing
+        let (pk2, output2) = mock_signature_output(&response_request.args);
         let final_pub_entry = final_entry
-            .advance(mock_publish_state())
+            .advance(pk2, &output2, mock_participants(), true)
             .await
-            .expect("should advance final to publishing");
+            .expect("advance call should succeed");
         assert_eq!(final_pub_entry.respond_request().id, sign_id);
 
         // Verify phase 2 signature against response_request
@@ -645,21 +725,23 @@ mod tests {
         let response_request = mock_bidi_response(&tx);
 
         // Start from initial entry, and keep calling advance all the way till completion!
+        let (pk1, output1) = mock_signature_output(&req.args);
+        let (pk2, output2) = mock_signature_output(&response_request.args);
         let completed = backlog
             .insert_bidirectional(req)
             .await
-            .advance(mock_publish_state())
+            .advance(pk1, &output1, mock_participants(), true)
             .await
-            .expect("advance to initial publishing")
+            .expect("advance call should succeed")
             .advance(tx)
             .await
             .expect("advance to executing")
             .advance(response_request)
             .await
             .expect("advance to final generating")
-            .advance(mock_publish_state())
+            .advance(pk2, &output2, mock_participants(), true)
             .await
-            .expect("advance to final publishing")
+            .expect("advance call should succeed")
             .complete()
             .await;
 
@@ -673,10 +755,11 @@ mod tests {
         let sign_id = SignId::from_u8(33);
 
         let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
+        let (pk, output) = mock_signature_output(&entry.request().args);
         let _ = entry
-            .advance(mock_publish_state())
+            .advance(pk, &output, mock_participants(), true)
             .await
-            .expect("advance to publishing");
+            .expect("advance call should succeed");
 
         // Query with wildcard AnyProgress typestate
         let entry = backlog
@@ -688,5 +771,25 @@ mod tests {
         let completed = entry.complete().await;
         assert!(completed.is_some());
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_advance_invalid_signature_error() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::from_u8(99);
+        let req = mock_sign_request(sign_id, Chain::Ethereum);
+        let entry = backlog.insert_sign(req).await;
+
+        let wrong_root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let wrong_pk = wrong_root_sk.public_key().into();
+        let dummy_output = cait_sith::FullSignature {
+            big_r: k256::AffinePoint::GENERATOR,
+            s: k256::Scalar::ONE,
+        };
+
+        let result = entry
+            .advance(wrong_pk, &dummy_output, mock_participants(), true)
+            .await;
+        assert_eq!(result.unwrap_err(), BacklogError::InvalidSignature);
     }
 }

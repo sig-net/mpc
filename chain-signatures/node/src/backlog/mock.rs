@@ -4,10 +4,11 @@ use crate::backlog::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
 use cait_sith::protocol::Participant;
-use k256::{AffinePoint, Scalar};
+use cait_sith::FullSignature;
+use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalTx,
-    SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PublicKey,
+    RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use std::sync::Arc;
 
@@ -56,9 +57,11 @@ impl BacklogTestExt for Backlog {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Executing>> {
-        self.insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
-            .await
-            .advance(mock_publish_state())
+        let bidi = self
+            .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
+            .await;
+        let (pk, output) = mock_signature_output(&bidi.request().args);
+        bidi.advance(pk, &output, mock_participants(), true)
             .await
             .expect("advance to publishing")
             .advance(Arc::new(tx.clone()))
@@ -84,6 +87,24 @@ pub fn mock_signature() -> Signature {
     Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
 }
 
+/// Create a mock governance public key and Cait-Sith signature output for tests.
+pub fn mock_signature_output(args: &SignArgs) -> (PublicKey, FullSignature<Secp256k1>) {
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let sig = mpc_crypto::generate_signature(&root_sk, args);
+    (
+        root_sk.public_key().into(),
+        FullSignature {
+            big_r: sig.big_r,
+            s: sig.s,
+        },
+    )
+}
+
+/// Create a mock participant list for tests.
+pub fn mock_participants() -> Vec<Participant> {
+    vec![Participant::from(0u32), Participant::from(1u32)]
+}
+
 /// Create a mock publish state with proposer set to true for tests.
 pub fn mock_publish_state() -> Arc<PublishState> {
     mock_publish_state_with_proposer(true)
@@ -93,7 +114,7 @@ pub fn mock_publish_state() -> Arc<PublishState> {
 pub fn mock_publish_state_with_proposer(is_proposer: bool) -> Arc<PublishState> {
     Arc::new(PublishState {
         signature: mock_signature(),
-        participants: vec![Participant::from(0u32), Participant::from(1u32)],
+        participants: mock_participants(),
         is_proposer,
     })
 }

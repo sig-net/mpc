@@ -8,7 +8,6 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use k256::{AffinePoint, Scalar};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
@@ -17,17 +16,18 @@ use mpc_chain_integration_core::{
     NoopChainTelemetry, StateManager,
 };
 use mpc_crypto::kdf::generate_signature;
+use mpc_node::backlog::mock::mock_signature_output;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::types::SignCommand;
 use mpc_primitives::{
     BidirectionalTx, Chain, ChainEvent, IndexedSignRequest, SignArgs,
-    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -538,7 +538,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         from_address: **ctx.wallet,
         nonce: checkpoint_nonce,
     };
-    backlog
+    let seed_entry = backlog
         .insert_bidirectional(Arc::new(
             mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
                 execution_sign_id,
@@ -548,12 +548,16 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                 test_bidirectional_event(),
             ),
         ))
-        .await
-        .advance(Arc::new(PublishState {
-            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
-            is_proposer: true,
-        }))
+        .await;
+
+    let (pk, output) = mock_signature_output(&seed_entry.request().args);
+    seed_entry
+        .advance(
+            pk,
+            &output,
+            vec![Participant::from(0u32), Participant::from(1u32)],
+            true,
+        )
         .await
         .unwrap()
         .advance(Arc::new(execution_tx))
@@ -874,7 +878,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         from_address: **ctx.wallet,
         nonce: 0,
     };
-    backlog
+    let seed_entry = backlog
         .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x88),
@@ -882,12 +886,16 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await
-        .advance(Arc::new(PublishState {
-            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
-            is_proposer: true,
-        }))
+        .await;
+
+    let (pk, output) = mock_signature_output(&seed_entry.request().args);
+    seed_entry
+        .advance(
+            pk,
+            &output,
+            vec![Participant::from(0u32), Participant::from(1u32)],
+            true,
+        )
         .await
         .unwrap()
         .advance(Arc::new(tx))
@@ -1004,7 +1012,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     };
 
     // Insert the sign request into the backlog
-    backlog
+    let bidi_entry = backlog
         .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x71),
@@ -1012,12 +1020,16 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await
-        .advance(Arc::new(PublishState {
-            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
-            is_proposer: true,
-        }))
+        .await;
+
+    let (pk, output) = mock_signature_output(&bidi_entry.request().args);
+    bidi_entry
+        .advance(
+            pk,
+            &output,
+            vec![Participant::from(0u32), Participant::from(1u32)],
+            true,
+        )
         .await
         .unwrap()
         .advance(Arc::new(tx.clone()))
@@ -1048,8 +1060,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     let replacement_sign_id = SignId::new([0x72; 32]);
     let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
 
-    // Insert the replacement sign request into the backlog
-    backlog
+    let repl_entry = backlog
         .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             replacement_sign_id,
             test_sign_args(0x72),
@@ -1057,12 +1068,16 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await
-        .advance(Arc::new(PublishState {
-            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
-            is_proposer: true,
-        }))
+        .await;
+
+    let (pk_repl, output_repl) = mock_signature_output(&repl_entry.request().args);
+    repl_entry
+        .advance(
+            pk_repl,
+            &output_repl,
+            vec![Participant::from(0u32), Participant::from(1u32)],
+            true,
+        )
         .await
         .unwrap()
         .advance(Arc::new(BidirectionalTx {

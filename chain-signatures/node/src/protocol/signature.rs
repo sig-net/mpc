@@ -1,10 +1,9 @@
 //! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
-use crate::backlog::{Generating, SignEntry};
+use crate::backlog::{BacklogError, Generating, SignEntry};
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::PresignatureId;
 use crate::rpc::{GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -17,7 +16,6 @@ use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
 use mpc_primitives::{IndexedSignRequest, SignId};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -283,22 +281,23 @@ impl SignGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
                     let is_proposer = self.proposer == me;
-                    let Some(publish) = build_publish_state(
-                        ctx.governance.public_key,
-                        entry.request(),
-                        &output,
-                        &self.participants,
-                        is_proposer,
-                    ) else {
-                        tracing::error!(
-                            ?sign_id,
-                            "failed to validate signature; trashing publish request",
-                        );
-                        break Ok(());
-                    };
-
-                    let entry = match entry.advance(publish).await {
+                    let entry = match entry
+                        .advance(
+                            ctx.governance.public_key,
+                            &output,
+                            self.participants.clone(),
+                            is_proposer,
+                        )
+                        .await
+                    {
                         Ok(entry) => entry,
+                        Err(BacklogError::InvalidSignature) => {
+                            tracing::error!(
+                                ?sign_id,
+                                "failed to validate signature; trashing publish request",
+                            );
+                            break Ok(());
+                        }
                         Err(err) => {
                             tracing::warn!(
                                 ?sign_id,
@@ -339,31 +338,6 @@ fn awaited_peers(participants: &[Participant], seen: &[Participant]) -> Vec<Part
         .collect()
 }
 
-/// Build [`PublishState`] from the finished threshold signature; verifies it
-/// against the derived key so a corrupt signature is rejected before publish.
-fn build_publish_state(
-    public_key: mpc_crypto::PublicKey,
-    request: &IndexedSignRequest,
-    output: &cait_sith::FullSignature<Secp256k1>,
-    participants: &[Participant],
-    is_proposer: bool,
-) -> Option<Arc<PublishState>> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
-    let signature = mpc_crypto::reconstruct_signature(
-        &expected_public_key,
-        &output.big_r,
-        &output.s,
-        request.args.payload,
-    )
-    .ok()?;
-    let publish = PublishState {
-        signature,
-        participants: participants.to_vec(),
-        is_proposer,
-    };
-
-    Some(Arc::new(publish))
-}
 
 impl Drop for SignGenerator {
     /// Unsubscribe and drop any buffered messages for this signature.

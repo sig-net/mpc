@@ -8,17 +8,18 @@ use mpc_chain_integration_core::{
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_crypto::ScalarExt;
+use mpc_node::backlog::mock::mock_signature_output;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature,
     LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
@@ -510,30 +511,28 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([77u8; 32]);
-    let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
+    let args = SignArgs {
+        entropy: [9u8; 32],
+        epsilon: Scalar::from(1u64),
+        payload: Scalar::from(2u64),
+        path: "test".to_string(),
+        key_version: LATEST_MPC_KEY_VERSION,
+    };
+    let (pk, output) = mock_signature_output(&args);
 
-    seeded_backlog
+    let pub_entry = seeded_backlog
         .insert_sign(Arc::new(IndexedSignRequest::sign(
             sign_id,
-            SignArgs {
-                entropy: [9u8; 32],
-                epsilon: Scalar::from(1u64),
-                payload: Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: LATEST_MPC_KEY_VERSION,
-            },
+            args,
             Chain::Solana,
             0,
         )))
         .await
-        .advance(Arc::new(PublishState {
-            signature,
-            participants: vec![Participant::from(0u32)],
-            is_proposer: true,
-        }))
+        .advance(pk, &output, vec![Participant::from(0u32)], true)
         .await
         .unwrap();
+    let expected_sig = pub_entry.publish_state().signature;
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
         .await;
@@ -619,7 +618,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         RpcAction::Publish(action) => {
             assert_eq!(action.request.id, sign_id);
             assert_eq!(action.request.chain, Chain::Solana);
-            assert_eq!(action.signature, signature);
+            assert_eq!(action.signature, expected_sig);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }
         RpcAction::VoteCheckpoint { checkpoint, .. } => {

@@ -1,11 +1,12 @@
 use super::*;
+use crate::backlog::mock::mock_signature_output;
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::types::SignCommand;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -113,15 +114,11 @@ async fn seed_executing_entry(
     request: Arc<IndexedSignRequest>,
     tx: Arc<BidirectionalTx>,
 ) {
-    let pub_state = Arc::new(PublishState {
-        signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
-        participants: vec![],
-        is_proposer: true,
-    });
+    let (pk, output) = mock_signature_output(&request.args);
     backlog
         .insert_bidirectional(request)
         .await
-        .advance(pub_state)
+        .advance(pk, &output, vec![], true)
         .await
         .expect("advance to publishing")
         .advance(tx)
@@ -959,14 +956,11 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
             respond_serialization_schema: tx.respond_serialization_schema.clone(),
         },
     ));
+    let (pk, output) = mock_signature_output(&req.args);
     backlog
         .insert_bidirectional(req)
         .await
-        .advance(Arc::new(PublishState {
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
-            participants: vec![],
-            is_proposer: true,
-        }))
+        .advance(pk, &output, vec![], true)
         .await
         .unwrap();
 
