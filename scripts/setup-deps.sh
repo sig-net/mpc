@@ -239,6 +239,10 @@ case "$MODE" in
         ;;
     --install)
         if [ "${SETUP_DEPS_SKIP:-0}" = "1" ]; then printf 'skipping dependency install (SETUP_DEPS_SKIP=1)\n'; exit 0; fi
+        if [ "${SETUP_DEPS_FORCE:-0}" != "1" ] && { [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; }; then
+            printf 'skipping dependency install (CI detected; SETUP_DEPS_FORCE=1 to override)\n'
+            exit 0
+        fi
         case "$OS" in
             Linux) apt_install ;;
             Darwin) brew_install ;;

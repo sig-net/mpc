@@ -17,6 +17,11 @@ jobs:
         run: mkdir -p ~/.near-credentials/testnet && echo '${{ secrets.DEV_CONTRACT_JSON }}' > ~/.near-credentials/testnet/dev.sig-net.testnet.json
 
       - uses: actions/checkout@v6
+
+      - name: Install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
@@ -46,6 +51,6 @@ jobs:
 
       - name: Build & Deploy Dev Contract
         run: |
-          ./build-contract.sh
+          just build contract
           (yes || true) | near deploy dev.sig-net.testnet target/near/mpc_contract/mpc_contract.wasm
           near call dev.sig-net.testnet migrate '{}' --accountId dev.sig-net.testnet --gas 300000000000000

@@ -21,6 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -81,17 +86,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build eth contract
-        working-directory: ./chain-signatures/contract-eth
-        run: npm ci && npx hardhat compile
-
-      - name: Presetup binaries
-        run: ./setup.sh
+        run: just build eth
 
       - name: Build integration tests
-        run: cargo build -p integration-tests --tests
+        run: just build tests
 
       - name: Run Canton stream tests
-        run: cargo test -p integration-tests --test lib -- canton_stream --ignored --nocapture --test-threads 1
+        run: just test-canton
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
@@ -102,6 +103,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -163,17 +169,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build eth contract
-        working-directory: ./chain-signatures/contract-eth
-        run: npm ci && npx hardhat compile
-
-      - name: Presetup binaries
-        run: ./setup.sh
+        run: just build eth
 
       - name: Build integration tests
-        run: cargo build -p integration-tests --tests
+        run: just build tests
 
       - name: Run Canton E2E tests
-        run: cargo test -p integration-tests --test lib -- cases::canton --ignored --nocapture --test-threads 1
+        run: just test-canton cases::canton
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
