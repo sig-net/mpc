@@ -105,7 +105,7 @@ impl RpcChannel {
         self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 
-    pub fn publish_signature(
+    fn publish_signature(
         &self,
         request: Arc<IndexedSignRequest>,
         signature: Signature,

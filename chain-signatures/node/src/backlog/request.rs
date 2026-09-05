@@ -113,7 +113,15 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.publish(publish)
+        match &mut entry.status {
+            SignStatus::Sign(progress)
+            | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
+            | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                *progress = SignProgress::Publishing(publish);
+            }
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
+        }
+        Ok(())
     }
 
     async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
@@ -125,7 +133,7 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.advance(Arc::clone(&tx))?;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::clone(&tx)));
         let target_chain = tx.target_chain;
         drop(pending);
         self.backlog
@@ -410,6 +418,15 @@ pub trait SignState: Sized {
     fn try_from_status(status: &SignStatus) -> Option<Self>;
 }
 
+impl SignState for Sign<Generating> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Sign(SignProgress::Generating) => Some(Sign(Generating)),
+            _ => None,
+        }
+    }
+}
+
 impl SignState for Sign<Publishing> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
@@ -418,6 +435,22 @@ impl SignState for Sign<Publishing> {
             }
             _ => None,
         }
+    }
+}
+
+impl SignState for Generating {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        if status.is_pending_generation() {
+            Some(Generating)
+        } else {
+            None
+        }
+    }
+}
+
+impl SignState for Publishing {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        status.publish_state().map(|p| Publishing(Arc::clone(p)))
     }
 }
 
@@ -583,14 +616,5 @@ impl Backlog {
     ) -> SignEntry<Bidirectional<Initial<Generating>>> {
         self.insert(Arc::clone(&request)).await;
         SignEntry::bidirectional(request, self)
-    }
-
-    /// Insert any sign request into the backlog and return its handle in [`Generating`] state.
-    pub async fn insert_generating(
-        &self,
-        request: Arc<IndexedSignRequest>,
-    ) -> SignEntry<Generating> {
-        self.insert(Arc::clone(&request)).await;
-        SignEntry::generating(request, self)
     }
 }

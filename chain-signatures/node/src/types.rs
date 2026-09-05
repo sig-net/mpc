@@ -46,7 +46,7 @@ impl SignCommand {
             while let Some(cmd) = near_sign_rx.recv().await {
                 match cmd {
                     mpc_chain_near::SignCommand::Request(req) => {
-                        let entry = backlog.insert_generating(req).await;
+                        let (entry, _) = backlog.insert(req).await;
                         if sign_tx.send(Self::Request(entry)).await.is_err() {
                             break;
                         }

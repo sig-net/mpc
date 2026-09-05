@@ -662,26 +662,23 @@ async fn test_backlog_entry_rejections() {
     let tx = mock_tx(20);
     let sign_id = tx.sign_id();
 
-    // Plain sign requests reject bidirectional advance
-    backlog.insert_mock_sign(sign_id, tx.source_chain).await;
-    let mut plain_entry = backlog
-        .pending(&tx.source_chain)
-        .read()
-        .await
-        .get(&sign_id)
-        .cloned()
-        .expect("plain sign entry exists");
-    let err = plain_entry
-        .advance(Arc::new(tx.clone()))
-        .expect_err("advance should fail for plain sign");
-    assert_matches!(err, BacklogError::InvalidAdvanceTransition);
-
-    // Executing entry rejects response request with mismatched ID
+    // Executing entry rejects response request with mismatched ID via BacklogEntry
     let mut exec_entry = mock_execution_entry(&tx, Chain::Ethereum, pending_execution_status(&tx));
     let mismatched_req = mock_bidi_response_request(SignId::from_u8(99), tx.id, Chain::Ethereum);
     let err = exec_entry.respond(mismatched_req).unwrap_err();
     assert_matches!(err, BacklogError::InvalidBidirectionalResponseTransition);
     assert_eq!(exec_entry.sign_id(), sign_id);
+
+    // Also verify rejection via typed SignEntry::advance
+    backlog.insert_mock_executing(&tx).await;
+    let entry = backlog
+        .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
+        .await
+        .expect("executing entry exists");
+    let mismatched_req2 =
+        mock_bidi_response_request(SignId::from_u8(99), tx.id, tx.source_chain);
+    let err2 = entry.advance(mismatched_req2).await.unwrap_err();
+    assert_matches!(err2, BacklogError::InvalidBidirectionalResponseTransition);
 }
 
 #[tokio::test]
@@ -836,4 +833,126 @@ async fn test_total_pending_on_recovery() {
     assert_eq!(dirty.len(), 1);
     dirty.recover_by_checkpoint(checkpoint).await;
     assert_eq!(dirty.len(), 3);
+}
+
+// =========================================================================
+// 6. Typestate Querying, Casting & Advancement
+// =========================================================================
+
+#[tokio::test]
+async fn test_publishable_requests() {
+    let backlog = Backlog::new();
+    let chain = Chain::Ethereum;
+
+    // 1. Plain sign request advanced to publishing
+    let req1 = mock_sign_request(SignId::from_u8(1), chain);
+    let (pk1, out1) = mock_signature_output(&req1.args);
+    let _ = backlog
+        .insert_sign(req1)
+        .await
+        .advance(pk1, &out1, mock_participants(), true)
+        .await
+        .unwrap();
+
+    // 2. Plain sign request still generating (not publishable)
+    let req2 = mock_sign_request(SignId::from_u8(2), chain);
+    let _ = backlog.insert_sign(req2).await;
+
+    // 3. Bidirectional request advanced to Phase 1 publishing
+    let req3 = mock_bidi_request(SignId::from_u8(3), chain);
+    let (pk3, out3) = mock_signature_output(&req3.args);
+    let _ = backlog
+        .insert_bidirectional(req3)
+        .await
+        .advance(pk3, &out3, mock_participants(), false)
+        .await
+        .unwrap();
+
+    // 4. Query publishable requests: only req1 and req3 should appear
+    let publishable = backlog.publishable_requests(chain).await;
+    assert_eq!(publishable.len(), 2);
+    assert_eq!(publishable[0].sign_id(), SignId::from_u8(1));
+    assert!(publishable[0].publish_state().is_proposer);
+    assert_eq!(publishable[1].sign_id(), SignId::from_u8(3));
+    assert!(!publishable[1].publish_state().is_proposer);
+}
+
+#[tokio::test]
+async fn test_insert_and_accessors() {
+    let backlog = Backlog::new();
+    let chain = Chain::Ethereum;
+    let sign_id = SignId::from_u8(10);
+    let req = mock_sign_request(sign_id, chain);
+
+    let (entry, is_new) = backlog.insert(Arc::clone(&req)).await;
+    assert!(is_new);
+    assert_eq!(entry.chain(), chain);
+    assert_eq!(entry.sign_id(), sign_id);
+    assert_eq!(entry.request_id(), sign_id.request_id);
+    assert_eq!(entry.request().id, sign_id);
+    assert_eq!(entry.into_request().id, sign_id);
+
+    // Duplicate insert should report is_new == false
+    let (_entry2, is_new2) = backlog.insert(req).await;
+    assert!(!is_new2);
+}
+
+#[tokio::test]
+async fn test_dynamic_entry_cast_and_is() {
+    let backlog = Backlog::new();
+    let chain = Chain::Ethereum;
+    let sign_id = SignId::from_u8(5);
+    let req = mock_sign_request(sign_id, chain);
+
+    let (pk, out) = mock_signature_output(&req.args);
+    let _ = backlog
+        .insert_sign(req)
+        .await
+        .advance(pk, &out, mock_participants(), true)
+        .await
+        .unwrap();
+
+    // Dynamic entry via backlog.get
+    let dyn_entry = backlog.get(chain, &sign_id).await.expect("entry exists");
+    assert!(dyn_entry.is::<Sign<Publishing>>());
+    assert!(!dyn_entry.is::<Sign<Generating>>());
+    assert!(!dyn_entry.is::<Bidirectional<Executing>>());
+
+    // Borrowed downcast via cast
+    let cast_entry = dyn_entry.cast::<Sign<Publishing>>();
+    assert!(cast_entry.is_some());
+    assert_eq!(cast_entry.unwrap().sign_id(), sign_id);
+    assert!(dyn_entry.cast::<Sign<Generating>>().is_none());
+
+    // Owned conversion via try_into
+    let typed = dyn_entry.try_into::<Sign<Publishing>>().expect("matches");
+    assert_eq!(typed.sign_id(), sign_id);
+    assert!(typed.publish_state().is_proposer);
+}
+
+#[tokio::test]
+async fn test_initial_any_progress_advance() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::from_u8(7);
+    let req = mock_bidi_request(sign_id, Chain::Solana);
+    let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
+
+    let _ = backlog.insert_bidirectional(req).await;
+
+    // Retrieve via wildcard AnyProgress
+    let entry = backlog
+        .get_by::<Bidirectional<Initial<AnyProgress>>>(Chain::Solana, &sign_id)
+        .await
+        .expect("wildcard initial entry exists");
+
+    // Advance directly to Executing
+    let exec_entry = entry
+        .advance(Arc::clone(&tx))
+        .await
+        .expect("advances to executing");
+    assert_eq!(exec_entry.execution_tx().id, tx.id);
+    assert!(backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+        .await
+        .is_some());
 }

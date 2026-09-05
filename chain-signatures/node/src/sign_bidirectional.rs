@@ -39,19 +39,6 @@ impl SignProgress {
             Self::Generating => None,
         }
     }
-
-    pub fn publish(
-        &mut self,
-        publish: Arc<PublishState>,
-    ) -> Result<(), crate::backlog::BacklogError> {
-        match self {
-            Self::Generating => {
-                *self = Self::Publishing(publish);
-                Ok(())
-            }
-            Self::Publishing(_) => Err(crate::backlog::BacklogError::InvalidPublishingTransition),
-        }
-    }
 }
 
 /// Lifecycle stages of a two-phase bidirectional transaction.

@@ -8,7 +8,7 @@ pub use request::{
     AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
 };
 
-use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub(crate) use checkpoints::CheckpointError;
 use checkpoints::Checkpoints;
@@ -184,23 +184,29 @@ impl Backlog {
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> Option<BacklogEntry> {
+    /// Returns the initial [`SignEntry<Generating>`] handle and a boolean indicating
+    /// whether the request was newly inserted (`true`) or was already present (`false`).
+    pub async fn insert(
+        &self,
+        request: Arc<IndexedSignRequest>,
+    ) -> (SignEntry<Generating>, bool) {
         let chain = request.chain;
         let id = request.id;
-        let entry = BacklogEntry::new(request);
+        let entry = BacklogEntry::new(Arc::clone(&request));
         let (prev, len) = {
             let mut pending = self.pending(&chain).write().await;
             let p = pending.insert(id, entry);
             (p, pending.len())
         };
 
+        let is_new = prev.is_none();
         // Only increment total pending if this is a new entry
-        if prev.is_none() {
+        if is_new {
             self.total_pending.fetch_add(1, Ordering::Relaxed);
         }
 
         self.observe_backlog_size(chain, len);
-        prev
+        (SignEntry::generating(request, self), is_new)
     }
 
     /// Remove a Sign request from the backlog for the specified chain.
@@ -581,10 +587,6 @@ impl StateManager for Backlog {
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
     NotFound { chain: Chain, id: SignId },
-    #[error("cannot advance sign request: status must be pending generation or publishing")]
-    InvalidAdvanceTransition,
-    #[error("cannot mark publishing: status must be pending generation")]
-    InvalidPublishingTransition,
     #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
     InvalidBidirectionalResponseTransition,
     #[error("failed to reconstruct signature")]
@@ -669,31 +671,6 @@ impl BacklogEntry {
             progress: SignProgress::Generating,
         });
         Ok(())
-    }
-
-    pub fn publish(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
-        match &mut self.status {
-            SignStatus::Sign(progress) => progress.publish(publish),
-            SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)) => {
-                progress.publish(publish)
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                progress.publish(publish)
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
-                Err(BacklogError::InvalidPublishingTransition)
-            }
-        }
-    }
-
-    pub fn advance(&mut self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
-        match &mut self.status {
-            SignStatus::Bidirectional(progress @ BidirectionalProgress::Initial(_)) => {
-                *progress = BidirectionalProgress::Executing(tx);
-                Ok(())
-            }
-            _ => Err(BacklogError::InvalidAdvanceTransition),
-        }
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {

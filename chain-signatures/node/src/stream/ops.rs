@@ -33,14 +33,7 @@ pub(crate) async fn process_sign_request(
         })?;
     }
 
-    // `Backlog::insert` returns `None` if the request is new, or `Some(_)` if it was already present.
-    let is_new = ctx
-        .backlog
-        .insert(Arc::clone(&sign_request))
-        .await
-        .is_none();
-
-    let entry = SignEntry::generating(sign_request, &ctx.backlog);
+    let (entry, is_new) = ctx.backlog.insert(sign_request).await;
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
     Ok(is_new)
