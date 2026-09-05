@@ -10,7 +10,6 @@ import {
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { filter, firstValueFrom, throwError, timeout } from "rxjs";
 
-import type { Endpoints } from "./config.js";
 import { PublisherError } from "./errors.js";
 import type { UnboundTransaction } from "./prover.js";
 
@@ -34,7 +33,10 @@ export const RECIPE_TTL_MS = 5 * 60 * 1000;
 
 class DustReadinessTimeoutError extends Error {}
 
-async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
+export async function openFundingWallet(
+  keys: AccountKeys,
+  config: MidnightNodeConfig,
+): Promise<FundingWallet> {
   const facade = await initialiseWalletFacade(keys, config);
 
   try {
@@ -87,18 +89,4 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
     },
     close: () => facade.stop(),
   };
-}
-
-export async function openFundingWallet(
-  keys: AccountKeys,
-  networkId: string,
-  endpoints: Endpoints,
-): Promise<FundingWallet> {
-  return openFacade(keys, {
-    indexerUrl: endpoints.indexerUrl,
-    indexerWsUrl: endpoints.indexerWsUrl,
-    nodeUrl: endpoints.nodeUrl,
-    proofServerUrl: endpoints.proofServerUrl,
-    networkId,
-  });
 }

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { respondInput } from "./support.js";
+import { PUBLISHER_ENV, respondInput } from "./support.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const ENTRY = `${ROOT}dist/main.js`;
@@ -16,19 +16,11 @@ const ENTRY = `${ROOT}dist/main.js`;
 const BURST = 2;
 const BUILD = await respondInput();
 
-const STARTUP_ENV: NodeJS.ProcessEnv = {
-  MIDNIGHT_PUB_NETWORK_ID: "undeployed",
-  MIDNIGHT_PUB_NODE_URL: "http://127.0.0.1:9944",
-  MIDNIGHT_PUB_PROOF_SERVER_URL: "http://127.0.0.1:6300",
-  MIDNIGHT_PUB_INDEXER_URL: "http://127.0.0.1:8088/api/v3/graphql",
-  MIDNIGHT_PUB_INDEXER_WS_URL: "ws://127.0.0.1:8088/api/v3/graphql/ws",
-  MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
-};
+const ready = (id = 0): string => JSON.stringify({ id, op: "ready", protocolVersion: 1 });
 
-const ready = (): string => JSON.stringify({ id: 0, op: "ready", protocolVersion: 1 });
-
+// Every endpoint on one port, so a single black-hole server absorbs all of startup's connections.
 const envFor = (port: number): NodeJS.ProcessEnv => ({
-  ...STARTUP_ENV,
+  ...PUBLISHER_ENV,
   MIDNIGHT_PUB_NODE_URL: `http://127.0.0.1:${port}`,
   MIDNIGHT_PUB_PROOF_SERVER_URL: `http://127.0.0.1:${port}`,
   MIDNIGHT_PUB_INDEXER_URL: `http://127.0.0.1:${port}/api/v3/graphql`,
@@ -159,26 +151,8 @@ describe("dist/main.js over a pipe", () => {
 
   it("flushes ready and exits when its publisher warmup never settles", async () => {
     const blackHole = await openBlackHole();
-    const httpUrl = `http://127.0.0.1:${blackHole.port}`;
-    const wsUrl = `ws://127.0.0.1:${blackHole.port}`;
     try {
-      const run = await drive(
-        [
-          JSON.stringify({
-            id: 40,
-            op: "ready",
-            protocolVersion: 1,
-          }),
-        ],
-        {
-          ...STARTUP_ENV,
-          MIDNIGHT_PUB_NODE_URL: httpUrl,
-          MIDNIGHT_PUB_PROOF_SERVER_URL: httpUrl,
-          MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,
-          MIDNIGHT_PUB_INDEXER_WS_URL: `${wsUrl}/api/v3/graphql/ws`,
-        },
-        5_000,
-      );
+      const run = await drive([ready(40)], envFor(blackHole.port), 5_000);
 
       expect(run.timedOut).toBe(false);
       expect(run.code).toBe(0);
