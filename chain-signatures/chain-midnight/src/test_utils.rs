@@ -12,6 +12,12 @@ use midnight_storage::DefaultDB;
 
 use crate::reader::Node;
 
+pub(crate) fn hex_32(value: &str) -> [u8; 32] {
+    let mut decoded = [0u8; 32];
+    hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
+    decoded
+}
+
 pub(crate) fn notification_payload(
     version: u8,
     request_id: [u8; 32],
