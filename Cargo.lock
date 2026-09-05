@@ -8897,6 +8897,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber 0.3.20",
  "url 2.5.4",
 ]
 
