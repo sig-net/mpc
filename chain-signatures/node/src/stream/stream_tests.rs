@@ -1,5 +1,5 @@
 use super::supervisor::run_supervised;
-use crate::backlog::mock::mock_signature_output;
+use crate::backlog::mock::{mock_sign_request, mock_signature_output, BacklogTestExt};
 use crate::backlog::{Backlog, Bidirectional, Executing};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -72,27 +72,18 @@ impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 async fn test_stream_handles_sign_and_respond() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([1u8; 32]);
-
-    // construct an IndexedSignRequest
-    let args = test_sign_args(0);
-
-    let request = IndexedSignRequest::sign(
-        sign_id,
-        args.clone(),
-        Chain::Solana,
-        current_unix_timestamp(),
-    );
+    let request = mock_sign_request(sign_id, Chain::Solana);
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
 
     // Prepare a respond event that matches the sign id
-    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
+    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &request.args);
     let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
-            request: Arc::new(request),
+            request: Arc::clone(&request),
             block_timestamp: None,
         }),
         Some(ChainEvent::Respond(sig_responded)),
@@ -430,15 +421,8 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([99u8; 32]);
-    let args = test_sign_args(9);
-
-    seeded_backlog
-        .insert(Arc::new(IndexedSignRequest::sign(
-            sign_id,
-            args.clone(),
-            Chain::Ethereum,
-            current_unix_timestamp(),
-        )))
+    let entry = seeded_backlog
+        .insert_mock_sign(sign_id, Chain::Ethereum)
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
@@ -448,7 +432,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
-    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
+    let mpc_sig = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
 
     let respond = signature_responded_event(sign_id, mpc_sig, Chain::Ethereum);
 
@@ -538,17 +522,10 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
 async fn test_stream_resumes_pending_publish_after_catchup() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([77u8; 32]);
-    let args = test_sign_args(9);
-    let (pk, output) = mock_signature_output(&args);
+    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let (pk, output) = mock_signature_output(&entry.request().args);
 
-    let pub_entry = backlog
-        .insert_sign(Arc::new(IndexedSignRequest::sign(
-            sign_id,
-            args,
-            Chain::Solana,
-            current_unix_timestamp(),
-        )))
-        .await
+    let pub_entry = entry
         .advance(pk, &output, vec![Participant::from(0u32)], true)
         .await
         .unwrap();
@@ -614,17 +591,10 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([88u8; 32]);
-    let args = test_sign_args(10);
-    let (pk, output) = mock_signature_output(&args);
+    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let (pk, output) = mock_signature_output(&entry.request().args);
 
-    backlog
-        .insert_sign(Arc::new(IndexedSignRequest::sign(
-            sign_id,
-            args,
-            Chain::Solana,
-            current_unix_timestamp(),
-        )))
-        .await
+    entry
         .advance(pk, &output, vec![Participant::from(0u32)], false)
         .await
         .unwrap();

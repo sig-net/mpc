@@ -7,8 +7,7 @@ use mpc_chain_integration_core::{
     PublishAction, StateManager,
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
-use mpc_crypto::ScalarExt;
-use mpc_node::backlog::mock::{mock_signature_output, BacklogTestExt};
+use mpc_node::backlog::mock::{mock_bidi_response_request, mock_signature_output, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
@@ -20,8 +19,8 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalTx, SignArgs,
-    SignId, Signature, LATEST_MPC_KEY_VERSION,
+    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, ScalarExt, SignId, Signature,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -687,23 +686,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
     let sign_id = SignId::new([9u8; 32]);
-    let request = Arc::new(IndexedSignRequest::respond_bidirectional(
-        sign_id,
-        SignArgs {
-            entropy: [7u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-        },
-        Chain::Solana,
-        0,
-        RespondBidirectionalTx {
-            tx_id: BidirectionalTxId([1u8; 32]),
-            output: vec![0xde, 0xad, 0xbe, 0xef],
-            chain_ctx: None,
-        },
-    ));
+    let request = mock_bidi_response_request(sign_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
 
     let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
     publisher

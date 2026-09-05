@@ -1,5 +1,8 @@
 use super::*;
-use crate::backlog::mock::{mock_participants, mock_signature_output, mock_tx, BacklogTestExt};
+use crate::backlog::mock::{
+    mock_bidi_request, mock_bidi_response_request, mock_participants, mock_sign_request,
+    mock_signature_output, mock_tx, BacklogTestExt,
+};
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
@@ -11,7 +14,7 @@ use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
     make_test_stream_context, make_test_stream_context_with_generator_pk,
     make_test_stream_context_with_rpc, respond_event, test_bidirectional_tx,
-    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
+    test_canton_sign_bidirectional_request, test_sign_args,
 };
 use crate::types::SignCommand;
 use alloy::primitives::B256;
@@ -20,7 +23,7 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainConfig as _, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind, Signature,
+    ChainConfig as _, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignKind, Signature,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -55,25 +58,9 @@ async fn recover_backlog_requeues_pending_signs() {
     // should be marked for requeue during recovery.
     let backlog = Backlog::new();
     let sign_id = SignId::new([9u8; 32]);
-    let args = SignArgs {
-        entropy: [1u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-
-    // Add a request and persist a checkpoint so recover() can load it
-    let unix_timestamp_indexed = current_unix_timestamp();
-    backlog
-        .insert(test_indexed_request(
-            sign_id,
-            Chain::Solana,
-            args.clone(),
-            unix_timestamp_indexed,
-            SignKind::Sign,
-        ))
-        .await;
+    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let expected_args = entry.request().args.clone();
+    let expected_timestamp = entry.request().unix_timestamp_indexed;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
     let threshold = 1;
@@ -98,11 +85,11 @@ async fn recover_backlog_requeues_pending_signs() {
     match msg.expect("sign_rx should contain a message") {
         SignCommand::Request(req) => {
             assert_eq!(req.sign_id(), sign_id);
-            assert_eq!(req.request().args, args);
+            assert_eq!(req.request().args, expected_args);
             assert_eq!(req.chain(), Chain::Solana);
             assert_eq!(req.request().kind, SignKind::Sign);
             // Verify that the unix_timestamp_indexed is preserved from the original entry
-            assert_eq!(req.request().unix_timestamp_indexed, unix_timestamp_indexed);
+            assert_eq!(req.request().unix_timestamp_indexed, expected_timestamp);
             assert!(req.request().unix_timestamp_indexed <= current_unix_timestamp());
         }
         other => panic!("unexpected message: {:?}", other),
@@ -131,24 +118,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
-
-    // Insert a pending Sign request on the source chain
-    let args = SignArgs {
-        entropy: [1u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-    let unix_timestamp_indexed = current_unix_timestamp();
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args.clone(),
-        unix_timestamp_indexed,
-        SignKind::SignBidirectional(bidirectional_event(vec![])),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
@@ -211,21 +181,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
-    let args = SignArgs {
-        entropy: [7u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args,
-        current_unix_timestamp(),
-        SignKind::SignBidirectional(bidirectional_event(vec![])),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -281,21 +237,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
     let tx = test_bidirectional_tx(8, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let mismatched_sign_id = SignId::new([88u8; 32]);
-    let args = SignArgs {
-        entropy: [8u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args,
-        current_unix_timestamp(),
-        SignKind::SignBidirectional(bidirectional_event(vec![])),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -343,21 +285,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let backlog = Backlog::persisted(storage.clone());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
-    let args = SignArgs {
-        entropy: [9u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args.clone(),
-        current_unix_timestamp(),
-        SignKind::SignBidirectional(bidirectional_event(vec![])),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
     drop(sign_rx);
@@ -502,29 +430,12 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 async fn process_sign_request_rejects_respond_bidirectional_kind() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([12u8; 32]);
-    let args = SignArgs {
-        entropy: [12u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-
-    let request = IndexedSignRequest::respond_bidirectional(
-        sign_id,
-        args,
-        Chain::Solana,
-        current_unix_timestamp(),
-        RespondBidirectionalTx {
-            tx_id: BidirectionalTxId(B256::from([12u8; 32]).0),
-            output: vec![],
-            chain_ctx: None,
-        },
-    );
+    let tx_id = BidirectionalTxId(B256::from([12u8; 32]).0);
+    let request = mock_bidi_response_request(sign_id, tx_id, Chain::Solana);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    let err = process_sign_request(Arc::new(request), &ctx)
+    let err = process_sign_request(request, &ctx)
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
@@ -538,21 +449,13 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([23u8; 32]);
-    let args = test_sign_args(23);
+    let req = mock_bidi_request(sign_id, Chain::Solana);
 
     // Inserted directly, as checkpoint recovery would: never passed admission.
-    backlog
-        .insert(test_indexed_request(
-            sign_id,
-            Chain::Solana,
-            args.clone(),
-            current_unix_timestamp(),
-            SignKind::SignBidirectional(bidirectional_event(vec![0xde, 0xad])),
-        ))
-        .await;
+    backlog.insert(req.clone()).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let signature = mpc_crypto::generate_signature(&root_sk, &req.args);
     let event = SignatureRespondedEvent {
         request_id: sign_id.request_id,
         signature,
@@ -603,15 +506,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([14u8; 32]);
-
-    let event = bidirectional_event(vec![0xde, 0xad, 0xbe, 0xef]);
-    let request = test_indexed_request(
-        sign_id,
-        Chain::Solana,
-        test_sign_args(14),
-        current_unix_timestamp(),
-        SignKind::SignBidirectional(event),
-    );
+    let request = mock_bidi_request(sign_id, Chain::Solana);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
@@ -634,13 +529,13 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     // it would sit in the backlog and later panic in `sign_and_hash_transaction`
     // (empty RLP) when the respond event advances it to execution.
     let event = bidirectional_event(vec![]);
-    let request = test_indexed_request(
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
         sign_id,
-        Chain::Solana,
         test_sign_args(13),
+        Chain::Solana,
         current_unix_timestamp(),
-        SignKind::SignBidirectional(event),
-    );
+        event,
+    ));
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
@@ -660,13 +555,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([9u8; 32]);
-    let request = test_indexed_request(
-        sign_id,
-        Chain::Ethereum,
-        test_sign_args(9),
-        current_unix_timestamp(),
-        SignKind::Sign,
-    );
+    let request = mock_sign_request(sign_id, Chain::Ethereum);
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
@@ -724,20 +613,10 @@ async fn process_sign_request_duplicate_is_idempotent() {
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([15u8; 32]);
-    let args = test_sign_args(15);
-
-    backlog
-        .insert(test_indexed_request(
-            sign_id,
-            Chain::Ethereum,
-            args.clone(),
-            current_unix_timestamp(),
-            SignKind::Sign,
-        ))
-        .await;
+    let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
     invalid_signature.s += Scalar::ONE;
 
     let event = SignatureRespondedEvent {
@@ -764,25 +643,12 @@ async fn process_respond_event_rejects_invalid_signature() {
 #[tokio::test]
 async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([13u8; 32]);
-    let args = test_sign_args(13);
-
-    backlog
-        .insert(Arc::new(IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            args.clone(),
-            Chain::Solana,
-            current_unix_timestamp(),
-            RespondBidirectionalTx {
-                tx_id: BidirectionalTxId(B256::from([13u8; 32]).0),
-                output: vec![1, 2, 3],
-                chain_ctx: None,
-            },
-        )))
-        .await;
+    let tx = test_bidirectional_tx(13, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
 
     let duplicate_event0 = respond_event(sign_id, signature);
     let duplicate_event1 = respond_event(sign_id, signature);
@@ -819,25 +685,12 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
 #[tokio::test]
 async fn process_respond_bidirectional_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([16u8; 32]);
-    let args = test_sign_args(16);
-
-    backlog
-        .insert(Arc::new(IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            args.clone(),
-            Chain::Solana,
-            current_unix_timestamp(),
-            RespondBidirectionalTx {
-                tx_id: BidirectionalTxId(B256::from([16u8; 32]).0),
-                output: vec![1, 2, 3],
-                chain_ctx: None,
-            },
-        )))
-        .await;
+    let tx = test_bidirectional_tx(16, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &args);
+    let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
     invalid_signature.s += Scalar::ONE;
 
     let event = respond_event(sign_id, invalid_signature);
@@ -861,22 +714,12 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
 async fn process_respond_event_duplicate_ethereum_is_idempotent() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([3u8; 32]);
-    let args = test_sign_args(1);
-
-    backlog
-        .insert(test_indexed_request(
-            sign_id,
-            Chain::Ethereum,
-            args.clone(),
-            current_unix_timestamp(),
-            SignKind::Sign,
-        ))
-        .await;
+    let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
         request_id: sign_id.request_id,
-        signature: mpc_crypto::generate_signature(&root_sk, &args),
+        signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
         chain: Chain::Ethereum,
     };
 
@@ -1010,24 +853,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
     let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
-
-    // Insert pending Sign request on source chain
-    let args = SignArgs {
-        entropy: [2u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(3u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-    let unix_timestamp_indexed = current_unix_timestamp();
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args.clone(),
-        unix_timestamp_indexed,
-        SignKind::SignBidirectional(bidirectional_event(vec![])),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -1081,49 +907,9 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     let backlog = Backlog::new();
 
-    use alloy::primitives::{Address, B256};
-    let tx = BidirectionalTx {
-        id: BidirectionalTxId(B256::from([4u8; 32]).0),
-        sender: [0u8; 32],
-        serialized_transaction: vec![1, 2, 3],
-        source_chain: Chain::Solana,
-        target_chain: Chain::Ethereum,
-        caip2_id: "test_caip2_id".to_string(),
-        key_version: 1,
-        deposit: 1000,
-        path: "test_path".to_string(),
-        algo: "ECDSA".to_string(),
-        dest: "0x1234567890123456789012345678901234567890".to_string(),
-        params: "{}".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: [4u8; 32],
-        from_address: **Address::ZERO,
-        nonce: 0,
-    };
+    let tx = test_bidirectional_tx(4, Chain::Solana, Chain::Ethereum);
     let sign_id = tx.sign_id();
-
-    let args = SignArgs {
-        entropy: [4u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
-
-    let request = test_indexed_request(
-        sign_id,
-        tx.source_chain,
-        args,
-        current_unix_timestamp(),
-        SignKind::SignBidirectional(SignBidirectionalEvent {
-            chain: Chain::Solana,
-            dest: Chain::Canton.to_string(),
-            caip2_id: Chain::Canton.caip2_chain_id().to_string(),
-            ..bidirectional_event(vec![])
-        }),
-    );
-    seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
+    backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
@@ -1235,31 +1021,12 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
     let backlog = Backlog::new();
     let solana_sign_id = SignId::new([7u8; 32]);
     let ethereum_sign_id = SignId::new([8u8; 32]);
-    let args = SignArgs {
-        entropy: [1u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
 
     backlog
-        .insert(test_indexed_request(
-            solana_sign_id,
-            Chain::Solana,
-            args.clone(),
-            current_unix_timestamp(),
-            SignKind::Sign,
-        ))
+        .insert_mock_sign(solana_sign_id, Chain::Solana)
         .await;
     backlog
-        .insert(test_indexed_request(
-            ethereum_sign_id,
-            Chain::Ethereum,
-            args,
-            current_unix_timestamp(),
-            SignKind::Sign,
-        ))
+        .insert_mock_sign(ethereum_sign_id, Chain::Ethereum)
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);

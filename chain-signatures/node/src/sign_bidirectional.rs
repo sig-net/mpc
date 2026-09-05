@@ -488,58 +488,14 @@ mod tests {
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
         use super::{BidirectionalProgress, SignProgress, SignStatus};
-        use crate::backlog::Publishing;
-        use k256::Scalar;
-        use mpc_primitives::{
-            BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalTx,
-            SignArgs, SignId, SignKind, Signature,
-        };
+        use crate::backlog::mock::{mock_bidi_response, mock_publishing, mock_tx};
 
-        let dummy_sig = Signature {
-            big_r: k256::ProjectivePoint::GENERATOR.to_affine(),
-            s: k256::Scalar::ONE,
-            recovery_id: 0,
-        };
-        let dummy_tx = Arc::new(BidirectionalTx {
-            id: BidirectionalTxId([1u8; 32]),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: String::new(),
-            key_version: 0,
-            deposit: 0,
-            path: String::new(),
-            algo: String::new(),
-            dest: String::new(),
-            params: String::new(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: [1u8; 32],
-            from_address: [0u8; 20],
-            nonce: 0,
-        });
-        let publish = || Publishing::new(dummy_sig, vec![], true);
-        let dummy_respond_req = Arc::new(IndexedSignRequest::new(
-            SignId::new([1u8; 32]),
-            SignArgs {
-                entropy: [0u8; 32],
-                epsilon: Scalar::ONE,
-                payload: Scalar::ONE,
-                path: String::new(),
-                key_version: 0,
-            },
-            Chain::Solana,
-            0,
-            SignKind::RespondBidirectional(RespondBidirectionalTx {
-                tx_id: dummy_tx.id,
-                output: vec![],
-                chain_ctx: None,
-            }),
-        ));
+        let dummy_tx = Arc::new(mock_tx(1));
+        let dummy_respond_req = mock_bidi_response(&dummy_tx);
 
         let generation_tag = SignStatus::Sign(SignProgress::Generating).consensus_tag();
-        let publish_tag = SignStatus::Sign(SignProgress::Publishing(publish())).consensus_tag();
+        let publish_tag =
+            SignStatus::Sign(SignProgress::Publishing(mock_publishing())).consensus_tag();
         assert_eq!(
             generation_tag, publish_tag,
             "Generating and Publishing must produce identical consensus tags"
@@ -562,7 +518,7 @@ mod tests {
         .consensus_tag();
         let pub_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: dummy_respond_req,
-            progress: SignProgress::Publishing(publish()),
+            progress: SignProgress::Publishing(mock_publishing()),
         })
         .consensus_tag();
         assert_eq!(

@@ -596,22 +596,10 @@ mod tests {
 
         let cfg = ProtocolConfig::default();
         let sign_id = SignId::new([42u8; 32]);
-        let args = mpc_primitives::SignArgs {
-            entropy: [1u8; 32],
-            epsilon: k256::Scalar::from(1u64),
-            payload: k256::Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
-        let request = Arc::new(IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0));
+        let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
 
         let probe_id = SignId::new([43u8; 32]);
-        let probe_request = IndexedSignRequest::sign(
-            probe_id,
-            request.args.clone(),
-            Chain::Solana,
-            request.unix_timestamp_indexed,
-        );
+        let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
         let dropped = Arc::new(Notify::new());
         struct DropProbe(Arc<Notify>);
         impl Drop for DropProbe {
@@ -620,8 +608,7 @@ mod tests {
             }
         }
         let probe = DropProbe(Arc::clone(&dropped));
-        let probe_req_arc = Arc::new(probe_request);
-        let entry = backlog::SignEntry::generating(probe_req_arc, &backlog);
+        let entry = backlog::SignEntry::generating(probe_request, &backlog);
         spawner.requests.insert(
             probe_id,
             SignEntry {

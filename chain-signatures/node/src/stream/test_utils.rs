@@ -17,29 +17,13 @@ use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest,
-    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
+    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, Signature,
     SignatureRespondedEvent,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-
-pub fn test_indexed_request(
-    sign_id: SignId,
-    chain: Chain,
-    args: SignArgs,
-    unix_timestamp_indexed: u64,
-    kind: SignKind,
-) -> Arc<IndexedSignRequest> {
-    Arc::new(IndexedSignRequest::new(
-        sign_id,
-        args,
-        chain,
-        unix_timestamp_indexed,
-        kind,
-    ))
-}
 
 pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
     BidirectionalTx {
