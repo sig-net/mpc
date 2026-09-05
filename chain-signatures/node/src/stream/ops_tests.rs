@@ -1,5 +1,5 @@
 use super::*;
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -1052,11 +1052,11 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     assert!(watchers.is_empty());
 
     // Source chain should now wait for final bidirectional response.
-    let waiting = ctx
+    assert!(ctx
         .backlog
-        .pending_generation_bidirectionals(tx.source_chain)
-        .await;
-    assert!(waiting.contains_key(&sign_id));
+        .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
+        .await
+        .is_some());
 
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));

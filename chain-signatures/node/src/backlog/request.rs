@@ -125,17 +125,13 @@ impl<State> SignEntry<State> {
 // --- Single-phase Sign Transitions ---
 
 impl SignEntry<Sign<Generating>> {
-    pub async fn new_sign(
-        chain: Chain,
-        request: Arc<IndexedSignRequest>,
-        backlog: Backlog,
-    ) -> Self {
+    pub async fn sign(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
         backlog.insert(Arc::clone(&request)).await;
         Self {
-            chain,
+            chain: request.chain,
             request,
             state: Sign(Generating),
-            backlog,
+            backlog: backlog.clone(),
         }
     }
 
@@ -160,17 +156,13 @@ impl SignEntry<Sign<Publishing>> {
 // --- Bidirectional Transitions ---
 
 impl SignEntry<Bidirectional<Initial<Generating>>> {
-    pub async fn new_bidirectional(
-        chain: Chain,
-        request: Arc<IndexedSignRequest>,
-        backlog: Backlog,
-    ) -> Self {
+    pub async fn bidirectional(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
         backlog.insert(Arc::clone(&request)).await;
         Self {
-            chain,
+            chain: request.chain,
             request,
             state: Bidirectional(Initial(Generating)),
-            backlog,
+            backlog: backlog.clone(),
         }
     }
 
@@ -400,7 +392,7 @@ impl Backlog {
         &self,
         request: Arc<IndexedSignRequest>,
     ) -> SignEntry<Sign<Generating>> {
-        SignEntry::new_sign(request.chain, request, self.clone()).await
+        SignEntry::sign(request, self).await
     }
 
     /// Insert a two-phase bidirectional sign request into the backlog and return its initial [`SignEntry`].
@@ -408,19 +400,19 @@ impl Backlog {
         &self,
         request: Arc<IndexedSignRequest>,
     ) -> SignEntry<Bidirectional<Initial<Generating>>> {
-        SignEntry::new_bidirectional(request.chain, request, self.clone()).await
+        SignEntry::bidirectional(request, self).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::test_ext::{test_bidi_request, test_sign_request};
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
-        SignBidirectionalEvent, SignId, SignKind, Signature,
+        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs, SignId, Signature,
     };
 
     fn test_sign_args(seed: u8) -> SignArgs {
@@ -435,40 +427,6 @@ mod tests {
 
     fn test_signature() -> Signature {
         Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
-    }
-
-    fn test_plain_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
-        Arc::new(IndexedSignRequest::new(
-            id,
-            test_sign_args(1),
-            chain,
-            100,
-            SignKind::Sign,
-        ))
-    }
-
-    fn test_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
-        Arc::new(IndexedSignRequest::new(
-            id,
-            test_sign_args(2),
-            chain,
-            100,
-            SignKind::SignBidirectional(SignBidirectionalEvent {
-                sender: Default::default(),
-                serialized_transaction: vec![1, 2, 3],
-                dest: "ethereum".to_string(),
-                caip2_id: "eip155:1".to_string(),
-                key_version: 1,
-                deposit: 0,
-                path: "test".to_string(),
-                algo: "secp256k1".to_string(),
-                params: "{}".to_string(),
-                chain,
-                chain_ctx: None,
-                output_deserialization_schema: vec![],
-                respond_serialization_schema: vec![],
-            }),
-        ))
     }
 
     fn test_publish_state() -> Arc<PublishState> {
@@ -505,7 +463,7 @@ mod tests {
     async fn test_plain_sign_typestate_advance_all_the_way_till_completion() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([1u8; 32]);
-        let req = test_plain_request(sign_id, Chain::Ethereum);
+        let req = test_sign_request(sign_id, Chain::Ethereum);
 
         // 1. Initial entry via Backlog::insert_sign
         let entry = backlog.insert_sign(Arc::clone(&req)).await;
@@ -541,13 +499,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plain_sign_entry_new_sign_chained_advance() {
+    async fn test_plain_sign_entry_chained_advance() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([11u8; 32]);
-        let req = test_plain_request(sign_id, Chain::Ethereum);
+        let req = test_sign_request(sign_id, Chain::Ethereum);
 
-        // Chained advance from new_sign all the way till completion
-        let completed = SignEntry::new_sign(Chain::Ethereum, req, backlog.clone())
+        // Chained advance from sign all the way till completion
+        let completed = SignEntry::sign(req, &backlog)
             .await
             .advance(test_publish_state())
             .await
@@ -649,7 +607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bidirectional_entry_new_bidirectional_chained_advances() {
+    async fn test_bidirectional_entry_chained_advances() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([22u8; 32]);
         let req = test_bidi_request(sign_id, Chain::Solana);
@@ -667,7 +625,7 @@ mod tests {
         ));
 
         // Start from initial entry, and keep calling advance all the way till completion!
-        let completed = SignEntry::new_bidirectional(Chain::Solana, req, backlog.clone())
+        let completed = SignEntry::bidirectional(req, &backlog)
             .await
             .advance(test_publish_state())
             .await
@@ -692,7 +650,7 @@ mod tests {
     async fn test_any_progress_completion() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([33u8; 32]);
-        let req = test_plain_request(sign_id, Chain::Ethereum);
+        let req = test_sign_request(sign_id, Chain::Ethereum);
 
         let entry = backlog.insert_sign(req).await;
         let _ = entry
