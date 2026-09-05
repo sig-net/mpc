@@ -397,7 +397,8 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(
-                req.sign_id(), sign_id,
+                req.sign_id(),
+                sign_id,
                 "follow-up request should reuse the sign id"
             );
             match &req.request().kind {

@@ -19,8 +19,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignId, Signature,
-    LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, SignId, Signature, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -512,7 +511,9 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([77u8; 32]);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
-    let entry = seeded_backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let entry = seeded_backlog
+        .insert_mock_sign(sign_id, Chain::Solana)
+        .await;
     let (pk, output) = mock_signature_output(&entry.request().args);
     let pub_entry = entry
         .advance(pk, &output, vec![Participant::from(0u32)], true)

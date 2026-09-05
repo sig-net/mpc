@@ -338,7 +338,6 @@ fn awaited_peers(participants: &[Participant], seen: &[Participant]) -> Vec<Part
         .collect()
 }
 
-
 impl Drop for SignGenerator {
     /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {

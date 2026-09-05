@@ -26,8 +26,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind,
-    LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -578,7 +577,10 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                 );
             }
             SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
-                assert!(matches!(req.request().kind, SignKind::RespondBidirectional(_)));
+                assert!(matches!(
+                    req.request().kind,
+                    SignKind::RespondBidirectional(_)
+                ));
                 assert_eq!(req.chain(), Chain::Solana);
                 saw_execution_follow_up = true;
             }
@@ -586,7 +588,10 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                 saw_requeued_request = true;
             }
             SignCommand::Request(req) if req.chain() == Chain::Ethereum => {
-                assert_eq!(req.request().args.payload.to_bytes(), catchup_payload.into());
+                assert_eq!(
+                    req.request().args.payload.to_bytes(),
+                    catchup_payload.into()
+                );
                 saw_catchup_request = true;
             }
             _ => {}

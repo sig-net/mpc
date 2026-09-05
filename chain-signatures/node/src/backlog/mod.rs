@@ -698,9 +698,9 @@ mod tests {
     use crate::backlog::mock::{
         bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidi_response_request,
         mock_bidirectional_tx, mock_execution_entry, mock_execution_entry_with_timestamp,
-        mock_participants, mock_publish_state, mock_publish_state_with_proposer,
-        mock_sign_request, mock_signature_output, mock_tx, pending_execution_status,
-        single_entry_checkpoint, BacklogTestExt,
+        mock_participants, mock_publish_state, mock_publish_state_with_proposer, mock_sign_request,
+        mock_signature_output, mock_tx, pending_execution_status, single_entry_checkpoint,
+        BacklogTestExt,
     };
     use crate::backlog::{
         AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Executing, Final,
@@ -1256,9 +1256,7 @@ mod tests {
         let tx = mock_tx(44);
         let sign_id = tx.sign_id();
 
-        let entry = backlog
-            .insert_mock_final(&tx)
-            .await;
+        let entry = backlog.insert_mock_final(&tx).await;
 
         let (pk, output) = mock_signature_output(&entry.request().args);
         let entry = entry

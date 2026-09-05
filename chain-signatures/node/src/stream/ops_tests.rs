@@ -1,7 +1,6 @@
 use super::*;
 use crate::backlog::mock::mock_signature_output;
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
-use crate::types::SignCommand;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -14,6 +13,7 @@ use crate::stream::test_utils::{
     make_test_stream_context_with_rpc, respond_event, test_bidirectional_tx,
     test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
 };
+use crate::types::SignCommand;
 use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
@@ -1144,7 +1144,10 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.chain(), Chain::Solana);
-            assert_matches!(req.request().kind, mpc_primitives::SignKind::RespondBidirectional(_));
+            assert_matches!(
+                req.request().kind,
+                mpc_primitives::SignKind::RespondBidirectional(_)
+            );
         }
         other => panic!("expected cross-chain follow-up request, got {other:?}"),
     }
