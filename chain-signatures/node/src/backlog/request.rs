@@ -406,64 +406,23 @@ impl Backlog {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::backlog::test_ext::{test_bidi_request, test_sign_request};
-    use alloy::primitives::{Address, B256};
-    use cait_sith::protocol::Participant;
-    use k256::{AffinePoint, Scalar};
-    use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs, SignId, Signature,
+    use crate::backlog::mock::{
+        mock_bidi_request, mock_bidi_response_request, mock_bidirectional_tx, mock_publish_state,
+        mock_sign_request, BacklogTestExt,
     };
-
-    fn test_sign_args(seed: u8) -> SignArgs {
-        SignArgs {
-            entropy: [seed; 32],
-            epsilon: Scalar::from(seed as u64),
-            payload: Scalar::from((seed + 1) as u64),
-            path: "test".to_string(),
-            key_version: 1,
-        }
-    }
-
-    fn test_signature() -> Signature {
-        Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
-    }
-
-    fn test_publish_state() -> Arc<PublishState> {
-        Arc::new(PublishState {
-            signature: test_signature(),
-            participants: vec![Participant::from(0u32), Participant::from(1u32)],
-            is_proposer: true,
-        })
-    }
-
-    fn test_bidirectional_tx(id: SignId, chain: Chain) -> Arc<BidirectionalTx> {
-        Arc::new(BidirectionalTx {
-            id: BidirectionalTxId(B256::from([7u8; 32]).0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![1, 2, 3],
-            source_chain: chain,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:1".to_string(),
-            key_version: 1,
-            deposit: 0,
-            path: "test".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: "ethereum".to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: id.request_id,
-            from_address: **Address::ZERO,
-            nonce: 0,
-        })
-    }
+    use crate::backlog::request::{
+        AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
+        SignEntry,
+    };
+    use crate::backlog::Backlog;
+    use mpc_primitives::{Chain, SignId};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_plain_sign_typestate_advance_all_the_way_till_completion() {
         let backlog = Backlog::new();
-        let sign_id = SignId::new([1u8; 32]);
-        let req = test_sign_request(sign_id, Chain::Ethereum);
+        let sign_id = SignId::from_u8(1);
+        let req = mock_sign_request(sign_id, Chain::Ethereum);
 
         // 1. Initial entry via Backlog::insert_sign
         let entry = backlog.insert_sign(Arc::clone(&req)).await;
@@ -478,7 +437,7 @@ mod tests {
 
         // 2. Advance to publishing
         let pub_entry = entry
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("should advance to publishing");
 
@@ -501,13 +460,13 @@ mod tests {
     #[tokio::test]
     async fn test_plain_sign_entry_chained_advance() {
         let backlog = Backlog::new();
-        let sign_id = SignId::new([11u8; 32]);
-        let req = test_sign_request(sign_id, Chain::Ethereum);
+        let sign_id = SignId::from_u8(11);
+        let req = mock_sign_request(sign_id, Chain::Ethereum);
 
         // Chained advance from sign all the way till completion
         let completed = SignEntry::sign(req, &backlog)
             .await
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("advance to publishing should succeed")
             .complete()
@@ -520,8 +479,8 @@ mod tests {
     #[tokio::test]
     async fn test_bidirectional_typestate_full_lifecycle() {
         let backlog = Backlog::new();
-        let sign_id = SignId::new([2u8; 32]);
-        let req = test_bidi_request(sign_id, Chain::Solana);
+        let sign_id = SignId::from_u8(2);
+        let req = mock_bidi_request(sign_id, Chain::Solana);
 
         // 1. Initial Generating via insert_bidirectional
         let bidi_entry = backlog.insert_bidirectional(Arc::clone(&req)).await;
@@ -530,7 +489,7 @@ mod tests {
 
         // 2. Advance to Publishing
         let pub_entry = bidi_entry
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("should advance to publishing");
 
@@ -542,7 +501,7 @@ mod tests {
             .expect("sig1 should verify");
 
         // 3. Advance to Executing
-        let tx = test_bidirectional_tx(sign_id, Chain::Solana);
+        let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
         let exec_entry = pub_entry
             .advance(Arc::clone(&tx))
             .await
@@ -560,17 +519,7 @@ mod tests {
             .is_none());
 
         // 4. Advance to Final Generating
-        let response_request = Arc::new(IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            test_sign_args(3),
-            Chain::Solana,
-            0,
-            RespondBidirectionalTx {
-                tx_id: tx.id,
-                output: vec![9, 9],
-                chain_ctx: None,
-            },
-        ));
+        let response_request = mock_bidi_response_request(sign_id, tx.id, Chain::Solana);
         let final_entry = exec_entry
             .advance(Arc::clone(&response_request))
             .await
@@ -589,7 +538,7 @@ mod tests {
 
         // 5. Advance to Final Publishing
         let final_pub_entry = final_entry
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("should advance final to publishing");
         assert_eq!(final_pub_entry.respond_request().id, sign_id);
@@ -609,25 +558,15 @@ mod tests {
     #[tokio::test]
     async fn test_bidirectional_entry_chained_advances() {
         let backlog = Backlog::new();
-        let sign_id = SignId::new([22u8; 32]);
-        let req = test_bidi_request(sign_id, Chain::Solana);
-        let tx = test_bidirectional_tx(sign_id, Chain::Solana);
-        let response_request = Arc::new(IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            test_sign_args(5),
-            Chain::Solana,
-            0,
-            RespondBidirectionalTx {
-                tx_id: tx.id,
-                output: vec![1, 2],
-                chain_ctx: None,
-            },
-        ));
+        let sign_id = SignId::from_u8(22);
+        let req = mock_bidi_request(sign_id, Chain::Solana);
+        let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
+        let response_request = mock_bidi_response_request(sign_id, tx.id, Chain::Solana);
 
         // Start from initial entry, and keep calling advance all the way till completion!
         let completed = SignEntry::bidirectional(req, &backlog)
             .await
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("advance to initial publishing")
             .advance(tx)
@@ -636,7 +575,7 @@ mod tests {
             .advance(response_request)
             .await
             .expect("advance to final generating")
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("advance to final publishing")
             .complete()
@@ -649,12 +588,11 @@ mod tests {
     #[tokio::test]
     async fn test_any_progress_completion() {
         let backlog = Backlog::new();
-        let sign_id = SignId::new([33u8; 32]);
-        let req = test_sign_request(sign_id, Chain::Ethereum);
+        let sign_id = SignId::from_u8(33);
 
-        let entry = backlog.insert_sign(req).await;
+        let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
         let _ = entry
-            .advance(test_publish_state())
+            .advance(mock_publish_state(true))
             .await
             .expect("advance to publishing");
 

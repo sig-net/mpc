@@ -132,7 +132,7 @@ async fn seed_executing_entry(
 async fn process_execution_confirmed_success_creates_respond_request() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
 
     // Insert a pending Sign request on the source chain
     let args = SignArgs {
@@ -212,7 +212,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
     let args = SignArgs {
         entropy: [7u8; 32],
         epsilon: Scalar::from(1u64),
@@ -281,7 +281,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(8, Chain::Solana, Chain::Ethereum);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
     let mismatched_sign_id = SignId::new([88u8; 32]);
     let args = SignArgs {
         entropy: [8u8; 32],
@@ -344,7 +344,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
     let args = SignArgs {
         entropy: [9u8; 32],
         epsilon: Scalar::from(1u64),
@@ -922,7 +922,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
     let args = test_sign_args(14);
 
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -1012,7 +1012,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     let backlog = Backlog::new();
 
     let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
 
     // Insert pending Sign request on source chain
     let args = SignArgs {
@@ -1104,7 +1104,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
         from_address: **Address::ZERO,
         nonce: 0,
     };
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
 
     let args = SignArgs {
         entropy: [4u8; 32],
@@ -1160,7 +1160,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
     let backlog = Backlog::new();
     let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
     tx.sender = [7u8; 32];
-    let sign_id = SignId::new(tx.request_id);
+    let sign_id = tx.sign_id();
     let sign_event_contract_id = "#sign-event-cid";
 
     let request = test_canton_sign_bidirectional_request(sign_id, sign_event_contract_id);
