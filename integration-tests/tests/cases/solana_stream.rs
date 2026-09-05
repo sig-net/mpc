@@ -514,7 +514,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
 
     seeded_backlog
-        .insert(Arc::new(IndexedSignRequest::sign(
+        .insert_sign(Arc::new(IndexedSignRequest::sign(
             sign_id,
             SignArgs {
                 entropy: [9u8; 32],
@@ -526,17 +526,12 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             Chain::Solana,
             0,
         )))
-        .await;
-    seeded_backlog
-        .publish(
-            Chain::Solana,
-            &sign_id,
-            Arc::new(PublishState {
-                signature,
-                participants: vec![Participant::from(0u32)],
-                is_proposer: true,
-            }),
-        )
+        .await
+        .advance(Arc::new(PublishState {
+            signature,
+            participants: vec![Participant::from(0u32)],
+            is_proposer: true,
+        }))
         .await
         .unwrap();
     seeded_backlog

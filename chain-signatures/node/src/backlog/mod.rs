@@ -951,25 +951,6 @@ mod tests {
         SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
     }
 
-    fn bidi_final_status(tx: &BidirectionalTx, chain: Chain) -> SignStatus {
-        let sign_id = SignId::new(tx.request_id);
-        let completion_request = IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            create_test_args(sign_id.request_id[0]),
-            chain,
-            0,
-            RespondBidirectionalTx {
-                tx_id: tx.id,
-                output: vec![],
-                chain_ctx: None,
-            },
-        );
-        SignStatus::Bidirectional(BidirectionalProgress::Final {
-            respond_request: Arc::new(completion_request),
-            progress: SignProgress::Generating,
-        })
-    }
-
     fn create_test_tx(id: u8) -> BidirectionalTx {
         BidirectionalTx {
             id: BidirectionalTxId(B256::from([id; 32]).0),
@@ -1096,22 +1077,6 @@ mod tests {
         pending.checkpoint(Chain::Ethereum)
     }
 
-    async fn insert_bidirectional_with_status(
-        backlog: &Backlog,
-        chain: Chain,
-        tx: BidirectionalTx,
-        status: SignStatus,
-        dest: &str,
-    ) {
-        let sign_id = SignId::new(tx.request_id);
-        let request = create_bidirectional_request(sign_id, chain, dest, 0);
-        let mut pending = backlog.pending(&chain).write().await;
-        let entry = BacklogEntry::with_status(request, status);
-        if pending.insert(sign_id, entry).is_none() {
-            backlog.total_pending.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
     #[tokio::test]
     async fn test_backlog_chain_isolation() {
         let backlog = Backlog::new();
@@ -1125,30 +1090,30 @@ mod tests {
         let sign_id_near = SignId::new(tx_near.request_id);
 
         // Insert into different chains
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Ethereum,
-            tx_eth.clone(),
-            bidi_initial_status(),
-            "ethereum",
-        )
-        .await;
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Solana,
-            tx_sol.clone(),
-            bidi_initial_status(),
-            "solana",
-        )
-        .await;
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::NEAR,
-            tx_near.clone(),
-            bidi_initial_status(),
-            "near",
-        )
-        .await;
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id_eth,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await;
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id_sol,
+                Chain::Solana,
+                "solana",
+                0,
+            ))
+            .await;
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id_near,
+                Chain::NEAR,
+                "near",
+                0,
+            ))
+            .await;
 
         // Verify correct transactions in each chain
         assert!(backlog.get(Chain::Ethereum, &sign_id_eth).await.is_some());
@@ -1169,45 +1134,85 @@ mod tests {
         let tx2 = create_test_tx(2);
         let tx3 = create_test_tx(3);
 
-        insert_bidirectional_with_status(
-            &backlog,
+        let sign_id1 = SignId::new(tx1.request_id);
+        let sign_id2 = SignId::new(tx2.request_id);
+        let sign_id3 = SignId::new(tx3.request_id);
+
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id1,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await;
+
+        let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
+            sign_id2,
+            create_test_args(sign_id2.request_id[0]),
             Chain::Ethereum,
-            tx1,
-            bidi_initial_status(),
-            "ethereum",
-        )
-        .await;
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Ethereum,
-            tx2.clone(),
-            bidi_final_status(&tx2, Chain::Ethereum),
-            "ethereum",
-        )
-        .await;
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Ethereum,
-            tx3.clone(),
-            pending_execution_status(&tx3),
-            "ethereum",
-        )
-        .await;
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx2.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        ));
+
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id2,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx2.clone()))
+            .await
+            .unwrap()
+            .advance(completion_request)
+            .await
+            .unwrap();
+
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id3,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx3.clone()))
+            .await
+            .unwrap();
 
         // Add transactions to Solana
         let tx4 = create_test_tx(4);
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Solana,
-            tx4.clone(),
-            pending_execution_status(&tx4),
-            "solana",
-        )
-        .await;
+        let sign_id4 = SignId::new(tx4.request_id);
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id4,
+                Chain::Solana,
+                "solana",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx4.clone()))
+            .await
+            .unwrap();
 
-        // Filter Ethereum by Pending
+        // Filter Ethereum by Pending execution
         let eth_pending = backlog
-            .pending_execution(Chain::Ethereum, &SignId::new(tx3.request_id))
+            .get_by::<Bidirectional<Executing>>(Chain::Ethereum, &sign_id3)
             .await;
         assert!(eth_pending.is_some());
 
@@ -1216,19 +1221,19 @@ mod tests {
 
         // Filter Ethereum by bidirectional completion awaiting final respond
         let eth_completion = backlog
-            .pending_generation_bidirectionals(Chain::Ethereum)
+            .get_by::<Bidirectional<Final<Generating>>>(Chain::Ethereum, &sign_id2)
             .await;
-        assert_eq!(eth_completion.len(), 1);
+        assert!(eth_completion.is_some());
 
-        // Filter Solana by Pending
+        // Filter Solana by Pending execution
         let sol_pending = backlog
-            .pending_execution(Chain::Solana, &SignId::new(tx4.request_id))
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id4)
             .await;
         assert!(sol_pending.is_some());
 
         // Filter non-existent chain returns empty
         let near_pending = backlog
-            .pending_execution(Chain::NEAR, &SignId::new(tx0.request_id))
+            .get_by::<Bidirectional<Executing>>(Chain::NEAR, &SignId::new(tx0.request_id))
             .await;
         assert!(near_pending.is_none());
     }
@@ -1243,14 +1248,15 @@ mod tests {
             let backlog = backlog.clone();
             let handle = tokio::spawn(async move {
                 let tx = create_test_tx(i);
-                insert_bidirectional_with_status(
-                    &backlog,
-                    Chain::Ethereum,
-                    tx,
-                    bidi_initial_status(),
-                    "ethereum",
-                )
-                .await;
+                let sign_id = SignId::new(tx.request_id);
+                backlog
+                    .insert_bidirectional(create_bidirectional_request(
+                        sign_id,
+                        Chain::Ethereum,
+                        "ethereum",
+                        0,
+                    ))
+                    .await;
             });
             handles.push(handle);
         }
@@ -1259,14 +1265,15 @@ mod tests {
             let backlog = backlog.clone();
             let handle = tokio::spawn(async move {
                 let tx = create_test_tx(i);
-                insert_bidirectional_with_status(
-                    &backlog,
-                    Chain::Solana,
-                    tx,
-                    bidi_initial_status(),
-                    "solana",
-                )
-                .await;
+                let sign_id = SignId::new(tx.request_id);
+                backlog
+                    .insert_bidirectional(create_bidirectional_request(
+                        sign_id,
+                        Chain::Solana,
+                        "solana",
+                        0,
+                    ))
+                    .await;
             });
             handles.push(handle);
         }
@@ -1308,22 +1315,53 @@ mod tests {
         let tx1 = create_test_tx(1);
         let tx2 = create_test_tx(2);
 
-        insert_bidirectional_with_status(
-            &backlog,
+        let sign_id1 = SignId::new(tx1.request_id);
+        let sign_id2 = SignId::new(tx2.request_id);
+
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id1,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx1.clone()))
+            .await
+            .unwrap();
+
+        let completion_request = Arc::new(IndexedSignRequest::respond_bidirectional(
+            sign_id2,
+            create_test_args(sign_id2.request_id[0]),
             Chain::Ethereum,
-            tx1.clone(),
-            pending_execution_status(&tx1),
-            "ethereum",
-        )
-        .await;
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Ethereum,
-            tx2.clone(),
-            bidi_final_status(&tx2, Chain::Ethereum),
-            "ethereum",
-        )
-        .await;
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx2.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        ));
+
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id2,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx2.clone()))
+            .await
+            .unwrap()
+            .advance(completion_request)
+            .await
+            .unwrap();
 
         backlog
             .set_processed_block(Chain::Ethereum, 100)
@@ -1686,14 +1724,20 @@ mod tests {
         let tx = create_test_tx(6);
         let sign_id = SignId::new(tx.request_id);
 
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Solana,
-            tx.clone(),
-            pending_execution_status(&tx),
-            "ethereum",
-        )
-        .await;
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx.clone()))
+            .await
+            .unwrap();
         backlog.set_processed_block(Chain::Solana, 10).await;
 
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1705,11 +1749,11 @@ mod tests {
             .expect("failed to recover");
 
         let entry = recovered
-            .get(Chain::Solana, &sign_id)
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
             .await
             .expect("entry should exist");
         assert_eq!(entry.sign_id(), sign_id);
-        assert_eq!(entry.status(), pending_execution_status(&tx));
+        assert_eq!(&*entry.state().0 .0, &tx);
 
         let watchers = recovered.get_execution_watchers(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
@@ -1720,15 +1764,22 @@ mod tests {
     async fn test_recovery_makes_checkpoint_visible_as_latest() {
         let backlog = Backlog::new();
         let tx = create_test_tx(16);
+        let sign_id = SignId::new(tx.request_id);
 
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Solana,
-            tx.clone(),
-            pending_execution_status(&tx),
-            "ethereum",
-        )
-        .await;
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await
+            .advance(test_publish_state(true))
+            .await
+            .unwrap()
+            .advance(Arc::new(tx.clone()))
+            .await
+            .unwrap();
         backlog.set_processed_block(Chain::Solana, 10).await;
 
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1825,19 +1876,23 @@ mod tests {
                     chain_ctx: None,
                 },
             ));
-            let status = SignStatus::Bidirectional(BidirectionalProgress::Final {
-                respond_request: Arc::clone(&completion_request),
-                progress: SignProgress::Generating,
-            });
-
-            insert_bidirectional_with_status(
-                &backlog,
-                Chain::Solana,
-                tx.clone(),
-                status.clone(),
-                "ethereum",
-            )
-            .await;
+            let _entry = backlog
+                .insert_bidirectional(create_bidirectional_request(
+                    sign_id,
+                    Chain::Solana,
+                    "ethereum",
+                    0,
+                ))
+                .await
+                .advance(test_publish_state(true))
+                .await
+                .expect("phase 1 publishing")
+                .advance(Arc::new(tx.clone()))
+                .await
+                .expect("executing")
+                .advance(completion_request)
+                .await
+                .expect("final generating");
             backlog.set_processed_block(Chain::Solana, 10).await;
 
             let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1876,18 +1931,23 @@ mod tests {
             },
         ));
 
-        backlog
-            .insert(create_bidirectional_request(
+        let _entry = backlog
+            .insert_bidirectional(create_bidirectional_request(
                 sign_id,
                 Chain::Solana,
                 "ethereum",
                 0,
             ))
-            .await;
-        backlog
-            .respond(Chain::Solana, &sign_id, completion_request)
             .await
-            .unwrap();
+            .advance(test_publish_state(true))
+            .await
+            .expect("phase 1 publishing")
+            .advance(Arc::new(tx.clone()))
+            .await
+            .expect("executing")
+            .advance(completion_request)
+            .await
+            .expect("final generating");
 
         let requeued = backlog.take_requeueable_requests(Chain::Solana).await;
         assert_eq!(requeued.len(), 1);
@@ -1900,8 +1960,8 @@ mod tests {
         let tx = create_test_tx(43);
         let sign_id = SignId::new(tx.request_id);
 
-        backlog
-            .insert(create_bidirectional_request(
+        let entry = backlog
+            .insert_bidirectional(create_bidirectional_request(
                 sign_id,
                 Chain::Solana,
                 "ethereum",
@@ -1909,19 +1969,17 @@ mod tests {
             ))
             .await;
 
-        backlog
-            .publish(Chain::Solana, &sign_id, test_publish_state(true))
+        let entry = entry
+            .advance(test_publish_state(true))
             .await
             .expect("pending generation should transition to publishing");
 
-        let entry = backlog
-            .get(Chain::Solana, &sign_id)
+        let fetched = backlog
+            .get_by::<Bidirectional<Initial<Publishing>>>(Chain::Solana, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert_matches!(
-            entry.status(),
-            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Publishing(_)))
-        );
+        assert_eq!(fetched.request().id, sign_id);
+        assert_eq!(entry.request().id, sign_id);
     }
 
     #[tokio::test]
@@ -1942,35 +2000,33 @@ mod tests {
             },
         ));
 
-        backlog
-            .insert(create_bidirectional_request(
+        let entry = backlog
+            .insert_bidirectional(create_bidirectional_request(
                 sign_id,
                 Chain::Solana,
                 "ethereum",
                 0,
             ))
-            .await;
-        backlog
-            .respond(Chain::Solana, &sign_id, completion_request)
             .await
-            .expect("should transition to final generating");
-
-        backlog
-            .publish(Chain::Solana, &sign_id, test_publish_state(true))
+            .advance(test_publish_state(true))
             .await
-            .expect("final respond generation should transition to publishing");
+            .expect("phase 1 publishing")
+            .advance(Arc::new(tx.clone()))
+            .await
+            .expect("executing")
+            .advance(completion_request)
+            .await
+            .expect("final generating")
+            .advance(test_publish_state(true))
+            .await
+            .expect("final publishing");
 
-        let entry = backlog
-            .get(Chain::Solana, &sign_id)
+        let fetched = backlog
+            .get_by::<Bidirectional<Final<Publishing>>>(Chain::Solana, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert_matches!(
-            entry.status(),
-            SignStatus::Bidirectional(BidirectionalProgress::Final {
-                progress: SignProgress::Publishing(_),
-                ..
-            })
-        );
+        assert_eq!(fetched.request().id, sign_id);
+        assert_eq!(entry.request().id, sign_id);
     }
 
     #[tokio::test]
@@ -2031,6 +2087,10 @@ mod tests {
             .pending_generation_bidirectionals(tx.source_chain)
             .await;
         assert!(successes.contains_key(&sign_id));
+        assert!(backlog
+            .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
+            .await
+            .is_some());
     }
 
     #[tokio::test]
@@ -2039,14 +2099,15 @@ mod tests {
 
         // Add some transactions
         let tx1 = create_test_tx(1);
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Ethereum,
-            tx1.clone(),
-            pending_execution_status(&tx1),
-            "ethereum",
-        )
-        .await;
+        let sign_id1 = SignId::new(tx1.request_id);
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id1,
+                Chain::Ethereum,
+                "ethereum",
+                0,
+            ))
+            .await;
 
         let interval = Chain::Ethereum.checkpoint_interval().unwrap();
 
@@ -2084,14 +2145,15 @@ mod tests {
 
         // Add transaction
         let tx1 = create_test_tx(1);
-        insert_bidirectional_with_status(
-            &backlog,
-            Chain::Solana,
-            tx1.clone(),
-            pending_execution_status(&tx1),
-            "solana",
-        )
-        .await;
+        let sign_id1 = SignId::new(tx1.request_id);
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id1,
+                Chain::Solana,
+                "solana",
+                0,
+            ))
+            .await;
 
         // Solana interval is 10 blocks
         for i in 1..interval {
@@ -2109,14 +2171,15 @@ mod tests {
 
     async fn seed_pending_solana_request(backlog: &Backlog) {
         let tx = create_test_tx(1);
-        insert_bidirectional_with_status(
-            backlog,
-            Chain::Solana,
-            tx.clone(),
-            pending_execution_status(&tx),
-            "solana",
-        )
-        .await;
+        let sign_id = SignId::new(tx.request_id);
+        backlog
+            .insert_bidirectional(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "solana",
+                0,
+            ))
+            .await;
     }
 
     #[tokio::test]
@@ -2224,8 +2287,8 @@ mod tests {
             key_version: 1,
         };
 
-        backlog
-            .insert(create_indexed_request(
+        let _entry = backlog
+            .insert_sign(create_indexed_request(
                 sign_id,
                 tx.source_chain,
                 args,
@@ -2248,8 +2311,8 @@ mod tests {
         let tx = create_test_tx(9);
         let sign_id = SignId::new(tx.request_id);
 
-        backlog
-            .insert(create_bidirectional_request(
+        let _entry = backlog
+            .insert_bidirectional(create_bidirectional_request(
                 sign_id,
                 tx.source_chain,
                 "ethereum",
@@ -2263,10 +2326,10 @@ mod tests {
             .expect("advance should accept catchup advancement from PendingGeneration");
 
         let entry = backlog
-            .get(tx.source_chain, &sign_id)
+            .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert_eq!(entry.status(), pending_execution_status(&tx));
+        assert_eq!(entry.execution_tx().id, tx.id);
     }
 
     #[tokio::test]
@@ -2275,33 +2338,27 @@ mod tests {
         let tx = create_test_tx(10);
         let sign_id = SignId::new(tx.request_id);
 
-        backlog
-            .insert(create_bidirectional_request(
+        let entry = backlog
+            .insert_bidirectional(create_bidirectional_request(
                 sign_id,
                 tx.source_chain,
                 "ethereum",
                 0,
             ))
-            .await;
-        backlog
-            .publish(tx.source_chain, &sign_id, test_publish_state(true))
             .await
-            .expect("should transition to publishing");
-
-        backlog
-            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
+            .advance(test_publish_state(true))
+            .await
+            .expect("should transition to publishing")
+            .advance(Arc::new(tx.clone()))
             .await
             .expect("advance should succeed once respond() is confirmed from PendingPublish");
 
-        let entry = backlog
-            .get(tx.source_chain, &sign_id)
+        assert_eq!(entry.execution_tx().id, tx.id);
+        let fetched = backlog
+            .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert_eq!(entry.status(), pending_execution_status(&tx));
-        assert_eq!(
-            entry.execution_tx().map(|execution| execution.id),
-            Some(tx.id)
-        );
+        assert_eq!(fetched.execution_tx().id, tx.id);
     }
 
     #[tokio::test]
@@ -2353,7 +2410,7 @@ mod tests {
         let backlog = Backlog::new();
 
         backlog
-            .insert(create_indexed_request(
+            .insert_sign(create_indexed_request(
                 SignId::new(create_test_tx(1).request_id),
                 Chain::Ethereum,
                 create_test_args(1),
@@ -2363,7 +2420,7 @@ mod tests {
             .await;
 
         backlog
-            .insert(create_indexed_request(
+            .insert_sign(create_indexed_request(
                 SignId::new(create_test_tx(2).request_id),
                 Chain::Solana,
                 create_test_args(2),
@@ -2381,7 +2438,7 @@ mod tests {
         let sign_id = SignId::new(create_test_tx(1).request_id);
 
         backlog
-            .insert(create_indexed_request(
+            .insert_sign(create_indexed_request(
                 sign_id,
                 Chain::Ethereum,
                 create_test_args(1),
@@ -2403,7 +2460,7 @@ mod tests {
         let sign_id2 = SignId::new(create_test_tx(2).request_id); // Not inserted
 
         backlog
-            .insert(create_indexed_request(
+            .insert_sign(create_indexed_request(
                 sign_id1,
                 Chain::Ethereum,
                 create_test_args(1),
@@ -2427,7 +2484,7 @@ mod tests {
         // Populate 3 requests and create a checkpoint
         for i in 1..=3 {
             backlog
-                .insert(create_indexed_request(
+                .insert_sign(create_indexed_request(
                     SignId::new(create_test_tx(i).request_id),
                     Chain::Ethereum,
                     create_test_args(i),
@@ -2458,7 +2515,7 @@ mod tests {
         // Populate 3 requests and create a checkpoint
         for i in 1..=3 {
             backlog
-                .insert(create_indexed_request(
+                .insert_sign(create_indexed_request(
                     SignId::new(create_test_tx(i).request_id),
                     Chain::Ethereum,
                     create_test_args(i),
@@ -2473,7 +2530,7 @@ mod tests {
         // Dirty backlog has 1 entirely different request before recovery
         let dirty_backlog = Backlog::new();
         dirty_backlog
-            .insert(create_indexed_request(
+            .insert_sign(create_indexed_request(
                 SignId::new([99u8; 32]),
                 Chain::Ethereum,
                 create_test_args(99),

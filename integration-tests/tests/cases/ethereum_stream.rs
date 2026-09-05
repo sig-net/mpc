@@ -519,18 +519,6 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let backlog = Backlog::persisted(storage.clone());
 
     let execution_sign_id = SignId::new([0x33; 32]);
-    backlog
-        .insert(Arc::new(
-            mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
-                execution_sign_id,
-                test_sign_args(0x33),
-                Chain::Solana,
-                current_unix_timestamp(),
-                test_bidirectional_event(),
-            ),
-        ))
-        .await;
-
     let execution_tx = mpc_primitives::BidirectionalTx {
         id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
         sender: [0u8; 32],
@@ -551,19 +539,24 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         nonce: checkpoint_nonce,
     };
     backlog
-        .publish(
-            execution_tx.source_chain,
-            &execution_sign_id,
-            Arc::new(PublishState {
-                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-                participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                is_proposer: true,
-            }),
-        )
+        .insert_bidirectional(Arc::new(
+            mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
+                execution_sign_id,
+                test_sign_args(0x33),
+                Chain::Solana,
+                current_unix_timestamp(),
+                test_bidirectional_event(),
+            ),
+        ))
         .await
-        .unwrap();
-    backlog
-        .advance(Chain::Solana, execution_sign_id, Arc::new(execution_tx))
+        .advance(Arc::new(PublishState {
+            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer: true,
+        }))
+        .await
+        .unwrap()
+        .advance(Arc::new(execution_tx))
         .await
         .context("failed to seed execution watcher")?;
 
@@ -882,28 +875,22 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         nonce: 0,
     };
     backlog
-        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x88),
             Chain::Solana,
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await;
-    backlog
-        .publish(
-            tx.source_chain,
-            &sign_id,
-            Arc::new(PublishState {
-                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-                participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                is_proposer: true,
-            }),
-        )
         .await
-        .unwrap();
-    backlog
-        .advance(Chain::Solana, sign_id, Arc::new(tx))
+        .advance(Arc::new(PublishState {
+            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer: true,
+        }))
+        .await
+        .unwrap()
+        .advance(Arc::new(tx))
         .await
         .context("failed to seed late execution watcher")?;
 
@@ -1018,32 +1005,22 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
 
     // Insert the sign request into the backlog
     backlog
-        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(0x71),
             Chain::Solana,
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await;
-
-    // Set the status to PendingPublish so the watcher is active
-    backlog
-        .publish(
-            tx.source_chain,
-            &sign_id,
-            Arc::new(PublishState {
-                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-                participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                is_proposer: true,
-            }),
-        )
         .await
-        .unwrap();
-
-    // Advance the sign request to execution
-    backlog
-        .advance(Chain::Solana, sign_id, Arc::new(tx.clone()))
+        .advance(Arc::new(PublishState {
+            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer: true,
+        }))
+        .await
+        .unwrap()
+        .advance(Arc::new(tx.clone()))
         .await
         .context("failed to register execution watcher")?;
 
@@ -1073,42 +1050,42 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
 
     // Insert the replacement sign request into the backlog
     backlog
-        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
             replacement_sign_id,
             test_sign_args(0x72),
             Chain::Solana,
             current_unix_timestamp(),
             test_bidirectional_event(),
         )))
-        .await;
-
-    // Set the status of the replacement sign request to PendingPublish
-    backlog
-        .publish(
-            Chain::Solana,
-            &replacement_sign_id,
-            Arc::new(PublishState {
-                signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
-                participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                is_proposer: true,
-            }),
-        )
         .await
-        .unwrap();
-
-    // Advance the replacement sign request
-    backlog
-        .advance(
-            Chain::Solana,
-            replacement_sign_id,
-            Arc::new(BidirectionalTx {
-                id: replacement_tx_id,
-                request_id: replacement_sign_id.request_id,
-                ..tx.clone()
-            }),
-        )
+        .advance(Arc::new(PublishState {
+            signature: mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer: true,
+        }))
         .await
-        .context("failed to register replacement watcher")?;
+        .unwrap()
+        .advance(Arc::new(BidirectionalTx {
+            id: replacement_tx_id,
+            sender: tx.sender,
+            serialized_transaction: tx.serialized_transaction.clone(),
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: tx.caip2_id.clone(),
+            key_version: tx.key_version,
+            deposit: tx.deposit,
+            path: tx.path.clone(),
+            algo: tx.algo.clone(),
+            dest: tx.dest.clone(),
+            params: tx.params.clone(),
+            output_deserialization_schema: tx.output_deserialization_schema.clone(),
+            respond_serialization_schema: tx.respond_serialization_schema.clone(),
+            request_id: replacement_sign_id.request_id,
+            from_address: **responder_address,
+            nonce,
+        }))
+        .await
+        .context("failed to advance replacement sign request")?;
 
     let mut stream = stream_ethereum(&ctx, backlog).await?;
 
