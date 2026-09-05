@@ -16,7 +16,7 @@ use mpc_chain_integration_core::{
     NoopChainTelemetry, StateManager,
 };
 use mpc_crypto::kdf::generate_signature;
-use mpc_node::backlog::mock::mock_signature_output;
+use mpc_node::backlog::mock::BacklogTestExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
@@ -26,8 +26,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainEvent, IndexedSignRequest, SignArgs,
-    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
+    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -320,35 +319,6 @@ fn test_sign_args(seed: u8) -> SignArgs {
     }
 }
 
-fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
-    let mut rlp_s = rlp::RlpStream::new_list(9);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
-    rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
-    rlp_s.append(&1u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-
-    NodeSignBidirectionalEvent {
-        sender: solana_sdk::pubkey::Pubkey::new_unique().to_bytes(),
-        serialized_transaction: rlp_s.out().to_vec(),
-        caip2_id: "eip155:31337".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        deposit: 1,
-        path: "bidirectional-test-path".to_string(),
-        algo: "secp256k1".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "{}".to_string(),
-        chain: Chain::Solana,
-        chain_ctx: Some(solana_sdk::pubkey::Pubkey::new_unique().to_bytes().to_vec()),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-    }
-}
-
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
@@ -438,7 +408,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     for _ in 0..12 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
             SignCommand::Request(req) => {
-                let payload: [u8; 32] = req.args.payload.to_bytes().into();
+                let payload: [u8; 32] = req.request().args.payload.to_bytes().into();
                 if payload == replayed_payload {
                     saw_replayed_payload = true;
                 }
@@ -538,31 +508,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         from_address: **ctx.wallet,
         nonce: checkpoint_nonce,
     };
-    let seed_entry = backlog
-        .insert_bidirectional(Arc::new(
-            mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
-                execution_sign_id,
-                test_sign_args(0x33),
-                Chain::Solana,
-                current_unix_timestamp(),
-                test_bidirectional_event(),
-            ),
-        ))
-        .await;
-
-    let (pk, output) = mock_signature_output(&seed_entry.request().args);
-    seed_entry
-        .advance(
-            pk,
-            &output,
-            vec![Participant::from(0u32), Participant::from(1u32)],
-            true,
-        )
-        .await
-        .unwrap()
-        .advance(Arc::new(execution_tx))
-        .await
-        .context("failed to seed execution watcher")?;
+    backlog.insert_mock_executing(&execution_tx).await;
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
@@ -631,16 +577,16 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                     "pre-catchup resolved request should not emit a completion"
                 );
             }
-            SignCommand::Request(req) if req.id == execution_sign_id => {
-                assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
-                assert_eq!(req.chain, Chain::Solana);
+            SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
+                assert!(matches!(req.request().kind, SignKind::RespondBidirectional(_)));
+                assert_eq!(req.chain(), Chain::Solana);
                 saw_execution_follow_up = true;
             }
-            SignCommand::Request(req) if req.id == requeued_sign_id => {
+            SignCommand::Request(req) if req.sign_id() == requeued_sign_id => {
                 saw_requeued_request = true;
             }
-            SignCommand::Request(req) if req.chain == Chain::Ethereum => {
-                assert_eq!(req.args.payload.to_bytes(), catchup_payload.into());
+            SignCommand::Request(req) if req.chain() == Chain::Ethereum => {
+                assert_eq!(req.request().args.payload.to_bytes(), catchup_payload.into());
                 saw_catchup_request = true;
             }
             _ => {}
@@ -778,12 +724,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     let dummy_sign_id = SignId::new([0x66; 32]);
     backlog
-        .insert(Arc::new(IndexedSignRequest::sign(
-            dummy_sign_id,
-            test_sign_args(0x66),
-            Chain::Ethereum,
-            current_unix_timestamp(),
-        )))
+        .insert_mock_sign(dummy_sign_id, Chain::Ethereum)
         .await;
 
     let indexer = EthereumIndexer::new(
@@ -826,7 +767,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let mut saw_catchup_flush = false;
     for _ in 0..20 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            SignCommand::Request(req) if req.id == dummy_sign_id => {
+            SignCommand::Request(req) if req.sign_id() == dummy_sign_id => {
                 saw_catchup_flush = true;
                 break;
             }
@@ -878,36 +819,14 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         from_address: **ctx.wallet,
         nonce: 0,
     };
-    let seed_entry = backlog
-        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
-            sign_id,
-            test_sign_args(0x88),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
-        )))
-        .await;
-
-    let (pk, output) = mock_signature_output(&seed_entry.request().args);
-    seed_entry
-        .advance(
-            pk,
-            &output,
-            vec![Participant::from(0u32), Participant::from(1u32)],
-            true,
-        )
-        .await
-        .unwrap()
-        .advance(Arc::new(tx))
-        .await
-        .context("failed to seed late execution watcher")?;
+    backlog.insert_mock_executing(&tx).await;
 
     let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.chain, Chain::Solana);
-            match &req.kind {
+            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.chain(), Chain::Solana);
+            match &req.request().kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx_id);
                     assert!(
@@ -1011,30 +930,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         nonce,
     };
 
-    // Insert the sign request into the backlog
-    let bidi_entry = backlog
-        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
-            sign_id,
-            test_sign_args(0x71),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
-        )))
-        .await;
-
-    let (pk, output) = mock_signature_output(&bidi_entry.request().args);
-    bidi_entry
-        .advance(
-            pk,
-            &output,
-            vec![Participant::from(0u32), Participant::from(1u32)],
-            true,
-        )
-        .await
-        .unwrap()
-        .advance(Arc::new(tx.clone()))
-        .await
-        .context("failed to register execution watcher")?;
+    backlog.insert_mock_executing(&tx).await;
 
     // Replacement: same sender and nonce with a fee bump
     let tx_b = TransactionRequest::default()
@@ -1060,47 +956,12 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     let replacement_sign_id = SignId::new([0x72; 32]);
     let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
 
-    let repl_entry = backlog
-        .insert_bidirectional(Arc::new(IndexedSignRequest::sign_bidirectional(
-            replacement_sign_id,
-            test_sign_args(0x72),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
-        )))
-        .await;
-
-    let (pk_repl, output_repl) = mock_signature_output(&repl_entry.request().args);
-    repl_entry
-        .advance(
-            pk_repl,
-            &output_repl,
-            vec![Participant::from(0u32), Participant::from(1u32)],
-            true,
-        )
-        .await
-        .unwrap()
-        .advance(Arc::new(BidirectionalTx {
-            id: replacement_tx_id,
-            sender: tx.sender,
-            serialized_transaction: tx.serialized_transaction.clone(),
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: tx.caip2_id.clone(),
-            key_version: tx.key_version,
-            deposit: tx.deposit,
-            path: tx.path.clone(),
-            algo: tx.algo.clone(),
-            dest: tx.dest.clone(),
-            params: tx.params.clone(),
-            output_deserialization_schema: tx.output_deserialization_schema.clone(),
-            respond_serialization_schema: tx.respond_serialization_schema.clone(),
-            request_id: replacement_sign_id.request_id,
-            from_address: **responder_address,
-            nonce,
-        }))
-        .await
-        .context("failed to advance replacement sign request")?;
+    let replacement_tx = BidirectionalTx {
+        id: replacement_tx_id,
+        request_id: replacement_sign_id.request_id,
+        ..tx.clone()
+    };
+    backlog.insert_mock_executing(&replacement_tx).await;
 
     let mut stream = stream_ethereum(&ctx, backlog).await?;
 

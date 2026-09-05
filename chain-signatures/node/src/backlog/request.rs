@@ -73,6 +73,10 @@ impl<State> SignEntry<State> {
         &self.request
     }
 
+    pub fn into_request(self) -> Arc<IndexedSignRequest> {
+        self.request
+    }
+
     pub fn state(&self) -> &State {
         &self.state
     }

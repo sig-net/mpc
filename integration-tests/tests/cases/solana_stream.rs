@@ -8,7 +8,7 @@ use mpc_chain_integration_core::{
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_crypto::ScalarExt;
-use mpc_node::backlog::mock::mock_signature_output;
+use mpc_node::backlog::mock::{mock_signature_output, BacklogTestExt};
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
@@ -19,7 +19,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature,
+    Chain, ChainEvent, IndexedSignRequest, SignId, Signature,
     LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
@@ -88,7 +88,7 @@ async fn next_sign_command(
 ) -> Result<Arc<IndexedSignRequest>> {
     loop {
         match timeout(FINALIZED_EVENT_TIMEOUT, sign_rx.recv()).await {
-            Ok(Some(SignCommand::Request(request))) => return Ok(request),
+            Ok(Some(SignCommand::Request(request))) => return Ok(request.into_request()),
             Ok(Some(other)) => {
                 tracing::debug!(?other, "ignoring non-request sign command")
             }
@@ -512,23 +512,9 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([77u8; 32]);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
-    let args = SignArgs {
-        entropy: [9u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-    };
-    let (pk, output) = mock_signature_output(&args);
-
-    let pub_entry = seeded_backlog
-        .insert_sign(Arc::new(IndexedSignRequest::sign(
-            sign_id,
-            args,
-            Chain::Solana,
-            0,
-        )))
-        .await
+    let entry = seeded_backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let (pk, output) = mock_signature_output(&entry.request().args);
+    let pub_entry = entry
         .advance(pk, &output, vec![Participant::from(0u32)], true)
         .await
         .unwrap();
@@ -608,7 +594,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
         if let SignCommand::Request(req) = &message {
-            if req.id == sign_id {
+            if req.sign_id() == sign_id {
                 anyhow::bail!("recovered publish request was incorrectly requeued for signing");
             }
         }
@@ -828,7 +814,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let drain_until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < drain_until {
         match timeout(drain_until - Instant::now(), sign_rx.recv()).await {
-            Ok(Some(SignCommand::Request(request))) => seen.push(request.id),
+            Ok(Some(SignCommand::Request(request))) => seen.push(request.sign_id()),
             Ok(_) | Err(_) => break,
         }
     }
@@ -948,7 +934,7 @@ async fn test_solana_stream_backfills_requests_missed_during_downtime() -> Resul
     while Instant::now() < drain_until {
         match timeout(drain_until - Instant::now(), sign_rx2.recv()).await {
             Ok(Some(SignCommand::Request(request))) => {
-                payloads.push(<[u8; 32]>::from(request.args.payload.to_bytes()))
+                payloads.push(<[u8; 32]>::from(request.request().args.payload.to_bytes()))
             }
             Ok(_) | Err(_) => break,
         }
