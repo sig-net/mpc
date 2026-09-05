@@ -232,6 +232,18 @@ impl SignEntry<Publishing> {
 
 // --- Single-phase Sign Transitions ---
 
+impl From<SignEntry<Sign<Generating>>> for SignEntry<Generating> {
+    fn from(entry: SignEntry<Sign<Generating>>) -> Self {
+        entry.map_state(|_| Generating)
+    }
+}
+
+impl From<SignEntry<Publishing>> for SignEntry<Sign<Publishing>> {
+    fn from(entry: SignEntry<Publishing>) -> Self {
+        entry.map_state(Sign)
+    }
+}
+
 impl SignEntry<Sign<Generating>> {
     pub fn sign(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
         Self {
@@ -251,22 +263,10 @@ impl SignEntry<Sign<Generating>> {
         participants: impl Into<Vec<Participant>>,
         is_proposer: bool,
     ) -> Result<SignEntry<Sign<Publishing>>, BacklogError> {
-        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
-        let signature = reconstruct_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            self.request.args.payload,
-        )
-        .map_err(|_| BacklogError::InvalidSignature)?;
-
-        let publish = Arc::new(PublishState {
-            signature,
-            participants: participants.into(),
-            is_proposer,
-        });
-        self.publishing(Arc::clone(&publish)).await?;
-        Ok(self.transition(Sign(Publishing(publish))))
+        SignEntry::<Generating>::from(self)
+            .advance(public_key, output, participants, is_proposer)
+            .await
+            .map(Into::into)
     }
 }
 
@@ -277,6 +277,18 @@ impl SignEntry<Sign<Publishing>> {
 }
 
 // --- Bidirectional Transitions ---
+
+impl From<SignEntry<Bidirectional<Initial<Generating>>>> for SignEntry<Generating> {
+    fn from(entry: SignEntry<Bidirectional<Initial<Generating>>>) -> Self {
+        entry.map_state(|_| Generating)
+    }
+}
+
+impl From<SignEntry<Publishing>> for SignEntry<Bidirectional<Initial<Publishing>>> {
+    fn from(entry: SignEntry<Publishing>) -> Self {
+        entry.map_state(|p| Bidirectional(Initial(p)))
+    }
+}
 
 impl SignEntry<Bidirectional<Initial<Generating>>> {
     pub fn bidirectional(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
@@ -297,22 +309,10 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
         participants: impl Into<Vec<Participant>>,
         is_proposer: bool,
     ) -> Result<SignEntry<Bidirectional<Initial<Publishing>>>, BacklogError> {
-        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
-        let signature = reconstruct_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            self.request.args.payload,
-        )
-        .map_err(|_| BacklogError::InvalidSignature)?;
-
-        let publish = Arc::new(PublishState {
-            signature,
-            participants: participants.into(),
-            is_proposer,
-        });
-        self.publishing(Arc::clone(&publish)).await?;
-        Ok(self.transition(Bidirectional(Initial(Publishing(publish)))))
+        SignEntry::<Generating>::from(self)
+            .advance(public_key, output, participants, is_proposer)
+            .await
+            .map(Into::into)
     }
 }
 
@@ -364,12 +364,13 @@ impl SignEntry<Bidirectional<Executing>> {
 
 impl From<SignEntry<Bidirectional<Final<Generating>>>> for SignEntry<Generating> {
     fn from(entry: SignEntry<Bidirectional<Final<Generating>>>) -> Self {
-        SignEntry {
-            chain: entry.chain,
-            request: entry.request,
-            state: Generating,
-            backlog: entry.backlog,
-        }
+        entry.map_state(|_| Generating)
+    }
+}
+
+impl From<SignEntry<Publishing>> for SignEntry<Bidirectional<Final<Publishing>>> {
+    fn from(entry: SignEntry<Publishing>) -> Self {
+        entry.map_state(|p| Bidirectional(Final(p)))
     }
 }
 
@@ -383,22 +384,10 @@ impl SignEntry<Bidirectional<Final<Generating>>> {
         participants: impl Into<Vec<Participant>>,
         is_proposer: bool,
     ) -> Result<SignEntry<Bidirectional<Final<Publishing>>>, BacklogError> {
-        let expected_public_key = derive_key(public_key, self.request.args.epsilon);
-        let signature = reconstruct_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            self.request.args.payload,
-        )
-        .map_err(|_| BacklogError::InvalidSignature)?;
-
-        let publish = Arc::new(PublishState {
-            signature,
-            participants: participants.into(),
-            is_proposer,
-        });
-        self.publishing(Arc::clone(&publish)).await?;
-        Ok(self.transition(Bidirectional(Final(Publishing(publish)))))
+        SignEntry::<Generating>::from(self)
+            .advance(public_key, output, participants, is_proposer)
+            .await
+            .map(Into::into)
     }
 }
 
