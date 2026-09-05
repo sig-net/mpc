@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/setup-deps.sh --check [scope]
 #   ./scripts/setup-deps.sh --install [scope]
+#   ./scripts/setup-deps.sh --install-act   # act CI runner only (never part of --check/--install)
 #   SETUP_DEPS_SKIP=1 ./scripts/setup-deps.sh --install  # no-op for fast loops
 #
 # scope is "" (core) or "all" / "extended" (core + Solana, Anchor, Java,
@@ -151,6 +152,15 @@ ensure_foundry() {
     note_path_dir "$HOME/.foundry/bin"
 }
 
+ensure_act() {
+    have act && return 0
+    case "$OS" in
+        Darwin) brew install act ;;
+        Linux) curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash ;;
+        *) return 1 ;;
+    esac
+}
+
 ensure_node() {
     if have node; then
         MAJOR="$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
@@ -265,8 +275,15 @@ case "$MODE" in
         if [ "$FAIL" -gt 0 ]; then printf '%d missing requirement(s) remain\n' "$FAIL"; exit 1; fi
         printf 'all requirements met\n'
         ;;
+    --install-act)
+        if have act; then printf 'ok - act %s\n' "$(act --version 2>/dev/null | head -n 1)"; exit 0; fi
+        ensure_act
+        if have act; then printf 'ok - act %s\n' "$(act --version 2>/dev/null | head -n 1)"; exit 0; fi
+        printf 'act install failed\n'
+        exit 1
+        ;;
     *)
-        printf 'usage: %s --check|--install [all|extended]\n' "$0"
+        printf 'usage: %s --check|--install [all|extended]|--install-act\n' "$0"
         exit 2
         ;;
 esac

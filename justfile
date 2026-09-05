@@ -14,10 +14,21 @@ alias sc := setup-check
 # Install missing system deps (if needed), then build WASM contract + local mpc-node binary
 # Pass helios=1 to enable Helios: just setup helios=1
 # Pass scope="all" to also install extended chain tooling; install auto-skips on CI (SETUP_DEPS_FORCE=1 to override) and with SETUP_DEPS_SKIP=1
+# just setup act installs the act CI runner only (no dep check, no artifact build)
 setup helios="" scope="":
-    ./scripts/setup-deps.sh --install {{scope}}
-    {{ if helios != "" { "MPC_ENABLE_HELIOS=1 ./setup.sh" } else { "./setup.sh" } }}
+    @if [ "{{helios}}" = "act" ]; then \
+      ./scripts/setup-deps.sh --install-act; \
+    elif [ -n "{{helios}}" ]; then \
+      ./scripts/setup-deps.sh --install {{scope}} && MPC_ENABLE_HELIOS=1 ./setup.sh; \
+    else \
+      ./scripts/setup-deps.sh --install {{scope}} && ./setup.sh; \
+    fi
 alias s := setup
+
+# Run GitHub workflows locally via act (needs Docker; pulls runner images on first run)
+# Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j 'Unit Check & Test'")
+run-ci args="": (setup "act")
+    act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-latest=catthehacker/ubuntu:act-latest {{args}}
 
 # Run all integration tests
 # Usage: just t [filter] [helios=1]
