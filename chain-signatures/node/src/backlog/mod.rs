@@ -337,20 +337,6 @@ impl Backlog {
         self.pending(&chain).read().await.len()
     }
 
-    /// Record that this node dispatched a publish for `id`'s current
-    /// pending-publish episode, returning `false` if one was already dispatched or
-    /// the entry is gone.
-    pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
-        let pending = self.pending(&chain).read().await;
-
-        pending
-            .requests
-            .get(id)
-            .and_then(|entry| entry.status.publishing())
-            .map(|publishing| publishing.mark_publish_dispatched())
-            .unwrap_or(false)
-    }
-
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
     pub async fn watch_execution(
         &self,
