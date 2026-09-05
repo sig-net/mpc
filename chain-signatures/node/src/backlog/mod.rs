@@ -1,8 +1,8 @@
 mod checkpoints;
 pub mod consensus;
-pub mod request;
 #[cfg(any(test, feature = "test-feature"))]
 pub mod mock;
+pub mod request;
 
 pub use request::{
     AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
@@ -173,7 +173,7 @@ impl Backlog {
 
     /// Get the pending requests for a specific chain.
     #[inline]
-    fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
+    pub(crate) fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
         &self.requests[*chain]
     }
 
@@ -297,39 +297,6 @@ impl Backlog {
         self.pending(&chain).read().await.len()
     }
 
-    /// Marks a request as publishing for a specific chain and request id, with the given publish state.
-    pub async fn publish(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        publish: Arc<PublishState>,
-    ) -> Result<(), BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
-        };
-
-        entry.publish(publish)
-    }
-
-    /// Atomically move a completed target-chain execution into final response signing.
-    pub async fn respond(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        request: Arc<IndexedSignRequest>,
-    ) -> Result<BacklogEntry, BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(id)
-            .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.respond(request)?;
-        Ok(entry.clone())
-    }
-
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
     ///
     /// The watcher's `sign_id` and `tx.request_id` are expected to agree: on
@@ -373,32 +340,6 @@ impl Backlog {
         entry
             .remove(tx_id)
             .map(|watcher| (watcher.sign_id, watcher.tx))
-    }
-
-    /// Advances a `Sign` transaction to its execution phase and register execution watcher.
-    /// This is called after the protocol generates the signature for a SignBidirectional request.
-    pub async fn advance(
-        &self,
-        chain: Chain,
-        sign_id: SignId,
-        bidirectional_tx: Arc<BidirectionalTx>,
-    ) -> Result<(), BacklogError> {
-        // Update the transaction in the backlog from Sign to Bidirectional
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(&sign_id)
-            .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
-
-        entry.advance(Arc::clone(&bidirectional_tx))?;
-
-        // Registration successful, now register the execution watcher on the target chain
-        let target_chain = bidirectional_tx.target_chain;
-        drop(pending);
-        self.watch_execution(target_chain, sign_id, bidirectional_tx)
-            .await;
-        Ok(())
     }
 
     /// Set the processed block height for a specific chain.
@@ -759,8 +700,8 @@ mod tests {
         pending_execution_status, single_entry_checkpoint, BacklogTestExt,
     };
     use crate::backlog::{
-        Backlog, BacklogEntry, BacklogError, Bidirectional, Executing, Final, Generating, Initial,
-        PendingRequests, Publishing,
+        AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Executing, Final,
+        Generating, Initial, PendingRequests, Publishing,
     };
     use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
     use mpc_chain_integration_core::StateManager;
@@ -807,13 +748,13 @@ mod tests {
         let backlog = Backlog::new();
 
         // Add transactions with different statuses to Ethereum
-        let tx0 = mock_tx(0);
-        let tx1 = mock_bidirectional_tx(SignId::from_u8(1), Chain::Ethereum);
+        let sign_id0 = SignId::from_u8(0);
+        let sign_id1 = SignId::from_u8(1);
         let tx2 = mock_bidirectional_tx(SignId::from_u8(2), Chain::Ethereum);
         let tx3 = mock_bidirectional_tx(SignId::from_u8(3), Chain::Ethereum);
 
         backlog
-            .insert_mock_bidirectional(tx1.sign_id(), Chain::Ethereum)
+            .insert_mock_bidirectional(sign_id1, Chain::Ethereum)
             .await;
         backlog.insert_mock_final(&tx2).await;
         backlog.insert_mock_executing(&tx3).await;
@@ -830,7 +771,7 @@ mod tests {
 
         // Filter Ethereum by Initial Generating
         let eth_awaiting = backlog
-            .get_by::<Bidirectional<Initial<Generating>>>(Chain::Ethereum, &tx1.sign_id())
+            .get_by::<Bidirectional<Initial<Generating>>>(Chain::Ethereum, &sign_id1)
             .await;
         assert!(eth_awaiting.is_some());
 
@@ -848,7 +789,7 @@ mod tests {
 
         // Filter non-existent chain returns empty
         let near_pending = backlog
-            .get_by::<Bidirectional<Executing>>(Chain::NEAR, &tx0.sign_id())
+            .get_by::<Bidirectional<Executing>>(Chain::NEAR, &sign_id0)
             .await;
         assert!(near_pending.is_none());
     }
@@ -919,9 +860,7 @@ mod tests {
         backlog.insert_mock_executing(&tx1).await;
         backlog.insert_mock_final(&tx2).await;
 
-        backlog
-            .set_processed_block(Chain::Ethereum, 100)
-            .await;
+        backlog.set_processed_block(Chain::Ethereum, 100).await;
 
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
@@ -1061,11 +1000,7 @@ mod tests {
     #[test]
     fn test_respond_updates_entry_atomically() {
         let tx = mock_bidirectional_tx(SignId::from_u8(23), Chain::Ethereum);
-        let mut entry = mock_execution_entry(
-            &tx,
-            Chain::Ethereum,
-            pending_execution_status(&tx),
-        );
+        let mut entry = mock_execution_entry(&tx, Chain::Ethereum, pending_execution_status(&tx));
         let response_request = mock_bidi_response(&tx);
 
         entry.respond(response_request).unwrap();
@@ -1084,11 +1019,7 @@ mod tests {
     fn test_respond_rejects_mismatched_request_id() {
         let tx = mock_tx(24);
         let original_sign_id = tx.sign_id();
-        let mut entry = mock_execution_entry(
-            &tx,
-            Chain::Ethereum,
-            pending_execution_status(&tx),
-        );
+        let mut entry = mock_execution_entry(&tx, Chain::Ethereum, pending_execution_status(&tx));
         let response_request =
             mock_bidi_response_request(SignId::from_u8(25), tx.id, Chain::Ethereum);
 
@@ -1106,18 +1037,10 @@ mod tests {
     fn test_checkpoint_digest_ignores_timestamp() {
         let tx = mock_tx(8);
 
-        let entry1 = mock_execution_entry_with_timestamp(
-            &tx,
-            Chain::Ethereum,
-            bidi_initial_status(),
-            0,
-        );
-        let entry2 = mock_execution_entry_with_timestamp(
-            &tx,
-            Chain::Ethereum,
-            bidi_initial_status(),
-            9999,
-        );
+        let entry1 =
+            mock_execution_entry_with_timestamp(&tx, Chain::Ethereum, bidi_initial_status(), 0);
+        let entry2 =
+            mock_execution_entry_with_timestamp(&tx, Chain::Ethereum, bidi_initial_status(), 9999);
 
         let checkpoint1 = single_entry_checkpoint(entry1);
         let checkpoint2 = single_entry_checkpoint(entry2);
@@ -1350,8 +1273,8 @@ mod tests {
         let tx = mock_tx(7);
         let sign_id = tx.sign_id();
 
-        // Insert a pending Sign request on the source chain
-        backlog.insert_mock_sign(sign_id, tx.source_chain).await;
+        // Insert an executing request on the source chain
+        backlog.insert_mock_executing(&tx).await;
 
         // Watch execution on the target chain
         backlog
@@ -1367,8 +1290,12 @@ mod tests {
 
         // respond should transition to final response signing
         let completion_request = mock_bidi_response(&tx);
-        backlog
-            .respond(tx.source_chain, &sign_id, completion_request)
+        let entry = backlog
+            .get_by::<Bidirectional<Executing>>(tx.source_chain, &sign_id)
+            .await
+            .expect("executing entry should be found");
+        entry
+            .advance(completion_request)
             .await
             .expect("respond should transition to final generating");
         assert!(backlog
@@ -1546,9 +1473,12 @@ mod tests {
 
         let _entry = backlog.insert_mock_sign(sign_id, tx.source_chain).await;
 
-        let err = backlog
-            .advance(tx.source_chain, sign_id, Arc::new(tx))
+        let mut entry = backlog
+            .get(tx.source_chain, &sign_id)
             .await
+            .expect("entry should be found");
+        let err = entry
+            .advance(Arc::new(tx))
             .expect_err("advance should fail for plain Sign requests");
 
         assert_matches!(err, BacklogError::InvalidAdvanceTransition);
@@ -1564,8 +1494,12 @@ mod tests {
             .insert_mock_bidirectional(sign_id, tx.source_chain)
             .await;
 
-        backlog
-            .advance(tx.source_chain, sign_id, Arc::new(tx.clone()))
+        let entry = backlog
+            .get_by::<Bidirectional<Initial<AnyProgress>>>(tx.source_chain, &sign_id)
+            .await
+            .expect("entry should be found");
+        entry
+            .advance(Arc::new(tx.clone()))
             .await
             .expect("advance should accept catchup advancement from PendingGeneration");
 

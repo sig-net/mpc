@@ -96,6 +96,52 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
+    async fn publishing(&self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        entry.publish(publish)
+    }
+
+    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        entry.advance(Arc::clone(&tx))?;
+        let target_chain = tx.target_chain;
+        drop(pending);
+        self.backlog
+            .watch_execution(target_chain, self.request.id, tx)
+            .await;
+        Ok(())
+    }
+
+    async fn responding(
+        &self,
+        respond_request: Arc<IndexedSignRequest>,
+    ) -> Result<(), BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        entry.respond(respond_request)?;
+        Ok(())
+    }
+
     /// Complete and remove this request from the backlog.
     pub async fn complete(self) -> Option<BacklogEntry> {
         self.backlog.remove(self.chain, &self.request.id).await
@@ -122,6 +168,34 @@ impl<State> SignEntry<State> {
     }
 }
 
+// --- General Transitions ---
+
+impl SignEntry<Generating> {
+    pub fn generating(request: Arc<IndexedSignRequest>, backlog: &Backlog) -> Self {
+        Self {
+            chain: request.chain,
+            request,
+            state: Generating,
+            backlog: backlog.clone(),
+        }
+    }
+
+    /// Advance from `Generating` to `Publishing`.
+    pub async fn advance(
+        self,
+        publish: Arc<PublishState>,
+    ) -> Result<SignEntry<Publishing>, BacklogError> {
+        self.publishing(Arc::clone(&publish)).await?;
+        Ok(self.transition(Publishing(publish)))
+    }
+}
+
+impl SignEntry<Publishing> {
+    pub fn publish_state(&self) -> &Arc<PublishState> {
+        &self.state.0
+    }
+}
+
 // --- Single-phase Sign Transitions ---
 
 impl SignEntry<Sign<Generating>> {
@@ -139,9 +213,7 @@ impl SignEntry<Sign<Generating>> {
         self,
         publish: Arc<PublishState>,
     ) -> Result<SignEntry<Sign<Publishing>>, BacklogError> {
-        self.backlog
-            .publish(self.chain, &self.request.id, Arc::clone(&publish))
-            .await?;
+        self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Sign(Publishing(publish))))
     }
 }
@@ -169,9 +241,7 @@ impl SignEntry<Bidirectional<Initial<Generating>>> {
         self,
         publish: Arc<PublishState>,
     ) -> Result<SignEntry<Bidirectional<Initial<Publishing>>>, BacklogError> {
-        self.backlog
-            .publish(self.chain, &self.request.id, Arc::clone(&publish))
-            .await?;
+        self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Bidirectional(Initial(Publishing(publish)))))
     }
 }
@@ -186,22 +256,18 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.backlog
-            .advance(self.chain, self.request.id, Arc::clone(&tx))
-            .await?;
+        self.executing(Arc::clone(&tx)).await?;
         Ok(self.transition(Bidirectional(Executing(tx))))
     }
 }
 
-impl SignEntry<Bidirectional<Initial<SignProgress>>> {
+impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
     /// Advance Phase 1 into destination-chain `Executing`.
     pub async fn advance(
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.backlog
-            .advance(self.chain, self.request.id, Arc::clone(&tx))
-            .await?;
+        self.executing(Arc::clone(&tx)).await?;
         Ok(self.transition(Bidirectional(Executing(tx))))
     }
 }
@@ -216,9 +282,7 @@ impl SignEntry<Bidirectional<Executing>> {
         self,
         respond_request: Arc<IndexedSignRequest>,
     ) -> Result<SignEntry<Bidirectional<Final<Generating>>>, BacklogError> {
-        self.backlog
-            .respond(self.chain, &self.request.id, Arc::clone(&respond_request))
-            .await?;
+        self.responding(Arc::clone(&respond_request)).await?;
         Ok(SignEntry {
             chain: self.chain,
             request: respond_request,
@@ -234,9 +298,7 @@ impl SignEntry<Bidirectional<Final<Generating>>> {
         self,
         publish: Arc<PublishState>,
     ) -> Result<SignEntry<Bidirectional<Final<Publishing>>>, BacklogError> {
-        self.backlog
-            .publish(self.chain, &self.request.id, Arc::clone(&publish))
-            .await?;
+        self.publishing(Arc::clone(&publish)).await?;
         Ok(self.transition(Bidirectional(Final(Publishing(publish)))))
     }
 }
@@ -258,6 +320,27 @@ impl SignEntry<Bidirectional<Final<Publishing>>> {
 /// Trait for converting a runtime [`SignStatus`] into a typed [`SignEntry`] state.
 pub trait SignState: Sized {
     fn try_from_status(status: &SignStatus) -> Option<Self>;
+}
+
+impl SignState for Generating {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Sign(SignProgress::Generating)
+            | SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+            | SignStatus::Bidirectional(BidirectionalProgress::Final {
+                progress: SignProgress::Generating,
+                ..
+            }) => Some(Generating),
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Publishing {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        let publish = status.publish_state()?;
+        Some(Publishing(Arc::clone(publish)))
+    }
 }
 
 impl SignState for Sign<Generating> {
@@ -337,7 +420,7 @@ impl SignState for Bidirectional<Final<Publishing>> {
     }
 }
 
-impl SignState for Sign<SignProgress> {
+impl SignState for Sign<AnyProgress> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Sign(progress) => Some(Sign(progress.clone())),
@@ -346,7 +429,7 @@ impl SignState for Sign<SignProgress> {
     }
 }
 
-impl SignState for Bidirectional<Initial<SignProgress>> {
+impl SignState for Bidirectional<Initial<AnyProgress>> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)) => {
@@ -357,7 +440,7 @@ impl SignState for Bidirectional<Initial<SignProgress>> {
     }
 }
 
-impl SignState for Bidirectional<Final<SignProgress>> {
+impl SignState for Bidirectional<Final<AnyProgress>> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
             SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
@@ -402,18 +485,24 @@ impl Backlog {
         self.insert(Arc::clone(&request)).await;
         SignEntry::bidirectional(request, self)
     }
+
+    /// Insert any sign request into the backlog and return its handle in [`Generating`] state.
+    pub async fn insert_generating(
+        &self,
+        request: Arc<IndexedSignRequest>,
+    ) -> SignEntry<Generating> {
+        self.insert(Arc::clone(&request)).await;
+        SignEntry::generating(request, self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backlog::mock::{
         mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_publish_state,
         mock_sign_request, BacklogTestExt,
     };
-    use crate::backlog::request::{
-        AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign,
-    };
-    use crate::backlog::Backlog;
     use mpc_primitives::{Chain, SignId};
     use std::sync::Arc;
 
@@ -607,5 +696,52 @@ mod tests {
         let completed = entry.complete().await;
         assert!(completed.is_some());
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_generating_typestate_advances_any_kind() {
+        let backlog = Backlog::new();
+
+        // 1. Plain sign
+        let id1 = SignId::from_u8(1);
+        backlog.insert_mock_sign(id1, Chain::Ethereum).await;
+        let gen1 = backlog
+            .get_by::<Generating>(Chain::Ethereum, &id1)
+            .await
+            .expect("should find Generating for plain Sign");
+        let pub1 = gen1
+            .advance(mock_publish_state())
+            .await
+            .expect("advance to Publishing");
+        assert!(pub1.publish_state().is_proposer);
+
+        // 2. Bidirectional initial
+        let id2 = SignId::from_u8(2);
+        backlog
+            .insert_mock_bidirectional(id2, Chain::Ethereum)
+            .await;
+        let gen2 = backlog
+            .get_by::<Generating>(Chain::Ethereum, &id2)
+            .await
+            .expect("should find Generating for Initial bidi");
+        let pub2 = gen2
+            .advance(mock_publish_state())
+            .await
+            .expect("advance to Publishing");
+        assert!(pub2.publish_state().is_proposer);
+
+        // 3. Bidirectional final
+        let id3 = SignId::from_u8(3);
+        let tx3 = mock_bidirectional_tx(id3, Chain::Ethereum);
+        backlog.insert_mock_final(&tx3).await;
+        let gen3 = backlog
+            .get_by::<Generating>(Chain::Ethereum, &id3)
+            .await
+            .expect("should find Generating for Final bidi");
+        let pub3 = gen3
+            .advance(mock_publish_state())
+            .await
+            .expect("advance to Publishing");
+        assert!(pub3.publish_state().is_proposer);
     }
 }

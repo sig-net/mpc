@@ -6,6 +6,7 @@ use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
+use crate::backlog::{Generating, SignEntry};
 
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
@@ -83,7 +84,7 @@ impl GeneratingPhase {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            Arc::clone(&state.request),
+            state.entry.clone(),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -171,7 +172,6 @@ pub struct SignTask {
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-    pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     pub is_proposer: Arc<AtomicBool>,
     /// Posit round, shared with `SignEntry` so it survives a respawn.
@@ -184,14 +184,14 @@ impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        request: Arc<IndexedSignRequest>,
+        entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(request, mesh_state, Arc::clone(&self.round));
+        let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round));
         let mut phase = SignPhase::Organizing(OrganizingPhase);
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
@@ -234,7 +234,6 @@ impl SignTask {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
-            backlog: self.backlog.clone(),
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }
