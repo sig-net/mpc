@@ -179,7 +179,7 @@ impl SolanaClient {
             transaction_details: Some(TransactionDetails::Full),
             rewards: Some(false),
             commitment: Some(CommitmentConfig::finalized()),
-            max_supported_transaction_version: Some(u8::MAX),
+            max_supported_transaction_version: Some(1),
         }
     }
 
