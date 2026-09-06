@@ -608,7 +608,7 @@ mod tests {
             config.commitment.map(|c| c.commitment),
             Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
         );
-        assert_eq!(config.max_supported_transaction_version, Some(u8::MAX));
+        assert_eq!(config.max_supported_transaction_version, Some(1));
     }
 
     #[tokio::test]
