@@ -162,6 +162,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 )
                                 .await?
                             {
+                                tracing::info!(
+                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    sign_id = ?request.id,
+                                    "midnight signature requested"
+                                );
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
                                     block_timestamp: None,
@@ -563,7 +568,7 @@ mod tests {
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
-        array_of, cell_from_record, key_of, map_of, notification_payload, response_payload,
+        array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
         sample_record,
     };
     use midnight_onchain_state::state::StateValue;
@@ -571,12 +576,58 @@ mod tests {
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use std::collections::{HashMap, HashSet, VecDeque};
-    use std::sync::Mutex;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
 
+    type RecordedFields = HashMap<&'static str, String>;
+
+    #[derive(Clone, Default)]
+    struct EventRecorder {
+        events: Arc<Mutex<Vec<RecordedFields>>>,
+    }
+
+    impl EventRecorder {
+        fn snapshot(&self) -> Vec<RecordedFields> {
+            self.events.lock().expect("recorded events").clone()
+        }
+    }
+
+    struct FieldRecorder<'a> {
+        fields: &'a mut RecordedFields,
+    }
+
+    impl Visit for FieldRecorder<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields.insert(field.name(), format!("{value:?}"));
+        }
+    }
+
+    impl<S> Layer<S> for EventRecorder
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = HashMap::new();
+            event.record(&mut FieldRecorder {
+                fields: &mut fields,
+            });
+            self.events.lock().expect("recorded events").push(fields);
+        }
+    }
+
     const CALLER: [u8; 32] = [0xab; 32];
     const SINGLETON: [u8; 32] = [0x12; 32];
+    const LEDGER_TX_HASH: [u8; 32] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
+    ];
     const REQUESTS_FIELD: u8 = 4;
     const CAPTURE_HEIGHT: u64 = 156;
     const CAPTURE_BLOCK_HASH: &str =
@@ -588,12 +639,6 @@ mod tests {
         "1cd10eb1f4fa5c665084d24a7982b09aa321886dce77d85b5f6feee0687a414b";
     const CAPTURE_NOTIFY_TX: &[u8] = include_bytes!("../fixtures/notify-tx-156.mn");
     const CAPTURE_CALLER_STATE: &[u8] = include_bytes!("../fixtures/caller-post-state-156.mn");
-
-    fn hex_32(value: &str) -> [u8; 32] {
-        let mut decoded = [0u8; 32];
-        hex::decode_to_slice(value, &mut decoded).expect("fixture constant is 32-byte hex");
-        decoded
-    }
 
     fn test_config() -> MidnightConfig {
         MidnightConfig {
@@ -639,6 +684,7 @@ mod tests {
         BlockEmissions {
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
+                ledger_tx_hash: LEDGER_TX_HASH,
                 extrinsic_index: 1,
                 calls,
             }],
@@ -659,7 +705,9 @@ mod tests {
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
         record.request_nonce = nonce;
-        let rid = crate::request_id::compute_request_id(&record);
+        let rid = crate::hashing::compute_request_id(
+            &crate::test_utils::aligned_value_from_record(&record),
+        );
         (record, rid)
     }
 
@@ -1098,8 +1146,76 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_request_logs_ledger_hash_and_sign_id_together() {
+        let (record, rid) = named_record_and_rid(7);
+        let absent_rid = [0x91; 32];
+        let mut unsupported = notification(rid);
+        unsupported[0] = 2;
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(absent_rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: unsupported,
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                ],
+            }],
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let recorder = EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_request(event, rid);
+        }
+
+        let recorded = recorder.snapshot();
+        let correlations = recorded
+            .iter()
+            .filter(|fields| fields.contains_key("tx_hash") || fields.contains_key("sign_id"))
+            .collect::<Vec<_>>();
+        assert_eq!(correlations.len(), 2);
+        let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
+        let expected_sign_id = format!("{:?}", SignId::new(rid));
+        for fields in correlations {
+            assert_eq!(
+                fields.get("message").map(String::as_str),
+                Some("midnight signature requested")
+            );
+            assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
+            assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
+        }
+    }
+
     #[tokio::test]
-    async fn captured_entry_decodes_resolves_and_converts() {
+    async fn captured_cell_decodes_resolves_and_converts_under_transient_id() {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
@@ -1115,7 +1231,7 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
-        let notification = decode_notification(&emission.payload);
+        let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
             .expect("captured caller state decodes");
@@ -1126,6 +1242,53 @@ mod tests {
             caller_tree,
         );
 
+        let legacy_request = direct_indexer()
+            .await
+            .process_entry(
+                &source,
+                notification.clone(),
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
+            .await
+            .expect("captured entry processing does not hold");
+        assert!(
+            legacy_request.is_none(),
+            "the pre-transient captured ID must not bypass the request-ID gate"
+        );
+
+        let captured_tree = source
+            .states
+            .get(&(hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()))
+            .expect("captured caller state is installed");
+        let requests_path = unpack_notification_v1(&notification)
+            .expect("captured notification unpacks")
+            .requests_path;
+        let StateValue::Map(entries) = signet_field_node_by_path(captured_tree, &requests_path)
+            .expect("captured requests field resolves")
+        else {
+            panic!("captured requests field is not a map");
+        };
+        let entry = entries
+            .get(&key_of(hex_32(CAPTURE_REQUEST_ID)))
+            .expect("captured request entry exists");
+        let StateValue::Cell(cell) = &*entry else {
+            panic!("captured request entry is not a cell");
+        };
+        let request_id = crate::hashing::compute_request_id(cell);
+        notification.request_id = request_id;
+        source.states.insert(
+            (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
+            array_of(vec![
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                StateValue::Null,
+                map_of(vec![(key_of(request_id), (*entry).clone())]),
+            ]),
+        );
+
         let request = direct_indexer()
             .await
             .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
@@ -1133,7 +1296,7 @@ mod tests {
             .expect("captured entry processing does not hold")
             .expect("captured entry produces a request");
 
-        assert_eq!(request.id, SignId::new(hex_32(CAPTURE_REQUEST_ID)));
+        assert_eq!(request.id, SignId::new(request_id));
         assert_eq!(request.args.key_version, 1);
         assert_eq!(
             request.args.path,
@@ -1566,7 +1729,9 @@ mod tests {
         let mut bad_record = sample_record();
         bad_record.request_nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::request_id::compute_request_id(&bad_record);
+        let bad_rid = crate::hashing::compute_request_id(
+            &crate::test_utils::aligned_value_from_record(&bad_record),
+        );
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,

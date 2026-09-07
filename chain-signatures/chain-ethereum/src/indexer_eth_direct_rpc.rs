@@ -1,41 +1,60 @@
+#[cfg(feature = "bench")]
 use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::hex::{self, ToHexExt};
+use alloy::primitives::hex;
 use alloy::primitives::{Address, Bytes, B256};
+use alloy::rpc::client::{ClientBuilder, RpcClient};
 use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
-use serde::de::DeserializeOwned;
 use serde_json::json;
-
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 #[cfg(feature = "bench")]
 use crate::bench;
-use crate::client::MaybeBlock;
+use crate::client::{logs_filter, MaybeBlock};
 
 // This is more than likely limited by the RPC provider, but alchemy
 // supports archive nodes, so we effectively can go as far back as needed
 // for direct RPC client.
 pub const MAX_CATCHUP_BLOCKS: u64 = u64::MAX;
 
+/// JSON-RPC read client over a plain alloy HTTP transport. Retry, timeout,
+/// and 429-gating policy live one layer up in [`crate::client::EthereumClient`];
+/// this type only frames and executes requests.
 #[derive(Clone)]
 pub struct RpcEthereumClient {
-    http: reqwest::Client,
-    url: reqwest::Url,
-    id: Arc<AtomicU64>,
+    client: RpcClient,
 }
 
 impl RpcEthereumClient {
-    pub fn new(url: reqwest::Url) -> Self {
+    pub fn new(url: url::Url) -> Self {
         Self {
-            http: reqwest::Client::new(),
-            url,
-            id: Arc::new(AtomicU64::new(1)),
+            client: ClientBuilder::default().http(url),
         }
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
-        self.block(block_id).await
+        // Bench: distinguish `eth_getBlockByNumber(Finalized)` (used by
+        // `wait_for_finalized_block`) from `eth_getBlockByNumber(Number)` (catchup batch / single
+        // fetches).
+        #[cfg(feature = "bench")]
+        bench::rpc_inc(match &block_id {
+            BlockId::Number(BlockNumberOrTag::Number(_)) => "eth_getBlockByNumber(Number)",
+            BlockId::Number(BlockNumberOrTag::Finalized) => "eth_getBlockByNumber(Finalized)",
+            BlockId::Number(_) => "eth_getBlockByNumber(other)", // Latest, Earliest, Safe, Pending (all expected to be zero)
+            BlockId::Hash(_) => "eth_getBlockByHash", // Not expected in catchup, keep for completeness
+        });
+
+        let result = match block_id {
+            BlockId::Number(_) => {
+                self.client
+                    .request::<_, Option<Block>>("eth_getBlockByNumber", (block_id, false))
+                    .await
+            }
+            BlockId::Hash(hash) => {
+                self.client
+                    .request::<_, Option<Block>>("eth_getBlockByHash", (hash.block_hash,))
+                    .await
+            }
+        };
+        result.map_err(|err| anyhow::anyhow!("failed to fetch block {block_id:?}: {err}"))
     }
 
     pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<MaybeBlock>> {
@@ -63,43 +82,38 @@ impl RpcEthereumClient {
             }
         }
 
-        let requests = block_ids
-            .iter()
-            .map(|block_id| {
-                let request_id = self.next_id();
-                let params = match block_id {
-                    BlockId::Number(_) => {
-                        vec![json!(to_hex_block_id(*block_id)), json!(false)]
-                    }
-                    BlockId::Hash(hash) => {
-                        vec![json!(format!("{:#x}", hash.block_hash)), json!(false)]
-                    }
-                };
-                (
-                    request_id,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "method": match block_id {
-                            BlockId::Number(_) => "eth_getBlockByNumber",
-                            BlockId::Hash(_) => "eth_getBlockByHash",
-                        },
-                        "params": params,
-                    }),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut batch = self.client.new_batch();
+        let mut waiters = Vec::with_capacity(block_ids.len());
+        for &block_id in block_ids {
+            let waiter =
+                match block_id {
+                    BlockId::Number(_) => batch
+                        .add_call::<_, Option<Block>>("eth_getBlockByNumber", &(block_id, false)),
+                    BlockId::Hash(hash) => batch
+                        .add_call::<_, Option<Block>>("eth_getBlockByHash", &(hash.block_hash,)),
+                }
+                .map_err(|err| {
+                    anyhow::anyhow!("failed to queue batch block fetch {block_id:?}: {err}")
+                })?;
+            waiters.push(waiter);
+        }
 
-        let results: Vec<Option<Block>> = self.batch_execute(requests).await?;
+        batch
+            .send()
+            .await
+            .map_err(|err| anyhow::anyhow!("eth_getBlock batch failed: {err}"))?;
 
-        Ok(results
-            .into_iter()
-            .zip(block_ids.iter())
-            .map(|(maybe, block_id)| match maybe {
+        let mut blocks = Vec::with_capacity(block_ids.len());
+        for (waiter, &block_id) in waiters.into_iter().zip(block_ids) {
+            let block = waiter.await.map_err(|err| {
+                anyhow::anyhow!("eth_getBlock batch member for {block_id:?} failed: {err}")
+            })?;
+            blocks.push(match block {
                 Some(block) => MaybeBlock::Block(block),
-                None => MaybeBlock::Missing(*block_id),
-            })
-            .collect())
+                None => MaybeBlock::Missing(block_id),
+            });
+        }
+        Ok(blocks)
     }
 
     /// Fetch a single transaction's receipt via `eth_getTransactionReceipt`.
@@ -112,7 +126,10 @@ impl RpcEthereumClient {
         #[cfg(feature = "bench")]
         bench::rpc_inc("eth_getTransactionReceipt");
 
-        self.transaction_receipt(tx_hash).await
+        self.client
+            .request::<_, Option<TransactionReceipt>>("eth_getTransactionReceipt", (tx_hash,))
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to get receipt for {tx_hash:#x}: {err}"))
     }
 
     /// Fetch all logs emitted by `address` within `block_id` via a single
@@ -123,7 +140,12 @@ impl RpcEthereumClient {
         #[cfg(feature = "bench")]
         bench::rpc_inc("eth_getLogs");
 
-        self.logs(address, block_id).await
+        self.client
+            .request::<_, Vec<Log>>("eth_getLogs", (logs_filter(address, block_id),))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to get logs for {address:#x} at {block_id:?}: {err}")
+            })
     }
 
     /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
@@ -145,45 +167,44 @@ impl RpcEthereumClient {
         #[cfg(feature = "bench")]
         bench::rpc_inc_n("eth_getLogs(batch)", block_ids.len() as u64);
 
-        let requests = block_ids
-            .iter()
-            .map(|block_id| {
-                let request_id = self.next_id();
-                (
-                    request_id,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "method": "eth_getLogs",
-                        "params": [logs_filter_object(address, *block_id)],
-                    }),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut batch = self.client.new_batch();
+        let mut waiters = Vec::with_capacity(block_ids.len());
+        for &block_id in block_ids {
+            let waiter = batch
+                .add_call::<_, Option<Vec<Log>>>("eth_getLogs", &(logs_filter(address, block_id),))
+                .map_err(|err| {
+                    anyhow::anyhow!("failed to queue batch logs fetch for {block_id:?}: {err}")
+                })?;
+            waiters.push(waiter);
+        }
 
-        let results: Vec<Option<Vec<Log>>> = self.batch_execute(requests).await?;
+        batch
+            .send()
+            .await
+            .map_err(|err| anyhow::anyhow!("eth_getLogs batch failed: {err}"))?;
 
-        Ok(results
-            .into_iter()
-            .map(|opt| opt.unwrap_or_default())
-            .collect())
+        let mut results = Vec::with_capacity(block_ids.len());
+        for waiter in waiters {
+            let logs = waiter
+                .await
+                .map_err(|err| anyhow::anyhow!("eth_getLogs batch member failed: {err}"))?;
+            results.push(logs.unwrap_or_default());
+        }
+        Ok(results)
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         #[cfg(feature = "bench")]
         bench::rpc_inc("eth_getTransactionCount");
 
-        self.rpc_call::<String>(
-            "eth_getTransactionCount",
-            vec![
-                json!(format_address(address)),
-                json!(to_hex_block_id(block_id)),
-            ],
-        )
-        .await
-        .and_then(|nonce| {
-            hex_to_u64(&nonce).map_err(|err| anyhow::anyhow!("Failed to parse nonce: {err}"))
-        })
+        let nonce: alloy::primitives::U64 = self
+            .client
+            .request("eth_getTransactionCount", (address, block_id))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to get nonce for {address:#x} at {block_id:?}: {err}")
+            })?;
+        Ok(nonce.to::<u64>())
     }
 
     pub async fn get_transaction_by_hash(
@@ -193,25 +214,26 @@ impl RpcEthereumClient {
         #[cfg(feature = "bench")]
         bench::rpc_inc("eth_getTransactionByHash");
 
-        self.transaction_by_hash(tx_hash).await
+        self.client
+            .request::<_, Option<Transaction>>("eth_getTransactionByHash", (tx_hash,))
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to get transaction {tx_hash:#x}: {err}"))
     }
 
     /// Re-execute `tx_hash` via `debug_traceTransaction` (`callTracer`,
     /// `onlyTopCall: true`) and return the top call's return data. The RPC
     /// response is the call frame directly — see `trace_output_to_bytes` for
     /// the field reference and worked examples.
-    pub async fn trace_transaction_output(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<Bytes>> {
+    pub async fn trace_transaction_output(&self, tx_hash: B256) -> anyhow::Result<Option<Bytes>> {
         #[cfg(feature = "bench")]
         bench::rpc_inc("debug_traceTransaction");
 
         let call_frame: serde_json::Value = self
-            .rpc_call(
+            .client
+            .request(
                 "debug_traceTransaction",
-                vec![
-                    json!(format!("{:#x}", tx_hash)),
+                (
+                    tx_hash,
                     json!({
                         "tracer": "callTracer",
                         "tracerConfig": {
@@ -219,161 +241,14 @@ impl RpcEthereumClient {
                         },
                         "timeout": "5s"
                     }),
-                ],
+                ),
             )
-            .await?;
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("debug_traceTransaction failed for {tx_hash:#x}: {err}")
+            })?;
 
         trace_output_to_bytes(tx_hash, &call_frame)
-    }
-
-    fn next_id(&self) -> u64 {
-        self.id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    async fn rpc_call<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: Vec<serde_json::Value>,
-    ) -> anyhow::Result<T> {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": self.next_id(),
-            "method": method,
-            "params": params,
-        });
-
-        let response = self
-            .http
-            .post(self.url.clone())
-            .json(&request)
-            .send()
-            .await?;
-        let response = ensure_http_success(response, &format!("rpc {method}")).await?;
-        let value: serde_json::Value = response.json().await?;
-
-        if let Some(error) = value.get("error") {
-            anyhow::bail!("rpc {method} failed: {error}");
-        }
-
-        let result = value
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        Ok(serde_json::from_value(result)?)
-    }
-
-    /// Send a pre-assembled JSON-RPC batch and return results in input order.
-    /// Each entry in the returned `Vec` corresponds to the request at the same
-    /// index. A server-returned `null` result or a missing response both map to
-    /// `None`.
-    async fn batch_execute<T: DeserializeOwned>(
-        &self,
-        requests: Vec<(u64, serde_json::Value)>,
-    ) -> anyhow::Result<Vec<Option<T>>> {
-        #[derive(serde::Deserialize)]
-        struct BatchResponse<T> {
-            id: u64,
-            result: Option<T>,
-            error: Option<serde_json::Value>,
-        }
-
-        // Extract the request IDs and build a set of valid IDs for validation. The
-        // payload is the JSON-RPC batch array of request objects.
-        let ordered_ids: Vec<u64> = requests.iter().map(|(id, _)| *id).collect();
-        let valid_ids: HashSet<u64> = ordered_ids.iter().copied().collect();
-        let payload: Vec<serde_json::Value> = requests.into_iter().map(|(_, body)| body).collect();
-
-        // Send the batch request and parse the response. The response is expected to be an array of JSON-RPC response objects.
-        let response = self
-            .http
-            .post(self.url.clone())
-            .json(&payload)
-            .send()
-            .await?;
-        let response = ensure_http_success(response, "batch rpc").await?;
-        let value: serde_json::Value = response.json().await?;
-        let items = if let serde_json::Value::Array(items) = value {
-            items
-        } else {
-            anyhow::bail!("batch rpc response was not an array: {value}");
-        };
-
-        // Build a map of response IDs to results.
-        let mut results_by_id: HashMap<u64, Option<T>> = HashMap::with_capacity(ordered_ids.len());
-
-        for item in items {
-            let response: BatchResponse<T> = serde_json::from_value(item)?;
-            if let Some(error) = response.error {
-                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
-            }
-            if !valid_ids.contains(&response.id) {
-                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
-            }
-            results_by_id.insert(response.id, response.result);
-        }
-
-        Ok(ordered_ids
-            .into_iter()
-            .map(|id| results_by_id.remove(&id).flatten())
-            .collect())
-    }
-
-    async fn block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
-        // Bench: distinguish `eth_getBlockByNumber(Finalized)` (used by
-        // `wait_for_finalized_block`) from `eth_getBlockByNumber(Number)` (catchup batch / single
-        // fetches).
-        #[cfg(feature = "bench")]
-        bench::rpc_inc(match &block_id {
-            BlockId::Number(BlockNumberOrTag::Number(_)) => "eth_getBlockByNumber(Number)",
-            BlockId::Number(BlockNumberOrTag::Finalized) => "eth_getBlockByNumber(Finalized)",
-            BlockId::Number(_) => "eth_getBlockByNumber(other)", // Latest, Earliest, Safe, Pending (all expected to be zero)
-            BlockId::Hash(_) => "eth_getBlockByHash", // Not expected in catchup, keep for completeness
-        });
-
-        match block_id {
-            BlockId::Number(_) => {
-                self.rpc_call(
-                    "eth_getBlockByNumber",
-                    vec![json!(to_hex_block_id(block_id)), json!(false)],
-                )
-                .await
-            }
-            BlockId::Hash(hash) => {
-                self.rpc_call(
-                    "eth_getBlockByHash",
-                    vec![json!(format!("{:#x}", hash.block_hash))],
-                )
-                .await
-            }
-        }
-    }
-
-    /// Issue `eth_getTransactionReceipt` and deserialize the result as an
-    /// optional `TransactionReceipt`. `null` (pending / unknown tx) → `None`.
-    async fn transaction_receipt(
-        &self,
-        tx_hash: B256,
-    ) -> anyhow::Result<Option<TransactionReceipt>> {
-        self.rpc_call(
-            "eth_getTransactionReceipt",
-            vec![json!(format!("{:#x}", tx_hash))],
-        )
-        .await
-    }
-
-    /// Issue a single-block `eth_getLogs` address filter via the raw RPC
-    /// path and deserialize the result array as `Vec<Log>`.
-    async fn logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
-        self.rpc_call::<Vec<Log>>("eth_getLogs", vec![logs_filter_object(address, block_id)])
-            .await
-    }
-
-    async fn transaction_by_hash(&self, tx_hash: B256) -> anyhow::Result<Option<Transaction>> {
-        self.rpc_call(
-            "eth_getTransactionByHash",
-            vec![json!(format!("{:#x}", tx_hash))],
-        )
-        .await
     }
 }
 
@@ -470,76 +345,6 @@ fn trace_output_to_bytes(
     Ok(Some(Bytes::from(hex::decode(stripped)?)))
 }
 
-/// Bails with the HTTP status and a truncated body when the response is not
-/// successful, keeping status codes (e.g. 429) visible to retry classification.
-async fn ensure_http_success(
-    response: reqwest::Response,
-    label: &str,
-) -> anyhow::Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let body: String = response
-        .text()
-        .await
-        .unwrap_or_default()
-        .chars()
-        .take(256)
-        .collect();
-    anyhow::bail!("{label} HTTP error {status}: {body}")
-}
-
-fn format_address(address: Address) -> String {
-    format!("0x{}", address.encode_hex())
-}
-
-fn to_hex_u64(value: u64) -> String {
-    format!("0x{:x}", value)
-}
-
-fn hex_to_u64(value: &str) -> anyhow::Result<u64> {
-    let trimmed = value.trim_start_matches("0x");
-    if trimmed.is_empty() {
-        return Ok(0);
-    }
-    u64::from_str_radix(trimmed, 16)
-        .map_err(|err| anyhow::anyhow!("failed to parse hex value '{value}': {err}"))
-}
-
-/// Build the `eth_getLogs` filter object for a single `address` scoped to one
-/// block.
-///
-/// - `BlockId::Hash` → `{ "blockHash": "0x..", "address": "0x.." }` (pins to
-///   the exact block, immune to reorgs).
-/// - `BlockId::Number(tag)` → `{ "fromBlock": tag, "toBlock": tag,
-///   "address": "0x.." }` (request by number/tag).
-fn logs_filter_object(address: Address, block_id: BlockId) -> serde_json::Value {
-    match block_id {
-        BlockId::Hash(hash) => json!({
-            "blockHash": format!("{:#x}", hash.block_hash),
-            "address": format_address(address),
-        }),
-        BlockId::Number(_) => json!({
-            "fromBlock": to_hex_block_id(block_id),
-            "toBlock": to_hex_block_id(block_id),
-            "address": format_address(address),
-        }),
-    }
-}
-
-fn to_hex_block_id(block_id: BlockId) -> String {
-    match block_id {
-        BlockId::Number(BlockNumberOrTag::Number(number)) => to_hex_u64(number),
-        BlockId::Number(BlockNumberOrTag::Latest) => "latest".to_string(),
-        BlockId::Number(BlockNumberOrTag::Finalized) => "finalized".to_string(),
-        BlockId::Number(BlockNumberOrTag::Safe) => "safe".to_string(),
-        BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
-        BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
-        BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +363,8 @@ mod tests {
             BlockId::Number(BlockNumberOrTag::Number(8)),
         ];
 
+        // Responses deliberately out of request order: null (block 8) first,
+        // then block 7.
         server
             .mock("POST", "/")
             .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
@@ -567,12 +374,12 @@ mod tests {
                 json!([
                     {
                         "jsonrpc": "2.0",
-                        "id": 2,
+                        "id": 1,
                         "result": null
                     },
                     {
                         "jsonrpc": "2.0",
-                        "id": 1,
+                        "id": 0,
                         "result": {
                             "number": "0x7",
                             "hash": format!("0x{:064x}", 7),
@@ -645,7 +452,7 @@ mod tests {
             .mock("POST", "/")
             .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
             .match_body(Matcher::Regex(
-                // "0x42" appears at the end of a checksummed address
+                // "42" appears at the end of the (lowercase-hex) address
                 r#"42"#.to_string(),
             ))
             .with_status(200)
@@ -724,8 +531,8 @@ mod tests {
             BlockId::Number(BlockNumberOrTag::Number(12)),
         ];
 
-        // Match any eth_getLogs batch POST; respond with 2 results in
-        // reversed order: id 3 first, then 1, then 2 (note: id 2 returns null).
+        // Match any eth_getLogs batch POST; respond with results in
+        // reversed order: id 2 first, then 0, then 1 (id 1 returns null).
         server
             .mock("POST", "/")
             .match_body(Matcher::Regex(r#"eth_getLogs"#.to_string()))
@@ -733,9 +540,9 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    filter_response(3, vec![log_value(addr, 12, 0)]),
-                    filter_response(1, vec![]),          // empty for block 10
-                    { "jsonrpc": "2.0", "id": 2, "result": null }, // null → empty vec for block 11
+                    filter_response(2, vec![log_value(addr, 12, 0)]),
+                    filter_response(0, vec![]),          // empty for block 10
+                    { "jsonrpc": "2.0", "id": 1, "result": null }, // null → empty vec for block 11
                 ])
                 .to_string(),
             )
@@ -748,11 +555,11 @@ mod tests {
             .expect("batch fetch should succeed");
 
         assert_eq!(results.len(), 3);
-        // block 10 → id 1 → empty array
+        // block 10 → id 0 → empty array
         assert!(results[0].is_empty());
-        // block 11 → id 2 → null → empty vec
+        // block 11 → id 1 → null → empty vec
         assert!(results[1].is_empty());
-        // block 12 → id 3 → 1 log
+        // block 12 → id 2 → 1 log
         assert_eq!(results[2].len(), 1);
         assert_eq!(results[2][0].address(), addr);
     }

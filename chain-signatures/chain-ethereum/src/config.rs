@@ -1,9 +1,9 @@
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use reqwest::Url;
 use std::fmt;
 use std::time::Duration;
+use url::Url;
 
 /// Configuration for fetching historical blocks in batches.
 #[derive(Clone, Debug)]

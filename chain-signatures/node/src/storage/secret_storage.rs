@@ -349,7 +349,7 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
         let account_id = make_test_account_id();
-        let gcp_service = GcpService::init(&account_id, &opts).await.unwrap();
+        let gcp_service = GcpService::init(&opts).await.unwrap();
 
         let storage = init(Some(&gcp_service), &opts, &account_id);
 

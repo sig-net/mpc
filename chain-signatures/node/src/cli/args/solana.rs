@@ -11,9 +11,6 @@ pub struct SolArgs {
     /// Solana RPC HTTP URL
     #[clap(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
     pub sol_rpc_http_url: Option<String>,
-    /// Solana RPC WS URL
-    #[clap(long, env("MPC_SOL_RPC_WS_URL"), requires = "sol_account_sk")]
-    pub sol_rpc_ws_url: Option<String>,
     /// The program address to watch
     #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
@@ -31,9 +28,6 @@ impl SolArgs {
         if let Some(sol_rpc_http_url) = self.sol_rpc_http_url {
             args.extend(["--sol-rpc-http-url".to_string(), sol_rpc_http_url]);
         }
-        if let Some(sol_rpc_ws_url) = self.sol_rpc_ws_url {
-            args.extend(["--sol-rpc-ws-url".to_string(), sol_rpc_ws_url]);
-        }
         if let Some(sol_program_address) = self.sol_program_address {
             args.extend(["--sol-program-address".to_string(), sol_program_address]);
         }
@@ -48,7 +42,6 @@ impl SolArgs {
         Some(SolConfig {
             account_sk: self.sol_account_sk?,
             rpc_http_url: self.sol_rpc_http_url?,
-            rpc_ws_url: self.sol_rpc_ws_url?,
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig {
                 poll_interval: Duration::from_millis(self.sol_poll_interval_ms),
@@ -62,14 +55,12 @@ impl SolArgs {
             Some(config) => SolArgs {
                 sol_account_sk: Some(config.account_sk),
                 sol_rpc_http_url: Some(config.rpc_http_url),
-                sol_rpc_ws_url: Some(config.rpc_ws_url),
                 sol_program_address: Some(config.program_address),
                 sol_poll_interval_ms: config.indexer.poll_interval.as_millis() as u64,
             },
             None => SolArgs {
                 sol_account_sk: None,
                 sol_rpc_http_url: None,
-                sol_rpc_ws_url: None,
                 sol_program_address: None,
                 sol_poll_interval_ms: SolIndexerConfig::default().poll_interval.as_millis() as u64,
             },

@@ -29,6 +29,19 @@ pub fn block_may_contain_logs(block: &Block, address: Address) -> bool {
     block.header.logs_bloom.contains_raw_log(address, &[])
 }
 
+/// Build the `eth_getLogs` filter for a single `address` scoped to one block.
+///
+/// - `BlockId::Hash` → pins to the exact block, immune to reorgs.
+/// - `BlockId::Number(tag)` → requests by number/tag.
+pub(crate) fn logs_filter(address: Address, block_id: BlockId) -> alloy::rpc::types::Filter {
+    let mut filter = alloy::rpc::types::Filter::new().address(address);
+    filter = match block_id {
+        BlockId::Hash(hash) => filter.at_block_hash(hash.block_hash),
+        BlockId::Number(tag) => filter.from_block(tag).to_block(tag),
+    };
+    filter
+}
+
 /// Catchup item yielded by [`EthereumClient::catchup_batch_stream`] and
 /// consumed by `process_catchup`.
 #[derive(Debug, Clone)]
@@ -146,28 +159,29 @@ pub enum EthereumClientInner {
 }
 
 impl EthereumClient {
-    pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
+    pub async fn new(
+        eth: EthConfig,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<EthereumClient> {
+        // Without the `helios` feature the CLI already forces `light_client`
+        // to false (with a warning), so only the direct-RPC client exists.
+        #[cfg(feature = "helios")]
         let inner = if eth.light_client {
-            #[cfg(feature = "helios")]
-            {
-                EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
-            }
-            #[cfg(not(feature = "helios"))]
-            {
-                anyhow::bail!(
-                    "ethereum light client requested, but mpc-node was built without helios feature"
-                );
-            }
+            EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
         } else {
             EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
                 eth.execution_rpc_http_url,
             ))
         };
+        #[cfg(not(feature = "helios"))]
+        let inner = EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
+            eth.execution_rpc_http_url,
+        ));
 
         Ok(Self {
             inner,
             rpc: eth.rpc.clone(),
-            shared_backoff: SharedBackoff::new(),
+            shared_backoff,
         })
     }
 
@@ -176,17 +190,11 @@ impl EthereumClient {
     pub(crate) async fn new_with_strategy(
         eth: EthConfig,
         retry_strategy: RetryConfig,
+        shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
-        let mut client = Self::new(eth).await?;
+        let mut client = Self::new(eth, shared_backoff).await?;
         client.rpc.retry = retry_strategy;
         Ok(client)
-    }
-
-    /// Overrides the shared 429 cooldown gate
-    #[cfg(test)]
-    pub(crate) fn with_shared_backoff(mut self, shared_backoff: SharedBackoff) -> Self {
-        self.shared_backoff = shared_backoff;
-        self
     }
 
     fn client_name(&self) -> &str {
@@ -511,12 +519,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = test_utils::create_test_ethereum_client(&server.url())
-            .await
-            .with_shared_backoff(SharedBackoff::with_cooldowns(
-                Duration::from_millis(50),
-                Duration::from_millis(200),
-            ));
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            Default::default(),
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200)),
+        )
+        .await;
 
         let start = std::time::Instant::now();
         let (r1, r2) = tokio::join!(
@@ -544,9 +552,9 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response(3, 9),
-                    test_utils::block_response(1, 7),
-                    test_utils::missing_block_response(2),
+                    test_utils::block_response(2, 9),
+                    test_utils::block_response(0, 7),
+                    test_utils::missing_block_response(1),
                 ])
                 .to_string(),
             )
@@ -593,9 +601,9 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response(4, 20),
-                    test_utils::missing_block_response(5),
-                    test_utils::block_response(6, 22),
+                    test_utils::block_response(3, 20),
+                    test_utils::missing_block_response(4),
+                    test_utils::block_response(5, 22),
                 ])
                 .to_string(),
             )
@@ -626,9 +634,9 @@ mod tests {
 
         let first_batch = (10..42)
             .enumerate()
-            .map(|(index, block_number)| test_utils::block_response(index as u64 + 1, block_number))
+            .map(|(index, block_number)| test_utils::block_response(index as u64, block_number))
             .collect::<Vec<_>>();
-        let second_batch = vec![test_utils::block_response(33, 42)];
+        let second_batch = vec![test_utils::block_response(32, 42)];
 
         let second_batch_mock = server
             .mock("POST", "/")
@@ -662,6 +670,7 @@ mod tests {
                 block_batch_size: 32,
                 fetch_concurrency: 1,
             },
+            SharedBackoff::new(),
         )
         .await;
         let mut stream = client.catchup_batch_stream(10, 43, contract_address);
@@ -701,15 +710,15 @@ mod tests {
 
         let first_batch = (0..32)
             .enumerate()
-            .map(|(idx, block_number)| test_utils::block_response(idx as u64 + 1, block_number))
+            .map(|(idx, block_number)| test_utils::block_response(idx as u64, block_number))
             .collect::<Vec<_>>();
         let second_batch = (0..32)
             .enumerate()
             .map(|(idx, block_number)| {
-                test_utils::block_response((idx + 33) as u64, block_number + 32)
+                test_utils::block_response((idx + 32) as u64, block_number + 32)
             })
             .collect::<Vec<_>>();
-        let third_batch = vec![test_utils::block_response(65, 64)];
+        let third_batch = vec![test_utils::block_response(64, 64)];
 
         let first_batch_mock = server
             .mock("POST", "/")
@@ -755,6 +764,7 @@ mod tests {
                 block_batch_size: 32,
                 fetch_concurrency: 1,
             },
+            SharedBackoff::new(),
         )
         .await;
         let mut stream = client.catchup_batch_stream(0, 65, contract_address);
@@ -795,7 +805,7 @@ mod tests {
         for (hi_hex, lo) in [("1f", 0u64), ("3f", 32), ("5f", 64)] {
             let blocks: Vec<_> = (lo..lo + 32)
                 .enumerate()
-                .map(|(i, n)| test_utils::block_response(lo + i as u64 + 1, n))
+                .map(|(i, n)| test_utils::block_response(lo + i as u64, n))
                 .collect();
             server
                 .mock("POST", "/")
@@ -816,6 +826,7 @@ mod tests {
                 block_batch_size: 32,
                 fetch_concurrency: 3,
             },
+            SharedBackoff::new(),
         )
         .await;
 
@@ -964,16 +975,16 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response_with_bloom(1, 10, &bloom),
-                    test_utils::block_response_with_bloom(2, 11, &bloom),
+                    test_utils::block_response_with_bloom(0, 10, &bloom),
+                    test_utils::block_response_with_bloom(1, 11, &bloom),
                 ])
                 .to_string(),
             )
             .create_async()
             .await;
 
-        // Logs batch: request IDs are 3 (block 10) and 4 (block 11). Return
-        // them SWAPPED (4 then 3) to test batch_execute reorders by id so
+        // Logs batch: request IDs are 2 (block 10) and 3 (block 11). Return
+        // them SWAPPED (3 then 2) so batch matching by id yields
         // block 10 → 1 log, block 11 → 2 logs.
         server
             .mock("POST", "/")
@@ -984,13 +995,13 @@ mod tests {
             .with_body(
                 test_utils::logs_batch_response(&[
                     (
-                        4,
+                        3,
                         vec![
                             test_utils::log_value(contract_address, 11, 0),
                             test_utils::log_value(contract_address, 11, 1),
                         ],
                     ),
-                    (3, vec![test_utils::log_value(contract_address, 10, 0)]),
+                    (2, vec![test_utils::log_value(contract_address, 10, 0)]),
                 ])
                 .to_string(),
             )
@@ -1035,8 +1046,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    test_utils::block_response(1, 10),
-                    test_utils::block_response(2, 11),
+                    test_utils::block_response(0, 10),
+                    test_utils::block_response(1, 11),
                 ])
                 .to_string(),
             )

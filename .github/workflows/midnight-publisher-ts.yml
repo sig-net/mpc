@@ -20,7 +20,29 @@ on:
       - "Dockerfile"
       - "chain-signatures/midnight-publisher-ts/**"
       - "chain-signatures/chain-midnight/**"
+  # Push paths plus the shared core, since the seam differential compiles
+  # mpc-chain-midnight. merge_group stays unfiltered as the safety net.
+  # Keep core in sync with the other chain workflows.
   pull_request:
+    paths:
+      - ".github/workflows/midnight-publisher-ts.yml"
+      - "Dockerfile"
+      - "chain-signatures/midnight-publisher-ts/**"
+      - "chain-signatures/chain-midnight/**"
+      # Shared core: compiled into mpc-chain-midnight and the seam tests.
+      - "chain-signatures/chain-integration-core/**"
+      - "chain-signatures/primitives/**"
+      - "chain-signatures/crypto/**"
+      - "chain-signatures/keys/**"
+      - "chain-signatures/utils/**"
+      - "chain-signatures/compact-hashing/**"
+      - "chain-signatures/node/**"
+      - "signet-crypto/**"
+      - "signet-primitives/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "justfile"
+      - ".config/nextest.toml"
   merge_group:
 
 jobs:
@@ -32,6 +54,12 @@ jobs:
         working-directory: chain-signatures/midnight-publisher-ts
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -81,4 +109,4 @@ jobs:
       # matches against test names and selects nothing.
       - name: Rust intent seam differential
         working-directory: .
-        run: cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'
+        run: just test-midnight-seam

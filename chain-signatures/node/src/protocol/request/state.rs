@@ -21,9 +21,6 @@ pub struct SignState {
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
     /// be cleared when `highest_seen_round` changes. One slot per sender.
     pub buffered_messages: HashMap<Participant, SignPositMessage>,
-    /// When Some, another group is already generating this signature.
-    /// The timestamp is when proposing can be resumed.
-    pub pause_proposing_until: Option<std::time::Instant>,
     /// Shared with `SignEntry` so a respawn resumes at the round it left off;
     /// peers rely on our rounds never going down.
     carried_round: Arc<AtomicUsize>,
@@ -43,7 +40,6 @@ impl SignState {
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
-            pause_proposing_until: None,
             carried_round,
         }
     }

@@ -1,4 +1,4 @@
-use crate::indexer_hydration::HydrationConfig;
+use mpc_chain_hydration::HydrationConfig;
 
 /// Configures Hydration indexer.
 #[derive(Debug, Clone, clap::Parser)]

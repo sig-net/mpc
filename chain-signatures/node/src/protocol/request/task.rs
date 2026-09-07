@@ -53,9 +53,6 @@ impl GeneratingPhase {
         state: &mut SignState,
         mailbox: &PositMailbox,
     ) -> SignPhase {
-        // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing_until = None;
-
         let sign_id = ctx.sign_id;
 
         tracing::info!(
@@ -109,7 +106,7 @@ impl GeneratingPhase {
             tokio::select! {
                 result = &mut generation => break result,
                 task_msg = mailbox.recv() => {
-                    Self::reject_late_propose(ctx, task_msg).await;
+                    Self::reject_late_propose(ctx, state, task_msg).await;
                 }
             }
         };
@@ -122,7 +119,11 @@ impl GeneratingPhase {
 
     /// Reject a `Propose` that arrives while we are already generating; drop
     /// stale Accept/Reject/Start messages.
-    async fn reject_late_propose(ctx: &SignTask, task_msg: SignPositMessage) {
+    async fn reject_late_propose(
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_msg: SignPositMessage,
+    ) {
         let SignPositMessage {
             presignature_id,
             round,
@@ -134,10 +135,18 @@ impl GeneratingPhase {
             return;
         }
         let me = ctx.governance.me;
+        let reason = if state.round() > round {
+            PositRejectReason::StaleRound(state.round())
+        } else {
+            state.record_peer_round(round);
+            PositRejectReason::AlreadyGenerating
+        };
         tracing::info!(
             sign_id = ?ctx.sign_id,
             ?from,
             round,
+            my_round = state.round(),
+            ?reason,
             "received Propose while already generating, rejecting"
         );
         ctx.msg
@@ -147,8 +156,7 @@ impl GeneratingPhase {
                 PositMessage {
                     id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
                     from: me,
-                    action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-                    stale_round: None,
+                    action: PositAction::RejectWithReason(reason),
                 },
             )
             .await;
@@ -169,6 +177,10 @@ pub struct SignTask {
     pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,
     pub node_account_id: near_account_id::AccountId,
+    /// Reports a peer's sync status to the mesh. A `MissingArtifact` reject
+    /// proves our holder list is wrong about what that peer stored, and state
+    /// sync is what corrects it; this puts the peer back through it.
+    pub sync_report_tx: SyncReportSender,
 }
 
 impl SignTask {
@@ -229,5 +241,63 @@ impl SignTask {
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::posit::tests::{sent_posit, setup};
+    use super::*;
+
+    fn propose(from: Participant, round: usize) -> SignPositMessage {
+        SignPositMessage {
+            presignature_id: 42,
+            round,
+            from,
+            action: PositAction::Propose,
+        }
+    }
+
+    /// A behind peer is answered the way every other phase answers one, with
+    /// StaleRound carrying our round, so it catches up in a single bump.
+    #[tokio::test]
+    async fn late_propose_from_behind_peer_carries_our_round() {
+        let me = Participant::from(0);
+        let behind = Participant::from(1);
+        let mut t = setup(me, behind, 2);
+        t.state.set_round(5);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(behind, 2)).await;
+
+        let (round, action) = sent_posit(&mut t.outbox, me, behind);
+        // The id echoes the rejected round; ours rides in the reject.
+        assert_eq!(round, 2);
+        assert_eq!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(5))
+        );
+        assert_eq!(t.state.round(), 5);
+    }
+
+    /// An ahead peer's round is recorded, so the reorganize after a failed
+    /// generation lands on it instead of climbing one round at a time.
+    #[tokio::test]
+    async fn late_propose_from_ahead_peer_is_recorded() {
+        let me = Participant::from(0);
+        let ahead = Participant::from(1);
+        let mut t = setup(me, ahead, 2);
+        t.state.set_round(3);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(ahead, 12)).await;
+
+        let (_, action) = sent_posit(&mut t.outbox, me, ahead);
+        assert!(matches!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
+        ));
+
+        // Caught up in one bump: max(3 + 1, 12) = 12.
+        t.state.reorganize("generation failed");
+        assert_eq!(t.state.round(), 12);
     }
 }

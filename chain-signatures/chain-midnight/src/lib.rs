@@ -7,12 +7,12 @@
 mod config;
 mod convert;
 pub mod emissions;
+mod hashing;
 mod indexer;
 mod intent_gen;
 mod publisher;
 mod reader;
 pub mod records;
-mod request_id;
 mod rpc;
 mod source;
 mod state;
@@ -21,7 +21,6 @@ mod test_utils;
 mod tx;
 
 pub use config::{IndexerConfig, MidnightAddress, MidnightConfig, PublisherConfig, RpcConfig};
-pub use convert::generate_sign_request;
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;

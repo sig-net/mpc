@@ -12,7 +12,8 @@ use alloy::providers::{
 use alloy::rpc::types::TransactionReceipt;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::retry_rpc, ChainPublisher, PublishAction, PublisherTelemetry,
+    utils::retry::{retry_rpc_gated, SharedBackoff},
+    ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
@@ -69,15 +70,21 @@ struct BatchPublisher {
     gas: GasConfig,
     /// Publisher configuration for controlling batching and retry behavior
     config: PublisherConfig,
+    /// Node-wide 429 cooldown gate shared with the indexer's read client
+    shared_backoff: SharedBackoff,
 }
 
 impl EthClient {
-    pub fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
+    pub fn new(
+        eth: &EthConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
+    ) -> Self {
         let (batch_tx, batch_rx) = mpsc::channel(eth.publisher.channel_capacity);
 
         // Spawn the background batching loop; it owns no sender, so it can shut
         // down once every EthClient is dropped.
-        let batcher = BatchPublisher::new(eth, telemetry);
+        let batcher = BatchPublisher::new(eth, telemetry, shared_backoff);
         tokio::spawn(async move {
             batcher.run_batch_respond(batch_rx).await;
         });
@@ -87,7 +94,11 @@ impl EthClient {
 }
 
 impl BatchPublisher {
-    fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
+    fn new(
+        eth: &EthConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
+    ) -> Self {
         let wallet = EthereumWallet::from(eth.account_sk.clone());
         let provider = ProviderBuilder::new()
             .wallet(wallet)
@@ -98,6 +109,7 @@ impl BatchPublisher {
             telemetry,
             gas: eth.gas.clone(),
             config: eth.publisher.clone(),
+            shared_backoff,
         }
     }
 
@@ -162,9 +174,10 @@ impl BatchPublisher {
             .map(|action| (action.request.id, action.signature))
             .collect();
 
-        let res = retry_rpc!(
+        let res = retry_rpc_gated!(
             Duration::MAX, // Prevent from timing out
             self.config.batch_publish_retry,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
@@ -191,9 +204,10 @@ impl BatchPublisher {
         tx_hash: B256,
         sign_ids: &[SignId],
     ) -> anyhow::Result<TransactionReceipt> {
-        retry_rpc!(
+        retry_rpc_gated!(
             self.config.receipt_timeout,
             self.config.receipt_retry,
+            self.shared_backoff,
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
@@ -230,9 +244,10 @@ impl BatchPublisher {
         gas: u64,
         sign_ids: &[SignId],
     ) -> anyhow::Result<B256> {
-        retry_rpc!(
+        retry_rpc_gated!(
             self.config.send_timeout,
             self.config.send_retry,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     ?sign_ids,
@@ -365,6 +380,7 @@ mod tests {
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
+    use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, SignKind};
@@ -554,6 +570,52 @@ mod tests {
             .await;
     }
 
+    fn test_publisher(url: &str) -> BatchPublisher {
+        BatchPublisher::new(
+            &mock_config(url),
+            Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn publisher_429_engages_shared_backoff_gate() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // 1 initial + max_times(2) retries per op, 2 concurrent ops.
+            // Ungated, all 6 would fire within ~25ms of local backoff.
+            .expect(6)
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .create_async()
+            .await;
+
+        let mut cfg = mock_config(&server.url());
+        cfg.publisher.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
+        let publisher = BatchPublisher::new(&cfg, Arc::new(NoopPublisherTelemetry), gate);
+
+        let start = std::time::Instant::now();
+        let ids1 = [SignId::new([1u8; 32])];
+        let ids2 = [SignId::new([2u8; 32])];
+        let (r1, r2) = tokio::join!(
+            publisher.send_responses(vec![], 21000, &ids1),
+            publisher.send_responses(vec![], 21000, &ids2),
+        );
+
+        assert!(r1.is_err() && r2.is_err());
+        assert!(r1.unwrap_err().to_string().contains("429"));
+        // The gate forces retries into separate >= 50ms cooldown windows.
+        assert!(start.elapsed() >= Duration::from_millis(100));
+    }
+
     #[test]
     fn test_signature_to_abi_conversion() {
         let mpc_sig = create_test_signature();
@@ -603,10 +665,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
         let receipt = publisher
             .wait_for_transaction_receipt(tx_hash, &[SignId::new([2u8; 32])])
             .await
@@ -642,10 +701,7 @@ mod tests {
             .expect_at_least(2)
             .create_async().await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         // Attempt to send
         let result = publisher
@@ -706,10 +762,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         // Execute the full publish pipeline
         let result = publisher
@@ -765,10 +818,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         let result = publisher
             .execute_publish(vec![], 21000, &[SignId::new([5u8; 32])])
@@ -796,10 +846,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         // 500_000 * 12 / 10 == 600_000
         let gas = publisher.estimate_batch_gas(&[], 1).await;
@@ -822,10 +869,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         let gas = publisher.estimate_batch_gas(&[], 1).await;
         assert_eq!(gas, GasConfig::default().base_gas_limit);
@@ -852,10 +896,7 @@ mod tests {
             .create_async()
             .await;
 
-        let publisher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let publisher = test_publisher(&server.url());
 
         // 3 requests -> static heuristic = max(40_000, 20_000 * 3) = 60_000.
         let gas = publisher.estimate_batch_gas(&[], 3).await;
@@ -869,10 +910,7 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 2).await;
 
-        let mut batcher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let mut batcher = test_publisher(&server.url());
         batcher.config.max_batch_size = 10;
         // Disable the interval so only batch-fullness triggers a flush.
         batcher.config.batch_flush_interval = Duration::from_secs(3600);
@@ -895,10 +933,7 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 1).await;
 
-        let mut batcher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let mut batcher = test_publisher(&server.url());
         batcher.config.max_batch_size = 10;
         batcher.config.batch_flush_interval = Duration::from_millis(200);
 
@@ -920,10 +955,7 @@ mod tests {
         mock_alloy_background_rpcs(&mut server).await;
         let send_mock = mock_publish_pipeline(&mut server, tx_hash, 1).await;
 
-        let mut batcher = BatchPublisher::new(
-            &mock_config(&server.url()),
-            Arc::new(NoopPublisherTelemetry),
-        );
+        let mut batcher = test_publisher(&server.url());
         batcher.config.max_batch_size = 10;
         // Interval longer than the test: only the channel close may trigger the flush.
         batcher.config.batch_flush_interval = Duration::from_secs(3600);

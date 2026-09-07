@@ -107,9 +107,22 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take mine triple pairs and check that they are removed from the storage and marked as using
-    let _taken3 = triple_storage.take_mine().await.unwrap();
-    let _taken4 = triple_storage.take_mine().await.unwrap();
+    // Reserve and commit mine triple pairs and check that they are removed from
+    // the storage and marked as using
+    let _taken3 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    let _taken4 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -249,8 +262,15 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 1);
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage and marked as using
-    let _taken_ps2 = presignature_storage.take_mine().await.unwrap();
+    // Reserve and commit mine presignature and check that it is removed from
+    // the storage and marked as using
+    let _taken_ps2 = presignature_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -395,10 +415,11 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         vec![first.clone(), second.clone()]
     );
 
-    assert!(
+    assert_eq!(
         restarted
-            .promote_pending(Chain::Solana, first.block_height)
-            .await?
+            .promote_pending(Chain::Solana, first.digest())
+            .await?,
+        Some(1)
     );
     assert_eq!(
         restarted.load_latest(Chain::Solana).await?,
@@ -412,20 +433,20 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     let mut conflicting = second.clone();
     conflicting.cumulative_digest[0] = 1;
     assert!(restarted.persist_pending(&conflicting).await.is_err());
-    assert!(
-        !restarted
-            .promote_pending(Chain::Solana, second.block_height + 1)
-            .await?
-    );
+    assert!(restarted
+        .promote_pending(Chain::Solana, [99; 32])
+        .await?
+        .is_none());
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,
         vec![second.clone()]
     );
-    assert!(
+    assert_eq!(
         restarted
-            .promote_pending(Chain::Solana, second.block_height)
-            .await?
+            .promote_pending(Chain::Solana, second.digest())
+            .await?,
+        Some(0)
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
     assert!(restarted.load_pending(Chain::Solana).await?.is_empty());

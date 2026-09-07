@@ -5,8 +5,8 @@ use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
 use alloy::primitives::{Address, Bloom};
 use alloy::rpc::types::{Block, Log};
-use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::{
+    utils::retry::{RetryConfig, SharedBackoff},
     ChainTelemetry, ExtractionFailureKind, MockStateManager, NoopChainTelemetry,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +25,7 @@ const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
-    create_test_ethereum_client_with_catchup(url, Default::default()).await
+    create_test_ethereum_client_with_catchup(url, Default::default(), SharedBackoff::new()).await
 }
 
 /// Like [`create_test_ethereum_client`], but with a custom catchup fetch shape
@@ -34,6 +34,7 @@ pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
 pub async fn create_test_ethereum_client_with_catchup(
     url: &str,
     catchup: CatchupFetchConfig,
+    shared_backoff: SharedBackoff,
 ) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
     let retry_strategy = RetryConfig {
@@ -62,7 +63,7 @@ pub async fn create_test_ethereum_client_with_catchup(
         indexer: Default::default(),
     };
 
-    EthereumClient::new_with_strategy(eth, retry_strategy)
+    EthereumClient::new_with_strategy(eth, retry_strategy, shared_backoff)
         .await
         .unwrap()
 }

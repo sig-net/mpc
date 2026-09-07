@@ -9,7 +9,7 @@ use std::time::Duration;
 use alloy::primitives::B256;
 use common::{submit_sign_request, wait_for_responded, EthTestEnv};
 use mpc_chain_ethereum::publisher::EthClient;
-use mpc_chain_integration_core::utils::test::make_publish_action;
+use mpc_chain_integration_core::utils::{retry::SharedBackoff, test::make_publish_action};
 use mpc_chain_integration_core::{ChainPublisher, NoopPublisherTelemetry};
 use mpc_primitives::{Chain, SignId, SignKind};
 
@@ -27,7 +27,11 @@ async fn publishes_single_response() {
         SignId::new(request_id.into()),
     );
 
-    let client = EthClient::new(&env.eth_config, Arc::new(NoopPublisherTelemetry));
+    let client = EthClient::new(
+        &env.eth_config,
+        Arc::new(NoopPublisherTelemetry),
+        SharedBackoff::new(),
+    );
     client
         .publish_signature(&action)
         .await
@@ -56,7 +60,7 @@ async fn publishes_batched_responses() {
     // Widen the flush window so all 3 actions accumulate before the batch fires
     let mut cfg = env.eth_config.clone();
     cfg.publisher.batch_flush_interval = Duration::from_millis(1000);
-    let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry));
+    let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
     // Publish all 3 responses.
     for rid in &request_ids {
@@ -101,7 +105,7 @@ async fn publishes_across_multiple_batches() {
     let mut cfg = env.eth_config.clone();
     cfg.publisher.max_batch_size = 3;
     cfg.publisher.batch_flush_interval = Duration::from_millis(2000);
-    let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry));
+    let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
     for rid in &request_ids {
         let action =

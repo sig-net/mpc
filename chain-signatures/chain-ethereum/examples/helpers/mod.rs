@@ -4,7 +4,8 @@ use anyhow::anyhow;
 use futures_util::StreamExt;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
+    utils::{retry::SharedBackoff, stream::chain_event_channel},
+    MockStateManager, NoopChainTelemetry,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -87,7 +88,8 @@ pub async fn run_catchup(
     end: u64,
     label: &'static str,
 ) -> anyhow::Result<u64> {
-    let indexer = EthereumIndexer::new(config, state, NoopChainTelemetry).await?;
+    let indexer =
+        EthereumIndexer::new(config, state, NoopChainTelemetry, SharedBackoff::new()).await?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
     // Maintain the finalized head the same way `run()` does, so OPTIMISTIC=0

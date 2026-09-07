@@ -18,8 +18,6 @@ pub trait ChainPublisher: Send + Sync + 'static {
 /// Represents a signature that is ready to be published to a blockchain.
 #[derive(Clone)]
 pub struct PublishAction {
-    /// The public key associated with the signature.
-    pub public_key: PublicKey,
     /// The indexed sign request that this signature corresponds to.
     pub request: Arc<IndexedSignRequest>,
     /// The actual signature to be published.
@@ -46,7 +44,6 @@ impl PublishAction {
         )
         .ok()?;
         Some(Self {
-            public_key,
             request,
             signature,
             participants,

@@ -5,6 +5,10 @@ pragma language_version >= 0.25;
 import CompactStandardLibrary;
 import "@sig-net/midnight/src/Signet";
 
+struct BoolResponse {
+  success: Boolean;
+}
+
 // The declaration order is protocol-visible. The request map is field 3 and the
 // notification below names that exact path.
 export ledger requestNonce: Counter;
@@ -90,12 +94,12 @@ export circuit submitIsEvenRequest(
 export circuit verifyResponse(
   requestId: RequestId,
   respondBidirectionalEvent: RespondBidirectionalEvent,
-  serializedOutput: Bytes<32>
+  serializedOutput: Bytes<1>
 ): [] {
   const disclosedRequestId = disclose(requestId);
   assert(initialised != 0, "Not initialised");
   assert(
-    verifyRespondBidirectionalEvent<32>(
+    verifyRespondBidirectionalEvent<1>(
       disclosedRequestId,
       serializedOutput,
       disclose(respondBidirectionalEvent),
@@ -103,7 +107,8 @@ export circuit verifyResponse(
     ),
     "Invalid attestation signature"
   );
-  assert(abiWordToBool(serializedOutput), "Foreign call reported failure");
+  const response = deserialize<BoolResponse, 1>(serializedOutput);
+  assert(response.success, "Foreign call reported failure");
   assert(requests.member(disclosedRequestId), "Request not found");
   requests.remove(disclosedRequestId);
 }

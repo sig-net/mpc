@@ -108,35 +108,6 @@ impl NodeClient {
             .map(|v| v.to_string())
     }
 
-    pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
-        &self,
-        url: &Url,
-        payload: &T,
-    ) -> Result<R, RequestError> {
-        let resp = self
-            .http
-            .post(url.clone())
-            .header("content-type", "application/json")
-            .json(payload)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if status.is_success() {
-            Ok(resp.json::<R>().await?)
-        } else {
-            // TODO: parse response body and convert to mpc_node::Error type.
-            let request_id = Self::extract_request_id(&resp);
-            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!(
-                request_id = ?request_id,
-                "failed to send a message to {url} with code {status}: {resp}"
-            );
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
-        }
-    }
-
     pub async fn post_cbor<T: Serialize + ?Sized>(
         &self,
         url: &Url,

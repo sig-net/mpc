@@ -8,7 +8,6 @@ use alloy::primitives::Address;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use k256::ecdsa::VerifyingKey;
-use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
@@ -146,11 +145,6 @@ pub async fn batch_duplicate_signature_production(nodes: &Cluster) -> anyhow::Re
     Ok(())
 }
 
-/// Get the x coordinate of a point, as a scalar
-pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
-}
-
 pub fn recover_eth_address(
     msg_hash: &[u8; 32],
     signature_bytes: &[u8; 64],
@@ -179,7 +173,8 @@ mod tests {
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover_eth_address, x_coordinate};
+    use super::{public_key_to_address, recover_eth_address};
+    use mpc_crypto::x_coordinate;
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
@@ -218,7 +213,7 @@ mod tests {
 
         let s = hex::decode(s).unwrap().try_into().unwrap();
         let s = k256::Scalar::from_bytes(s).unwrap();
-        let r = x_coordinate::<k256::Secp256k1>(&big_r);
+        let r = x_coordinate(&big_r);
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 

@@ -155,10 +155,6 @@ impl Participants {
         self.find(account_id).map(|(participant, _)| participant)
     }
 
-    pub fn find_participant_info(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
-        self.find(account_id).map(|(_, info)| info)
-    }
-
     pub fn contains_account_id(&self, account_id: &AccountId) -> bool {
         self.participants
             .values()
@@ -267,10 +263,6 @@ impl Candidates {
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
     }
-
-    pub fn find_candidate(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(account_id)
-    }
 }
 
 impl From<mpc_contract::primitives::CandidatesView> for Candidates {
@@ -369,19 +361,6 @@ pub fn intersect<T: Copy + Hash + Eq>(sets: &[&[T]]) -> HashSet<T> {
     } else {
         HashSet::new()
     }
-}
-
-pub fn intersect_hash<T: Clone + Hash + Eq>(sets: &[&HashSet<T>]) -> HashSet<T> {
-    let mut sets = sets.iter();
-    let Some(&first) = sets.next() else {
-        return HashSet::new();
-    };
-    let mut intersection = first.clone();
-    for set in sets {
-        intersection.retain(|item| set.contains(item));
-    }
-
-    intersection
 }
 
 pub fn intersect_vec<T: Copy + Hash + Eq>(sets: &[&[T]]) -> Vec<T> {
