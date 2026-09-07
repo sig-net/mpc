@@ -987,7 +987,7 @@ mod tests {
         // Logs batch: request IDs are 2 (block 10) and 3 (block 11). Note
         // IDs start at 0 because the test client issues no RPCs before
         // catchup; update if setup changes. SWAPPED (3 then 2) so pairing
-        // by id yields block 10 → 1 log, block 11 → 2 logs.
+        // by id yields block 10 → 1 log, block 11 → 2 logs
         server
             .mock("POST", "/")
             .match_body(Matcher::Regex("eth_getLogs".to_string()))
