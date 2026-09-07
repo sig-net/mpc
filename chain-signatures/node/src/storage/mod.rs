@@ -29,6 +29,7 @@ pub struct Options {
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
     pub sk_share_local_path: Option<String>,
+    /// Redis URL for triples, presignatures, checkpoints and the backlog.
     #[arg(long, env("MPC_REDIS_URL"))]
     pub redis_url: String,
 }
