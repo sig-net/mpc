@@ -41,6 +41,8 @@ impl Options {
             self.env,
             "--gcp-project-id".to_string(),
             self.gcp_project_id,
+            "--redis-url".to_string(),
+            self.redis_url,
         ];
         if let Some(sk_share_secret_id) = self.sk_share_secret_id {
             opts.extend(vec!["--sk-share-secret-id".to_string(), sk_share_secret_id]);

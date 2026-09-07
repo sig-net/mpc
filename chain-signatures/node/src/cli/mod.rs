@@ -155,8 +155,6 @@ impl Cli {
                     account_sk.to_string(),
                     "--cipher-sk".to_string(),
                     cipher_sk,
-                    "--redis-url".to_string(),
-                    storage_options.redis_url.to_string(),
                 ];
                 if let Some(sign_sk) = sign_sk {
                     args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
