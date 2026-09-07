@@ -18,13 +18,13 @@ pub const STORAGE_VERSION: &str = "v12";
 #[group(id = "storage_options")]
 pub struct Options {
     /// env used to differentiate among environments.
-    #[clap(long, env("MPC_ENV"))]
+    #[arg(long, env("MPC_ENV"))]
     pub env: String,
     /// GCP project ID.
-    #[clap(long, env("MPC_GCP_PROJECT_ID"))]
+    #[arg(long, env("MPC_GCP_PROJECT_ID"))]
     pub gcp_project_id: String,
     /// GCP Secret Manager ID that will be used to load/store the node's secret key share.
-    #[clap(long, env("MPC_SK_SHARE_SECRET_ID"), requires_all=["gcp_project_id"])]
+    #[arg(long, env("MPC_SK_SHARE_SECRET_ID"), requires_all=["gcp_project_id"])]
     pub sk_share_secret_id: Option<String>,
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]

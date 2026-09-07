@@ -22,7 +22,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
-    #[clap(
+    #[arg(
         long,
         env("MPC_OPENTELEMETRY_LEVEL"),
         value_enum,
@@ -30,14 +30,14 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
-    #[clap(
+    #[arg(
         long,
         env("MPC_OTLP_ENDPOINT"),
         default_value = "http://localhost:4318"
     )]
     pub otlp_endpoint: String,
 
-    #[clap(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
+    #[arg(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
     pub disable_gcp_logs: bool,
 }
 

@@ -82,19 +82,19 @@ pub enum Cli {
         #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
         /// Ethereum Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         eth: EthArgs,
         /// Solana Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         sol: SolArgs,
         /// Hydration Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         hydration: HydrationArgs,
         /// Canton Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         canton: CantonArgs,
         /// Midnight Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         midnight: MidnightArgs,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
@@ -104,17 +104,17 @@ pub enum Cli {
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
         /// Storage options
-        #[clap(flatten)]
+        #[command(flatten)]
         storage_options: storage::Options,
         /// Logging options
-        #[clap(flatten)]
+        #[command(flatten)]
         log_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
-        #[clap(flatten)]
+        #[command(flatten)]
         mesh_options: mesh::Options,
-        #[clap(flatten)]
+        #[command(flatten)]
         message_options: node_client::Options,
     },
 }
