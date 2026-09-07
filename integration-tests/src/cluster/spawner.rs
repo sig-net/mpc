@@ -295,7 +295,6 @@ impl ClusterSpawner {
             self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),      // Will be filled in later
                 rpc_http_url: String::new(),    // Will be filled in later
-                rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
                 indexer: Default::default(),
             });

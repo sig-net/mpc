@@ -23,6 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -68,12 +74,7 @@ jobs:
           compact compile --version
 
       - name: Build real-stack TypeScript fixtures
-        working-directory: chain-signatures/midnight-publisher-ts
-        run: |
-          npm ci
-          npm run build
-          npm run compile:real-stack-caller
-          npm run typecheck:real-stack
+        run: just build midnight
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -107,16 +108,13 @@ jobs:
             sh /tmp/cargo-near-installer.sh
           fi
 
-      - name: Build integration artifacts
-        run: ./setup.sh
-
       - name: Build integration tests
-        run: cargo build -p integration-tests --tests
+        run: just build tests
 
       # nextest fails on an empty selection, so a renamed test cannot turn this
       # step into a silent no-op.
       - name: Test Midnight end-to-end stream
-        run: cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+        run: just test-midnight
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

@@ -5,8 +5,7 @@ use crate::storage;
 use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
 use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
 use google_secretmanager1::oauth2::{
-    AccessTokenAuthenticator, ApplicationDefaultCredentialsAuthenticator,
-    ApplicationDefaultCredentialsFlowOpts,
+    ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
 };
 use google_secretmanager1::SecretManager;
 use hyper::client::HttpConnector;
@@ -76,21 +75,7 @@ pub struct GcpService {
 impl GcpService {
     pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
         let project_id = storage_options.gcp_project_id.clone();
-        let secret_manager = if storage_options.env == "local-test" {
-            let client = hyper::Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_or_http()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            );
-            // Assuming we are in a test environment, token does not matter
-            let authenticator = AccessTokenAuthenticator::builder("TOKEN".to_string())
-                .build()
-                .await?;
-            SecretManager::new(client.clone(), authenticator.clone())
-        } else {
+        let secret_manager = {
             // restring client to use https in production
             let client = hyper::Client::builder().build(
                 hyper_rustls::HttpsConnectorBuilder::new()

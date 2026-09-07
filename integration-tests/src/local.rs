@@ -89,7 +89,6 @@ impl Node {
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
@@ -187,7 +186,6 @@ impl Node {
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
