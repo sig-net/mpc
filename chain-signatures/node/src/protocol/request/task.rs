@@ -7,6 +7,10 @@ use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
 
+use crate::sign_bidirectional::PublishState;
+use cait_sith::FullSignature;
+use k256::Secp256k1;
+
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
     pub proposer: Participant,
@@ -112,8 +116,44 @@ impl GeneratingPhase {
         };
 
         match result {
-            Ok(()) => SignPhase::Complete(Ok(())),
+            Ok(output) => {
+                self.publish(ctx, state, output).await;
+                SignPhase::Complete(Ok(()))
+            }
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
+        }
+    }
+
+    /// Hand the finished signature on: every participant records it in the
+    /// backlog (so publish failover can pick it up), the proposer publishes it.
+    async fn publish(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
+        let sign_id = ctx.sign_id;
+        let is_proposer = self.proposer == ctx.governance.me;
+        let request = &state.request;
+
+        if let Some(publish) = build_publish_state(
+            ctx.governance.public_key,
+            request,
+            &output,
+            &self.accepted_participants,
+            is_proposer,
+        ) {
+            if let Err(err) = ctx
+                .backlog
+                .mark_publishing(request.chain, &sign_id, publish)
+                .await
+            {
+                tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+            }
+        }
+
+        if is_proposer {
+            ctx.rpc.publish(
+                ctx.governance.public_key,
+                Arc::clone(request),
+                output,
+                self.accepted_participants.clone(),
+            );
         }
     }
 
@@ -236,12 +276,31 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            rpc: self.rpc.clone(),
-            backlog: self.backlog.clone(),
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }
     }
+}
+
+/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
+fn build_publish_state(
+    public_key: mpc_crypto::PublicKey,
+    request: &IndexedSignRequest,
+    output: &FullSignature<Secp256k1>,
+    participants: &[Participant],
+    is_proposer: bool,
+) -> Option<Arc<PublishState>> {
+    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
+    let signature = mpc_crypto::reconstruct_signature(
+        &expected_public_key,
+        &output.big_r,
+        &output.s,
+        request.args.payload,
+    )
+    .ok()?;
+    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
+
+    Some(Arc::new(publish))
 }
 
 #[cfg(test)]

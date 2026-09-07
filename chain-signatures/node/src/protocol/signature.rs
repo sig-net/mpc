@@ -1,17 +1,15 @@
 //! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
-use crate::backlog::Backlog;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::PresignatureId;
-use crate::rpc::{GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
+use crate::rpc::GovernanceInfo;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::PresignOutput;
+use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
@@ -28,13 +26,12 @@ pub(crate) enum SignError {
     Aborted,
 }
 
+/// What the signing protocol needs to run. Publishing the result is the
+/// caller's job: the generator returns the signature and knows nothing about
+/// the chain or the backlog.
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
-    /// Publishes the finished signature (proposer only).
-    pub rpc: RpcChannel,
-    /// Marks the request as publishing once a signature is produced.
-    pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -164,9 +161,12 @@ impl SignGenerator {
         }
     }
 
-    /// Poke-drive the protocol to completion: relay messages, and on `Return`
-    /// publish the signature (proposer) and mark the request publishing.
-    pub(crate) async fn run(mut self, ctx: &GenerateCtx) -> Result<(), SignError> {
+    /// Poke-drive the protocol to completion, relaying messages, and return the
+    /// finished signature. The caller publishes it.
+    pub(crate) async fn run(
+        mut self,
+        ctx: &GenerateCtx,
+    ) -> Result<FullSignature<Secp256k1>, SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
@@ -280,39 +280,11 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGN_GENERATION_LATENCY
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
-
-                    let is_proposer = self.proposer == me;
-                    if let Some(publish) = build_publish_state(
-                        ctx.governance.public_key,
-                        &self.request,
-                        &output,
-                        &self.participants,
-                        is_proposer,
-                    ) {
-                        if let Err(err) = ctx
-                            .backlog
-                            .mark_publishing(self.request.chain, &sign_id, Arc::clone(&publish))
-                            .await
-                        {
-                            tracing::warn!(
-                                ?sign_id,
-                                ?err,
-                                "failed to mark publishing for sign request"
-                            );
-                        }
-                    }
-
-                    if is_proposer {
+                    if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        ctx.rpc.publish(
-                            ctx.governance.public_key,
-                            Arc::clone(&self.request),
-                            output,
-                            self.participants.clone(),
-                        );
                     }
 
-                    break Ok(());
+                    break Ok(output);
                 }
             }
         }
@@ -335,27 +307,6 @@ fn awaited_peers(participants: &[Participant], seen: &[Participant]) -> Vec<Part
         .copied()
         .filter(|p| !seen.contains(p))
         .collect()
-}
-
-/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
-fn build_publish_state(
-    public_key: mpc_crypto::PublicKey,
-    request: &IndexedSignRequest,
-    output: &cait_sith::FullSignature<Secp256k1>,
-    participants: &[Participant],
-    is_proposer: bool,
-) -> Option<Arc<PublishState>> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
-    let signature = mpc_crypto::reconstruct_signature(
-        &expected_public_key,
-        &output.big_r,
-        &output.s,
-        request.args.payload,
-    )
-    .ok()?;
-    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
-
-    Some(Arc::new(publish))
 }
 
 impl Drop for SignGenerator {
