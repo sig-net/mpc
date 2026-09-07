@@ -835,12 +835,13 @@ mod tests {
         let start = std::time::Instant::now();
         let mut stream = client.catchup_batch_stream(0, 96, contract_address);
         for expected_number in 0..96u64 {
+            let next = stream.next().await;
             assert!(
                 matches!(
-                    stream.next().await,
+                    &next,
                     Some(CatchupItem::BatchBlock { block, .. }) if block.header.number == expected_number
                 ),
-                "expected block {expected_number} in order"
+                "expected block {expected_number}, got {next:?}"
             );
         }
         assert!(stream.next().await.is_none());
