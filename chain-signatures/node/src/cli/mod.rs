@@ -53,6 +53,7 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 
 #[derive(Parser, Debug)]
 pub enum Cli {
+    /// Start the MPC node
     Start {
         /// NEAR RPC address
         #[arg(
