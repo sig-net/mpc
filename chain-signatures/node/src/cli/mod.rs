@@ -55,6 +55,7 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 pub enum Cli {
     /// Start the MPC node
     Start {
+        // -- NEAR identity and governance contract --
         /// NEAR RPC address
         #[arg(
             long,
@@ -71,17 +72,37 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
+
+        // -- Node-to-node networking --
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
         web_port: u16,
+        /// Local address that other peers can use to message this node.
+        /// mainnet nodes: this should be set to their domain name
+        /// testnet nodes: this should be set to their http://ip:web_port
+        /// dev nodes: this should be set to their local network domain name
+        /// integration test nodes: this should be set to None
+        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
+        my_address: Option<Url>,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
+        #[clap(flatten)]
+        mesh_options: mesh::Options,
+        #[clap(flatten)]
+        message_options: node_client::Options,
+
+        // -- Protocol --
+        /// The set of configurations that we will use to override contract configurations.
+        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
+        override_config: Option<OverrideConfig>,
+
+        // -- Chains --
         /// Ethereum Indexer options
         #[clap(flatten)]
         eth: EthArgs,
@@ -97,26 +118,14 @@ pub enum Cli {
         /// Midnight Indexer options
         #[clap(flatten)]
         midnight: MidnightArgs,
-        /// Local address that other peers can use to message this node.
-        /// mainnet nodes: this should be set to their domain name
-        /// testnet nodes: this should be set to their http://ip:web_port
-        /// dev nodes: this should be set to their local network domain name
-        /// integration test nodes: this should be set to None
-        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
-        my_address: Option<Url>,
+
+        // -- Infrastructure --
         /// Storage options
         #[clap(flatten)]
         storage_options: storage::Options,
         /// Logging options
         #[clap(flatten)]
         log_options: logs::Options,
-        /// The set of configurations that we will use to override contract configurations.
-        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
-        override_config: Option<OverrideConfig>,
-        #[clap(flatten)]
-        mesh_options: mesh::Options,
-        #[clap(flatten)]
-        message_options: node_client::Options,
     },
 }
 
@@ -125,23 +134,23 @@ impl Cli {
         match self {
             Cli::Start {
                 near_rpc,
-                account_id,
                 mpc_contract_id,
+                account_id,
                 account_sk,
                 web_port,
+                my_address,
                 cipher_sk,
                 sign_sk,
+                mesh_options,
+                message_options,
+                override_config,
                 eth,
                 sol,
                 hydration,
                 canton,
                 midnight,
-                my_address,
                 storage_options,
                 log_options,
-                override_config,
-                mesh_options,
-                message_options,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -153,24 +162,25 @@ impl Cli {
                     account_id.to_string(),
                     "--account-sk".to_string(),
                     account_sk.to_string(),
+                    "--web-port".to_string(),
+                    web_port.to_string(),
                     "--cipher-sk".to_string(),
                     cipher_sk,
                 ];
-                if let Some(sign_sk) = sign_sk {
-                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                }
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
+                if let Some(sign_sk) = sign_sk {
+                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
+                }
+                args.extend(mesh_options.into_str_args());
+                args.extend(message_options.into_str_args());
                 if let Some(override_config) = override_config {
                     args.extend([
                         "--override-config".to_string(),
                         serde_json::to_string(&override_config).unwrap(),
                     ]);
                 }
-
-                args.extend(["--web-port".to_string(), web_port.to_string()]);
-
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
                 args.extend(hydration.into_str_args());
@@ -178,8 +188,6 @@ impl Cli {
                 args.extend(midnight.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
-                args.extend(mesh_options.into_str_args());
-                args.extend(message_options.into_str_args());
                 args
             }
         }
