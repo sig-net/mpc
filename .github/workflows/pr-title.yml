@@ -17,7 +17,7 @@ jobs:
     name: Conventional PR title
     runs-on: ubuntu-latest
     steps:
-      # Using default settings (let me know if we need to adjust anything):
+      # Using default settings:
       # types: feat, fix, chore, docs, style, refactor, perf, test, build, ci, revert
       # requireScope: false, disallowScopes: none, subjectPattern: none
       # wip: false (draft PRs are VALIDATED)
