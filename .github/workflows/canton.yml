@@ -7,32 +7,7 @@ on:
     paths:
       - integration-tests/**
       - chain-signatures/**
-  # PRs run only on Canton or shared-core changes; merge_group stays
-  # unfiltered as the safety net. Keep core in sync with other chain workflows.
   pull_request:
-    paths:
-      - ".github/workflows/canton.yml"
-      # Shared core: changes here trigger every chain workflow.
-      - "chain-signatures/chain-integration-core/**"
-      - "chain-signatures/primitives/**"
-      - "chain-signatures/crypto/**"
-      - "chain-signatures/keys/**"
-      - "chain-signatures/utils/**"
-      - "chain-signatures/compact-hashing/**"
-      - "chain-signatures/node/**"
-      - "signet-crypto/**"
-      - "signet-primitives/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "justfile"
-      - ".config/nextest.toml"
-      # Canton crate, tests, and fixtures (matches any *canton* file at any depth).
-      - "chain-signatures/chain-canton/**"
-      - "integration-tests/{src,fixtures,tests}/**canton**"
-      # Shared integration-test harness.
-      - "integration-tests/{Cargo.toml,src/lib.rs,src/cluster/**,src/mpc_fixture/**,tests/lib.rs,tests/cases/mod.rs}"
-      # Canton tests cross-sign over Ethereum via anvil + the eth contract.
-      - "chain-signatures/contract-eth/**"
   merge_group:
 
 env:
