@@ -6,7 +6,11 @@ use std::time::Duration;
 #[group(id = "indexer_sol_options")]
 pub struct SolArgs {
     /// The solana account secret key used to sign solana respond txn.
-    #[arg(long, env("MPC_SOL_ACCOUNT_SK"))]
+    #[arg(
+        long,
+        env("MPC_SOL_ACCOUNT_SK"),
+        requires_all = ["sol_rpc_http_url", "sol_program_address"]
+    )]
     pub sol_account_sk: Option<String>,
     /// Solana RPC HTTP URL
     #[clap(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]

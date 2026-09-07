@@ -5,10 +5,18 @@ use mpc_chain_hydration::HydrationConfig;
 #[group(id = "indexer_hydration_options")]
 pub struct HydrationArgs {
     /// Hydration RPC ws URL
-    #[clap(long = "hydration-rpc-ws-url", env("MPC_HYDRATION_RPC_WS_URL"))]
+    #[clap(
+        long = "hydration-rpc-ws-url",
+        env("MPC_HYDRATION_RPC_WS_URL"),
+        requires = "signer_uri"
+    )]
     pub rpc_ws_url: Option<String>,
     /// Hydration signer URI
-    #[clap(long = "hydration-signer-uri", env("MPC_HYDRATION_SIGNER_URI"))]
+    #[clap(
+        long = "hydration-signer-uri",
+        env("MPC_HYDRATION_SIGNER_URI"),
+        requires = "rpc_ws_url"
+    )]
     pub signer_uri: Option<String>,
 }
 
