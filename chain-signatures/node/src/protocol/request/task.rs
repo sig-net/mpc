@@ -30,7 +30,10 @@ pub enum SignPhase {
     Posit(PositPhase),
     /// Commit the reserved presignature and run the signing protocol to completion.
     Generating(GeneratingPhase),
-    /// Terminal: the request finished (`Ok`) or aborted (`Err`).
+    /// Terminal. `Ok` means generation finished and the signature was handed
+    /// off to the backlog and the RPC queue; it does not mean a response is on
+    /// chain, which the backlog state and the chain streams track. `Err` means
+    /// the request aborted.
     Complete(Result<(), SignError>),
 }
 
@@ -117,41 +120,59 @@ impl GeneratingPhase {
 
         match result {
             Ok(output) => {
-                self.publish(ctx, state, output).await;
+                self.hand_off(ctx, state, output).await;
                 SignPhase::Complete(Ok(()))
             }
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
         }
     }
 
-    /// Hand the finished signature on: every participant records it in the
-    /// backlog (so publish failover can pick it up), the proposer publishes it.
-    async fn publish(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
+    /// Hand the finished signature on. This is not the on-chain publish: every
+    /// participant moves the backlog entry to pending-publish, the record that
+    /// publish failover works from, and the proposer queues a publish for the
+    /// RPC worker, which submits and retries on its own. Neither outcome is
+    /// reported back here.
+    async fn hand_off(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
         let sign_id = ctx.sign_id;
-        let is_proposer = self.proposer == ctx.governance.me;
         let request = &state.request;
+        let is_proposer = self.proposer == ctx.governance.me;
 
-        if let Some(publish) = build_publish_state(
-            ctx.governance.public_key,
-            request,
-            &output,
-            &self.accepted_participants,
-            is_proposer,
+        let expected_public_key =
+            mpc_crypto::derive_key(ctx.governance.public_key, request.args.epsilon);
+        let signature = match mpc_crypto::reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            request.args.payload,
         ) {
-            if let Err(err) = ctx
-                .backlog
-                .mark_publishing(request.chain, &sign_id, publish)
-                .await
-            {
-                tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+            Ok(signature) => signature,
+            Err(err) => {
+                tracing::error!(
+                    ?sign_id,
+                    ?err,
+                    "generated signature does not verify against the derived key; dropping it"
+                );
+                return;
             }
+        };
+
+        let publish = Arc::new(PublishState::new(
+            signature,
+            self.accepted_participants.clone(),
+            is_proposer,
+        ));
+        if let Err(err) = ctx
+            .backlog
+            .mark_publishing(request.chain, &sign_id, publish)
+            .await
+        {
+            tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
         }
 
         if is_proposer {
-            ctx.rpc.publish(
-                ctx.governance.public_key,
+            ctx.rpc.publish_signature(
                 Arc::clone(request),
-                output,
+                signature,
                 self.accepted_participants.clone(),
             );
         }
@@ -280,27 +301,6 @@ impl SignTask {
             node_account_id: self.node_account_id.clone(),
         }
     }
-}
-
-/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
-fn build_publish_state(
-    public_key: mpc_crypto::PublicKey,
-    request: &IndexedSignRequest,
-    output: &FullSignature<Secp256k1>,
-    participants: &[Participant],
-    is_proposer: bool,
-) -> Option<Arc<PublishState>> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
-    let signature = mpc_crypto::reconstruct_signature(
-        &expected_public_key,
-        &output.big_r,
-        &output.s,
-        request.args.payload,
-    )
-    .ok()?;
-    let publish = PublishState::new(signature, participants.to_vec(), is_proposer);
-
-    Some(Arc::new(publish))
 }
 
 #[cfg(test)]
