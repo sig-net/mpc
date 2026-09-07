@@ -45,16 +45,12 @@ export const RESPOND_CIRCUITS = [
 export type RespondCircuit = (typeof RESPOND_CIRCUITS)[number];
 
 type CompiledSignetContract = SignetContract<SignetContractPrivateState>;
-// Compact's branded id widens to every generated circuit, so check each argument
-// tuple against its generated function before passing it to the executor.
+// Compact's branded id widens to every generated circuit, so check the argument
+// tuple against each generated function before passing it to the executor.
 type CircuitArguments<K extends RespondCircuit> =
   Parameters<CompiledSignetContract["provableCircuits"][K]> extends [unknown, ...infer Arguments]
     ? Arguments
     : never;
-
-const RESPOND_CIRCUIT_ID = ProvableCircuitId<CompiledSignetContract>("respond");
-const RESPOND_BIDIRECTIONAL_CIRCUIT_ID =
-  ProvableCircuitId<CompiledSignetContract>("respondBidirectional");
 
 export interface WireSignature {
   readonly bigR: { readonly x: string; readonly y: string };
@@ -133,29 +129,17 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
     privateState: createSignetContractPrivateState(),
     ledgerParameters: LedgerParameters.deserialize(fromHex(input.ledgerParameters)),
   };
-  const requestId = fromHex(input.requestId);
-  const event = { signature: signatureStruct(input.signature) };
-  const layer = executionContext(input.coinPublicKey);
-  const result =
-    input.circuit === "respond"
-      ? await Effect.runPromise(
-          executable
-            .circuit(
-              RESPOND_CIRCUIT_ID,
-              context,
-              ...([requestId, event] satisfies CircuitArguments<"respond">),
-            )
-            .pipe(Effect.provide(layer)),
-        )
-      : await Effect.runPromise(
-          executable
-            .circuit(
-              RESPOND_BIDIRECTIONAL_CIRCUIT_ID,
-              context,
-              ...([requestId, event] satisfies CircuitArguments<"respondBidirectional">),
-            )
-            .pipe(Effect.provide(layer)),
-        );
+  // One tuple serves both entry points; the intersection keeps every generated signature
+  // checked, so a contract version that diverges them fails here rather than in the executor.
+  const args = [
+    fromHex(input.requestId),
+    { signature: signatureStruct(input.signature) },
+  ] satisfies CircuitArguments<"respond"> & CircuitArguments<"respondBidirectional">;
+  const result = await Effect.runPromise(
+    executable
+      .circuit(ProvableCircuitId<CompiledSignetContract>(input.circuit), context, ...args)
+      .pipe(Effect.provide(executionContext(input.coinPublicKey))),
+  );
 
   // A second call would mean the contract grew cross-contract calls this builder cannot carry.
   if (result.calls.length !== 1) {

@@ -4,23 +4,20 @@
 import {
   deriveAccountKeys,
   type AccountKeys,
-  type Endpoints,
+  type MidnightNodeConfig,
   type NetworkId,
 } from "@sig-net/midnight-contract-deploy";
 
-export type { Endpoints } from "@sig-net/midnight-contract-deploy";
-
 export interface Config {
-  readonly networkId: NetworkId;
-  readonly endpoints: Endpoints;
+  readonly node: MidnightNodeConfig;
   readonly accountKeys: AccountKeys;
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
   const networkId = env.MIDNIGHT_PUB_NETWORK_ID as NetworkId;
   return {
-    networkId,
-    endpoints: {
+    node: {
+      networkId,
       nodeUrl: env.MIDNIGHT_PUB_NODE_URL!,
       proofServerUrl: env.MIDNIGHT_PUB_PROOF_SERVER_URL!,
       indexerUrl: env.MIDNIGHT_PUB_INDEXER_URL!,

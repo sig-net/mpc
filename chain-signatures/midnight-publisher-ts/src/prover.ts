@@ -2,10 +2,9 @@
 // call's prover key, verifier key and IR live in the managed dir and travel in the
 // payload. Proving happens before the wallet balances: balancing prices the proof sizes.
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-
-import { hashVerifierKey, parseContractKeyLocation } from "@midnight-ntwrk/compact-js";
+import { parseContractKeyLocation } from "@midnight-ntwrk/compact-js";
+import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
+import { ZKConfigRegistry, zkConfigToProvingKeyMaterial } from "@midnight-ntwrk/midnight-js-types";
 import {
   CostModel,
   createCheckPayload,
@@ -22,6 +21,7 @@ import {
 import { expectedVk } from "@sig-net/midnight-contract";
 import { signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
+import { withDeadline } from "./deadline.js";
 import { PublisherError } from "./errors.js";
 import { RESPOND_CIRCUITS, type RespondCircuit } from "./intent.js";
 
@@ -31,38 +31,6 @@ const BUILTIN_PREFIX = "midnight/";
 
 function isRespondCircuit(circuitId: string): circuitId is RespondCircuit {
   return RESPOND_CIRCUITS.some((circuit) => circuit === circuitId);
-}
-
-async function keyMaterial(
-  circuit: RespondCircuit,
-  verifierKeyHash: string,
-): Promise<ProvingKeyMaterial> {
-  const artifact = async (directory: string, extension: string): Promise<Uint8Array> => {
-    try {
-      return Uint8Array.from(
-        await readFile(join(signetContractManagedPath, directory, `${circuit}.${extension}`)),
-      );
-    } catch (cause) {
-      throw new PublisherError(
-        "contract_mismatch",
-        `the packaged contract has no ${extension} for circuit \`${circuit}\``,
-        { cause },
-      );
-    }
-  };
-
-  const [proverKey, verifierKey, ir] = await Promise.all([
-    artifact("keys", "prover"),
-    artifact("keys", "verifier"),
-    artifact("zkir", "bzkir"),
-  ]);
-  if (hashVerifierKey(verifierKey) !== verifierKeyHash) {
-    throw new PublisherError(
-      "contract_mismatch",
-      `the packaged verifier key for circuit \`${circuit}\` does not match the intent`,
-    );
-  }
-  return { proverKey, verifierKey, ir };
 }
 
 async function post(
@@ -86,6 +54,7 @@ async function post(
 }
 
 export function provingProvider(proofServerUrl: string, signal: AbortSignal): ProvingProvider {
+  const registry = new ZKConfigRegistry([new NodeZkConfigProvider(signetContractManagedPath)]);
   const material = async (keyLocation: string): Promise<ProvingKeyMaterial | undefined> => {
     if (keyLocation.startsWith(BUILTIN_PREFIX)) return undefined;
     const location = parseContractKeyLocation(keyLocation);
@@ -99,7 +68,15 @@ export function provingProvider(proofServerUrl: string, signal: AbortSignal): Pr
         `the intent names an unsupported key location \`${keyLocation}\``,
       );
     }
-    return keyMaterial(location.circuitId, location.verifierKeyHash);
+    try {
+      return zkConfigToProvingKeyMaterial(await registry.get(location));
+    } catch (cause) {
+      throw new PublisherError(
+        "contract_mismatch",
+        `the packaged artifacts for circuit \`${location.circuitId}\` do not match the intent or compiler manifest`,
+        { cause },
+      );
+    }
   };
 
   return {
@@ -133,20 +110,13 @@ export async function proveTransaction(
     "proving_timeout",
     `proving exceeded its ${proofBudgetMs} ms budget; no wallet operation started and retry is safe`,
   );
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(timeoutError);
-      controller.abort(timeoutError);
-    }, proofBudgetMs);
-  });
-  try {
-    const proving = transaction.prove(
+  return withDeadline(
+    transaction.prove(
       provingProvider(proofServerUrl, controller.signal),
       CostModel.initialCostModel(),
-    );
-    return await Promise.race([proving, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
+    ),
+    proofBudgetMs,
+    timeoutError,
+    () => controller.abort(timeoutError),
+  );
 }

@@ -7,16 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContractOperation, ContractState } from "@midnight-ntwrk/compact-runtime";
 import { ContractCall, type Proofish } from "@midnightntwrk/ledger-v9";
+import { signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
 import { buildIntent } from "../src/intent.js";
-import {
-  calledEntryPoint,
-  decodeIntent,
-  initialSingletonStateHex,
-  managedDir,
-  respondInput,
-  toHex,
-} from "./support.js";
+import { decodeIntent } from "../src/submit.js";
+import { calledEntryPoint, initialSingletonStateHex, respondInput, toHex } from "./support.js";
 
 const CONTRACT_STATE = await initialSingletonStateHex();
 
@@ -83,7 +78,9 @@ describe("buildIntent", () => {
   it("names the mismatch when the deployed respond is absent, proofless, or differently keyed", async () => {
     const differing = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
     const operation = differing.operation("respond")!;
-    operation.verifierKey = readFileSync(`${managedDir()}/keys/respondBidirectional.verifier`);
+    operation.verifierKey = readFileSync(
+      `${signetContractManagedPath}/keys/respondBidirectional.verifier`,
+    );
     differing.setOperation("respond", operation);
     const proofless = ContractState.deserialize(Buffer.from(CONTRACT_STATE, "hex"));
     proofless.setOperation("respond", new ContractOperation());

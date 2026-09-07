@@ -18,7 +18,8 @@ import type { BalancingRecipe } from "../src/wallet.js";
 
 type UnboundRecipe = Awaited<ReturnType<WalletFacade["balanceUnboundTransaction"]>>;
 
-const ENDPOINTS = {
+const NODE = {
+  networkId: "undeployed" as const,
   nodeUrl: "http://127.0.0.1:9944",
   proofServerUrl: "http://127.0.0.1:6300",
   indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
@@ -54,12 +55,9 @@ describe("openFundingWallet", () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
 
-    await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+    await openFundingWallet(KEYS, NODE);
 
-    expect(sdk.initialiseWalletFacade).toHaveBeenCalledWith(KEYS, {
-      ...ENDPOINTS,
-      networkId: "undeployed",
-    });
+    expect(sdk.initialiseWalletFacade).toHaveBeenCalledWith(KEYS, NODE);
     expect(facade.start).toHaveBeenCalledExactlyOnceWith(
       KEYS.shieldedSecretKeys,
       KEYS.dustSecretKey,
@@ -72,9 +70,7 @@ describe("openFundingWallet", () => {
     vi.mocked(facade.start).mockRejectedValueOnce(new Error("dust wallet unavailable"));
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
 
-    await expect(openFundingWallet(KEYS, "undeployed", ENDPOINTS)).rejects.toThrow(
-      "dust wallet unavailable",
-    );
+    await expect(openFundingWallet(KEYS, NODE)).rejects.toThrow("dust wallet unavailable");
 
     expect(facade.stop).toHaveBeenCalledOnce();
   });
@@ -84,7 +80,7 @@ describe("openFundingWallet", () => {
     const dustState = new Subject<DustStateStub>();
     const facade = stubFacade(dustState);
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, NODE);
 
     const timeoutOutcome = wallet.requireReady(25).then(
       () => undefined,
@@ -119,7 +115,7 @@ describe("openFundingWallet", () => {
   it("submits through the facade, which tracks the pending transaction, and stops it on close", async () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, NODE);
     const tx = { identifiers: () => ["ab".repeat(32)] } as unknown as FinalizedTransaction;
 
     await expect(wallet.submitTx(tx)).resolves.toEqual({ txId: "ab".repeat(32) });
@@ -141,7 +137,7 @@ describe("openFundingWallet", () => {
     vi.mocked(facade.signRecipe).mockResolvedValueOnce(signed);
     vi.mocked(facade.finalizeRecipe).mockResolvedValueOnce(finalized);
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
-    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+    const wallet = await openFundingWallet(KEYS, NODE);
     const tx = { unbound: true } as unknown as UnboundTransaction;
     const before = Date.now();
 
