@@ -29,14 +29,9 @@ on:
       # Midnight crate, TS publisher fixtures, and tests.
       - "chain-signatures/chain-midnight/**"
       - "chain-signatures/midnight-publisher-ts/**"
-      - "integration-tests/src/midnight.rs"
-      - "integration-tests/tests/cases/midnight_stream.rs"
+      - "integration-tests/{src,tests}/**midnight**"
       # Shared integration-test harness.
-      - "integration-tests/src/lib.rs"
-      - "integration-tests/src/cluster/**"
-      - "integration-tests/tests/lib.rs"
-      - "integration-tests/tests/cases/mod.rs"
-      - "integration-tests/Cargo.toml"
+      - "integration-tests/{Cargo.toml,src/lib.rs,src/cluster/**,src/mpc_fixture/**,tests/lib.rs,tests/cases/mod.rs}"
       # The e2e test cross-signs over Ethereum via anvil + the eth contract.
       - "chain-signatures/contract-eth/**"
   merge_group:

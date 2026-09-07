@@ -26,19 +26,11 @@ on:
       - "Cargo.lock"
       - "justfile"
       - ".config/nextest.toml"
-      # Canton crate, tests, and fixtures.
+      # Canton crate, tests, and fixtures (matches any *canton* file at any depth).
       - "chain-signatures/chain-canton/**"
-      - "integration-tests/src/canton.rs"
-      - "integration-tests/src/canton_auth.rs"
-      - "integration-tests/tests/cases/canton.rs"
-      - "integration-tests/tests/cases/canton_stream.rs"
-      - "integration-tests/fixtures/canton/**"
+      - "integration-tests/{src,fixtures,tests}/**canton**"
       # Shared integration-test harness.
-      - "integration-tests/src/lib.rs"
-      - "integration-tests/src/cluster/**"
-      - "integration-tests/tests/lib.rs"
-      - "integration-tests/tests/cases/mod.rs"
-      - "integration-tests/Cargo.toml"
+      - "integration-tests/{Cargo.toml,src/lib.rs,src/cluster/**,src/mpc_fixture/**,tests/lib.rs,tests/cases/mod.rs}"
       # Canton tests cross-sign over Ethereum via anvil + the eth contract.
       - "chain-signatures/contract-eth/**"
   merge_group:
