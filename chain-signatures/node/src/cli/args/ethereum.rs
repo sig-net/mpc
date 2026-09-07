@@ -2,6 +2,8 @@ use anyhow::Context as _;
 use mpc_chain_ethereum::EthConfig;
 use secrecy::{ExposeSecret, SecretString};
 
+const DEFAULT_REFRESH_FINALIZED_INTERVAL_MS: u64 = 10_000;
+
 // Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
@@ -68,7 +70,7 @@ pub struct EthArgs {
     #[clap(
         long,
         env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
-        default_value = "10000"
+        default_value_t = DEFAULT_REFRESH_FINALIZED_INTERVAL_MS
     )]
     pub eth_refresh_finalized_interval: u64,
     /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
@@ -78,14 +80,15 @@ pub struct EthArgs {
 }
 
 impl EthArgs {
+    /// Empty when Ethereum is not configured.
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(10);
-        if let Some(eth_account_sk) = self.eth_account_sk {
-            args.extend([
-                "--eth-account-sk".to_string(),
-                eth_account_sk.expose_secret().to_string(),
-            ]);
-        }
+        let Some(eth_account_sk) = self.eth_account_sk else {
+            return Vec::new();
+        };
+        let mut args = vec![
+            "--eth-account-sk".to_string(),
+            eth_account_sk.expose_secret().to_string(),
+        ];
         if let Some(eth_consensus_rpc_http_url) = self.eth_consensus_rpc_http_url {
             args.extend([
                 "--eth-consensus-rpc-http-url".to_string(),
@@ -196,7 +199,7 @@ impl EthArgs {
                 eth_contract_address: None,
                 eth_network: None,
                 eth_helios_data_path: None,
-                eth_refresh_finalized_interval: 0,
+                eth_refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL_MS,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
             },

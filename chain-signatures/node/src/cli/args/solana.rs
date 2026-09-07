@@ -20,11 +20,12 @@ pub struct SolArgs {
 }
 
 impl SolArgs {
+    /// Empty when Solana is not configured.
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(6);
-        if let Some(sol_account_sk) = self.sol_account_sk {
-            args.extend(["--sol-account-sk".to_string(), sol_account_sk]);
-        }
+        let Some(sol_account_sk) = self.sol_account_sk else {
+            return Vec::new();
+        };
+        let mut args = vec!["--sol-account-sk".to_string(), sol_account_sk];
         if let Some(sol_rpc_http_url) = self.sol_rpc_http_url {
             args.extend(["--sol-rpc-http-url".to_string(), sol_rpc_http_url]);
         }
