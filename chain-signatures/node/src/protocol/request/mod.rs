@@ -1,4 +1,4 @@
-use crate::protocol::signature::{GenerateCtx, PendingPresignature, SignError, SignGenerator};
+use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 
 use crate::backlog::Backlog;
 use crate::config::Config;

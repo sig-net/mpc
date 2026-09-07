@@ -7,10 +7,14 @@ use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
 
+use crate::storage::presignature_storage::PresignatureTaken;
+
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
+    /// Our reservation when we are the proposer; `None` for a deliberator,
+    /// whose copy is taken from storage when generation starts.
     pub presignature: Option<PresignatureReservation>,
     pub accepted_participants: Vec<Participant>,
 }
@@ -24,7 +28,8 @@ pub enum SignPhase {
     /// Agree on the presignature and participant set: the proposer collects
     /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
     Posit(PositPhase),
-    /// Commit the reserved presignature and run the signing protocol to completion.
+    /// Take the agreed presignature (commit our reservation, or wait for our
+    /// copy in storage) and run the signing protocol to completion.
     Generating(GeneratingPhase),
     /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
@@ -62,20 +67,9 @@ impl GeneratingPhase {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(reservation) = self.presignature.take() {
-            // Commit: actually remove from Redis now that posit succeeded and generation starts
-            match reservation.commit().await {
-                Some(taken) => PendingPresignature::Available(Box::new(taken)),
-                None => {
-                    return state.reorganize("failed to commit presignature reservation");
-                }
-            }
-        } else {
-            PendingPresignature::InStorage(
-                self.presignature_id,
-                self.proposer,
-                ctx.presignatures.clone(),
-            )
+        let taken = match self.take_presignature(ctx).await {
+            Ok(taken) => taken,
+            Err(reason) => return state.reorganize(&reason),
         };
 
         // Create and run signature generator, which will drive the protocol to completion.
@@ -84,7 +78,7 @@ impl GeneratingPhase {
             &gen_ctx,
             self.proposer,
             Arc::clone(&state.request),
-            presignature_pending,
+            taken,
             self.accepted_participants.clone(),
         )
         .await
@@ -115,6 +109,35 @@ impl GeneratingPhase {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
         }
+    }
+
+    /// Resolve the agreed presignature to one we hold. The proposer commits its
+    /// reservation, which removes the presignature from Redis now that posit
+    /// succeeded. A deliberator takes its copy from storage, waiting for it up
+    /// to the generation timeout: we accepted the Propose knowing only that the
+    /// presignature exists or is still being generated.
+    async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
+        if let Some(reservation) = self.presignature.take() {
+            return reservation
+                .commit()
+                .await
+                .ok_or_else(|| "failed to commit presignature reservation".to_string());
+        }
+
+        let id = self.presignature_id;
+        let timeout = Duration::from_millis(ctx.cfg.signature.generation_timeout);
+        // TODO: we can make storage wait for presignature to be available instead of here
+        tokio::time::timeout(timeout, async {
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                interval.tick().await;
+                if let Some(taken) = ctx.presignatures.take(id, self.proposer).await {
+                    break taken;
+                }
+            }
+        })
+        .await
+        .map_err(|_| format!("timeout ({timeout:?}) waiting for presignature {id} to be available"))
     }
 
     /// Reject a `Propose` that arrives while we are already generating; drop
