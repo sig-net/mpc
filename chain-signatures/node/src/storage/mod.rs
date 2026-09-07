@@ -24,7 +24,7 @@ pub struct Options {
     #[clap(long, env("MPC_GCP_PROJECT_ID"))]
     pub gcp_project_id: String,
     /// GCP Secret Manager ID that will be used to load/store the node's secret key share.
-    #[clap(long, env("MPC_SK_SHARE_SECRET_ID"), requires_all=["gcp_project_id"])]
+    #[clap(long, env("MPC_SK_SHARE_SECRET_ID"))]
     pub sk_share_secret_id: Option<String>,
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
