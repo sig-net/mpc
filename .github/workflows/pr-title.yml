@@ -1,0 +1,27 @@
+name: Lint PR Title
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    name: Conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      # Using default settings:
+      # types: feat, fix, chore, docs, style, refactor, perf, test, build, ci, revert
+      # requireScope: false, disallowScopes: none, subjectPattern: none
+      # wip: false (draft PRs are VALIDATED)
+      # More configuration options - https://github.com/amannn/action-semantic-pull-request#configuration
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
