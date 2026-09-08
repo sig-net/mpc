@@ -1,20 +1,5 @@
 name: Unit
 on:
-  push:
-    branches:
-      - main
-      - develop
-    paths:
-      - ".github/workflows/unit.yml"
-      - "chain-signatures/**/*.rs"
-      - "chain-signatures/Cargo.*"
-      - "integration-tests/**/*.rs"
-      - "chain-signatures/contract-eth/**/*.sol"
-      - "chain-signatures/contract-eth/**/*.js"
-      - "signet-crypto/**"
-      - "signet-primitives/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
   pull_request:
   merge_group:
 

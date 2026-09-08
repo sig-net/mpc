@@ -1,12 +1,6 @@
 name: Integration
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - integration-tests/**
-      - chain-signatures/**
   pull_request:
   merge_group:
 

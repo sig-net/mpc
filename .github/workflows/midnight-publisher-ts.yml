@@ -12,14 +12,6 @@
 name: Midnight Publisher TS
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - ".github/workflows/midnight-publisher-ts.yml"
-      - "Dockerfile"
-      - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
   pull_request:
   merge_group:
 
