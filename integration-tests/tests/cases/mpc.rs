@@ -215,14 +215,9 @@ async fn test_basic_sign() {
 
     let timeout = Duration::from_secs(10);
 
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -246,12 +241,9 @@ async fn test_sign_task_survives_resharing() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -273,12 +265,9 @@ async fn test_sign_request_during_resharing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
 fn sign_request(seed: u8) -> SignCommand {
@@ -398,13 +387,8 @@ async fn test_threshold_change_via_mpc_governance() {
         .assert_presignatures(1, Duration::from_secs(120))
         .await;
     network.broadcast(&sign_request(88)).await;
-    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
+    let actions = network.assert_publish_actions(1, Duration::from_secs(30)).await;
     assert_eq!(actions.len(), 1);
-    assert!(actions
-        .iter()
-        .next()
-        .unwrap()
-        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
@@ -479,7 +463,7 @@ async fn test_sign_adequate_stockpile() {
     // Wait for all signatures to be produced
     let timeout = Duration::from_secs(60);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     assert_eq!(
@@ -487,14 +471,6 @@ async fn test_sign_adequate_stockpile() {
         NUM_SIGN_REQUESTS as usize,
         "should have exactly {NUM_SIGN_REQUESTS} signatures"
     );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Count final presignatures to verify consumption
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -559,7 +535,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Use a generous timeout since contention may slow things down
     let timeout = Duration::from_secs(90);
     let actions = network
-        .assert_actions(min_expected_signatures, timeout)
+        .assert_publish_actions(min_expected_signatures, timeout)
         .await;
 
     // Count final presignatures
@@ -572,20 +548,6 @@ async fn test_sign_limited_stockpile_contention() {
         presignatures_consumed,
         "contention test completed"
     );
-
-    assert!(
-        actions.len() >= min_expected_signatures,
-        "should have produced at least {min_expected_signatures} signatures, got {}",
-        actions.len()
-    );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify no excessive presignature burning
     // Consumed should be <= signatures produced + small margin for contention
@@ -676,7 +638,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     tracing::info!("waiting for remaining signatures");
     let final_timeout = Duration::from_secs(60);
     let final_actions = network
-        .assert_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
+        .assert_publish_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
         .await;
 
     tracing::info!(
@@ -690,14 +652,6 @@ async fn test_sign_requests_wait_for_presignatures() {
         "should complete all {} sign requests",
         TOTAL_SIGN_REQUESTS
     );
-
-    // Verify all actions are publish actions
-    for action_str in &final_actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 }
 
 /// Test sign request contention with 5 nodes.
@@ -752,7 +706,7 @@ async fn test_sign_contention_5_nodes() {
     // Wait for all signatures - allow more time for 5-node consensus
     let timeout = Duration::from_secs(120);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -772,13 +726,6 @@ async fn test_sign_contention_5_nodes() {
         "should have exactly {} signatures",
         NUM_SIGN_REQUESTS
     );
-
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify 1:1 presignature consumption (with small tolerance for timing)
     assert!(
@@ -915,7 +862,7 @@ async fn test_sign_no_presignature_waste() {
     }
 
     let actions = network
-        .assert_actions(initial_presignatures, Duration::from_secs(120))
+        .assert_publish_actions(initial_presignatures, Duration::from_secs(120))
         .await;
 
     assert_eq!(
@@ -923,13 +870,6 @@ async fn test_sign_no_presignature_waste() {
         initial_presignatures,
         "should have exactly {initial_presignatures} signatures"
     );
-
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify every node has zero presignatures remaining.
     for node in &network.nodes {
@@ -1061,17 +1001,12 @@ async fn test_sign_missing_presignature() {
     // expectation: the node without the presignature will reject a posit, or if
     // they are proposer, a timeout will let the next proposer take over
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 /// Test that a node losing their presignatures locally doesn't prevent
@@ -1134,17 +1069,12 @@ async fn test_sign_missing_presignature_after_posits() {
     // posit, or if they are proposer, a timeout will let the next
     // proposer take over.
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -1233,7 +1163,9 @@ async fn test_signature_message_count() {
     network[1].sign_tx.send(request.clone()).await.unwrap();
     network[2].sign_tx.send(request.clone()).await.unwrap();
 
-    network.assert_actions(1, Duration::from_secs(10)).await;
+    network
+        .assert_publish_actions(1, Duration::from_secs(10))
+        .await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;
