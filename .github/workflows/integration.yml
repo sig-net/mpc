@@ -1,12 +1,6 @@
 name: Integration
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - integration-tests/**
-      - chain-signatures/**
   pull_request:
   merge_group:
 
@@ -77,7 +71,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -176,7 +170,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -237,7 +231,7 @@ jobs:
         with:
           shared-key: anvil-integration-test
           cache-targets: true
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
