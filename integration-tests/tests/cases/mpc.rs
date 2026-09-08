@@ -201,10 +201,7 @@ async fn test_sign_request_during_resharing() {
 }
 
 fn sign_request(seed: u32) -> SignCommand {
-    SignCommand::Request(Arc::new(super::helpers::sign_request(
-        seed,
-        Chain::NEAR,
-    )))
+    SignCommand::Request(Arc::new(super::helpers::sign_request(seed, Chain::NEAR)))
 }
 
 /// Drive the network through a threshold-change resharing via the real
@@ -315,7 +312,9 @@ async fn test_threshold_change_via_mpc_governance() {
         .assert_presignatures(1, Duration::from_secs(120))
         .await;
     network.broadcast(&sign_request(88)).await;
-    let actions = network.assert_publish_actions(1, Duration::from_secs(30)).await;
+    let actions = network
+        .assert_publish_actions(1, Duration::from_secs(30))
+        .await;
     assert_eq!(actions.len(), 1);
 }
 
