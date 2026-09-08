@@ -42,7 +42,8 @@ struct AxumState {
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
-    #[allow(dead_code)] // used by debug-page
+    /// Only used to label the debug page.
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
 }
