@@ -4,22 +4,15 @@ import { Trend, Rate, Counter } from 'k6/metrics';
 
 // Load test for the Solana -> Ethereum bidirectional round trip.
 //
-// Separate from k6-load-test.js because the endpoint is asynchronous. /ping
-// answers with the finished sign request, so http_req_duration measures it;
 // POST /sign_bidirectional answers 202 with a job id in milliseconds and the
-// round trip settles tens of minutes later. Thresholds on the built-in HTTP
-// metrics would pass while every round trip failed, so everything worth
-// asserting here is a custom metric fed by the job's own record.
-//
-// One iteration is one round trip: submit, then poll until the job reaches a
-// terminal state. Iterations are therefore long — budget for the respond leg,
-// not for an HTTP call.
+// round trip settles tens of minutes later, so thresholds on the built-in HTTP
+// metrics would pass while every round trip failed. One iteration is one round
+// trip: submit, then poll until the job reaches a terminal state.
 
 const BASE_URL = __ENV.LT_PINGER_URL || 'https://contract-ping.sig.network';
 
-// The service reports its own phase timings, so these are its numbers rather
-// than wall-clock around our polling, which would fold the poll interval into
-// whichever phase happened to end between two polls.
+// The service's own phase timings, not wall-clock around our polling, which
+// would fold the poll interval into whichever phase ended between two polls.
 const leaseWait = new Trend('bidi_lease_wait_ms', true);
 const signature = new Trend('bidi_signature_ms', true);
 const confirmation = new Trend('bidi_confirmation_ms', true);
@@ -28,35 +21,28 @@ const total = new Trend('bidi_total_ms', true);
 
 const success = new Rate('bidi_success');
 
-// Failures carry the service's own reason as a tag. The twelve reasons are
-// distinct diagnoses — a respond_timeout is the MPC not reading results back,
-// all_workers_underfunded is a treasury problem — and collapsing them into an
-// error count loses the only part that says what to do next.
+// Tagged with the service's own failure reason: respond_timeout and
+// all_workers_underfunded call for different remedies.
 const failures = new Counter('bidi_failures');
 
-// A rejection is not a failed round trip: the job never started. Kept apart so
-// a saturated service does not read as a broken one, and split by cause, since
-// the arrival cap and the capacity ceilings call for different remedies.
+// A rejection is not a failed round trip — the job never started — so a
+// saturated service does not read as a broken one.
 const rejectedRate = new Counter('bidi_rejected_rate_limit');
 const rejectedCapacity = new Counter('bidi_rejected_capacity');
 
 const pollSeconds = Number(__ENV.LT_POLL_SECONDS || 15);
 const jobTimeoutSeconds = Number(__ENV.LT_JOB_TIMEOUT_SECONDS || 2400);
 
-// The service caps arrivals at ten a minute and rejects the rest, so rates are
-// expressed per minute here rather than per second. Anything above that cap
-// measures the 429 handler instead of the flow.
+// Rates are per minute because the service caps arrivals at ten a minute;
+// above that this would measure the 429 handler.
 //
-// preAllocatedVUs follows from Little's law: a VU is held for the whole round
-// trip, so concurrency is arrival rate times round-trip duration. At 1/min
-// against a ~35 minute trip that is ~35 VUs busy at steady state.
+// preAllocatedVUs follows from Little's law — a VU is held for the whole round
+// trip — so 1/min against a ~35 minute trip is ~35 VUs busy at steady state.
 //
-// gracefulStop is what lets the last jobs finish. k6 abandons running
-// iterations shortly after the duration elapses, and with a round trip this
-// long the default 30s would discard most of the run's respond measurements —
-// so a test configured for 1h occupies the runner for rather longer.
+// gracefulStop is what lets the last jobs finish; the default 30s would
+// discard most of the run's respond measurements.
 const strategies = {
-  rate_1_min: {
+  rpm_1: {
     scenarios: {
       bidirectional: {
         executor: 'constant-arrival-rate',
@@ -67,15 +53,13 @@ const strategies = {
         gracefulStop: '45m',
       },
     },
-    // Only the success rate is asserted. A count threshold cannot tell four
-    // failures out of four from four out of four hundred, so it passes exactly
-    // when a short run has gone entirely wrong. bidi_failures stays a counter,
-    // read by its reason tag rather than gated on.
+    // Only the success rate is asserted: a count threshold cannot tell four
+    // failures out of four from four out of four hundred.
     thresholds: {
       bidi_success: ['rate>0.95'],
     },
   },
-  rate_6_min: {
+  rpm_6: {
     scenarios: {
       bidirectional: {
         executor: 'constant-arrival-rate',
@@ -116,6 +100,8 @@ export const options = (() => {
 
 const config = () => {
   const env = __ENV.LT_CHAIN_ENV;
+  // Not a CI input: the modes differ only in gas and in whether the respond
+  // value is decoded or synthesized, neither of which this test measures.
   const mode = __ENV.LT_MODE || 'eth_self_transfer';
   const apiKey = __ENV.LT_PINGER_API_KEY;
   if (!env || !apiKey) {
@@ -135,8 +121,7 @@ const headers = apiKey => ({
  * Refuse to start against a pool that cannot broadcast.
  *
  * Every job spends gas from a derived address, and an underfunded pool fails
- * each one in seconds. Without this the run still reports that, but only after
- * an hour of submissions and as a wall of failures rather than one line.
+ * each one in seconds — otherwise reported only after an hour of submissions.
  */
 export function setup() {
   const { env, apiKey } = config();
@@ -159,8 +144,7 @@ export function setup() {
   }
 
   // Any shortfall, not merely a total one: the address count sets concurrency,
-  // so a partly funded pool quietly measures a narrower pool at a lower
-  // arrival rate than the run claims to be applying.
+  // so a partly funded pool measures a narrower pool than the run claims.
   if (short.length > 0) {
     fail(
       `${short.length}/${workers.length} addresses underfunded; fund them before running`
@@ -178,9 +162,8 @@ export default function () {
     { headers: headers(apiKey) }
   );
 
-  // 429 is a healthy service saying it is full. Recorded and abandoned rather
-  // than retried: the arrival rate is the scenario's to control, and retrying
-  // inside an iteration would silently exceed the rate being tested.
+  // 429 is a healthy service saying it is full. Not retried: retrying inside
+  // an iteration would silently exceed the arrival rate being tested.
   if (submit.status === 429) {
     const limit = submit.json('limit');
     if (limit) {
@@ -213,8 +196,7 @@ export default function () {
       tags: { name: 'GET /sign_bidirectional/{jobId}' },
     });
     if (view.status !== 200) {
-      // A poll can fail transiently without the job being lost, so keep
-      // polling until the deadline rather than abandoning a live round trip.
+      // A poll can fail transiently without the job being lost.
       console.warn(`poll ${jobId}: ${view.status}`);
       continue;
     }
@@ -241,8 +223,7 @@ export default function () {
   }
 
   // Distinct from the service's own respond_timeout: this is the driver giving
-  // up while the job may still be live, which is a statement about
-  // LT_JOB_TIMEOUT_SECONDS rather than about the flow.
+  // up while the job may still be live, so it judges LT_JOB_TIMEOUT_SECONDS.
   success.add(false);
   failures.add(1, { reason: 'driver_timeout' });
   console.error(`job ${jobId} still running after ${jobTimeoutSeconds}s`);

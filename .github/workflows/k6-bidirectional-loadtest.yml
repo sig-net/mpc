@@ -1,28 +1,20 @@
 name: k6 Bidirectional Load Test
 
-# Drives the Solana -> Ethereum bidirectional round trip against the deployed
-# pinger, using loadtests/k6-bidirectional.js.
+# Drives the Solana -> Ethereum bidirectional round trip via
+# loadtests/k6-bidirectional.js.
 #
-# Separate from k6-ci-loadtest.yml rather than a branch inside it. That workflow
-# is shaped around /ping throughout — LT_CHAIN, LT_CHECK_SIGNATURE, the chain
-# tag, and a normalize step carrying three sets of defaults — none of which mean
-# anything for this flow. The branching would be larger than the file.
-#
-# Unscheduled on purpose. Every job broadcasts an Ethereum transaction and
-# spends gas from derived addresses that only a funding sweep refills, so a
-# recurring run is a standing cost that has to be chosen. Adding a schedule is
-# also a claim about respond-leg timings that no green run has established yet;
-# measure first, then decide the cadence and the thresholds together.
+# Dispatch only: every job broadcasts an Ethereum transaction and spends gas
+# from derived addresses that only a funding sweep refills.
 on:
   workflow_dispatch:
     inputs:
       lt_strategy:
-        description: Arrival rate (per minute — the service caps at 10)
+        description: Arrival rate per minute (the service caps at 10)
         type: choice
         options:
-          - rate_1_min
-          - rate_6_min
-        default: rate_1_min
+          - rpm_1
+          - rpm_6
+        default: rpm_1
         required: true
       lt_duration:
         description: How long to submit for, not how long the run takes
@@ -41,25 +33,13 @@ on:
           - testnet
         default: dev
         required: true
-      lt_mode:
-        description: Transaction mode
-        type: choice
-        options:
-          - eth_self_transfer
-          - erc20_zero_transfer
-        default: eth_self_transfer
-        required: true
 
 permissions:
   contents: read
 
-# The derived addresses are shared state: two runs would lease the same ones and
-# collide on their nonces. Queued rather than cancelled, since cancelling
-# mid-flight abandons jobs whose Ethereum transaction is already paid for.
-#
-# This only serialises runs of this workflow. The same addresses are also
-# reachable from contract-pinger's own workflows and from anything driving the
-# deployed service directly, and no group spans repositories.
+# The derived addresses are shared state: concurrent runs collide on their
+# nonces. Queued rather than cancelled, since cancelling mid-flight abandons
+# jobs whose Ethereum transaction is already paid for.
 concurrency:
   group: k6-bidirectional-loadtest
   cancel-in-progress: false
@@ -67,9 +47,8 @@ concurrency:
 jobs:
   loadtest:
     runs-on: ubuntu-latest
-    # Submission runs for lt_duration, then the scenario's 45m gracefulStop lets
-    # jobs still in flight finish and be measured. A 1h submission therefore
-    # occupies the runner for up to 1h45m; the rest is headroom for setup.
+    # Submission runs for lt_duration, then the scenario's 45m gracefulStop
+    # lets in-flight jobs finish, so a 1h run occupies the runner for ~1h45m.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
@@ -86,18 +65,9 @@ jobs:
 
       - uses: grafana/setup-k6-action@v1
 
-      # k6 runs locally rather than through run-k6-action, so its exit code is
-      # this step's exit code. The script's thresholds are the verdict, and a
-      # wrapper that reports success once a test has *started* would make a
-      # failing load test green — which is exactly what --exit-on-running does
-      # to the /ping workflow's push and pull_request runs today.
-      #
-      # `k6 run` is the last command in the step and pipefail is set, so the
-      # tee does not mask a threshold failure.
-      #
-      # The script's setup() reads the worker balances first and aborts if any
-      # derived address is short: the path count sets concurrency, so a partly
-      # funded pool measures a narrower pool than the run claims to apply.
+      # Run k6 directly, not through run-k6-action: the script's thresholds are
+      # the verdict, and --exit-on-running reports success once a test has
+      # merely started. `k6 run` is last in the step, so tee cannot mask it.
       - name: Run k6
         run: |
           set -euo pipefail
@@ -105,7 +75,6 @@ jobs:
         env:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ inputs.environment }}
-          LT_MODE: ${{ inputs.lt_mode }}
           LT_STRATEGY: ${{ inputs.lt_strategy }}
           LT_DURATION: ${{ inputs.lt_duration }}
 
@@ -116,13 +85,11 @@ jobs:
             echo "## k6 Bidirectional Load Test"
             echo
             echo "- Network: \`${{ inputs.environment }}\`"
-            echo "- Mode: \`${{ inputs.lt_mode }}\`"
             echo "- Rate: \`${{ inputs.lt_strategy }}\` submitting for \`${{ inputs.lt_duration }}\`"
             echo
             if [ -f k6-bidirectional.log ]; then
               echo '```'
-              # Thresholds, the custom bidi_* metrics and the phase breakdown
-              # all live in the trailing summary block.
+              # Thresholds and the bidi_* metrics live in the trailing summary.
               sed -n '/█ THRESHOLDS/,$p' k6-bidirectional.log | head -60
               echo '```'
             fi
