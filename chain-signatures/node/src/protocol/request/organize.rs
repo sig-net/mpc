@@ -11,7 +11,7 @@ impl OrganizingPhase {
     /// Seeded by request entropy so all nodes pick the same proposer.
     ///
     /// Both operands are reduced before adding: `round` comes from
-    /// `highest_seen_round`, which a peer sets, so it can be arbitrarily large.
+    /// the highest round a peer has shown us, so it can be arbitrarily large.
     fn proposer_per_round(
         round: usize,
         participants: &[Participant],

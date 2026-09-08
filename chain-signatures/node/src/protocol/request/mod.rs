@@ -102,7 +102,7 @@ fn round_timeout(round: usize) -> Duration {
         return ORGANIZE_POSIT_TIMEOUT;
     }
     // Saturates at the ceiling within ~16 iterations, which bounds the loop:
-    // `round` derives from `highest_seen_round`, so a peer can make it huge.
+    // `round` derives from the highest round a peer has shown us, so a peer can make it huge.
     let mut timeout = ROUND_TIMEOUT_FLOOR;
     for _ in 1..round {
         if timeout >= ROUND_TIMEOUT_CEILING {
