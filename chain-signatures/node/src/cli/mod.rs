@@ -67,6 +67,10 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
+        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
+        /// `integration-tests`). Labels logs and telemetry.
+        #[arg(long, env("MPC_ENV"))]
+        env: String,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
@@ -125,6 +129,7 @@ impl Cli {
             Cli::Start {
                 near_rpc,
                 account_id,
+                env,
                 mpc_contract_id,
                 account_sk,
                 web_port,
@@ -150,6 +155,8 @@ impl Cli {
                     mpc_contract_id.to_string(),
                     "--account-id".to_string(),
                     account_id.to_string(),
+                    "--env".to_string(),
+                    env,
                     "--account-sk".to_string(),
                     account_sk.to_string(),
                     "--cipher-sk".to_string(),
@@ -194,6 +201,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             web_port,
             mpc_contract_id,
             account_id,
+            env,
             account_sk,
             cipher_sk,
             sign_sk,
@@ -209,7 +217,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
-            let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
+            let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
             crate::metrics::init_metrics(
                 &account_id,
@@ -251,7 +259,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            if storage_options.env == "integration-tests" {
+            if env == "integration-tests" {
                 let rpc_client = near_fetch::Client::new(&near_rpc);
                 mpc_chain_near::run(
                     &mpc_contract_id,

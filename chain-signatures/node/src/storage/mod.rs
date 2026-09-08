@@ -17,9 +17,6 @@ pub const STORAGE_VERSION: &str = "v12";
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "storage_options")]
 pub struct Options {
-    /// env used to differentiate among environments.
-    #[clap(long, env("MPC_ENV"))]
-    pub env: String,
     /// GCP project ID.
     #[clap(long, env("MPC_GCP_PROJECT_ID"))]
     pub gcp_project_id: String,
@@ -35,12 +32,7 @@ pub struct Options {
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec![
-            "--env".to_string(),
-            self.env,
-            "--gcp-project-id".to_string(),
-            self.gcp_project_id,
-        ];
+        let mut opts = vec!["--gcp-project-id".to_string(), self.gcp_project_id];
         if let Some(sk_share_secret_id) = self.sk_share_secret_id {
             opts.extend(vec!["--sk-share-secret-id".to_string(), sk_share_secret_id]);
         }
