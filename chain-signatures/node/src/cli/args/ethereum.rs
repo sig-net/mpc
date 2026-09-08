@@ -18,12 +18,12 @@ pub struct EthArgs {
     )]
     pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch, with or without the `0x` prefix
-    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
+    #[arg(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
 
     // -- RPC endpoints --
     /// Ethereum execution RPC URL
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_EXECUTION_RPC_HTTP_URL"),
         requires = "eth_account_sk"
@@ -32,7 +32,7 @@ pub struct EthArgs {
 
     // -- Helios light-client --
     /// Use Helios light client instead of direct RPC
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_LIGHT_CLIENT"),
         default_value = "false",
@@ -40,7 +40,7 @@ pub struct EthArgs {
     )]
     pub eth_light_client: bool,
     /// Ethereum consensus RPC URL (required when --eth-light-client is set)
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
         requires = "eth_account_sk"
@@ -49,7 +49,7 @@ pub struct EthArgs {
     /// The network that the eth indexer is running on: "sepolia"/"mainnet",
     /// or "anvil" for local dev chains (anvil never reports finalized blocks,
     /// so requests are emitted without waiting for finality).
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_NETWORK"),
         default_value = DEFAULT_ETH_NETWORK,
@@ -57,7 +57,7 @@ pub struct EthArgs {
     )]
     pub eth_network: String,
     /// Helios light client data path
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_HELIOS_DATA_PATH"),
         default_value = DEFAULT_HELIOS_DATA_PATH
@@ -66,7 +66,7 @@ pub struct EthArgs {
 
     // -- Behaviour --
     /// Refresh finalized block interval in milliseconds
-    #[clap(
+    #[arg(
         long,
         env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
         default_value = "10000"
@@ -74,7 +74,7 @@ pub struct EthArgs {
     pub eth_refresh_finalized_interval: u64,
     /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
     /// on live networks a reorg can orphan already-emitted sign requests.
-    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
+    #[arg(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
     pub eth_optimistic_requests: bool,
 }
 

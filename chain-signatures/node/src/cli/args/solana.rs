@@ -13,13 +13,13 @@ pub struct SolArgs {
     )]
     pub sol_account_sk: Option<String>,
     /// Solana RPC HTTP URL
-    #[clap(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
+    #[arg(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
     pub sol_rpc_http_url: Option<String>,
     /// The program address to watch
-    #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
+    #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
     /// Polling interval for the Solana indexer in milliseconds
-    #[clap(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "1000")]
+    #[arg(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "1000")]
     pub sol_poll_interval_ms: u64,
 }
 
