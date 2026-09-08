@@ -186,7 +186,6 @@ impl MidnightArgs {
             indexer: Default::default(),
         };
         config.validate()?;
-        config.publisher.validate_output_storage()?;
         Ok(Some(config))
     }
 

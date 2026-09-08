@@ -11,7 +11,7 @@ const PORT: u16 = 4443;
 pub struct GcsEmulator {
     pub endpoint: String,
     pub bucket: String,
-    container: ContainerAsync<GenericImage>,
+    _container: ContainerAsync<GenericImage>,
     client: Client,
 }
 
@@ -24,24 +24,17 @@ impl GcsEmulator {
             .start()
             .await
             .context("starting the GCS emulator")?;
-        let mut emulator = Self {
-            endpoint: String::new(),
+        let host = container.get_host().await?;
+        let host_port = container.get_host_port_ipv4(PORT).await?;
+        let endpoint = format!("http://{host}:{host_port}");
+        let emulator = Self {
+            endpoint,
             bucket: format!("mpc-test-{}", uuid::Uuid::new_v4()),
-            container,
+            _container: container,
             client: Client::builder().timeout(Duration::from_secs(5)).build()?,
         };
-        emulator.refresh_endpoint().await?;
         emulator.create_bucket().await?;
         Ok(emulator)
-    }
-
-    async fn refresh_endpoint(&mut self) -> anyhow::Result<()> {
-        self.endpoint = format!(
-            "http://{}:{}",
-            self.container.get_host().await?,
-            self.container.get_host_port_ipv4(PORT).await?
-        );
-        Ok(())
     }
 
     async fn create_bucket(&self) -> anyhow::Result<()> {

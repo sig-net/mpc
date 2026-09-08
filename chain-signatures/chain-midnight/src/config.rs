@@ -113,10 +113,17 @@ impl Default for PublisherConfig {
 /// than skipped, so a later `derive(Debug)` cannot silently restore the leak.
 impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PublisherConfig")
+        let mut debug = f.debug_struct("PublisherConfig");
+        debug
             .field("output_storage_bucket", &self.output_storage_bucket)
             .field("output_storage_prefix", &self.output_storage_prefix)
-            .field("output_storage_timeout", &self.output_storage_timeout)
+            .field("output_storage_timeout", &self.output_storage_timeout);
+        #[cfg(feature = "sandbox")]
+        debug.field(
+            "output_storage_emulator_endpoint",
+            &self.output_storage_emulator_endpoint,
+        );
+        debug
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
             .field("proof_server_url", &self.proof_server_url)
@@ -205,6 +212,7 @@ impl PublisherConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        self.validate_output_storage()?;
         let program = self
             .intent_gen_command
             .first()
@@ -360,9 +368,75 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sandbox")]
+    #[test]
+    fn debug_includes_the_output_storage_emulator_endpoint_without_exposing_the_funding_seed() {
+        let seed = "0123456789abcdef0123456789abcdef";
+        let endpoint = "http://127.0.0.1:4443";
+        let mut config = valid_config();
+        config.publisher.funding_seed = seed.to_string();
+        config.publisher.output_storage_emulator_endpoint = Some(endpoint.to_string());
+
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("output_storage_emulator_endpoint"),
+            "the sandbox-only field is missing from Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains(endpoint),
+            "the emulator endpoint is missing from Debug: {rendered}"
+        );
+        assert!(
+            !rendered.contains(seed),
+            "the funding seed reached Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the funding seed must remain visibly redacted: {rendered}"
+        );
+    }
+
     #[test]
     fn a_complete_config_validates() {
         valid_config().validate().expect("every field is valid");
+    }
+
+    #[test]
+    fn output_storage_settings_are_validated_from_the_top_level() {
+        valid_config()
+            .validate()
+            .expect("output storage is optional by default");
+
+        let mut configured = valid_config();
+        configured.publisher.output_storage_bucket = Some("outputs".to_string());
+        configured.publisher.output_storage_prefix = "v1/test-deployment".to_string();
+        configured.publisher.output_storage_timeout = Duration::from_secs(1);
+        configured
+            .validate()
+            .expect("configured output storage is valid");
+
+        for (field, apply) in [
+            (
+                "output_storage_bucket",
+                (|config: &mut MidnightConfig| {
+                    config.publisher.output_storage_bucket = Some(" ".to_string());
+                }) as fn(&mut MidnightConfig),
+            ),
+            ("output_storage_prefix", |config: &mut MidnightConfig| {
+                config.publisher.output_storage_prefix = String::new();
+            }),
+            ("output_storage_timeout", |config: &mut MidnightConfig| {
+                config.publisher.output_storage_timeout = Duration::ZERO;
+            }),
+        ] {
+            let mut invalid = valid_config();
+            apply(&mut invalid);
+            let error = invalid.validate().unwrap_err().to_string();
+            assert!(
+                error.contains(field),
+                "unexpected error for {field}: {error}"
+            );
+        }
     }
 
     #[test]
