@@ -24,7 +24,12 @@ on:
   merge_group:
 
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   test:
+    needs: [changes]
+    if: needs.changes.outputs.midnight_ts == 'true' || needs.changes.outputs.core == 'true'
     name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:

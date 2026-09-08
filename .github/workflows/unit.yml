@@ -11,13 +11,22 @@ on:
       - "integration-tests/**/*.rs"
       - "chain-signatures/contract-eth/**/*.sol"
       - "chain-signatures/contract-eth/**/*.js"
+      - "signet-crypto/**"
+      - "signet-primitives/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   pull_request:
   merge_group:
 
 env:
   RUSTFLAGS: -D warnings
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   test:
+    needs: [changes]
+    if: needs.changes.outputs.unit == 'true'
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
@@ -81,6 +90,8 @@ jobs:
         run: just test-unit
 
   audit:
+    needs: [changes]
+    if: needs.changes.outputs.audit == 'true'
     name: Audit
     runs-on: ubuntu-latest
     steps:

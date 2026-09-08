@@ -67,6 +67,12 @@ pub struct DisclosedContract {
     pub synchronizer_id: Option<String>,
 }
 
+/// Structured error code returned by the Canton JSON Ledger API.
+#[derive(Deserialize)]
+pub(crate) struct JsCantonError {
+    pub code: String,
+}
+
 /// Response from `POST /v2/commands/submit-and-wait-for-transaction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

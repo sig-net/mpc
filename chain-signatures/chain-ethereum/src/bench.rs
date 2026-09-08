@@ -28,6 +28,9 @@ struct RpcCount {
 // `EthereumIndexer` (per-instance) so each catchup reports independently
 static RPC_STATS: Mutex<Option<HashMap<&'static str, RpcCount>>> = Mutex::new(None);
 static BATCH_FETCH_NS: AtomicU64 = AtomicU64::new(0);
+/// Wall-clock window of catchup batch fetching: earliest batch start → latest
+/// batch end, across concurrently in-flight batches.
+static FETCH_WINDOW: Mutex<Option<(Instant, Instant)>> = Mutex::new(None);
 static REFETCH_NS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static BLOCKS_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +71,7 @@ pub fn rpc_reset() {
         m.clear();
     }
     BATCH_FETCH_NS.store(0, Ordering::Relaxed);
+    *FETCH_WINDOW.lock().unwrap() = None;
     REFETCH_NS.store(0, Ordering::Relaxed);
     PROCESS_TIME_NS.store(0, Ordering::Relaxed);
     BLOCKS_PROCESSED.store(0, Ordering::Relaxed);
@@ -75,12 +79,22 @@ pub fn rpc_reset() {
     drop(stats);
 }
 
-/// Accumulate time spent in `CatchupIter::fetch_next_batch` — the batched
-/// `get_blocks` HTTP POST that pulls the next up-to-32-block chunk from the
-/// upstream. This is the main historical-block fetch path. Stored in
-/// nanoseconds to preserve sub-millisecond precision.
-pub fn add_batch_fetch_time(d: Duration) {
-    BATCH_FETCH_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+/// Record a completed catchup batch fetch (`fetch_catchup_batch`: one batched
+/// `get_blocks` POST plus the batched `get_logs` follow-up). Accumulates the
+/// summed per-batch work duration (nanoseconds, preserving sub-millisecond
+/// precision) and extends the wall-clock fetch window; with concurrent
+/// batches in flight the sum exceeds the window by the overlap factor.
+pub fn record_batch_fetch(start: Instant) {
+    let end = Instant::now();
+    BATCH_FETCH_NS.fetch_add(
+        end.duration_since(start).as_nanos() as u64,
+        Ordering::Relaxed,
+    );
+    let mut window = FETCH_WINDOW.lock().unwrap();
+    *window = Some(match *window {
+        Some((first, last)) => (first.min(start), last.max(end)),
+        None => (start, end),
+    });
 }
 
 /// Accumulate time spent in the per-block single-block refetch path inside
@@ -157,7 +171,13 @@ pub fn report_metrics(stage: &str) {
         .iter()
         .map(|(method, c)| c.logical * method_cu(method).1)
         .sum();
-    let batch_fetch_ms = (BATCH_FETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let fetch_work_ms = (BATCH_FETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let fetch_wall_ms = FETCH_WINDOW
+        .lock()
+        .unwrap()
+        .map(|(first, last)| last.duration_since(first).as_millis() as u64)
+        .unwrap_or(0);
+    let fetch_parallelism = fetch_work_ms as f64 / fetch_wall_ms.max(1) as f64;
     let refetch_ms = (REFETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let per_block_process_ms =
         (PROCESS_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
@@ -201,6 +221,6 @@ pub fn report_metrics(stage: &str) {
 
     tracing::info!(
         target: TARGET,
-        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  total_cu       {total_cu}  (cu_per_block {cu_per_block:.1})\n  total_tput_cu  {total_tput_cu}\n  batch_fetch_ms {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown (logical, http round-trips, compute CU):\n{breakdown}"
+        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  total_cu       {total_cu}  (cu_per_block {cu_per_block:.1})\n  total_tput_cu  {total_tput_cu}\n  batch_fetch_ms {fetch_wall_ms} (wall)\n  fetch_work_ms  {fetch_work_ms} (fetch_parallelism {fetch_parallelism:.1})\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown (logical, http round-trips, compute CU):\n{breakdown}"
     );
 }

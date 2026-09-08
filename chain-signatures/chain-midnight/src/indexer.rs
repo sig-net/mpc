@@ -162,6 +162,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 )
                                 .await?
                             {
+                                tracing::info!(
+                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    sign_id = ?request.id,
+                                    "midnight signature requested"
+                                );
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
                                     block_timestamp: None,
@@ -571,12 +576,58 @@ mod tests {
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use std::collections::{HashMap, HashSet, VecDeque};
-    use std::sync::Mutex;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
 
+    type RecordedFields = HashMap<&'static str, String>;
+
+    #[derive(Clone, Default)]
+    struct EventRecorder {
+        events: Arc<Mutex<Vec<RecordedFields>>>,
+    }
+
+    impl EventRecorder {
+        fn snapshot(&self) -> Vec<RecordedFields> {
+            self.events.lock().expect("recorded events").clone()
+        }
+    }
+
+    struct FieldRecorder<'a> {
+        fields: &'a mut RecordedFields,
+    }
+
+    impl Visit for FieldRecorder<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields.insert(field.name(), format!("{value:?}"));
+        }
+    }
+
+    impl<S> Layer<S> for EventRecorder
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = HashMap::new();
+            event.record(&mut FieldRecorder {
+                fields: &mut fields,
+            });
+            self.events.lock().expect("recorded events").push(fields);
+        }
+    }
+
     const CALLER: [u8; 32] = [0xab; 32];
     const SINGLETON: [u8; 32] = [0x12; 32];
+    const LEDGER_TX_HASH: [u8; 32] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
+    ];
     const REQUESTS_FIELD: u8 = 4;
     const CAPTURE_HEIGHT: u64 = 156;
     const CAPTURE_BLOCK_HASH: &str =
@@ -633,6 +684,7 @@ mod tests {
         BlockEmissions {
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
+                ledger_tx_hash: LEDGER_TX_HASH,
                 extrinsic_index: 1,
                 calls,
             }],
@@ -1091,6 +1143,74 @@ mod tests {
         assert_eq!(events.len(), 2);
         for event in events {
             assert_request(event, rid);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_request_logs_ledger_hash_and_sign_id_together() {
+        let (record, rid) = named_record_and_rid(7);
+        let absent_rid = [0x91; 32];
+        let mut unsupported = notification(rid);
+        unsupported[0] = 2;
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            vec![SingletonCallEmissions {
+                call_index: 1,
+                emissions: vec![
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(absent_rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: unsupported,
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                    Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification(rid),
+                    },
+                ],
+            }],
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let recorder = EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_request(event, rid);
+        }
+
+        let recorded = recorder.snapshot();
+        let correlations = recorded
+            .iter()
+            .filter(|fields| fields.contains_key("tx_hash") || fields.contains_key("sign_id"))
+            .collect::<Vec<_>>();
+        assert_eq!(correlations.len(), 2);
+        let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
+        let expected_sign_id = format!("{:?}", SignId::new(rid));
+        for fields in correlations {
+            assert_eq!(
+                fields.get("message").map(String::as_str),
+                Some("midnight signature requested")
+            );
+            assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
+            assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
         }
     }
 

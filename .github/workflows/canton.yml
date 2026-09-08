@@ -14,7 +14,12 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   canton:
+    needs: [changes]
+    if: needs.changes.outputs.canton == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Canton ${{ matrix.suite.name }} Tests
     runs-on: warp-ubuntu-latest-x64-4x
     strategy:
