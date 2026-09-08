@@ -230,6 +230,7 @@ pub struct Context {
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
+    pub env: String,
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
@@ -302,7 +303,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        env: spawner.env.clone(),
         gcp_project_id: spawner.gcp_project_id.clone(),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
@@ -356,6 +356,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         worker,
         mpc_contract,
         redis,
+        env: spawner.env.clone(),
         storage_options,
         log_options,
         mesh_options,

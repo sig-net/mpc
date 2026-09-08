@@ -8,6 +8,8 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Must be reported for merge groups, even though there is no title to validate
+  merge_group:
 
 permissions:
   pull-requests: read
@@ -23,5 +25,7 @@ jobs:
       # wip: false (draft PRs are VALIDATED)
       # More configuration options - https://github.com/amannn/action-semantic-pull-request#configuration
       - uses: amannn/action-semantic-pull-request@v6
+        # Only run this action for pull request events - merge group events do not have a title to validate
+        if: github.event_name == 'pull_request_target'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

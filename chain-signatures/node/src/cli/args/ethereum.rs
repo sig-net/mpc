@@ -2,6 +2,9 @@ use anyhow::Context as _;
 use mpc_chain_ethereum::EthConfig;
 use secrecy::{ExposeSecret, SecretString};
 
+const DEFAULT_ETH_NETWORK: &str = "sepolia";
+const DEFAULT_HELIOS_DATA_PATH: &str = "/helios/sepolia";
+
 // Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
@@ -49,19 +52,17 @@ pub struct EthArgs {
     #[arg(
         long,
         env("MPC_ETH_NETWORK"),
-        requires = "eth_account_sk",
-        default_value = "sepolia",
+        default_value = DEFAULT_ETH_NETWORK,
         value_parser = ["sepolia", "mainnet", "anvil"],
     )]
-    pub eth_network: Option<String>,
+    pub eth_network: String,
     /// Helios light client data path
     #[arg(
         long,
         env("MPC_ETH_HELIOS_DATA_PATH"),
-        requires = "eth_account_sk",
-        default_value = "/helios/sepolia"
+        default_value = DEFAULT_HELIOS_DATA_PATH
     )]
-    pub eth_helios_data_path: Option<String>,
+    pub eth_helios_data_path: String,
 
     // -- Behaviour --
     /// Refresh finalized block interval in milliseconds
@@ -101,12 +102,12 @@ impl EthArgs {
         if let Some(eth_contract_address) = self.eth_contract_address {
             args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
         }
-        if let Some(eth_network) = self.eth_network {
-            args.extend(["--eth-network".to_string(), eth_network]);
-        }
-        if let Some(eth_helios_data_path) = self.eth_helios_data_path {
-            args.extend(["--eth-helios-data-path".to_string(), eth_helios_data_path]);
-        }
+        args.extend([
+            "--eth-network".to_string(),
+            self.eth_network,
+            "--eth-helios-data-path".to_string(),
+            self.eth_helios_data_path,
+        ]);
         args.extend([
             "--eth-refresh-finalized-interval".to_string(),
             self.eth_refresh_finalized_interval.to_string(),
@@ -128,7 +129,7 @@ impl EthArgs {
             );
         }
 
-        let network = self.eth_network.unwrap_or_default();
+        let network = self.eth_network;
         if self.eth_optimistic_requests && network == "mainnet" {
             tracing::warn!(
                 "eth optimistic requests enabled on mainnet: emitted requests are NOT \
@@ -161,7 +162,7 @@ impl EthArgs {
             contract_address,
             optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
             network,
-            helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
+            helios_data_path: self.eth_helios_data_path,
             refresh_finalized_interval: self.eth_refresh_finalized_interval,
             #[cfg(feature = "helios")]
             light_client: self.eth_light_client,
@@ -183,8 +184,8 @@ impl EthArgs {
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
                 eth_contract_address: Some(config.contract_address.to_string()),
-                eth_network: Some(config.network),
-                eth_helios_data_path: Some(config.helios_data_path),
+                eth_network: config.network,
+                eth_helios_data_path: config.helios_data_path,
                 eth_refresh_finalized_interval: config.refresh_finalized_interval,
                 eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
@@ -194,8 +195,8 @@ impl EthArgs {
                 eth_consensus_rpc_http_url: None,
                 eth_execution_rpc_http_url: None,
                 eth_contract_address: None,
-                eth_network: None,
-                eth_helios_data_path: None,
+                eth_network: DEFAULT_ETH_NETWORK.to_string(),
+                eth_helios_data_path: DEFAULT_HELIOS_DATA_PATH.to_string(),
                 eth_refresh_finalized_interval: 0,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
