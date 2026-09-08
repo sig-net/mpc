@@ -6720,7 +6720,6 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "futures",
- "generic-array",
  "hex",
  "hyper 0.14.32",
  "k256",
