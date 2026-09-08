@@ -43,7 +43,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL

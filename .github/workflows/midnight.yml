@@ -94,7 +94,7 @@ jobs:
           shared-key: midnight-real-stack
           cache-targets: true
           cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

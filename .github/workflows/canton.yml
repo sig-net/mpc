@@ -93,7 +93,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Build eth contract
         run: just build eth
