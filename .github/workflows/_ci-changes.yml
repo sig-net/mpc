@@ -97,7 +97,10 @@ jobs:
             canton:
               - .github/workflows/canton.yml
               - chain-signatures/chain-canton/**
-              - integration-tests/{src,fixtures,tests}/**/*canton*
+              # Files with "canton" in their name
+              - integration-tests/{src,tests}/**/*canton*
+              # Files in the canton fixture directory
+              - integration-tests/fixtures/canton/**
 
             midnight:
               - .github/workflows/midnight.yml
