@@ -41,11 +41,12 @@ RUST_LOG=mpc_chain_solana::bench=info \
 cargo run -p mpc-chain-solana --example bench_catchup --features bench
 ```
 
-There is no caching proxy layer (eRPC is EVM-only): runs go straight against
-the live endpoint, so wall-clock figures are a reference snapshot (endpoint
-tier, latency, and load dependent), not a guarantee.
+The bench drives the production drain path (`drain_range`): catchup fetch +
+processing for slots with program activity, **and** `Block` marker emission
+for every drained inactive slot — the dominant event volume in sparse
+ranges. There is no caching proxy layer (eRPC is EVM-only).
 
-Only slots with program activity are fetched and processed.
+Only slots with program activity are fetched over RPC.
 
 ### Report fields
 
@@ -56,7 +57,9 @@ Only slots with program activity are fetched and processed.
 | `batch_fetch_ms` | batched `getBlock` POSTs (50/chunk, 5 concurrent) |
 | `refetch_ms` | single-slot `getBlock` retries for slots missing from a batch |
 | `process_ms` | per-slot parse + event emission |
+| `marker_ms` | `Block` marker emission for drained inactive slots (channel sends + telemetry) |
 | `walk_back` | pages fetched, signatures scanned vs. active slots — the ratio quantifies walk-back waste (pages past the range, or many sigs per slot) |
+| `block_markers` | inactive-slot markers emitted through the event channel |
 | `rpc_breakdown` | per-method logical requests vs. HTTP round-trips (batch sub-requests share one POST); counts attempted, not successful |
 
 ### Reference numbers
@@ -66,11 +69,12 @@ Devnet catchup over the program's full active history
 
 | metric | value |
 |---|---|
-| catchup wall time | 2.5 s |
-| slots processed | 22 |
-| `sig_fetch_ms` | 1003 |
-| `batch_fetch_ms` | 1470 |
-| `process_ms` | 17 |
+| catchup wall time | 6.9 s |
+| range drained | 1,527,313 slots (22 active) |
+| `sig_fetch_ms` | 1135 |
+| `batch_fetch_ms` | 4431 |
+| `process_ms` | 18 |
+| `marker_ms` | 1260 (1.53M markers) |
 | walk-back | 1 page (250-sig cap), 250 sigs → 22 slots (11.4x) |
 | total RPC | 24 logical / 3 HTTP |
 
@@ -79,8 +83,8 @@ Notes:
 - Alchemy caps `getSignaturesForAddress` pages at **250** despite our
   1000-signature request, so larger histories page more than
   `CATCHUP_PAGE_SIZE` implies.
-- The dominant cost for this shape is the batched `getBlock` POST
-  (`full` transaction details, `jsonParsed`), not per-slot processing.
+- The dominant costs for this shape are the batched `getBlock` POST
+  (`full` transaction details, `jsonParsed`).
 
 ### Environment variables
 
