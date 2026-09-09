@@ -413,7 +413,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     // walk never actually verified — silent loss. Consider discounting the
     // anchor by a requery margin before draining, so both the drain range
     // and the emitted markers stay behind the verified head.
-    async fn drain_range(
+    pub async fn drain_range(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         anchor: u64,
@@ -437,12 +437,16 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 }
                 None => (anchor, None),
             };
+            #[cfg(feature = "bench")]
+            let marker_started_at = Instant::now();
             self.emit_block_markers_for_drained_inactive_slots(
                 events_tx,
                 next_marker..landmark,
                 cancel,
             )
             .await?;
+            #[cfg(feature = "bench")]
+            crate::bench::add_marker_time(marker_started_at.elapsed());
             let Some(block) = block else { break };
             self.process_catchup_retrying(events_tx, landmark, &block, cancel)
                 .await;
@@ -466,6 +470,8 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 res = events_tx.send(ChainEvent::Block(slot)) => {
                     res.context("failed to send solana block marker event")?;
                     self.telemetry.block_indexed(slot);
+                    #[cfg(feature = "bench")]
+                    crate::bench::inc_marker();
                 }
             }
         }

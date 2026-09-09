@@ -1,9 +1,10 @@
 //! Standalone catchup benchmark for the Solana indexer.
 //!
-//! Drives `SolanaIndexer` over a fixed historical slot range against a real
-//! RPC endpoint and emits the `Catchup Benchmark Report` (RPC breakdown +
-//! `sig_fetch_ms` / `batch_fetch_ms` / `process_ms` / `rpc_per_sec` /
-//! `slots_per_sec` + the signature walk-back overhead ratio).
+//! Drives `SolanaIndexer` over the production drain path (`drain_range`)
+//! against a real RPC endpoint and emits the `Catchup Benchmark Report`
+//! (RPC breakdown + `sig_fetch_ms` / `batch_fetch_ms` / `process_ms` /
+//! `rpc_per_sec` / `slots_per_sec` + the signature walk-back overhead ratio
+//! and the inactive-slot `Block` marker count).
 //!
 //! # Configuration (env vars only)
 //!

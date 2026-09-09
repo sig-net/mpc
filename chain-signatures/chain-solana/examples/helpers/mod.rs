@@ -1,11 +1,10 @@
 //! Shared helpers for the Solana benchmark examples.
 
 use anyhow::anyhow;
-use futures_util::StreamExt;
 use mpc_chain_integration_core::{
     utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
 };
-use mpc_chain_solana::{SolConfig, SolanaCatchupBlock, SolanaIndexer};
+use mpc_chain_solana::{SolConfig, SolanaIndexer};
 
 /// Read a required environment variable, erroring if it's not set.
 pub fn opt_env(name: &str) -> anyhow::Result<String> {
@@ -57,18 +56,15 @@ pub fn parse_start_end() -> anyhow::Result<(u64, u64)> {
 }
 
 /// Spin up a [`SolanaIndexer`], spawn a background task that drains emitted
-/// events (so processing never blocks on a full channel), then drive
-/// `catchup_blocks(end, start)` → `process_catchup_item` to completion,
+/// events (so emission never blocks on a full channel), then drive the
+/// production drain path — `drain_range(end, start)` — to completion,
 /// firing the final `Catchup Benchmark Report` at the end.
-///
-/// Returns the number of slots processed (only slots with program activity;
-/// skipped slots produce no blocks).
 pub async fn run_catchup(
     config: SolConfig,
     start: u64,
     end: u64,
     label: &'static str,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<()> {
     let indexer = SolanaIndexer::new(config, MockStateManager::new(), NoopChainTelemetry)?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
@@ -80,19 +76,10 @@ pub async fn run_catchup(
         }
     });
 
-    let blocks_stream = indexer.catchup_blocks(end, start).await?;
-    let mut blocks = std::pin::pin!(blocks_stream);
-    let mut count: u64 = 0;
-    while let Some(item) = blocks.next().await {
-        let (slot, block) = item?;
-        if matches!(block, SolanaCatchupBlock::Missing) {
-            tracing::debug!(slot, "{label}: slot missing from batch, refetching");
-        }
-        indexer
-            .process_catchup_item(&events_tx, slot, &block)
-            .await?;
-        count += 1;
-    }
+    // Production drain path; never cancelled, returns on its own at the
+    // anchor.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    indexer.drain_range(&events_tx, end, start, &cancel).await?;
 
     // Fires the final `report_metrics("catchup_completed")` log under `bench`.
     #[cfg(feature = "bench")]
@@ -101,6 +88,6 @@ pub async fn run_catchup(
     drain.abort();
     let _ = drain.await;
 
-    tracing::info!(count, "{label}: processed slots; final report above");
-    Ok(count)
+    tracing::info!("{label}: catchup complete; final report above");
+    Ok(())
 }

@@ -28,7 +28,9 @@ static SIG_FETCH_NS: AtomicU64 = AtomicU64::new(0);
 static BATCH_FETCH_NS: AtomicU64 = AtomicU64::new(0);
 static REFETCH_NS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static MARKER_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static SLOTS_PROCESSED: AtomicU64 = AtomicU64::new(0);
+static BLOCK_MARKERS: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_PAGES: AtomicU64 = AtomicU64::new(0);
 static SIGNATURES_SCANNED: AtomicU64 = AtomicU64::new(0);
 static CATCHUP_START: Mutex<Option<Instant>> = Mutex::new(None);
@@ -71,7 +73,9 @@ pub fn rpc_reset() {
     BATCH_FETCH_NS.store(0, Ordering::Relaxed);
     REFETCH_NS.store(0, Ordering::Relaxed);
     PROCESS_TIME_NS.store(0, Ordering::Relaxed);
+    MARKER_TIME_NS.store(0, Ordering::Relaxed);
     SLOTS_PROCESSED.store(0, Ordering::Relaxed);
+    BLOCK_MARKERS.store(0, Ordering::Relaxed);
     SIGNATURE_PAGES.store(0, Ordering::Relaxed);
     SIGNATURES_SCANNED.store(0, Ordering::Relaxed);
     *CATCHUP_START.lock().unwrap() = Some(Instant::now());
@@ -106,9 +110,21 @@ pub fn add_process_time(d: Duration) {
     PROCESS_TIME_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
 }
 
+/// Accumulate time spent emitting `Block` markers for drained inactive
+/// slots — the dominant event volume in sparse ranges. Stored in nanoseconds.
+pub fn add_marker_time(d: Duration) {
+    MARKER_TIME_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+}
+
 /// Increment the count of slots processed by one and return the new count.
 pub fn inc_slot() -> u64 {
     SLOTS_PROCESSED.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Increment the count of `Block` markers emitted for drained inactive slots.
+/// In sparse ranges these dominate event volume.
+pub fn inc_marker() {
+    BLOCK_MARKERS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record one fetched signature page holding `scanned` signatures.
@@ -140,7 +156,9 @@ pub fn report_metrics(stage: &str) {
     let batch_fetch_ms = ns_to_ms(BATCH_FETCH_NS.load(Ordering::Relaxed));
     let refetch_ms = ns_to_ms(REFETCH_NS.load(Ordering::Relaxed));
     let process_ms = ns_to_ms(PROCESS_TIME_NS.load(Ordering::Relaxed));
+    let marker_ms = ns_to_ms(MARKER_TIME_NS.load(Ordering::Relaxed));
     let slots = SLOTS_PROCESSED.load(Ordering::Relaxed);
+    let markers = BLOCK_MARKERS.load(Ordering::Relaxed);
     let sig_pages = SIGNATURE_PAGES.load(Ordering::Relaxed);
     let sigs_scanned = SIGNATURES_SCANNED.load(Ordering::Relaxed);
     // Signatures walked past vs. slots that actually contained program
@@ -175,6 +193,6 @@ pub fn report_metrics(stage: &str) {
 
     tracing::info!(
         target: TARGET,
-        "Catchup Benchmark Report\n{label}\n  slots_per_sec  {slots_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  sig_fetch_ms   {sig_fetch_ms}\n  batch_fetch_ms {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {process_ms}\n  walk_back      {sig_pages} pages, {sigs_scanned} sigs scanned, {slots} active slots ({walk_back_overhead:.1}x overhead)\n  rpc_breakdown (logical, http round-trips):\n{breakdown}"
+        "Catchup Benchmark Report\n{label}\n  slots_per_sec  {slots_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  sig_fetch_ms   {sig_fetch_ms}\n  batch_fetch_ms {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {process_ms}\n  marker_ms      {marker_ms}\n  walk_back      {sig_pages} pages, {sigs_scanned} sigs scanned, {slots} active slots ({walk_back_overhead:.1}x overhead)\n  block_markers  {markers} emitted for drained inactive slots\n  rpc_breakdown (logical, http round-trips):\n{breakdown}"
     );
 }
