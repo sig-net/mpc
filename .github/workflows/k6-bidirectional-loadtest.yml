@@ -46,7 +46,11 @@ concurrency:
 
 jobs:
   loadtest:
-    runs-on: ubuntu-latest
+    # Self-hosted, as k6-ci-loadtest.yml does for its scheduled runs. That one
+    # keeps ubuntu-latest for push and pull_request because those finish in
+    # minutes; every run here occupies a runner for over an hour, so there is
+    # no short case to keep hosted.
+    runs-on: arc-runner-set
     # Submission runs for lt_duration, then the scenario's 45m gracefulStop
     # lets in-flight jobs finish, so a 1h run occupies the runner for ~1h45m.
     timeout-minutes: 120
