@@ -24,4 +24,4 @@ pub use bidirectional::{
 pub use chain::{ChainConfig, SerDeserFormat};
 pub use crypto::{cbor_scalar, SignArgs};
 pub use events::{ChainEvent, ExecutionOutcome, SignatureRespondedEvent};
-pub use requests::{IndexedSignRequest, SignCommand, SignKind};
+pub use requests::{IndexedSignRequest, SignKind};
