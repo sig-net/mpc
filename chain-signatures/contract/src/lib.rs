@@ -16,7 +16,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::CheckpointDigest;
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
@@ -74,7 +74,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
 
@@ -755,7 +755,7 @@ impl MpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
-        checkpoints: Option<BTreeMap<Chain, ConsensusCheckpointDigest>>,
+        checkpoints: Option<BTreeMap<Chain, CheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
             "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
@@ -832,7 +832,7 @@ impl MpcContract {
         &self.config
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&ConsensusCheckpointDigest> {
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&CheckpointDigest> {
         self.latest_checkpoints().get(&chain)
     }
 
@@ -910,10 +910,7 @@ impl MpcContract {
     /// checkpoint, or the caller submits a different digest for an already
     /// finalized height.
     #[handle_result]
-    pub fn vote_checkpoint(
-        &mut self,
-        checkpoint: ConsensusCheckpointDigest,
-    ) -> Result<bool, Error> {
+    pub fn vote_checkpoint(&mut self, checkpoint: CheckpointDigest) -> Result<bool, Error> {
         let voter = self.voter()?;
         let threshold = match self.state_ref() {
             ProtocolContractState::Running(state) => state.threshold,
@@ -944,7 +941,7 @@ impl MpcContract {
         if vote_count < threshold {
             return Ok(false);
         }
-        self.insert_checkpoint(checkpoint.chain, checkpoint);
+        self.insert_checkpoint(checkpoint);
 
         // Remove stale votes where candidate checkpoint is less than or equal to
         // this voted in consensus checkpoint.
@@ -954,7 +951,7 @@ impl MpcContract {
         Ok(true)
     }
 
-    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(ConsensusCheckpointDigest, usize)> {
+    pub fn checkpoint_votes(&self, chain: Chain) -> Vec<(CheckpointDigest, usize)> {
         let votes = &self.checkpoint_votes;
 
         votes
@@ -1176,12 +1173,14 @@ impl MpcContract {
         Ok(voter)
     }
 
-    fn latest_checkpoints(&self) -> &IterableMap<Chain, ConsensusCheckpointDigest> {
+    fn latest_checkpoints(&self) -> &IterableMap<Chain, CheckpointDigest> {
         &self.latest_checkpoints
     }
 
-    fn insert_checkpoint(&mut self, chain: Chain, checkpoint: ConsensusCheckpointDigest) {
-        self.latest_checkpoints.insert(chain, checkpoint);
+    /// Store a checkpoint under its own `chain` field, keeping the map key and
+    /// the value's chain consistent by construction.
+    fn insert_checkpoint(&mut self, checkpoint: CheckpointDigest) {
+        self.latest_checkpoints.insert(checkpoint.chain, checkpoint);
     }
 
     fn checkpoint_votes_mut(&mut self) -> &mut CheckpointVotes {
@@ -1210,14 +1209,11 @@ impl MpcContract {
         for CheckpointReset { chain, height } in resets {
             let resume_after = height.saturating_sub(1);
             chains.insert(chain);
-            self.insert_checkpoint(
+            self.insert_checkpoint(CheckpointDigest::new(
                 chain,
-                ConsensusCheckpointDigest::new(
-                    chain,
-                    resume_after,
-                    mpc_primitives::reset_checkpoint_digest(chain, resume_after),
-                ),
-            );
+                resume_after,
+                mpc_primitives::reset_checkpoint_digest(chain, resume_after),
+            ));
             env::log_str(
                 &serde_json::json!({
                     "event": "checkpoint_reset",
@@ -1275,10 +1271,7 @@ mod tests {
     // key entry. This reproduces the observed deployed state where
     // `latest_checkpoint(chain)` works because it uses `.get()`, while
     // `IterableMap::iter()` returns no checkpoints.
-    fn seed_checkpoint_lookup_without_iterable_key(
-        chain: Chain,
-        checkpoint: ConsensusCheckpointDigest,
-    ) {
+    fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: CheckpointDigest) {
         let mut key_bytes = latest_checkpoints_map_prefix();
         chain.serialize(&mut key_bytes).unwrap();
         let storage_key = env::sha256_array(&key_bytes);
@@ -1345,7 +1338,7 @@ mod tests {
             .build();
         testing_env!(context);
 
-        let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+        let checkpoint = CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
         seed_checkpoint_lookup_without_iterable_key(Chain::Solana, checkpoint);
 
         // Construct a contract whose `latest_checkpoints` map points at the
@@ -1442,10 +1435,10 @@ mod tests {
             checkpoint_votes: CheckpointVotes::new(),
         };
 
-        let solana_checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
-        let ethereum_checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
+        let solana_checkpoint = CheckpointDigest::new(Chain::Solana, 10, [1u8; 32]);
+        let ethereum_checkpoint = CheckpointDigest::new(Chain::Ethereum, 20, [2u8; 32]);
 
-        contract.insert_checkpoint(Chain::Solana, solana_checkpoint);
+        contract.insert_checkpoint(solana_checkpoint);
         contract
             .checkpoint_votes_mut()
             .entry(solana_checkpoint)
@@ -1466,7 +1459,7 @@ mod tests {
         // from the pair, which is what every node re-derives locally.
         assert_eq!(
             contract.latest_checkpoint(Chain::Solana),
-            Some(&ConsensusCheckpointDigest::new(
+            Some(&CheckpointDigest::new(
                 Chain::Solana,
                 5,
                 mpc_primitives::reset_checkpoint_digest(Chain::Solana, 5),
@@ -1482,7 +1475,7 @@ mod tests {
         }]);
         assert_eq!(
             contract.latest_checkpoint(Chain::Solana),
-            Some(&ConsensusCheckpointDigest::new(
+            Some(&CheckpointDigest::new(
                 Chain::Solana,
                 30,
                 mpc_primitives::reset_checkpoint_digest(Chain::Solana, 30),
@@ -1500,7 +1493,7 @@ mod tests {
         }]);
 
         // Below the reset height the ordinary "behind" rule already rejects.
-        let behind = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
+        let behind = CheckpointDigest::new(Chain::Solana, resume_at_height - 2, [1u8; 32]);
         assert!(contract
             .vote_checkpoint(behind)
             .unwrap_err()
@@ -1510,7 +1503,7 @@ mod tests {
 
         // Re-submitting the reset checkpoint itself is an idempotent no-op,
         // which is what lets nodes confirm it rather than fight over it.
-        let reset = ConsensusCheckpointDigest::new(
+        let reset = CheckpointDigest::new(
             Chain::Solana,
             resume_at_height - 1,
             mpc_primitives::reset_checkpoint_digest(Chain::Solana, resume_at_height - 1),
@@ -1519,8 +1512,7 @@ mod tests {
 
         // A competing digest at the reset height is a conflict, not a silent
         // overwrite of the state the network was told to restart from.
-        let conflicting =
-            ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
+        let conflicting = CheckpointDigest::new(Chain::Solana, resume_at_height - 1, [2u8; 32]);
         assert!(contract
             .vote_checkpoint(conflicting)
             .unwrap_err()
@@ -1528,7 +1520,7 @@ mod tests {
             .contains(&CheckpointError::ConflictingCheckpoint.to_string()));
 
         // Above it, voting resumes normally and settles past the reset.
-        let above = ConsensusCheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
+        let above = CheckpointDigest::new(Chain::Solana, resume_at_height, [3u8; 32]);
         assert!(contract.vote_checkpoint(above).unwrap());
         assert_eq!(
             contract.latest_checkpoint(Chain::Solana),

@@ -12,7 +12,7 @@ use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
-use crate::containers::{self, DockerClient};
+use crate::containers;
 use crate::local::NodeEnvConfig;
 use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
@@ -33,7 +33,6 @@ pub fn spawn() -> ClusterSpawner {
 
 pub struct Cluster {
     pub cfg: NodeConfig,
-    pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     pub nodes: Nodes,

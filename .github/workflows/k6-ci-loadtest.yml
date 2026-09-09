@@ -8,7 +8,7 @@ on:
     types: [closed]
     paths:
       - chain-signatures/**
-      - infra/loadtests/**
+      - loadtests/**
       - .github/workflows/k6-ci-loadtest.yml
   schedule:
     - cron: '0 * * * *'
@@ -110,7 +110,7 @@ jobs:
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
           LT_DURATION: ${{ steps.normalized.outputs.lt_duration }}
         with:
-          path: ./infra/loadtests/k6-load-test.js
+          path: ./loadtests/k6-load-test.js
           cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           cloud-comment-on-pr: false
           flags: >-

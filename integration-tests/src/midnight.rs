@@ -81,10 +81,6 @@ impl MidnightContext {
         spawner: &ClusterSpawner,
         root_public_key: mpc_crypto::PublicKey,
     ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            !cfg!(feature = "docker-test"),
-            "the Midnight real-stack integration currently launches host mpc-node binaries"
-        );
         let stack = MidnightStack::run(spawner).await?;
         let mut driver = MidnightDriver::spawn(&stack.artifact_dir).await?;
         let bootstrap = driver

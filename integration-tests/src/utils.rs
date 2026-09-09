@@ -203,10 +203,6 @@ where
     Ok(response.status())
 }
 
-pub async fn is_port_available(port: u16) -> bool {
-    is_port_available_sync(port)
-}
-
 fn is_port_available_sync(port: u16) -> bool {
     let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port);
     std::net::TcpListener::bind(addr).is_ok()

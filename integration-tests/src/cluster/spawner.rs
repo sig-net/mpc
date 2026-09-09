@@ -269,12 +269,6 @@ impl ClusterSpawner {
         self
     }
 
-    /// Do not wait for the nodes to be running.
-    pub fn disable_wait_running(mut self) -> Self {
-        self.wait_for_running = false;
-        self
-    }
-
     pub fn disable_prestockpile(mut self) -> Self {
         self.prestockpile = None;
         self
@@ -282,13 +276,6 @@ impl ClusterSpawner {
 
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
-        self
-    }
-
-    /// Disable pregenerated keys and generate keys fresh.
-    /// This is slower but tests the full key generation protocol.
-    pub fn without_pregenerated_keys(mut self) -> Self {
-        self.pregenerated_keys = PregeneratedKeys::Disabled;
         self
     }
 
@@ -308,7 +295,6 @@ impl ClusterSpawner {
             self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),      // Will be filled in later
                 rpc_http_url: String::new(),    // Will be filled in later
-                rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
                 indexer: Default::default(),
             });
@@ -368,11 +354,6 @@ impl ClusterSpawner {
         self
     }
 
-    pub fn debug_node(&mut self) -> &mut Self {
-        self.release = false;
-        self
-    }
-
     pub fn account_id(&self, idx: usize) -> AccountId {
         if idx >= self.accounts.len() {
             panic!("Account index out of bounds: {idx}");
@@ -411,12 +392,6 @@ impl ClusterSpawner {
         self.redis.as_ref().unwrap()
     }
 
-    /// Prespawns a Solana test validator instance for integration testing.
-    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
-        self.solana = Some(self.spawn_solana().await);
-        self.solana.as_ref().unwrap()
-    }
-
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
     /// new one from start up.
     pub async fn take_redis(&mut self) -> containers::Redis {
@@ -424,12 +399,6 @@ impl ClusterSpawner {
             Some(redis) => redis,
             None => self.spawn_redis().await,
         }
-    }
-
-    /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
-    /// new one from start up.
-    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
-        self.solana.take()
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
@@ -446,12 +415,6 @@ impl ClusterSpawner {
                 .await
                 .expect("failed to spawn sandbox"),
         }
-    }
-
-    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
-        let worker = self.prespawn_sandbox().await?.clone();
-        self.create_accounts(&worker).await;
-        Ok(self.prespawn_redis().await)
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
@@ -522,7 +485,6 @@ impl IntoFuture for ClusterSpawner {
                 cfg: self.cfg,
                 rpc_client,
                 http_client: reqwest::Client::default(),
-                docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),

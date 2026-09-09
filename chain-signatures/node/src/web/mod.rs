@@ -42,7 +42,8 @@ struct AxumState {
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
-    #[allow(dead_code)] // used by debug-page
+    /// Only used to label the debug page.
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
 }
@@ -405,9 +406,15 @@ async fn checkpoint(
 
     for (chain, digest) in selections {
         let checkpoint = if let Some(digest) = digest {
-            state.backlog.find_checkpoint_by_digest(chain, digest).await
+            state.backlog.checkpoints().find(chain, digest).await
         } else {
-            state.backlog.latest_checkpoint(chain).await
+            state
+                .backlog
+                .checkpoints()
+                .latest(chain)
+                .await
+                .ok()
+                .flatten()
         };
 
         let Some(checkpoint) = checkpoint else {

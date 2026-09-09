@@ -250,7 +250,7 @@ fn append_u256(stream: &mut RlpStream, value: &U256) {
 }
 
 fn signature_components(signature: &FullSignature<Secp256k1>) -> (U256, U256) {
-    let r_scalar = actions::x_coordinate::<Secp256k1>(&signature.big_r);
+    let r_scalar = mpc_crypto::x_coordinate(&signature.big_r);
     let r_bytes = r_scalar.to_bytes();
     let r = U256::from_be_slice(r_bytes.as_slice());
     let s_bytes = signature.s.to_bytes();

@@ -1,20 +1,15 @@
 use std::future::{Future, IntoFuture};
-use std::time::Duration;
 
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
-use mpc_node::backlog::Checkpoint;
 use mpc_node::web::StateView;
-use mpc_primitives::Chain;
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
 
 type Epoch = u64;
 type Present = bool;
-type BlockHeight = u64;
-
 enum ContractState {
     Candidate(AccountId, Present),
     Participant(AccountId, Present),
@@ -35,7 +30,6 @@ enum WaitActions {
     Signable(usize),
     NodeState(NodeState, usize),
     ContractState(ContractState),
-    Checkpoint(usize, Chain, BlockHeight),
 }
 
 pub struct WaitAction<'a, R> {
@@ -73,11 +67,6 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn min_mine_triples(mut self, min: usize) -> Self {
-        self.actions.push(WaitActions::MinTriples(min, true));
-        self
-    }
-
     pub fn min_presignatures(mut self, min: usize) -> Self {
         self.actions.push(WaitActions::MinPresignatures(min, false));
         self
@@ -93,22 +82,11 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn signable_many(mut self, count: usize) -> Self {
-        self.actions.push(WaitActions::Signable(count));
-        self
-    }
-
     pub fn nodes_running(mut self) -> Self {
         for id in 0..self.nodes.len() {
             self.actions
                 .push(WaitActions::NodeState(NodeState::Running, id));
         }
-        self
-    }
-
-    pub fn node_running(mut self, id: usize) -> Self {
-        self.actions
-            .push(WaitActions::NodeState(NodeState::Running, id));
         self
     }
 
@@ -120,31 +98,10 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
-    pub fn node_resharing(mut self, id: usize) -> Self {
-        self.actions
-            .push(WaitActions::NodeState(NodeState::Resharing, id));
-        self
-    }
-
     pub fn node_joining(mut self, id: usize) -> Self {
         self.actions
             .push(WaitActions::NodeState(NodeState::Joining, id));
         self
-    }
-
-    pub fn node_checkpoint(
-        mut self,
-        id: usize,
-        chain: Chain,
-        block_height: BlockHeight,
-    ) -> WaitAction<'a, Checkpoint> {
-        self.actions
-            .push(WaitActions::Checkpoint(id, chain, block_height));
-        WaitAction {
-            nodes: self.nodes,
-            actions: self.actions,
-            _phantom: std::marker::PhantomData,
-        }
     }
 
     pub fn candidate_present(mut self, candidate: &AccountId) -> Self {
@@ -203,9 +160,6 @@ impl<'a, R> WaitAction<'a, R> {
                 }
                 WaitActions::ContractState(state) => {
                     require_contract_state(self.nodes, state).await?;
-                }
-                WaitActions::Checkpoint(id, chain, block_height) => {
-                    require_checkpoint(self.nodes, id, chain, block_height).await?;
                 }
             }
         }
@@ -428,29 +382,4 @@ pub async fn require_triples(
     })?;
 
     Ok(state_views)
-}
-
-async fn require_checkpoint(
-    nodes: &Cluster,
-    id: usize,
-    chain: Chain,
-    block_height: u64,
-) -> anyhow::Result<Checkpoint> {
-    let is_ready = || async {
-        let checkpoints = nodes.fetch_checkpoints(id).await?;
-        if let Some(checkpoint) = checkpoints.get(&chain) {
-            if checkpoint.block_height >= block_height {
-                return Ok(checkpoint.clone());
-            }
-        }
-        anyhow::bail!("node(id={id}) {chain:?} checkpoint not yet at height {block_height}");
-    };
-
-    let strategy = ConstantBuilder::default()
-        .with_delay(Duration::from_secs(1))
-        .with_max_times(10);
-
-    is_ready.retry(&strategy).await.with_context(|| {
-        format!("node {id} did not reach {chain:?} checkpoint >= {block_height} in time")
-    })
 }

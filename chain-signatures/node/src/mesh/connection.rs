@@ -310,6 +310,24 @@ impl Pool {
         }
     }
 
+    /// Mark an active node as out-of-sync, so it is re-synced before we use it
+    /// in protocols we initiate. Called when we learn our record of what that
+    /// peer stores is wrong, e.g. it rejects a posit for an artifact we list
+    /// it as holding.
+    pub async fn report_node_desynced(&self, participant: Participant) {
+        if let Some(conn) = self.connections.get(&participant) {
+            conn.status_tx.send_if_modified(|(status, _)| {
+                if *status == NodeStatus::Active {
+                    tracing::info!(?participant, "reporting node desynced");
+                    *status = NodeStatus::Syncing;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
     /// Update the node state after synchronization was successful.
     pub async fn report_node_synced(&self, participant: Participant) {
         if let Some(conn) = self.connections.get(&participant) {

@@ -25,13 +25,13 @@ pub struct NearClient {
 
 impl NearClient {
     pub fn new(
-        near_rpc: &str,
+        client: near_fetch::Client,
         contract_id: &AccountId,
         signer: InMemorySigner,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         Self {
-            client: near_fetch::Client::new(near_rpc),
+            client,
             contract_id: contract_id.clone(),
             signer,
             telemetry,

@@ -8,7 +8,6 @@ description = "NEAR chain integration for the MPC node: contract polling indexer
 # TODO: replace anyhow with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
-clap.workspace = true
 hex.workspace = true
 k256.workspace = true
 mpc-chain-integration-core.workspace = true

@@ -314,7 +314,6 @@ mod tests {
         let opts = Options {
             sk_share_secret_id: None,
             sk_share_local_path: None,
-            env: "test".to_string(),
             gcp_project_id: "test-project".to_string(),
             redis_url: "redis://localhost".to_string(),
         };
@@ -329,7 +328,6 @@ mod tests {
         let opts = Options {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
-            env: "test".to_string(),
             gcp_project_id: "test-project".to_string(),
             redis_url: "redis://localhost".to_string(),
         };
@@ -344,12 +342,11 @@ mod tests {
         let opts = Options {
             sk_share_secret_id: Some("secret-id".to_string()),
             sk_share_local_path: None,
-            env: "test".to_string(),
             gcp_project_id: "test-project".to_string(),
             redis_url: "redis://localhost".to_string(),
         };
         let account_id = make_test_account_id();
-        let gcp_service = GcpService::init(&account_id, &opts).await.unwrap();
+        let gcp_service = GcpService::init(&opts).await.unwrap();
 
         let storage = init(Some(&gcp_service), &opts, &account_id);
 
