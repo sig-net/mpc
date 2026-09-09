@@ -10,27 +10,25 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    Chain, ExecutionOutcome, IndexedSignRequest, RespondBidirectionalEvent, SignId, SignKind,
+    SignatureRespondedEvent,
 };
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
 ) -> anyhow::Result<bool> {
-    if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
-        anyhow::bail!("Unexpected sign request kind");
-    }
-
-    // Reject malformed bidirectional requests at ingestion, running the same
-    // deterministic derivations the respond event will need later. A request
-    // admitted here but failing there can never advance: its entry sticks in
-    // pending-publish forever, and every node publishes a leg-1 response
-    // whose second leg will never come.
-    if let SignKind::SignBidirectional(event) = &sign_request.kind {
-        event.validate().with_context(|| {
+    match &sign_request.kind {
+        SignKind::RespondBidirectional(_) => anyhow::bail!("Unexpected sign request kind"),
+        // Reject malformed bidirectional requests at ingestion, running the same
+        // deterministic derivations the respond event will need later. A request
+        // admitted here but failing there can never advance: its entry sticks in
+        // pending-publish forever, and every node publishes a leg-1 response
+        // whose second leg will never come.
+        SignKind::SignBidirectional(event) => event.validate().with_context(|| {
             format!("rejecting bidirectional sign request {:?}", sign_request.id)
-        })?;
+        })?,
+        SignKind::Sign => {}
     }
 
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
@@ -138,12 +136,7 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Bidirectional<Initial<AnyProgress>>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
-        let event = match &entry.request().kind {
-            SignKind::SignBidirectional(event) => event.clone(),
-            _ => anyhow::bail!("unexpected sign kind for bidirectional initial entry"),
-        };
-        return advance_bidirectional_to_execution(entry, &event, respond_event, sign_id, root_pk)
-            .await;
+        return advance_bidirectional_to_execution(entry, respond_event, root_pk).await;
     }
 
     if entry.is::<Bidirectional<Executing>>() {
@@ -167,12 +160,12 @@ pub(crate) async fn process_respond_event(
 /// "pending execution".
 async fn advance_bidirectional_to_execution(
     entry: SignEntry<Bidirectional<Initial<AnyProgress>>>,
-    event: &SignBidirectionalEvent,
     respond_event: SignatureRespondedEvent,
-    sign_id: SignId,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let source_chain = respond_event.chain;
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain();
+    let event = entry.sign_bidirectional_event();
 
     // Admission validates the same derivations, but entries can enter the backlog
     // without passing admission (checkpoint recovery restores them wholesale). One
@@ -191,68 +184,17 @@ async fn advance_bidirectional_to_execution(
         return Ok(());
     }
 
-    tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event
-        .target_chain()
-        .with_context(|| format!("failed to process respond event for sign id: {sign_id:?}"))?;
+    let tx = Arc::new(event.to_bidirectional_tx(
+        respond_event.request_id,
+        respond_event.signature,
+        root_pk,
+    )?);
 
-    // Get the MPC public key and derive the from_address.
-    let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
+    entry.advance(tx).await.with_context(|| {
+        format!("advance bidirectional tx to execution failed for sign id {sign_id:?}")
+    })?;
 
-    let mpc_sig = respond_event.signature;
-
-    // Sign and hash the transaction to get the correct tx_id and nonce
-    let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
-        &event.serialized_transaction,
-        mpc_sig,
-    )?;
-
-    let tx_id = BidirectionalTxId(signed_tx_hash);
-
-    let bidirectional_tx = Arc::new(BidirectionalTx {
-        id: tx_id,
-        sender: event.sender,
-        serialized_transaction: event.serialized_transaction.clone(),
-        source_chain,
-        target_chain,
-        caip2_id: event.caip2_id.clone(),
-        key_version: event.key_version,
-        deposit: event.deposit,
-        path: event.path.clone(),
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-        output_deserialization_schema: event.output_deserialization_schema.clone(),
-        respond_serialization_schema: event.respond_serialization_schema.clone(),
-        request_id: respond_event.request_id,
-        from_address: **from_address,
-        nonce,
-    });
-
-    tracing::info!(
-        ?sign_id,
-        ?tx_id,
-        nonce = ?bidirectional_tx.nonce,
-        from_address = ?bidirectional_tx.from_address,
-        "bidirectional tx details before advancement",
-    );
-
-    entry
-        .advance(bidirectional_tx)
-        .await
-        .with_context(|| {
-            format!(
-                "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}"
-            )
-        })?;
-    tracing::info!(
-        ?sign_id,
-        ?tx_id,
-        ?target_chain,
-        "advance bidirectional tx to execution successful"
-    );
-
+    tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
     Ok(())
 }
 
@@ -275,14 +217,8 @@ pub(crate) async fn process_respond_bidirectional_event(
     };
 
     entry.verify_signature(root_pk, &event.signature)?;
-
-    if entry.complete().await {
-        tracing::info!(?sign_id, "bidirectional tx completed");
-    } else {
-        tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-        return Ok(());
-    }
-
+    entry.complete().await;
+    tracing::info!(?sign_id, "bidirectional tx completed");
     ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
@@ -292,13 +228,28 @@ pub(crate) async fn process_respond_bidirectional_event(
 /// The target chain is the chain where the execution was observed.
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
-    sign_id: SignId,
-    source_chain: Chain,
     block_height: u64,
     result: ExecutionOutcome,
     ctx: &StreamContext,
     target_chain: Chain,
 ) -> anyhow::Result<()> {
+    tracing::debug!(
+        ?tx_id,
+        ?target_chain,
+        block_height,
+        "received execution confirmation event"
+    );
+
+    let Some(entry) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
+        tracing::warn!(
+            ?tx_id,
+            "executing bidirectional entry not found (maybe already processed)"
+        );
+        return Ok(());
+    };
+
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain;
     tracing::info!(
         ?tx_id,
         ?sign_id,
@@ -308,57 +259,18 @@ pub async fn process_execution_confirmed(
         "handling execution confirmation"
     );
 
-    // Remove the watcher; if it's not found, it might have been processed already
-    let Some((unwatched_sign_id, pending_tx)) =
-        ctx.backlog.unwatch_execution(target_chain, &tx_id).await
-    else {
-        tracing::warn!(
-            ?tx_id,
-            "execution watcher not found (maybe already processed)"
-        );
-        return Ok(());
-    };
-    if unwatched_sign_id != sign_id {
-        tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
-    }
-    // The watched transaction is the source of truth for the source chain. The
-    // follow-up request's chain decides which backlog bucket, publish key, and
-    // cancellation key it lives under, and all of them must agree; an execution
-    // watcher filling the event's field differently must not split them.
-    if source_chain != pending_tx.source_chain {
-        tracing::warn!(
-            ?tx_id,
-            event = ?source_chain,
-            watcher = ?pending_tx.source_chain,
-            "source_chain mismatch between event and watcher; using the watcher's"
-        );
-    }
-    let source_chain = pending_tx.source_chain;
-
-    let Some(entry) = ctx
-        .backlog
-        .get_by::<Bidirectional<Executing>>(source_chain, &unwatched_sign_id)
-        .await
-    else {
-        tracing::warn!(
-            ?tx_id,
-            ?unwatched_sign_id,
-            "executing bidirectional entry not found in backlog"
-        );
-        return Ok(());
-    };
-
     let entry = entry
         .advance(result)
         .await
         .with_context(|| {
             format!(
-                "failed to transition pending tx to final response for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+                "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
     tracing::info!(
         ?tx_id,
-        ?unwatched_sign_id,
+        ?sign_id,
+        ?source_chain,
         "transitioned transaction to final response"
     );
     let chain = entry.chain;

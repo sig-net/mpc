@@ -127,22 +127,8 @@ impl SignState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::mock::mock_sign_request;
     use crate::backlog::Backlog;
-
-    fn request() -> IndexedSignRequest {
-        IndexedSignRequest::sign(
-            SignId::new([0u8; 32]),
-            mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon: k256::Scalar::from(1u64),
-                payload: k256::Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 0,
-            },
-            Chain::Ethereum,
-            0,
-        )
-    }
 
     /// A respawn rebuilds `SignState`; the round must resume from the carried
     /// value, not restart at 0 — peers read a round reset as time travel.
@@ -151,7 +137,10 @@ mod tests {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let backlog = Backlog::new();
-        let entry = SignEntry::generating(Arc::new(request()), &backlog);
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
 
         let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
         state.reorganize("test");

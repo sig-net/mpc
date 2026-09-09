@@ -116,34 +116,24 @@ impl PendingRequests {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ExecutionWatcher {
-    sign_id: SignId,
-    tx: Arc<BidirectionalTx>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
-    watchers: HashMap<BidirectionalTxId, ExecutionWatcher>,
+    watchers: HashMap<BidirectionalTxId, Arc<BidirectionalTx>>,
 }
 
 impl ExecutionWatchers {
-    fn insert(
-        &mut self,
-        tx_id: BidirectionalTxId,
-        watcher: ExecutionWatcher,
-    ) -> Option<ExecutionWatcher> {
-        self.watchers.insert(tx_id, watcher)
+    fn insert(&mut self, tx: Arc<BidirectionalTx>) -> Option<Arc<BidirectionalTx>> {
+        self.watchers.insert(tx.id, tx)
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatcher> {
+    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<Arc<BidirectionalTx>> {
         self.watchers.remove(tx_id)
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, watcher)| (*id, (watcher.sign_id, Arc::clone(&watcher.tx))))
+            .map(|(id, tx)| (*id, (tx.sign_id(), Arc::clone(tx))))
             .collect()
     }
 }
@@ -337,52 +327,29 @@ impl Backlog {
         self.pending(&chain).read().await.len()
     }
 
-    /// Record that this node dispatched a publish for `id`'s current
-    /// pending-publish episode, returning `false` if one was already dispatched or
-    /// the entry is gone.
-    pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
-        let pending = self.pending(&chain).read().await;
-
-        pending
-            .requests
-            .get(id)
-            .and_then(|entry| entry.status.publishing())
-            .map(|publishing| publishing.mark_publish_dispatched())
-            .unwrap_or(false)
-    }
-
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
-    pub async fn watch_execution(
-        &self,
-        entry: &SignEntry<Bidirectional<Executing>>,
-    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
+    pub async fn watch_execution(&self, entry: &SignEntry<Bidirectional<Executing>>) {
         let tx = entry.execution_tx();
         let target_chain = tx.target_chain;
-        let sign_id = entry.sign_id();
         let mut watchers = self.watchers(&target_chain).write().await;
 
-        watchers
-            .insert(
-                tx.id,
-                ExecutionWatcher {
-                    sign_id,
-                    tx: Arc::clone(tx),
-                },
-            )
-            .map(|previous| (previous.sign_id, previous.tx))
+        watchers.insert(Arc::clone(tx));
     }
 
-    /// Stop watching for execution of a bidirectional transaction on the destination chain.
+    /// Stop watching for execution of a bidirectional transaction on the destination chain
+    /// and retrieve the executing backlog entry from its source chain.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        let mut entry = self.watchers(&chain).write().await;
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        let tx = {
+            let mut watchers = self.watchers(&chain).write().await;
+            watchers.remove(tx_id)?
+        };
 
-        entry
-            .remove(tx_id)
-            .map(|watcher| (watcher.sign_id, watcher.tx))
+        self.get_by::<Bidirectional<Executing>>(tx.source_chain, &tx.sign_id())
+            .await
     }
 
     /// Set the processed block height for a specific chain.
@@ -543,9 +510,7 @@ impl Backlog {
         // Clear execution watchers whose source chain is the recovered chain
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
-            watchers
-                .watchers
-                .retain(|_, watcher| watcher.tx.source_chain != chain);
+            watchers.watchers.retain(|_, tx| tx.source_chain != chain);
         }
 
         // now repopulate our execution watchers

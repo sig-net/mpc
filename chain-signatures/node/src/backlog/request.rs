@@ -7,8 +7,8 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey, SignId, SignKind,
-    Signature,
+    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
+    SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -486,14 +486,24 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
     }
 }
 
+impl<P> SignEntry<Bidirectional<Initial<P>>> {
+    /// Return the underlying [`SignBidirectionalEvent`] for this initial bidirectional entry.
+    pub fn sign_bidirectional_event(&self) -> &SignBidirectionalEvent {
+        match &self.request.kind {
+            SignKind::SignBidirectional(event) => event,
+            _ => unreachable!("guaranteed by Bidirectional typestate invariant"),
+        }
+    }
+}
+
 impl SignEntry<Bidirectional<Executing>> {
     pub fn execution_tx(&self) -> &Arc<BidirectionalTx> {
         &self.state.0 .0
     }
 
     /// Watch execution of this bidirectional transaction on its target chain.
-    pub async fn watch_execution(&self) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        self.backlog.watch_execution(self).await
+    pub async fn watch_execution(&self) {
+        self.backlog.watch_execution(self).await;
     }
 
     /// Advance destination-chain `Executing` into Phase 2 response signing based on
