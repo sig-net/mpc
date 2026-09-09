@@ -66,13 +66,21 @@ jobs:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
 
       # The same three values the grafana-agent collectors remote-write with,
-      # read at run time rather than mirrored into repo secrets. The runner's
-      # Kubernetes service account already reaches Secret Manager, so there is
-      # no second copy to keep level with the collectors'.
+      # read at run time rather than mirrored into repo secrets, so there is no
+      # second copy to keep level with the collectors'.
       #
-      # This action registers them as masked outputs; `gcloud secrets versions
-      # access` into GITHUB_ENV would not, and would print them on any step
-      # that dumps the environment.
+      # Authenticated as near-dev-github, which holds secretAccessor on these
+      # three secrets and nothing else. The runner pods themselves have no GCP
+      # identity: they run as the arc-runners default service account, and the
+      # k8s-sa in that namespace belongs to the External Secrets controller
+      # rather than to jobs.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
+
+      # Masked outputs. `gcloud secrets versions access` into GITHUB_ENV would
+      # not mask, and would print them on any step that dumps the environment.
       - name: Read Grafana credentials
         id: grafana
         uses: google-github-actions/get-secretmanager-secrets@v2
