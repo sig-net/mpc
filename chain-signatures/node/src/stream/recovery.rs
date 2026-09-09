@@ -22,12 +22,11 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
-) {
+) -> Result<(), crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
-    // Hydrate the local checkpoint before aligning: the web server (spawned
-    // independently) can then serve durable pending bodies to peers during
-    // startup. `load_local` only reads local storage and does not need the mesh.
+    // Parser version only changes with a new binary, so apply it on the first
+    // recovery pass before hydrating the pending counter from storage.
     if load_local {
         match backlog.apply_parser_version(chain, parser_version).await {
             Ok(true) => {
@@ -41,22 +40,24 @@ pub(crate) async fn recover_backlog(
                 tracing::warn!(?chain, %err, "failed to apply parser version; continuing");
             }
         }
-        match backlog.load_local(chain).await {
-            Ok(Some(checkpoint)) => {
+    }
+
+    // Hydrate the in-memory pending checkpoint counter from storage on every
+    // recovery pass so any counter drift self-heals across restarts.
+    backlog.checkpoints().hydrate(chain).await?;
+
+    // Hydrate local backlog state from durable storage on initial startup.
+    if load_local {
+        match backlog.recover_local(chain).await? {
+            Some(checkpoint) => {
                 tracing::info!(
                     ?chain,
                     height = checkpoint.block_height,
-                    "loaded local checkpoint"
+                    "hydrated local checkpoint"
                 );
-                if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                    tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
-                }
             }
-            Ok(None) => {
+            None => {
                 tracing::info!(?chain, "no local checkpoint found");
-            }
-            Err(err) => {
-                tracing::warn!(?chain, %err, "failed to load local checkpoint");
             }
         }
     }
@@ -76,4 +77,6 @@ pub(crate) async fn recover_backlog(
     {
         tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
+
+    Ok(())
 }

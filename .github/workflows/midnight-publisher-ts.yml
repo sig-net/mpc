@@ -4,22 +4,13 @@
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
 # runs here too: the `intent_seam` differential drives the freshly built entry point
-# with the real client, which is what catches the two sides drifting apart, and is
-# why the `chain-midnight` path filter below is among the triggers.
+# with the real client, which is what catches the two sides drifting apart.
 #
 # The required live end-to-end path runs in the Integration workflow's
 # Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
 name: Midnight Publisher TS
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - ".github/workflows/midnight-publisher-ts.yml"
-      - "Dockerfile"
-      - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
   pull_request:
   merge_group:
 
@@ -32,6 +23,12 @@ jobs:
         working-directory: chain-signatures/midnight-publisher-ts
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -72,7 +69,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       # The filter names the test binary: the seam tests live in
@@ -81,4 +78,4 @@ jobs:
       # matches against test names and selects nothing.
       - name: Rust intent seam differential
         working-directory: .
-        run: cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'
+        run: just test-midnight-seam

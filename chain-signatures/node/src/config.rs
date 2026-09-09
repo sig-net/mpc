@@ -22,10 +22,6 @@ impl Config {
         watch::channel(config)
     }
 
-    pub fn channel_default() -> (watch::Sender<Self>, watch::Receiver<Self>) {
-        Self::channel(LocalConfig::default())
-    }
-
     pub fn new(local: LocalConfig) -> Self {
         let mut protocol = ProtocolConfig::default();
 
@@ -39,23 +35,6 @@ impl Config {
         }
 
         Self { protocol, local }
-    }
-
-    pub fn try_from_contract(mut contract: ContractConfig, original: &Config) -> Option<Self> {
-        let Some(mut protocol) = contract.remove("protocol") else {
-            tracing::warn!("unable to find protocol in contract config");
-            return None;
-        };
-        merge(&mut protocol, &original.local.over.entries);
-        let Ok(protocol) = serde_json::from_value(protocol) else {
-            tracing::warn!("unable to parse protocol in contract config");
-            return None;
-        };
-
-        Some(Self {
-            protocol,
-            local: original.local.clone(),
-        })
     }
 
     /// Returns whether the merged protocol config actually changed, so that the

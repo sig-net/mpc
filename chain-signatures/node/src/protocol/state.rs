@@ -305,10 +305,6 @@ impl NodeStateWatcher {
         self.watcher.borrow().clone()
     }
 
-    pub fn status_mut(&mut self) -> NodeStatus {
-        self.watcher.borrow_and_update().clone()
-    }
-
     pub fn participants(&self) -> Vec<Participant> {
         match self.status() {
             NodeStatus::Generating { participants } => participants,

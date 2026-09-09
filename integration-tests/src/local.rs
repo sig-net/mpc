@@ -6,7 +6,6 @@ use crate::{execute, utils, NodeConfig};
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
-use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
 use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
@@ -64,9 +63,6 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = NearIndexerOptions {
-            running_threshold: 120,
-        };
         let eth = EthArgs::from_config(cfg.eth.clone());
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
@@ -78,23 +74,22 @@ impl Node {
             near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
+            env: ctx.env.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            sign_sk: Some(sign_sk.clone()),
+            sign_sk: sign_sk.clone(),
             eth,
             sol,
             hydration,
             canton,
             midnight,
-            indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
@@ -167,9 +162,6 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-        let indexer_options = NearIndexerOptions {
-            running_threshold: 120,
-        };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = SolArgs::from_config(config.cfg.sol.clone());
@@ -180,23 +172,22 @@ impl Node {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
+            env: ctx.env.clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            sign_sk: Some(config.sign_sk.clone()),
+            sign_sk: config.sign_sk.clone(),
             eth,
             sol,
             hydration,
             canton,
             midnight,
-            indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };

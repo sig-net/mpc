@@ -137,10 +137,6 @@ impl MockServers {
     pub fn remove_back(&mut self) {
         self.servers.pop();
     }
-
-    pub fn swap_remove_front(&mut self) {
-        self.servers.swap_remove(0);
-    }
 }
 
 impl std::ops::Index<usize> for MockServers {
@@ -166,7 +162,6 @@ fn default_state_body() -> Vec<u8> {
         presignature_count: 0,
         presignature_mine_count: 0,
         presignature_potential_count: 0,
-        latest_block_height: 0,
     })
     .unwrap()
 }

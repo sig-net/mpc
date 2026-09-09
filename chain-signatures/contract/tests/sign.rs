@@ -3,7 +3,7 @@ use common::{candidates, create_response, init, init_env, sign_and_validate};
 
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, Read, SignRequest, View};
-use mpc_primitives::ConsensusCheckpointDigest;
+use mpc_primitives::CheckpointDigest;
 use near_workspaces::types::{AccountId, NearToken};
 use signet_primitives::{Chain, Signature, LATEST_MPC_KEY_VERSION};
 
@@ -354,7 +354,7 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_checkpoint_voting() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
-    let checkpoint = ConsensusCheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
+    let checkpoint = CheckpointDigest::new(Chain::Solana, 120, [7u8; 32]);
 
     let first_vote = accounts[0]
         .call(contract.id(), "vote_checkpoint")
@@ -388,7 +388,7 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
         .await?
         .json()?;
-    let checkpoints: HashMap<Chain, ConsensusCheckpointDigest> = views
+    let checkpoints: HashMap<Chain, CheckpointDigest> = views
         .into_iter()
         .find_map(|view| match view {
             View::Checkpoints(checkpoints) => Some(checkpoints),
@@ -397,15 +397,80 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .expect("read should return a Checkpoints view");
     assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
 
-    let latest: Option<ConsensusCheckpointDigest> = contract
+    let latest: Option<CheckpointDigest> = contract
         .view("latest_checkpoint")
         .args_json(serde_json::json!({ "chain": Chain::Solana }))
         .await?
         .json()?;
     assert_eq!(latest, Some(checkpoint));
 
-    let competing_a = ConsensusCheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
-    let competing_b = ConsensusCheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
+    // Verify that every returned checkpoint matches its map key and carries
+    // the correct chain based on the checkpoint digest.
+    for (chain, cp) in &checkpoints {
+        assert_eq!(
+            *chain, cp.chain,
+            "contract returned chain must match checkpoint digest's chain"
+        );
+    }
+
+    // Vote for a checkpoint on a different chain (Ethereum) to verify multi-chain storage.
+    let eth_checkpoint = CheckpointDigest::new(Chain::Ethereum, 50, [0xee; 32]);
+    for account in &accounts[0..2] {
+        let vote = account
+            .call(contract.id(), "vote_checkpoint")
+            .args_json(serde_json::json!({ "checkpoint": eth_checkpoint }))
+            .max_gas()
+            .transact()
+            .await?;
+        assert!(vote.is_success());
+    }
+
+    let views: Vec<View> = contract
+        .view("read")
+        .args_json(serde_json::json!({ "reads": [Read::Checkpoints] }))
+        .await?
+        .json()?;
+    let checkpoints: HashMap<Chain, CheckpointDigest> = views
+        .into_iter()
+        .find_map(|view| match view {
+            View::Checkpoints(checkpoints) => Some(checkpoints),
+            _ => None,
+        })
+        .expect("read should return a Checkpoints view");
+    assert_eq!(checkpoints.get(&Chain::Solana), Some(&checkpoint));
+    assert_eq!(checkpoints.get(&Chain::Ethereum), Some(&eth_checkpoint));
+    for (chain, cp) in &checkpoints {
+        assert_eq!(
+            *chain, cp.chain,
+            "contract returned chain must match checkpoint digest's chain"
+        );
+    }
+
+    let latest_sol: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    assert_eq!(latest_sol, Some(checkpoint));
+    assert_eq!(latest_sol.unwrap().chain, Chain::Solana);
+
+    let latest_eth: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Ethereum }))
+        .await?
+        .json()?;
+    assert_eq!(latest_eth, Some(eth_checkpoint));
+    assert_eq!(latest_eth.unwrap().chain, Chain::Ethereum);
+
+    let latest_unvoted: Option<CheckpointDigest> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Bitcoin }))
+        .await?
+        .json()?;
+    assert_eq!(latest_unvoted, None);
+
+    let competing_a = CheckpointDigest::new(Chain::Solana, 240, [1u8; 32]);
+    let competing_b = CheckpointDigest::new(Chain::Solana, 240, [2u8; 32]);
     let first_competing_vote = accounts[0]
         .call(contract.id(), "vote_checkpoint")
         .args_json(serde_json::json!({ "checkpoint": competing_a }))
@@ -433,7 +498,7 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
     assert!(finalize_competing_vote.is_success());
     assert!(finalize_competing_vote.json::<bool>()?);
 
-    let stale = ConsensusCheckpointDigest::new(Chain::Solana, 119, [9u8; 32]);
+    let stale = CheckpointDigest::new(Chain::Solana, 119, [9u8; 32]);
     let stale_vote = accounts[2]
         .call(contract.id(), "vote_checkpoint")
         .args_json(serde_json::json!({ "checkpoint": stale }))
@@ -448,7 +513,7 @@ async fn test_checkpoint_voting() -> anyhow::Result<()> {
         .to_string()
         .contains(&errors::CheckpointError::CheckpointBehind.to_string()));
 
-    let conflicting = ConsensusCheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
+    let conflicting = CheckpointDigest::new(Chain::Solana, 120, [8u8; 32]);
     let conflict = accounts[2]
         .call(contract.id(), "vote_checkpoint")
         .args_json(serde_json::json!({ "checkpoint": conflicting }))

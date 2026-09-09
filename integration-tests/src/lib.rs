@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod containers;
 pub mod eth;
 pub mod execute;
+pub mod gcs;
 pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
@@ -15,7 +16,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use self::local::NodeEnvConfig;
-use crate::containers::DockerClient;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
@@ -24,13 +24,12 @@ use cluster::spawner::ClusterSpawner;
 use mpc_chain_canton::CantonConfig;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::EthConfig;
+use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
-use mpc_node::gcp::GcpService;
-use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::web::CheckpointResponse;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::Chain;
@@ -104,7 +103,6 @@ impl Default for NodeConfig {
 }
 
 pub struct Nodes {
-    next_id: usize,
     ctx: Context,
     nodes: Vec<local::Node>,
 }
@@ -142,7 +140,6 @@ impl Nodes {
         tracing::info!(id = %new_account.id(), "adding one more node");
         self.nodes
             .push(local::Node::run(&self.ctx, cfg, new_account).await?);
-        self.next_id += 1;
         Ok(self.nodes.len() - 1)
     }
 
@@ -170,25 +167,10 @@ impl Nodes {
         tracing::info!(node_account_id = %config.account.id(), "restarting node");
         self.nodes
             .push(local::Node::spawn(&self.ctx, config).await?);
-        self.next_id += 1;
         // wait for the node to be added to the network
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         Ok(())
-    }
-
-    pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
-        let mut gcp_services = Vec::new();
-        for node in &self.nodes {
-            gcp_services
-                .push(GcpService::init(node.account.id(), &self.ctx.storage_options).await?);
-        }
-        Ok(gcp_services)
-    }
-
-    pub fn proxy_name_for_node(&self, id: usize) -> String {
-        let account_id = self.near_accounts();
-        format!("rpc_from_node_{}", account_id[id].id())
     }
 
     pub fn contract(&self) -> &Contract {
@@ -243,13 +225,13 @@ pub struct EthereumContext {
 }
 
 pub struct Context {
-    pub docker_client: DockerClient,
     pub docker_network: String,
     pub release: bool,
 
     pub worker: Worker<Sandbox>,
     pub mpc_contract: Contract,
     pub redis: containers::Redis,
+    pub env: String,
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
@@ -322,7 +304,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        env: spawner.env.clone(),
         gcp_project_id: spawner.gcp_project_id.clone(),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
@@ -371,12 +352,12 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     Ok(Context {
-        docker_client: spawner.docker.clone(),
         docker_network: spawner.network.clone(),
         release: spawner.release,
         worker,
         mpc_contract,
         redis,
+        env: spawner.env.clone(),
         storage_options,
         log_options,
         mesh_options,
@@ -520,11 +501,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         "governance contract initialized"
     );
 
-    Ok(Nodes {
-        next_id: nodes.len(),
-        ctx,
-        nodes,
-    })
+    Ok(Nodes { ctx, nodes })
 }
 
 pub async fn run(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {

@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{probe_network_id, MidnightAddress, MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{
+    probe_network_id, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
+};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,7 @@ pub struct SignedEvmTransaction {
 
 pub struct MidnightContext {
     _stack: MidnightStack,
+    pub output_storage: crate::gcs::GcsEmulator,
     pub config: MidnightConfig,
     driver: Mutex<MidnightDriver>,
 }
@@ -81,6 +84,7 @@ impl MidnightContext {
         spawner: &ClusterSpawner,
         root_public_key: mpc_crypto::PublicKey,
     ) -> anyhow::Result<Self> {
+        let output_storage = crate::gcs::GcsEmulator::run().await?;
         let stack = MidnightStack::run(spawner).await?;
         let mut driver = MidnightDriver::spawn(&stack.artifact_dir).await?;
         let bootstrap = driver
@@ -127,10 +131,17 @@ impl MidnightContext {
             &bootstrap,
             node_executable()?,
             publisher_entrypoint,
+            Some(OutputStorageConfig {
+                bucket: output_storage.bucket.clone(),
+                prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
+                timeout: Duration::from_secs(30),
+                emulator_endpoint: Some(output_storage.endpoint.clone()),
+            }),
         )?;
         config.validate()?;
         Ok(Self {
             _stack: stack,
+            output_storage,
             config,
             driver: Mutex::new(driver),
         })
@@ -169,11 +180,32 @@ impl MidnightContext {
             .await
     }
 
-    pub async fn settle_response(&self, request_id: [u8; 32]) -> anyhow::Result<()> {
+    pub async fn stored_output(&self, request_id: [u8; 32]) -> anyhow::Result<Vec<u8>> {
+        let object = format!(
+            "{}/{}/{}/{}.bin",
+            self.config
+                .publisher
+                .output_storage
+                .as_ref()
+                .context("Midnight output storage is disabled")?
+                .prefix,
+            self._stack.network_id,
+            self.config.central_address.to_hex(),
+            hex::encode(request_id),
+        );
+        self.output_storage.read_object(&object).await
+    }
+
+    pub async fn settle_response(
+        &self,
+        request_id: [u8; 32],
+        serialized_output: &[u8],
+    ) -> anyhow::Result<()> {
         let mut driver = self.driver.lock().await;
         let _: serde_json::Value = driver
             .request(&serde_json::json!({
                 "op": "settleResponse",
+                "serializedOutput": hex::encode(serialized_output),
                 "requestId": format!("0x{}", hex::encode(request_id)),
             }))
             .await?;
@@ -216,12 +248,14 @@ fn responder_config(
     bootstrap: &BootstrapResult,
     node_executable: String,
     publisher_entrypoint: PathBuf,
+    output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
+            output_storage,
             intent_gen_command: vec![
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),

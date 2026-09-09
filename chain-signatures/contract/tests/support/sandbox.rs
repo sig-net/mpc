@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
-/// Sandbox version that supports the WASM features emitted by current contract builds.
-pub const SANDBOX_VERSION: &str = "2.13.1";
+pub use mpc_primitives::SANDBOX_VERSION;
 
 pub fn contract_file_path() -> PathBuf {
     let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

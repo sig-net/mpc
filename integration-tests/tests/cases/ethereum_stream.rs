@@ -379,7 +379,8 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
-            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
         Ok(true)
     ));
@@ -511,7 +512,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
     assert!(matches!(
         seeded_backlog
-            .confirm_consensus(Chain::Ethereum, checkpoint.digest())
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
             .await,
         Ok(true)
     ));
@@ -563,6 +565,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -908,6 +911,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -1051,6 +1055,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )
@@ -1111,6 +1116,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                     ),
                     participants: vec![Participant::from(0u32), Participant::from(1u32)],
                     is_proposer: true,
+                    publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
                 }),
             },
         )

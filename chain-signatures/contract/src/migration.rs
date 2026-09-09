@@ -11,7 +11,7 @@ use crate::update::ProposedUpdates;
 use crate::MpcContract;
 
 use borsh::BorshDeserialize;
-use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 use std::collections::BTreeMap;
@@ -133,7 +133,7 @@ pub(crate) struct PreviousDevnet {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
-    latest_checkpoints: IterableMap<Chain, ConsensusCheckpointDigest>,
+    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
 

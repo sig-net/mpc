@@ -254,8 +254,8 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
         earliest = earliest.min(timestamp);
         let bytesize = msg.size();
-        if current_size + bytesize > 256 * 1024 {
-            // If adding this byte vector exceeds 256kb, start a new partition
+        if current_size + bytesize > super::MAX_OUTBOX_PAYLOAD_LIMIT {
+            // If adding this byte vector exceeds the payload limit, start a new partition
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
                 timestamp: earliest,
@@ -339,7 +339,7 @@ mod tests {
                 .iter()
                 .map(|msg| msg.size())
                 .sum::<usize>();
-            assert!(bytesize <= 256 * 1024);
+            assert!(bytesize <= crate::protocol::message::MAX_OUTBOX_PAYLOAD_LIMIT);
         }
     }
 

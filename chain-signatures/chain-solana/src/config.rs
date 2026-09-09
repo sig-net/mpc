@@ -28,8 +28,6 @@ pub struct SolConfig {
     pub account_sk: String,
     /// Solana RPC http URL
     pub rpc_http_url: String,
-    /// Solana RPC websocket URL
-    pub rpc_ws_url: String,
     /// The program address to watch
     pub program_address: String,
     /// Indexer polling tunables.
@@ -51,7 +49,6 @@ impl fmt::Debug for SolConfig {
         f.debug_struct("SolConfig")
             .field("account_sk", &"<hidden>")
             .field("rpc_http_url", &self.rpc_http_url)
-            .field("rpc_ws_url", &self.rpc_ws_url)
             .field("program_address", &self.program_address)
             .field("indexer", &self.indexer)
             .finish()

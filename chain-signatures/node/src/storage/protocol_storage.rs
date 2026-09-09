@@ -626,11 +626,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.reserved.read().await.using.contains_key(&id)
     }
 
-    /// Returns the set of artifact IDs currently being consumed by active protocols.
-    pub async fn using_ids(&self) -> HashSet<A::Id> {
-        self.reserved.read().await.using.keys().copied().collect()
-    }
-
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]

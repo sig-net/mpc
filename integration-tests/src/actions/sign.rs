@@ -2,22 +2,12 @@ use std::collections::HashSet;
 use std::fmt;
 use std::future::IntoFuture;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::primitives::{Address, FixedBytes, U256};
-use alloy::providers::Provider;
-use alloy::providers::ProviderBuilder;
-use alloy::signers::local::PrivateKeySigner;
-use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
-use anchor_client::{Client, Cluster as AnchorCluster};
 use cait_sith::FullSignature;
-use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
-use generic_array::GenericArray;
 use k256::Secp256k1;
-use mpc_chain_ethereum::abi::{ChainSignatures, SignatureRequestedEncoding};
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -34,7 +24,6 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
-use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
@@ -177,11 +166,6 @@ impl<'a> SignAction<'a> {
     pub fn parameters(mut self, params: &str) -> Self {
         self.params = params.into();
         self
-    }
-
-    /// Create an ETH contract sign request builder
-    pub fn eth(self) -> EthSignAction<'a> {
-        EthSignAction::new(self)
     }
 
     /// Create a Solana-specific sign action that calls the Solana contract's sign function
@@ -694,19 +678,76 @@ pub async fn wait_for_respond_bidirectional(
     timeout: Duration,
 ) -> anyhow::Result<SolRespondBidirectionalOutcome> {
     let program_id = solana.program_keypair.pubkey();
+    let rpc = RpcClient::new(solana.rpc_address.clone());
 
-    let cluster = AnchorCluster::Custom(solana.rpc_address.clone(), solana.ws_address.clone());
-    let client = Client::new_with_options(
-        cluster,
-        Arc::new(solana.payer_keypair.insecure_clone()),
-        CommitmentConfig::confirmed(),
+    tracing::info!(
+        request_id = %hex::encode(expected_request_id),
+        timeout_secs = timeout.as_secs(),
+        "polling for RespondBidirectionalEvent CPI instruction...",
     );
-    let program = client.program(program_id)?;
-    let (tx, rx) = oneshot::channel();
-    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
-    let event_unsub = program
-        .on(move |_ctx, event: RespondBidirectionalEvent| {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut elapsed_secs = 0u64;
+
+    loop {
+        if let Some(outcome) =
+            scan_respond_bidirectional_events(&rpc, &program_id, expected_request_id, &mut seen)
+                .await?
+        {
+            return Ok(outcome);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timeout ({timeout:?}) waiting for respond bidirectional on solana (request_id={})",
+                hex::encode(expected_request_id),
+            );
+        }
+
+        sleep(Duration::from_secs(2)).await;
+        elapsed_secs += 2;
+        if elapsed_secs.is_multiple_of(30) {
+            tracing::info!(
+                request_id = %hex::encode(expected_request_id),
+                elapsed_secs,
+                "still waiting for RespondBidirectionalEvent..."
+            );
+        }
+    }
+}
+
+async fn scan_respond_bidirectional_events(
+    rpc: &RpcClient,
+    program_id: &Pubkey,
+    expected_request_id: [u8; 32],
+    seen: &mut HashSet<String>,
+) -> anyhow::Result<Option<SolRespondBidirectionalOutcome>> {
+    let statuses = rpc.get_signatures_for_address(program_id).await?;
+
+    for status in statuses {
+        if status.err.is_some() || seen.contains(&status.signature) {
+            continue;
+        }
+
+        let Ok(signature) = SolSignature::from_str(&status.signature) else {
+            continue;
+        };
+
+        let events = match parse_respond_bidirectional_events(rpc, &signature, program_id).await {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!(
+                    tx_signature = %status.signature,
+                    error = %e,
+                    "failed to fetch transaction for RespondBidirectionalEvent scan; will retry",
+                );
+                continue;
+            }
+        };
+        seen.insert(status.signature.clone());
+
+        for event in events {
             tracing::info!(
                 request_id = %hex::encode(event.request_id),
                 responder = ?event.responder,
@@ -715,69 +756,86 @@ pub async fn wait_for_respond_bidirectional(
             );
 
             if event.request_id != expected_request_id {
-                return;
+                continue;
             }
 
-            let signature_result = parse_sol_signature(&event.signature);
-            if let Ok(mut sender) = tx.lock() {
-                if let Some(sender) = sender.take() {
-                    let outcome = signature_result.map(|(signature, recovery_id)| {
-                        SolRespondBidirectionalOutcome {
-                            request_id: event.request_id,
-                            responder: event.responder.to_string(),
-                            serialized_output: event.serialized_output.clone(),
-                            signature,
-                            recovery_id,
-                        }
-                    });
-                    if sender.send(outcome).is_err() {
-                        tracing::error!("failed to send RespondBidirectionalEvent outcome");
-                    }
-                }
-            }
-        })
+            let (signature, recovery_id) = parse_sol_signature(&event.signature)?;
+            return Ok(Some(SolRespondBidirectionalOutcome {
+                request_id: event.request_id,
+                responder: event.responder.to_string(),
+                serialized_output: event.serialized_output,
+                signature,
+                recovery_id,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn parse_respond_bidirectional_events(
+    rpc_client: &RpcClient,
+    signature: &solana_sdk::signature::Signature,
+    program_id: &Pubkey,
+) -> anyhow::Result<Vec<RespondBidirectionalEvent>> {
+    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+
+    let tx = rpc_client
+        .get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        )
         .await?;
 
-    tracing::info!(
-        request_id = %hex::encode(expected_request_id),
-        timeout_secs = timeout.as_secs(),
-        "subscribed to RespondBidirectionalEvent, waiting for MPC response...",
-    );
+    let Some(meta) = tx.transaction.meta else {
+        return Ok(Vec::new());
+    };
 
-    // Wrap the oneshot receiver with periodic progress logging so CI
-    // output shows the test is still alive and how long it has been waiting.
-    let request_id_hex = hex::encode(expected_request_id);
-    let result = tokio::time::timeout(timeout, async {
-        let mut elapsed_secs = 0u64;
-        let mut rx = rx;
-        loop {
-            tokio::select! {
-                res = &mut rx => { return res; }
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {
-                    elapsed_secs += 15;
-                    tracing::info!(
-                        request_id = %request_id_hex,
-                        elapsed_secs,
-                        "still waiting for RespondBidirectionalEvent..."
-                    );
-                }
+    let inner_sets = match meta.inner_instructions {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(inner) => inner,
+        _ => return Ok(Vec::new()),
+    };
+
+    let target_program = program_id.to_string();
+    let mut events = Vec::new();
+
+    for inner_set in inner_sets.iter() {
+        for instruction in inner_set.instructions.iter() {
+            let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(parsed)) = instruction
+            else {
+                continue;
+            };
+
+            if parsed.program_id != target_program {
+                continue;
+            }
+
+            let Ok(ix_data) = solana_sdk::bs58::decode(&parsed.data).into_vec() else {
+                continue;
+            };
+
+            if ix_data.len() < anchor_client::anchor_lang::event::EVENT_IX_TAG_LE.len() + 8
+                || !ix_data.starts_with(anchor_client::anchor_lang::event::EVENT_IX_TAG_LE)
+            {
+                continue;
+            }
+
+            let discriminator = &ix_data[8..16];
+            if discriminator != RespondBidirectionalEvent::DISCRIMINATOR {
+                continue;
+            }
+
+            if let Ok(event) = RespondBidirectionalEvent::deserialize(&mut &ix_data[16..]) {
+                events.push(event);
             }
         }
-    })
-    .await;
-    event_unsub.unsubscribe().await;
-
-    match result {
-        Ok(Ok(Ok(outcome))) => Ok(outcome),
-        Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol respond bidirectional signature: {e}"),
-        Ok(Err(_)) => anyhow::bail!(
-            "sol respond bidirectional event channel closed unexpectedly \
-             (request_id={request_id_hex})",
-        ),
-        Err(_) => anyhow::bail!(
-            "timeout ({timeout:?}) waiting for respond bidirectional on sol (request_id={request_id_hex})",
-        ),
     }
+
+    Ok(events)
 }
 
 impl<'a> IntoFuture for SignAction<'a> {
@@ -902,322 +960,4 @@ fn parse_sol_signature(
 
     // Create the FullSignature (note: FullSignature doesn't store recovery_id)
     Ok((FullSignature { big_r, s }, solana_sig.recovery_id))
-}
-
-/// Ethereum contract signature request outcome
-pub struct EthSignOutcome {
-    pub signer_address: Address,
-    pub contract_address: Address,
-    pub eth_tx_hash: Option<String>,
-    pub deposit_amount: u64,
-    pub signature: FullSignature<Secp256k1>,
-    pub payload: [u8; 32],
-    pub payload_hash: [u8; 32],
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-}
-
-impl fmt::Debug for EthSignOutcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EthSignOutcome")
-            .field("contract_address", &self.contract_address)
-            .field("eth_tx_hash", &self.eth_tx_hash)
-            .field("deposit_amount", &self.deposit_amount)
-            .field("signature_big_r", &self.signature.big_r)
-            .field("signature_s", &self.signature.s)
-            .field("payload", &self.payload)
-            .field("payload_hash", &self.payload_hash)
-            .field("algo", &self.algo)
-            .field("dest", &self.dest)
-            .field("params", &self.params)
-            .finish()
-    }
-}
-
-/// ETH contract signature request builder
-pub struct EthSignAction<'a> {
-    sign_action: SignAction<'a>,
-    contract_addr: Address,
-    signer: PrivateKeySigner,
-    deposit_amount: U256,
-    algo: String,
-    dest: String,
-    params: String,
-}
-
-impl<'a> EthSignAction<'a> {
-    pub fn new(sign_action: SignAction<'a>) -> Self {
-        let eth = sign_action.nodes.cfg.eth.as_ref().unwrap().clone();
-        Self {
-            sign_action,
-            contract_addr: eth.contract_address,
-            signer: eth.account_sk,
-            deposit_amount: U256::from(1), // 1 wei
-            algo: "ECDSA".to_string(),
-            dest: "ethereum".to_string(),
-            params: "{}".to_string(),
-        }
-    }
-
-    /// Set the ETH contract address to interact with
-    pub fn contract_address(mut self, address: &str) -> Self {
-        self.contract_addr = address.parse().expect("invalid contract address");
-        self
-    }
-
-    /// Set the ETH deposit amount in wei
-    pub fn deposit(mut self, amount: u64) -> Self {
-        self.deposit_amount = U256::from(amount);
-        self
-    }
-
-    /// Set the signing algorithm
-    pub fn algorithm(mut self, algo: &str) -> Self {
-        self.algo = algo.to_string();
-        self
-    }
-
-    /// Set the destination
-    pub fn destination(mut self, dest: &str) -> Self {
-        self.dest = dest.to_string();
-        self
-    }
-
-    /// Set additional parameters
-    pub fn parameters(mut self, params: &str) -> Self {
-        self.params = params.to_string();
-        self
-    }
-
-    /// Set the account to sign with (delegates to underlying SignAction)
-    pub fn account(mut self, account: Account) -> Self {
-        self.sign_action = self.sign_action.account(account);
-        self
-    }
-
-    /// Set the payload to sign (delegates to underlying SignAction)
-    pub fn payload(mut self, payload: [u8; 32]) -> Self {
-        self.sign_action = self.sign_action.payload(payload);
-        self
-    }
-
-    /// Set the derivation path (delegates to underlying SignAction)
-    pub fn path(mut self, path: &str) -> Self {
-        self.sign_action = self.sign_action.path(path);
-        self
-    }
-
-    /// Set the key version (delegates to underlying SignAction)
-    pub fn key_version(mut self, key_version: u32) -> Self {
-        self.sign_action = self.sign_action.key_version(key_version);
-        self
-    }
-}
-
-impl<'a> IntoFuture for EthSignAction<'a> {
-    type Output = anyhow::Result<EthSignOutcome>;
-    type IntoFuture =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.execute())
-    }
-}
-
-impl EthSignAction<'_> {
-    async fn execute(self) -> anyhow::Result<EthSignOutcome> {
-        // Store values we need
-        let path = self.sign_action.path.clone();
-        let payload = self
-            .sign_action
-            .payload
-            .unwrap_or_else(|| rand::thread_rng().gen());
-        let payload_hash = *alloy::primitives::keccak256(payload);
-        let rpc_url = "https://ethereum-sepolia-rpc.publicnode.com";
-
-        tracing::info!(
-            "calling ETH ChainSignatures contract: contract={}, payload={:?}, path={}, algo={}, dest={}, params={}, deposit={}",
-            self.contract_addr,
-            payload,
-            path,
-            self.algo,
-            self.dest,
-            self.params,
-            self.deposit_amount
-        );
-
-        // Prepare the signer and contract for signing and listening for events.
-        let signer_address = self.signer.address();
-        let provider = ProviderBuilder::new()
-            .wallet(self.signer)
-            .connect_http(rpc_url.parse()?);
-        let contract = ChainSignatures::new(self.contract_addr, provider.clone());
-
-        // Prepare the sign request
-        let sign_request = ChainSignatures::SignRequest {
-            payload: FixedBytes::<32>::from_slice(&payload_hash),
-            path: path.clone(),
-            keyVersion: self.sign_action.key_version,
-            algo: self.algo.clone(),
-            dest: self.dest.clone(),
-            params: self.params.clone(),
-        };
-
-        tracing::info!(
-            contract = %self.contract_addr,
-            from = format!("0x{:x}", signer_address),
-            payload = format!("0x{}", hex::encode(payload_hash)),
-            path,
-            key_version = self.sign_action.key_version,
-            algorithm = self.algo,
-            destination = self.dest,
-            parameters = self.params,
-            deposit = ?self.deposit_amount,
-            rpc = rpc_url,
-            "calling ChainSignatures.sign() on Sepolia network"
-        );
-
-        // Call the contract
-        let pending_tx = match contract
-            .sign(sign_request)
-            .value(U256::from(self.deposit_amount))
-            .send()
-            .await
-        {
-            Ok(pending_tx) => pending_tx,
-            Err(err) => {
-                tracing::error!("failed to send transaction: {}", err);
-                anyhow::bail!("Failed to send transaction: {}", err);
-            }
-        };
-        tracing::info!("eth transaction sent successfully!");
-
-        // Wait for transaction to be mined
-        let tx_hash = *pending_tx.tx_hash();
-        if let Err(err) = pending_tx.watch().await {
-            anyhow::bail!("Transaction failed to mine: {err}");
-        }
-
-        // Calculate the request ID using the same ABI encoding as the indexer
-        let signature_requested_encoding = SignatureRequestedEncoding {
-            sender: signer_address,
-            payload: payload_hash.into(),
-            path: path.clone(),
-            keyVersion: self.sign_action.key_version,
-            chainId: U256::from(11155111u64), // Sepolia chain ID
-            algo: self.algo.clone(),
-            dest: self.dest.clone(),
-            params: self.params.clone(),
-        };
-        let request_id = alloy::primitives::keccak256(signature_requested_encoding.encode_data());
-        tracing::info!(
-            request_id = hex::encode(request_id),
-            "transaction mined: 0x{tx_hash:x}; waiting for SignatureResponded event..."
-        );
-
-        // Poll for events
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 60; // 1 minute max wait
-        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-
-        // Now wait for the SignatureResponded event
-        loop {
-            interval.tick().await;
-            attempts += 1;
-            if attempts > MAX_ATTEMPTS {
-                anyhow::bail!(
-                    "timeout waiting for SignatureResponded after {MAX_ATTEMPTS} attempts"
-                );
-            }
-
-            let current_block = match provider.get_block_number().await {
-                Ok(block) => block,
-                Err(e) => {
-                    tracing::debug!("error getting block number (attempt {}): {}", attempts, e);
-                    continue;
-                }
-            };
-
-            // filter for SignatureResponded events
-            let filter = alloy::rpc::types::Filter::new()
-                .address(self.contract_addr)
-                .from_block(current_block.saturating_sub(10)) // Look back 10 blocks
-                .to_block(current_block)
-                .event_signature(alloy::primitives::keccak256(
-                    "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
-                ));
-
-            // Query for logs
-            let logs = match provider.get_logs(&filter).await {
-                Ok(logs) => logs,
-                Err(err) => {
-                    tracing::debug!("Error querying logs (attempt {}): {}", attempts, err);
-                    continue;
-                }
-            };
-            for log in logs.iter().filter(|log| log.topics().len() >= 2) {
-                // topics[0] is the event signature
-                // topics[1] is the indexed requestId
-                let event_request_id =
-                    alloy::primitives::FixedBytes::<32>::from_slice(&log.topics()[1].0);
-                if event_request_id != request_id {
-                    continue;
-                }
-                tracing::info!(
-                    request_id = hex::encode(event_request_id),
-                    "SignatureResponded event found!"
-                );
-
-                // Parse the event data. Event data format: responder (address, 32 bytes) + signature struct
-                if log.data().data.len() < 32 + 32 * 4 {
-                    tracing::warn!("event data too short: {} bytes", log.data().data.len());
-                    continue;
-                }
-                // responder + bigR.x + bigR.y + s + recoveryId
-                // Skip responder address (32 bytes)
-                let sig_data = &log.data().data[32..];
-                let big_r_x = U256::from_be_slice(&sig_data[0..32]);
-                let big_r_y = U256::from_be_slice(&sig_data[32..64]);
-                let s = U256::from_be_slice(&sig_data[64..96]);
-                tracing::info!(
-                    big_r_x = hex::encode(big_r_x.to_be_bytes::<32>()),
-                    big_r_y = hex::encode(big_r_y.to_be_bytes::<32>()),
-                    s = hex::encode(s.to_be_bytes::<32>()),
-                    "parsing signature from SignatureResponded event..."
-                );
-
-                // Convert to k256 types
-                let x_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&big_r_x.to_be_bytes::<32>());
-                let y_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&big_r_y.to_be_bytes::<32>());
-
-                let encoded_point =
-                    k256::EncodedPoint::from_affine_coordinates(&x_bytes, &y_bytes, false);
-                let big_r = k256::AffinePoint::from_encoded_point(&encoded_point).unwrap();
-
-                let s_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&s.to_be_bytes::<32>());
-                let s = k256::Scalar::from_bytes(s_bytes.into())
-                    .ok_or_else(|| anyhow::anyhow!("invalid scalar value in event {s_bytes:?}"))?;
-
-                let signature = FullSignature::<Secp256k1> { big_r, s };
-
-                tracing::info!("successfully parsed signature from SignatureResponded event");
-                return Ok(EthSignOutcome {
-                    signer_address,
-                    contract_address: self.contract_addr,
-                    eth_tx_hash: Some(format!("0x{:x}", tx_hash)),
-                    deposit_amount: self.deposit_amount.try_into().unwrap(),
-                    signature,
-                    payload,
-                    payload_hash,
-                    algo: self.algo,
-                    dest: self.dest,
-                    params: self.params,
-                });
-            }
-        }
-    }
 }

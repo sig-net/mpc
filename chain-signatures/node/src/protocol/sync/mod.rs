@@ -130,7 +130,7 @@ pub struct SyncTask {
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
-    synced_peer_tx: mpsc::Sender<Participant>,
+    sync_report_tx: SyncReportSender,
 }
 
 // TODO: add a watch channel for mesh active participants.
@@ -141,7 +141,7 @@ impl SyncTask {
         presignatures: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
-        synced_peer_tx: mpsc::Sender<Participant>,
+        sync_report_tx: SyncReportSender,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -151,7 +151,7 @@ impl SyncTask {
             mesh_state,
             contract,
             requests,
-            synced_peer_tx,
+            sync_report_tx,
         };
         (channel, task)
     }
@@ -274,7 +274,12 @@ impl SyncTask {
         for (peer, result) in responses {
             match result {
                 SyncPeerResponse::SelfPeer => {
-                    if self.synced_peer_tx.send(peer).await.is_err() {
+                    if self
+                        .sync_report_tx
+                        .send((peer, SyncKind::Synced))
+                        .await
+                        .is_err()
+                    {
                         tracing::error!("sync reporter is down: state sync will no longer work");
                         return Err("sync reporter is down".to_string());
                     }
@@ -310,7 +315,12 @@ impl SyncTask {
                                 "batch removed peer from artifacts and pruned"
                             );
                             // Only notify mesh if both succeeded
-                            if self.synced_peer_tx.send(peer).await.is_err() {
+                            if self
+                                .sync_report_tx
+                                .send((peer, SyncKind::Synced))
+                                .await
+                                .is_err()
+                            {
                                 tracing::error!(
                                     ?peer,
                                     "sync reporter is down: state sync will no longer work"
@@ -337,11 +347,26 @@ impl SyncTask {
         Ok(())
     }
 
-    /// Channel for communicating back from the sync task which nodes are now updated.
-    pub fn synced_nodes_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
+    /// Channel for reporting to the mesh which nodes changed sync status.
+    /// Sized well above the participant count: a full channel drops whatever
+    /// report is being sent, and the cost of losing a desync report is one
+    /// more failed round for that peer.
+    pub fn sync_report_channel() -> (SyncReportSender, SyncReportReceiver) {
         mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
     }
 }
+
+/// Which way a peer's sync status changed. `Synced` comes from the sync task
+/// once a peer's artifacts have been reconciled; `Desynced` comes from anyone
+/// who learns our record of what that peer stores is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncKind {
+    Synced,
+    Desynced,
+}
+
+pub type SyncReportSender = mpsc::Sender<(Participant, SyncKind)>;
+pub type SyncReportReceiver = mpsc::Receiver<(Participant, SyncKind)>;
 
 /// Broadcast an update to all participants specified by `receivers`.
 /// Returns results for all peers that complete within BROADCAST_TIMEOUT.

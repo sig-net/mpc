@@ -9,46 +9,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Configures the NEAR indexer.
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "indexer_options")]
-pub struct Options {
-    /// The threshold in seconds to check if the indexer needs to be restarted due to it stalling.
-    #[clap(long, env("MPC_INDEXER_RUNNING_THRESHOLD"), default_value = "300")]
-    pub running_threshold: u64,
-}
-
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        vec![
-            "--running-threshold".to_string(),
-            self.running_threshold.to_string(),
-        ]
-    }
-}
-
 pub struct NearIndexer {
-    last_updated_timestamp: Instant,
-    running_threshold: Duration,
     processed_requests: HashMap<SignId, Instant>,
 }
 
 impl NearIndexer {
-    fn new(options: &Options) -> Self {
+    fn new() -> Self {
         Self {
-            last_updated_timestamp: Instant::now(),
-            running_threshold: Duration::from_secs(options.running_threshold),
             processed_requests: HashMap::new(),
         }
-    }
-
-    /// Check whether the indexer is on track with polling.
-    pub fn is_running(&self) -> bool {
-        self.last_updated_timestamp.elapsed() <= self.running_threshold
-    }
-
-    fn update_timestamp(&mut self) {
-        self.last_updated_timestamp = Instant::now();
     }
 
     fn seen_request(&self, sign_id: &SignId) -> bool {
@@ -179,9 +148,6 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
 
     let completed_requests = ctx.indexer.completed_requests(&current_pending);
 
-    // Update timestamp to indicate we're still running
-    ctx.indexer.update_timestamp();
-
     // Send all new requests
     for request in new_requests {
         tracing::info!(
@@ -221,9 +187,7 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
 /// Spawn the NEAR contract-polling indexer.
 /// The indexer polls the MPC contract for pending sign requests and sends [`Sign`] messages
 /// on `sign_tx`.
-#[allow(clippy::too_many_arguments)]
 pub fn run<S: StateManager>(
-    options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     sign_tx: mpsc::Sender<SignCommand>,
@@ -236,7 +200,7 @@ pub fn run<S: StateManager>(
         "starting contract polling indexer"
     );
 
-    let indexer = NearIndexer::new(options);
+    let indexer = NearIndexer::new();
     let mut context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         sign_tx,

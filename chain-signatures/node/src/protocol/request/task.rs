@@ -135,11 +135,11 @@ impl GeneratingPhase {
             return;
         }
         let me = ctx.governance.me;
-        let (reason, stale_round) = if state.round() > round {
-            (PositRejectReason::StaleRound, Some(state.round()))
+        let reason = if state.round() > round {
+            PositRejectReason::StaleRound(state.round())
         } else {
             state.record_peer_round(round);
-            (PositRejectReason::AlreadyGenerating, None)
+            PositRejectReason::AlreadyGenerating
         };
         tracing::info!(
             sign_id = ?ctx.sign_id,
@@ -157,7 +157,6 @@ impl GeneratingPhase {
                     id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
                     from: me,
                     action: PositAction::RejectWithReason(reason),
-                    stale_round,
                 },
             )
             .await;
@@ -178,6 +177,10 @@ pub struct SignTask {
     pub round: Arc<AtomicUsize>,
     pub limiter: SignLimiter,
     pub node_account_id: near_account_id::AccountId,
+    /// Reports a peer's sync status to the mesh. A `MissingArtifact` reject
+    /// proves our holder list is wrong about what that peer stored, and state
+    /// sync is what corrects it; this puts the peer back through it.
+    pub sync_report_tx: SyncReportSender,
 }
 
 impl SignTask {
@@ -252,7 +255,6 @@ mod tests {
             round,
             from,
             action: PositAction::Propose,
-            stale_round: None,
         }
     }
 
@@ -267,14 +269,13 @@ mod tests {
 
         GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(behind, 2)).await;
 
-        let (round, action, stale_round) = sent_posit(&mut t.outbox, me, behind);
-        // The id echoes the rejected round; ours rides in `stale_round`.
+        let (round, action) = sent_posit(&mut t.outbox, me, behind);
+        // The id echoes the rejected round; ours rides in the reject.
         assert_eq!(round, 2);
-        assert!(matches!(
+        assert_eq!(
             action,
-            PositAction::RejectWithReason(PositRejectReason::StaleRound)
-        ));
-        assert_eq!(stale_round, Some(5));
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(5))
+        );
         assert_eq!(t.state.round(), 5);
     }
 
@@ -289,12 +290,11 @@ mod tests {
 
         GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(ahead, 12)).await;
 
-        let (_, action, stale_round) = sent_posit(&mut t.outbox, me, ahead);
+        let (_, action) = sent_posit(&mut t.outbox, me, ahead);
         assert!(matches!(
             action,
             PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
         ));
-        assert_eq!(stale_round, None);
 
         // Caught up in one bump: max(3 + 1, 12) = 12.
         t.state.reorganize("generation failed");

@@ -19,15 +19,15 @@ use std::time::Duration;
 #[group(id = "message_options")]
 pub struct Options {
     /// Default timeout used for all outbound requests to other nodes.
-    #[clap(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
     pub timeout: u64,
 
     /// Timeout used for fetching the state of a node.
-    #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
     pub state_timeout: u64,
 
     /// Timeout used for sync requests to other nodes.
-    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
+    #[arg(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
     pub sync_timeout: u64,
 }
 
@@ -106,35 +106,6 @@ impl NodeClient {
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string())
-    }
-
-    pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
-        &self,
-        url: &Url,
-        payload: &T,
-    ) -> Result<R, RequestError> {
-        let resp = self
-            .http
-            .post(url.clone())
-            .header("content-type", "application/json")
-            .json(payload)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if status.is_success() {
-            Ok(resp.json::<R>().await?)
-        } else {
-            // TODO: parse response body and convert to mpc_node::Error type.
-            let request_id = Self::extract_request_id(&resp);
-            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!(
-                request_id = ?request_id,
-                "failed to send a message to {url} with code {status}: {resp}"
-            );
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
-        }
     }
 
     pub async fn post_cbor<T: Serialize + ?Sized>(
