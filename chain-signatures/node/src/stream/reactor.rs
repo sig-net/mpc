@@ -24,11 +24,16 @@ pub enum RegressionOutcome {
 pub struct StreamReactor {
     pub chain: Chain,
     pub ctx: StreamContext,
+    last_confirmed: Option<[u8; 32]>,
 }
 
 impl StreamReactor {
     pub fn new(chain: Chain, ctx: StreamContext) -> Self {
-        Self { chain, ctx }
+        Self {
+            chain,
+            ctx,
+            last_confirmed: None,
+        }
     }
 
     /// Checks if the stream backlog has capacity for another pending checkpoint.
@@ -47,6 +52,7 @@ impl StreamReactor {
         };
 
         if self.confirm_consensus(checkpoint_digest.digest).await? {
+            self.last_confirmed = Some(checkpoint_digest.digest);
             return Ok(None);
         }
 
@@ -60,6 +66,7 @@ impl StreamReactor {
         };
 
         self.ctx.backlog.regress(&checkpoint).await?;
+        self.last_confirmed = Some(checkpoint.digest());
         Ok(Some(checkpoint.block_height))
     }
 
@@ -87,6 +94,10 @@ impl StreamReactor {
             return false;
         };
 
+        if self.last_confirmed == Some(checkpoint_digest.digest) {
+            return false;
+        }
+
         // A node holding no checkpoint still has to re-anchor its cursor on a
         // reset. Any other digest is unmatchable without one to compare against.
         if !self.is_consensus_reset(&checkpoint_digest) && !self.has_local_checkpoint().await {
@@ -96,7 +107,14 @@ impl StreamReactor {
         // A consensus digest can match either the latest checkpoint or a retained
         // pending checkpoint while this node is ahead of consensus.
         match self.confirm_consensus(checkpoint_digest.digest).await {
-            Ok(found) => !found,
+            Ok(true) => {
+                self.last_confirmed = Some(checkpoint_digest.digest);
+                false
+            }
+            Ok(false) => {
+                self.last_confirmed = None;
+                true
+            }
             Err(err) => {
                 tracing::warn!(
                     chain = ?self.chain,
@@ -109,8 +127,8 @@ impl StreamReactor {
     }
 
     /// Fetches the latest consensus checkpoint digest from the watch channel.
-    fn current_consensus_digest(&mut self) -> Option<CheckpointDigest> {
-        self.ctx.checkpoints_rx.borrow_and_update().clone()
+    fn current_consensus_digest(&self) -> Option<CheckpointDigest> {
+        self.ctx.checkpoints_rx.borrow().clone()
     }
 
     /// Checks if a consensus digest represents a canonical genesis/reset checkpoint.
@@ -198,7 +216,7 @@ impl StreamReactor {
                     if changed.is_err() {
                         return None;
                     }
-                    let digest = self.ctx.checkpoints_rx.borrow_and_update();
+                    let digest = self.ctx.checkpoints_rx.borrow().clone();
                     if !digest.as_ref().is_some_and(|cp| cp.digest == target_digest) {
                         tracing::info!(chain = ?self.chain, "consensus digest changed during wait, aborting...");
                         return None;
@@ -222,7 +240,21 @@ impl StreamReactor {
                             chain = ?self.chain,
                             "all nodes do not have the checkpoint, retrying in 3 seconds"
                         );
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        tokio::select! {
+                            biased;
+
+                            changed = self.ctx.checkpoints_rx.changed() => {
+                                if changed.is_err() {
+                                    return None;
+                                }
+                                let digest = self.ctx.checkpoints_rx.borrow().clone();
+                                if !digest.as_ref().is_some_and(|cp| cp.digest == target_digest) {
+                                    tracing::info!(chain = ?self.chain, "consensus digest changed during wait, aborting...");
+                                    return None;
+                                }
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                        }
                         continue;
                     };
                     break Some(checkpoint);
