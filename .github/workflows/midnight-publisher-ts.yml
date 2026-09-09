@@ -12,19 +12,16 @@
 name: Midnight Publisher TS
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - ".github/workflows/midnight-publisher-ts.yml"
-      - "Dockerfile"
-      - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
   pull_request:
   merge_group:
 
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   test:
+    needs: [changes]
+    if: needs.changes.outputs.midnight_ts == 'true' || needs.changes.outputs.core == 'true'
     name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:
@@ -78,7 +75,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       # The filter names the test binary: the seam tests live in

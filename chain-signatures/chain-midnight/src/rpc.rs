@@ -331,8 +331,6 @@ impl MidnightRpc {
                 );
                 continue;
             };
-            let _ledger_tx_hash = details.tx_hash;
-
             let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
                 &mut &found.value.midnight_tx[..],
             )
@@ -371,6 +369,7 @@ impl MidnightRpc {
                 }
             };
             decoded_candidates.push(CandidateTransactionEmissions {
+                ledger_tx_hash: details.tx_hash,
                 extrinsic_index: found.details.index(),
                 calls,
             });

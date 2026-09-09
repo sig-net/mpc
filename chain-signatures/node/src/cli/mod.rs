@@ -48,8 +48,6 @@ use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-const DEFAULT_WEB_PORT: u16 = 3000;
-
 /// Capacity of the SignCommand channel that feeds chain sign events from the
 /// indexers/streams into the SignatureSpawner.
 const MAX_SIGN_COMMANDS: usize = 16384;
@@ -70,6 +68,10 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
+        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
+        /// `integration-tests`). Labels logs and telemetry.
+        #[arg(long, env("MPC_ENV"))]
+        env: String,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
         account_sk: SecretKey,
@@ -77,7 +79,7 @@ pub enum Cli {
         /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
-        web_port: Option<u16>,
+        web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
         cipher_sk: String,
@@ -85,19 +87,19 @@ pub enum Cli {
         #[arg(long, env("MPC_SIGN_SK"))]
         sign_sk: Option<SecretKey>,
         /// Ethereum Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         eth: EthArgs,
         /// Solana Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         sol: SolArgs,
         /// Hydration Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         hydration: HydrationArgs,
         /// Canton Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         canton: CantonArgs,
         /// Midnight Indexer options
-        #[clap(flatten)]
+        #[command(flatten)]
         midnight: MidnightArgs,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
@@ -107,20 +109,17 @@ pub enum Cli {
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
         my_address: Option<Url>,
         /// Storage options
-        #[clap(flatten)]
+        #[command(flatten)]
         storage_options: storage::Options,
         /// Logging options
-        #[clap(flatten)]
+        #[command(flatten)]
         log_options: logs::Options,
         /// The set of configurations that we will use to override contract configurations.
         #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
         override_config: Option<OverrideConfig>,
-        /// referer header for mainnet whitelist
-        #[arg(long, env("MPC_CLIENT_HEADER_REFERER"), default_value(None))]
-        client_header_referer: Option<String>,
-        #[clap(flatten)]
+        #[command(flatten)]
         mesh_options: mesh::Options,
-        #[clap(flatten)]
+        #[command(flatten)]
         message_options: node_client::Options,
     },
 }
@@ -131,6 +130,7 @@ impl Cli {
             Cli::Start {
                 near_rpc,
                 account_id,
+                env,
                 mpc_contract_id,
                 account_sk,
                 web_port,
@@ -145,7 +145,6 @@ impl Cli {
                 storage_options,
                 log_options,
                 override_config,
-                client_header_referer,
                 mesh_options,
                 message_options,
             } => {
@@ -157,6 +156,8 @@ impl Cli {
                     mpc_contract_id.to_string(),
                     "--account-id".to_string(),
                     account_id.to_string(),
+                    "--env".to_string(),
+                    env,
                     "--account-sk".to_string(),
                     account_sk.to_string(),
                     "--cipher-sk".to_string(),
@@ -177,12 +178,7 @@ impl Cli {
                     ]);
                 }
 
-                if let Some(client_header_referer) = client_header_referer {
-                    args.extend(["--client-header-referer".to_string(), client_header_referer]);
-                }
-                if let Some(web_port) = web_port {
-                    args.extend(["--web-port".to_string(), web_port.to_string()]);
-                }
+                args.extend(["--web-port".to_string(), web_port.to_string()]);
 
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
@@ -206,6 +202,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             web_port,
             mpc_contract_id,
             account_id,
+            env,
             account_sk,
             cipher_sk,
             sign_sk,
@@ -218,11 +215,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             storage_options,
             log_options,
             override_config,
-            client_header_referer,
             mesh_options,
             message_options,
         } => {
-            let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
+            let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
             crate::metrics::init_metrics(
                 &account_id,
@@ -255,7 +251,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 let my_ip = local_ip().unwrap();
@@ -265,8 +260,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            if storage_options.env == "integration-tests" {
-                let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
+            if env == "integration-tests" {
+                let rpc_client = near_fetch::Client::new(&near_rpc);
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -607,21 +602,6 @@ fn log_startup(
         midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
         "starting node",
     );
-}
-
-fn setup_rpc_client(
-    near_rpc_url: &str,
-    client_header_referer: Option<String>,
-) -> near_fetch::Client {
-    let mut rpc_client = near_fetch::Client::new(near_rpc_url);
-    if let Some(referer) = client_header_referer {
-        rpc_client
-            .inner_mut()
-            .headers_mut()
-            .insert(http::header::REFERER, referer.parse().unwrap());
-    }
-    tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
-    rpc_client
 }
 
 struct MeshHandles {

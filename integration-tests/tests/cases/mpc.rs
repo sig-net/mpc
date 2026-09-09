@@ -2,14 +2,14 @@ use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixture, MpcFixtureBuilder};
 use mpc_node::backlog::{Backlog, SignEntry};
 use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
-use mpc_primitives::{Chain, IndexedSignRequest, SignId};
+use mpc_primitives::Chain;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Arc;
@@ -83,10 +83,7 @@ async fn test_basic_generate_keys() {
     }
 
     if WRITE_OUTPUT_TO_FILES {
-        let abs_path = std::env::current_dir().unwrap().join(KEY_SHARE_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(KEY_SHARE_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        write_json(KEY_SHARE_FILE, &data);
     }
 }
 
@@ -108,37 +105,7 @@ async fn test_basic_generate_triples() {
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
-        let mut conn = network.redis_container.pool().get().await.unwrap();
-        let mut data = BTreeMap::new();
-        for node in &network.nodes {
-            let mut nodes_shares = BTreeMap::new();
-            for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
-                let mut peer_triples = Vec::with_capacity(triple_ids.len());
-                for triple_id in triple_ids {
-                    let pair = conn
-                        .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
-                        .await;
-                    if let Ok(pair) = pair {
-                        peer_triples.push(pair);
-                    } else {
-                        tracing::error!("missing triple pair in redis {triple_id}");
-                    }
-                }
-                nodes_shares.insert(peer.me, peer_triples);
-            }
-            data.insert(node.me, nodes_shares);
-        }
-
-        // Filter: keep only triple pairs that exist on ALL nodes,
-        // then truncate each owner to exactly TRIPLE_PAIRS_PER_OWNER.
-        let data = filter_artifacts_on_all_nodes(data);
-        let data = truncate_per_owner(data, TRIPLE_PAIRS_PER_OWNER);
-
-        let abs_path = std::env::current_dir().unwrap().join(TRIPLES_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(TRIPLES_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        dump_triples(&network).await;
     }
 }
 
@@ -160,44 +127,7 @@ async fn test_basic_generate_presignature() {
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
-        let mut conn = network.redis_container.pool().get().await.unwrap();
-        let mut data = BTreeMap::new();
-        for node in &network.nodes {
-            let mut nodes_shares = BTreeMap::new();
-            for peer in &network.nodes {
-                let presignature_ids = node
-                    .presignature_storage
-                    .fetch_owned_by(peer.me)
-                    .await
-                    .unwrap();
-                let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
-                for presignature_id in presignature_ids {
-                    let t = conn
-                        .hget::<&str, u64, Presignature>(
-                            node.presignature_storage.presignature_key(),
-                            presignature_id,
-                        )
-                        .await;
-                    if let Ok(t) = t {
-                        peer_presignatures.push(t);
-                    } else {
-                        tracing::error!("missing presignature in redis {presignature_id}");
-                    }
-                }
-                nodes_shares.insert(peer.me, peer_presignatures);
-            }
-            data.insert(node.me, nodes_shares);
-        }
-
-        // Filter: keep only presignatures that exist on ALL nodes,
-        // then truncate each owner to exactly P_PER_OWNER.
-        let data = filter_artifacts_on_all_nodes(data);
-        let data = truncate_per_owner(data, PRESIGNATURES_PER_OWNER);
-
-        let abs_path = std::env::current_dir().unwrap().join(PRESIGNATURES_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(PRESIGNATURES_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        dump_presignatures(&network).await;
     }
 }
 
@@ -217,14 +147,9 @@ async fn test_basic_sign() {
 
     let timeout = Duration::from_secs(10);
 
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -248,12 +173,9 @@ async fn test_sign_task_survives_resharing() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -275,21 +197,13 @@ async fn test_sign_request_during_resharing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
-fn sign_request(seed: u8) -> SignCommand {
-    let req = Arc::new(IndexedSignRequest::sign(
-        SignId::new([seed; 32]),
-        super::helpers::test_sign_arg(seed),
-        Chain::NEAR,
-        0,
-    ));
+fn sign_request(seed: u32) -> SignCommand {
+    let req = Arc::new(super::helpers::sign_request(seed, Chain::NEAR));
     SignCommand::Request(SignEntry::generating(req, &Backlog::new()))
 }
 
@@ -401,13 +315,10 @@ async fn test_threshold_change_via_mpc_governance() {
         .assert_presignatures(1, Duration::from_secs(120))
         .await;
     network.broadcast(&sign_request(88)).await;
-    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
+    let actions = network
+        .assert_publish_actions(1, Duration::from_secs(30))
+        .await;
     assert_eq!(actions.len(), 1);
-    assert!(actions
-        .iter()
-        .next()
-        .unwrap()
-        .contains("RpcAction::Publish"));
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
@@ -457,7 +368,7 @@ async fn test_sign_adequate_stockpile() {
     // We have ~15 presignatures in the fixture (5 mine + 10 foreign per node approx).
     // This test sends fewer requests than available presignatures to verify
     // that each signature consumes exactly one presignature.
-    const NUM_SIGN_REQUESTS: u8 = 10;
+    const NUM_SIGN_REQUESTS: u32 = 10;
 
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
@@ -482,7 +393,7 @@ async fn test_sign_adequate_stockpile() {
     // Wait for all signatures to be produced
     let timeout = Duration::from_secs(60);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     assert_eq!(
@@ -490,14 +401,6 @@ async fn test_sign_adequate_stockpile() {
         NUM_SIGN_REQUESTS as usize,
         "should have exactly {NUM_SIGN_REQUESTS} signatures"
     );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Count final presignatures to verify consumption
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -528,7 +431,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Send more sign requests than presignatures to trigger contention.
     // We have ~15 presignatures in fixture, send 12 requests.
     // All should complete since we have enough presignatures.
-    const NUM_SIGN_REQUESTS: u8 = 12;
+    const NUM_SIGN_REQUESTS: u32 = 12;
 
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
@@ -562,7 +465,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Use a generous timeout since contention may slow things down
     let timeout = Duration::from_secs(90);
     let actions = network
-        .assert_actions(min_expected_signatures, timeout)
+        .assert_publish_actions(min_expected_signatures, timeout)
         .await;
 
     // Count final presignatures
@@ -575,20 +478,6 @@ async fn test_sign_limited_stockpile_contention() {
         presignatures_consumed,
         "contention test completed"
     );
-
-    assert!(
-        actions.len() >= min_expected_signatures,
-        "should have produced at least {min_expected_signatures} signatures, got {}",
-        actions.len()
-    );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify no excessive presignature burning
     // Consumed should be <= signatures produced + small margin for contention
@@ -609,7 +498,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     // We'll send 20 sign requests but start with only enough presignatures for ~10.
     // The first batch should complete, then we generate more presignatures to
     // complete the remaining requests.
-    const TOTAL_SIGN_REQUESTS: u8 = 20;
+    const TOTAL_SIGN_REQUESTS: u32 = 20;
     const FIRST_BATCH_SIZE: usize = 10;
 
     // Use a network that can generate presignatures (has preshared triples)
@@ -649,7 +538,7 @@ async fn test_sign_requests_wait_for_presignatures() {
 
     let first_batch_timeout = Duration::from_secs(30);
     let first_actions = network
-        .assert_actions(first_batch_expected, first_batch_timeout)
+        .assert_publish_actions(first_batch_expected, first_batch_timeout)
         .await;
 
     tracing::info!(
@@ -679,7 +568,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     tracing::info!("waiting for remaining signatures");
     let final_timeout = Duration::from_secs(60);
     let final_actions = network
-        .assert_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
+        .assert_publish_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
         .await;
 
     tracing::info!(
@@ -693,14 +582,6 @@ async fn test_sign_requests_wait_for_presignatures() {
         "should complete all {} sign requests",
         TOTAL_SIGN_REQUESTS
     );
-
-    // Verify all actions are publish actions
-    for action_str in &final_actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 }
 
 /// Test sign request contention with 5 nodes.
@@ -711,7 +592,7 @@ async fn test_sign_requests_wait_for_presignatures() {
 async fn test_sign_contention_5_nodes() {
     const NUM_NODES: u32 = 5;
     const THRESHOLD: usize = 4;
-    const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
+    const NUM_SIGN_REQUESTS: u32 = 5; // Reduced from 10 to match presignature availability
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
     const NODE_MIN_ARTIFACTS: u32 = 8;
 
@@ -755,7 +636,7 @@ async fn test_sign_contention_5_nodes() {
     // Wait for all signatures - allow more time for 5-node consensus
     let timeout = Duration::from_secs(120);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -776,13 +657,6 @@ async fn test_sign_contention_5_nodes() {
         NUM_SIGN_REQUESTS
     );
 
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
-
     // Verify 1:1 presignature consumption (with small tolerance for timing)
     assert!(
         presignatures_consumed <= actions.len() + 2,
@@ -795,6 +669,76 @@ async fn test_sign_contention_5_nodes() {
         actions.len(),
         presignatures_consumed
     );
+}
+
+async fn dump_triples(network: &MpcFixture) {
+    let mut conn = network.redis_container.pool().get().await.unwrap();
+    let mut data = BTreeMap::new();
+    for node in &network.nodes {
+        let mut nodes_shares = BTreeMap::new();
+        for peer in &network.nodes {
+            let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
+            let mut peer_triples = Vec::with_capacity(triple_ids.len());
+            for triple_id in triple_ids {
+                let pair = conn
+                    .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
+                    .await;
+                if let Ok(pair) = pair {
+                    peer_triples.push(pair);
+                } else {
+                    tracing::error!("missing triple pair in redis {triple_id}");
+                }
+            }
+            nodes_shares.insert(peer.me, peer_triples);
+        }
+        data.insert(node.me, nodes_shares);
+    }
+
+    let data = filter_artifacts_on_all_nodes(data);
+    let data = truncate_per_owner(data, TRIPLE_PAIRS_PER_OWNER);
+    write_json(TRIPLES_FILE, &data);
+}
+
+async fn dump_presignatures(network: &MpcFixture) {
+    let mut conn = network.redis_container.pool().get().await.unwrap();
+    let mut data = BTreeMap::new();
+    for node in &network.nodes {
+        let mut nodes_shares = BTreeMap::new();
+        for peer in &network.nodes {
+            let presignature_ids = node
+                .presignature_storage
+                .fetch_owned_by(peer.me)
+                .await
+                .unwrap();
+            let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
+            for presignature_id in presignature_ids {
+                let t = conn
+                    .hget::<&str, u64, Presignature>(
+                        node.presignature_storage.presignature_key(),
+                        presignature_id,
+                    )
+                    .await;
+                if let Ok(t) = t {
+                    peer_presignatures.push(t);
+                } else {
+                    tracing::error!("missing presignature in redis {presignature_id}");
+                }
+            }
+            nodes_shares.insert(peer.me, peer_presignatures);
+        }
+        data.insert(node.me, nodes_shares);
+    }
+
+    let data = filter_artifacts_on_all_nodes(data);
+    let data = truncate_per_owner(data, PRESIGNATURES_PER_OWNER);
+    write_json(PRESIGNATURES_FILE, &data);
+}
+
+fn write_json(path: &str, data: &impl serde::Serialize) {
+    let abs_path = std::env::current_dir().unwrap().join(path);
+    tracing::info!("Writing output to {}", abs_path.display());
+    let mut file = fs::File::create(path).unwrap();
+    serde_json::to_writer_pretty(&mut file, data).unwrap();
 }
 
 /// Truncate each owner's artifact list to exactly N items, keeping the same
@@ -914,11 +858,11 @@ async fn test_sign_no_presignature_waste() {
     );
 
     for seed in 0..initial_presignatures {
-        network.broadcast(&sign_request(seed as u8)).await;
+        network.broadcast(&sign_request(seed as u32)).await;
     }
 
     let actions = network
-        .assert_actions(initial_presignatures, Duration::from_secs(120))
+        .assert_publish_actions(initial_presignatures, Duration::from_secs(120))
         .await;
 
     assert_eq!(
@@ -926,13 +870,6 @@ async fn test_sign_no_presignature_waste() {
         initial_presignatures,
         "should have exactly {initial_presignatures} signatures"
     );
-
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify every node has zero presignatures remaining.
     for node in &network.nodes {
@@ -1064,17 +1001,12 @@ async fn test_sign_missing_presignature() {
     // expectation: the node without the presignature will reject a posit, or if
     // they are proposer, a timeout will let the next proposer take over
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 /// Test that a node losing their presignatures locally doesn't prevent
@@ -1137,17 +1069,12 @@ async fn test_sign_missing_presignature_after_posits() {
     // posit, or if they are proposer, a timeout will let the next
     // proposer take over.
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -1236,7 +1163,9 @@ async fn test_signature_message_count() {
     network[1].sign_tx.send(request.clone()).await.unwrap();
     network[2].sign_tx.send(request.clone()).await.unwrap();
 
-    network.assert_actions(1, Duration::from_secs(10)).await;
+    network
+        .assert_publish_actions(1, Duration::from_secs(10))
+        .await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;

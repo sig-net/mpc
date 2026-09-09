@@ -1,5 +1,5 @@
 use crate::client::{CatchupItem, EthereumClient};
-use crate::config::IndexerConfig;
+use crate::config::{CatchupFetchConfig, IndexerConfig, RpcConfig};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::indexer::EthereumIndexer;
 use crate::EthConfig;
@@ -25,13 +25,15 @@ const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 100;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
-    create_test_ethereum_client_with_backoff(url, SharedBackoff::new()).await
+    create_test_ethereum_client_with_catchup(url, Default::default(), SharedBackoff::new()).await
 }
 
-/// Like [`create_test_ethereum_client`] but injecting a caller-owned shared
-/// backoff gate (e.g. to assert 429-gating behavior across calls).
-pub async fn create_test_ethereum_client_with_backoff(
+/// Like [`create_test_ethereum_client`], but with a custom catchup fetch shape
+/// (batch size / fetch concurrency) for tests that drive
+/// [`EthereumClient::catchup_batch_stream`].
+pub async fn create_test_ethereum_client_with_catchup(
     url: &str,
+    catchup: CatchupFetchConfig,
     shared_backoff: SharedBackoff,
 ) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
@@ -52,7 +54,10 @@ pub async fn create_test_ethereum_client_with_backoff(
         helios_data_path: "".to_string(),
         refresh_finalized_interval: 0,
         optimistic_requests: false,
-        rpc: Default::default(),
+        rpc: RpcConfig {
+            catchup,
+            ..Default::default()
+        },
         gas: Default::default(),
         publisher: Default::default(),
         indexer: Default::default(),
