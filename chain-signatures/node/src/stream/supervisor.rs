@@ -58,7 +58,7 @@ pub(crate) async fn wait_detected_regression(
 
 /// Returns `true` if a regression is detected. When the consensus digest matches
 /// a local checkpoint (latest or historical), the checkpoint is confirmed via
-/// `confirm_consensus`. A transient storage error is treated as aligned so it is
+/// `confirm`. A transient storage error is treated as aligned so it is
 /// retried on the next checkpoint change. Returns `false` when the backlog is
 /// aligned (no regression).
 async fn detect_regression(
@@ -74,15 +74,29 @@ async fn detect_regression(
     // reset. Any other digest is unmatchable without one to compare against.
     let is_reset =
         Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
-    if !is_reset && backlog.latest_checkpoint(chain).await.is_none() {
-        tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
+    if !is_reset {
+        match backlog.checkpoints().latest(chain).await {
+            Ok(None) => {
+                tracing::info!(?chain, "no local checkpoint; skipping regression check");
+                return false;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?chain,
+                    %err,
+                    "transient storage error checking latest checkpoint; retrying on next change"
+                );
+                return false;
+            }
+            Ok(Some(_)) => {}
+        }
     }
 
     // A consensus digest can match either the latest checkpoint or a retained
     // pending checkpoint while this node is ahead of consensus.
     match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
+        .checkpoints()
+        .confirm(chain, checkpoint_digest.digest)
         .await
     {
         Ok(found) => {
@@ -106,6 +120,8 @@ async fn detect_regression(
 
 /// Delay before respawning a `run()` that returned an error.
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Maximum delay between consecutive backlog recovery retry attempts during storage outages.
+const MAX_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How long a cancelled `run()` gets to drain before it is aborted.
 const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -139,11 +155,12 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     }
 
     let mut load_local = true;
+    let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
-        recover_backlog(
+        if let Err(err) = recover_backlog(
             chain,
             load_local,
             &ctx.backlog,
@@ -152,7 +169,19 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             &ctx.node_client,
             &my_account_id,
         )
-        .await;
+        .await
+        {
+            tracing::error!(
+                %chain,
+                %err,
+                ?recovery_retry_delay,
+                "failed to recover backlog; retrying"
+            );
+            tokio::time::sleep(recovery_retry_delay).await;
+            recovery_retry_delay = (recovery_retry_delay * 2).min(MAX_RECOVERY_RETRY_DELAY);
+            continue;
+        }
+        recovery_retry_delay = ERROR_RESTART_DELAY;
         load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -170,7 +199,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             tokio::select! {
                 // Gate dispatch on checkpoint capacity: when the cap is full the
                 // channel backs up and pauses the chain's `send().await`.
-                event = events_rx.recv(), if ctx.backlog.has_checkpoint_slot(chain).await => {
+                event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
                     let Some(event) = event else {
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down,
@@ -314,7 +343,8 @@ mod tests {
         assert!(!result, "matching digest should not trigger regression");
 
         let persisted = backlog
-            .checkpoint_storage()
+            .checkpoints()
+            .storage()
             .load_latest(chain)
             .await
             .unwrap();
@@ -342,7 +372,8 @@ mod tests {
         assert!(!result, "ahead with match should not trigger regression");
 
         let persisted = backlog
-            .checkpoint_storage()
+            .checkpoints()
+            .storage()
             .load_latest(chain)
             .await
             .unwrap();
@@ -409,7 +440,8 @@ mod tests {
             mpc_primitives::reset_checkpoint_digest(chain, 42)
         );
         assert!(backlog
-            .confirm_consensus(chain, applied.digest())
+            .checkpoints()
+            .confirm(chain, applied.digest())
             .await
             .unwrap());
 
@@ -640,7 +672,8 @@ mod tests {
         backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
         assert!(backlog
-            .confirm_consensus(chain, stale.digest())
+            .checkpoints()
+            .confirm(chain, stale.digest())
             .await
             .unwrap());
 
@@ -700,7 +733,7 @@ mod tests {
             "recovery must re-anchor the cursor at the reset height"
         );
         assert_eq!(
-            backlog.latest_checkpoint(chain).await,
+            backlog.checkpoints().latest(chain).await.unwrap(),
             Some(Checkpoint::reset(chain, 42)),
             "local state must be the canonical reset checkpoint"
         );
@@ -785,7 +818,7 @@ mod tests {
             let h = (i as u64) * interval;
             assert!(backlog.set_processed_block(chain, h).await.is_some());
         }
-        assert!(!backlog.has_checkpoint_slot(chain).await);
+        assert!(!backlog.checkpoints().has_slot(chain));
 
         // The first (stalled) run is restarted by the watchdog; afterwards the
         // instant-Ok exits cannot be observed while the cap is full, so the
