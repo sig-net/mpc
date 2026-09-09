@@ -2,6 +2,7 @@
 name = "mpc-chain-solana"
 edition = "2021"
 version.workspace = true
+readme = "README.md"
 description = "Solana chain integration for MPC"
 
 [dependencies]
@@ -29,6 +30,9 @@ solana-client.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[features]
+bench = []
 
 [dev-dependencies]
 mockito.workspace = true
