@@ -1169,6 +1169,7 @@ mod tests {
         assert_midnight_env_unset();
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
         let central_address = "ab".repeat(32);
         let funding_seed = "0f".repeat(32);
         let intent_gen_command = r#"["midnight-publisher"]"#;
@@ -1180,7 +1181,7 @@ mod tests {
             "--account-sk",
             &account_sk,
             "--sign-sk",
-            &account_sk,
+            &sign_sk,
             "--cipher-sk",
             "cipher",
             "--env",
