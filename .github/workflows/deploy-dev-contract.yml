@@ -46,7 +46,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: deploy-dev-contract
+          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
 

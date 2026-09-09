@@ -17,10 +17,8 @@ jobs:
         suite:
           - name: Stream
             filter: canton_stream
-            cache-key: canton-test
           - name: E2E
             filter: cases::canton
-            cache-key: canton-e2e-test
 
     steps:
       - uses: actions/checkout@v6
@@ -87,7 +85,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.suite.cache-key }}
+          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches

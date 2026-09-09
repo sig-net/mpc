@@ -61,7 +61,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fixture-test
+          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -160,7 +161,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: integration-test
+          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -221,7 +223,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: anvil-integration-test
+          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          shared-key: workspace
           cache-targets: true
           save-if: ${{ github.event_name == 'merge_group' }}
 
