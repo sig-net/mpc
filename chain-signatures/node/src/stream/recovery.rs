@@ -1,7 +1,6 @@
-use crate::backlog::{consensus, Backlog};
+use crate::backlog::consensus_watcher::ConsensusCheckpointWatcher;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::types::CheckpointWatcher;
 
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
@@ -9,15 +8,13 @@ use tokio::sync::watch;
 
 /// Node-side checkpoint recovery:
 /// loads the local checkpoint into the backlog (it only touches local storage),
-/// then aligns the backlog with the consensus checkpoint feed. Mesh availability
-/// is handled inside `align_backlog_with_consensus` when it needs to fetch a
-/// checkpoint from peers.
-#[allow(clippy::too_many_arguments)]
+/// then aligns the backlog with the consensus checkpoint feed via the watcher.
+/// Peer fetching happens inside the watcher when it needs a diverged
+/// consensus checkpoint body.
 pub(crate) async fn recover_backlog(
     chain: Chain,
     load_local: bool,
-    backlog: &Backlog,
-    checkpoints_rx: &mut CheckpointWatcher,
+    watcher: &mut ConsensusCheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
@@ -28,6 +25,7 @@ pub(crate) async fn recover_backlog(
     // independently) can then serve durable pending bodies to peers during
     // startup. `load_local` only reads local storage and does not need the mesh.
     if load_local {
+        let backlog = watcher.backlog();
         match backlog.load_local(chain).await {
             Ok(Some(checkpoint)) => {
                 tracing::info!(
@@ -48,19 +46,9 @@ pub(crate) async fn recover_backlog(
         }
     }
 
-    // Returns None when no alignment is needed (the normal case); Some(height) when
-    // the backlog was regressed.
-    if consensus::align_backlog_with_consensus(
-        chain,
-        backlog,
-        checkpoints_rx,
-        mesh_state,
-        node_client,
-        my_account_id,
-    )
-    .await
-    .is_some()
-    {
-        tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
-    }
+    // The watcher alerts (rich log + metric) on regression itself; here we only
+    // need to know whether one happened so the supervisor restarts cleanly.
+    watcher
+        .align_with_consensus(mesh_state, node_client, my_account_id)
+        .await;
 }

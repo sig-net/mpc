@@ -143,3 +143,13 @@ pub(crate) static PENDING_CHECKPOINTS: LazyLock<prometheus::IntGaugeVec> = LazyL
     )
     .unwrap()
 });
+
+/// Counts regressions where the local backlog was reset to a consensus checkpoint.
+pub(crate) static CHECKPOINT_REGRESSIONS: LazyLock<CounterVec> = LazyLock::new(|| {
+    super::try_create_counter_vec_with_node_account_id(
+        "multichain_checkpoint_regressions_total",
+        "number of times the local backlog regressed to a consensus checkpoint, by chain",
+        &["chain"],
+    )
+    .unwrap()
+});

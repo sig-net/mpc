@@ -4,8 +4,8 @@
 use super::recovery::recover_backlog;
 use super::{handle_chain_event, StreamContext};
 
-use crate::backlog::Backlog;
-use crate::types::CheckpointWatcher;
+use crate::backlog::consensus_watcher::ConsensusCheckpointWatcher;
+
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
@@ -26,78 +26,6 @@ pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
             .saturating_add(BUFFER_SECS)
             .max(FLOOR_SECS),
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegressionOutcome {
-    /// Consensus digest mismatches local backlog — transition to Recovery.
-    Recovery,
-    /// Local backlog is aligned with consensus, continue current state.
-    Aligned,
-    /// Consensus checkpoint feed shut down — pipeline should stop.
-    Shutdown,
-}
-
-/// Waits for a consensus checkpoint digest change, then checks for regression.
-pub(crate) async fn wait_detected_regression(
-    checkpoints_rx: &mut CheckpointWatcher,
-    backlog: &Backlog,
-    chain: Chain,
-) -> RegressionOutcome {
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
-    }
-    if checkpoints_rx.changed().await.is_err() {
-        return RegressionOutcome::Shutdown;
-    }
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
-    }
-    RegressionOutcome::Aligned
-}
-
-/// Returns `true` if a regression is detected. When the consensus digest matches
-/// a local checkpoint (latest or historical), the checkpoint is confirmed via
-/// `confirm_consensus`. A transient storage error is treated as aligned so it is
-/// retried on the next checkpoint change. Returns `false` when the backlog is
-/// aligned (no regression).
-async fn detect_regression(
-    chain: Chain,
-    backlog: &Backlog,
-    checkpoints_rx: &mut CheckpointWatcher,
-) -> bool {
-    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
-        return false;
-    };
-
-    if backlog.latest_checkpoint(chain).await.is_none() {
-        tracing::info!(?chain, "no local checkpoint; skipping regression check");
-        return false;
-    }
-
-    // A consensus digest can match either the latest checkpoint or a retained
-    // pending checkpoint while this node is ahead of consensus.
-    match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
-        .await
-    {
-        Ok(found) => {
-            if found {
-                return false;
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                ?chain,
-                %err,
-                "transient storage error confirming checkpoint; retrying on next change"
-            );
-            return false;
-        }
-    }
-
-    // No match → regression detected.
-    true
 }
 
 /// Delay before respawning a `run()` that returned an error.
@@ -128,6 +56,8 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await;
     let indexer = Arc::new(indexer);
+    let mut watcher =
+        ConsensusCheckpointWatcher::new(chain, &ctx.backlog, ctx.checkpoints_rx.clone());
 
     enum Exit {
         Restart,
@@ -139,8 +69,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         recover_backlog(
             chain,
             load_local,
-            &ctx.backlog,
-            &mut ctx.checkpoints_rx,
+            &mut watcher,
             &mut ctx.mesh_state,
             &ctx.node_client,
             &my_account_id,
@@ -189,9 +118,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(?err, %chain, "failed to process chain event");
                     }
                 }
-                result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
+                regression = watcher.next_regression() => {
+                    match regression {
+                        Some(details) => {
+                            tracing::warn!(%chain, ?details, "consensus regression; restarting chain indexer");
                             ctx.rpc.abort_checkpoints(chain).await;
                             if let Err(err) =
                                 ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
@@ -200,8 +130,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                             }
                             break Exit::Restart;
                         }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => break Exit::Shutdown,
+                        None => break Exit::Shutdown,
                     }
                 }
                 // Watchdog: restart when no `ChainEvent::Block` was observed within
@@ -266,160 +195,6 @@ mod tests {
             ProjectivePoint::GENERATOR.to_affine(),
             0,
         )
-    }
-
-    fn make_digest(
-        height: u64,
-        digest: [u8; 32],
-    ) -> (
-        watch::Sender<Option<CheckpointDigest>>,
-        watch::Receiver<Option<CheckpointDigest>>,
-    ) {
-        watch::channel(Some(CheckpointDigest { height, digest }))
-    }
-
-    #[tokio::test]
-    async fn test_empty_digest_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let (_tx, mut rx) = watch::channel(None);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "empty digest should not trigger regression");
-    }
-
-    #[tokio::test]
-    async fn test_matching_consensus_confirms_and_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp = backlog.checkpoint(chain).await.unwrap();
-        let digest = cp.digest();
-
-        let (_tx, mut rx) = make_digest(100, digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "matching digest should not trigger regression");
-
-        let persisted = backlog
-            .checkpoint_storage()
-            .load_latest(chain)
-            .await
-            .unwrap();
-        assert!(
-            persisted.is_some(),
-            "matching checkpoint should be persisted"
-        );
-        assert_eq!(persisted.unwrap().block_height, 100);
-    }
-
-    #[tokio::test]
-    async fn test_ahead_with_pending_match_confirms() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp1 = backlog.checkpoint(chain).await.unwrap();
-        backlog.set_processed_block(chain, 200).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let digest1 = cp1.digest();
-        let (_tx, mut rx) = make_digest(100, digest1);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "ahead with match should not trigger regression");
-
-        let persisted = backlog
-            .checkpoint_storage()
-            .load_latest(chain)
-            .await
-            .unwrap();
-        assert!(persisted.is_some());
-        assert_eq!(persisted.unwrap().block_height, 100);
-    }
-
-    #[tokio::test]
-    async fn test_mismatch_triggers_regression() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let different_digest = [0xabu8; 32];
-        let (_tx, mut rx) = make_digest(200, different_digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result, "mismatched digest should trigger regression");
-    }
-
-    #[tokio::test]
-    async fn test_no_local_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        let digest = [0x42u8; 32];
-        let (_tx, mut rx) = make_digest(100, digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "no local checkpoint should not trigger regression");
-    }
-
-    #[tokio::test]
-    async fn test_wait_detects_regression_after_consumed() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
-        let _ = rx.borrow_and_update();
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            wait_detected_regression(&mut rx, &backlog, chain),
-        )
-        .await
-        .expect("should not hang — upfront check catches mismatch");
-        assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression even when receiver state was consumed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wait_detects_regression_after_change() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        let cp = backlog.checkpoint(chain).await.unwrap();
-        let matching_digest = cp.digest();
-
-        let (tx, mut rx) = make_digest(100, matching_digest);
-
-        let handle =
-            tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
-
-        tx.send(Some(CheckpointDigest {
-            height: 200,
-            digest: [0xabu8; 32],
-        }))
-        .unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("timeout")
-            .expect("task should not panic");
-
-        assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression after new mismatched value"
-        );
     }
 
     /// Emits CatchupCompleted + Block(100), then exits Ok.

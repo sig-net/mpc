@@ -323,7 +323,7 @@ pub async fn run<T: ChainTelemetry>(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    mut checkpoints_rx: CheckpointWatcher,
+    checkpoints_rx: CheckpointWatcher,
 ) {
     // Hydrate the local checkpoint before aligning: the web server (spawned
     // independently) can then serve durable pending bodies to peers during
@@ -352,14 +352,12 @@ pub async fn run<T: ChainTelemetry>(
     let root_pk = contract_watcher.wait_public_key().await;
 
     // Align with consensus
-    crate::backlog::consensus::align_backlog_with_consensus(
+    crate::backlog::consensus_watcher::ConsensusCheckpointWatcher::new(
         Chain::Hydration,
         &backlog,
-        &mut checkpoints_rx,
-        &mut mesh_state,
-        &node_client,
-        contract_watcher.account_id(),
+        checkpoints_rx.clone(),
     )
+    .align_with_consensus(&mut mesh_state, &node_client, contract_watcher.account_id())
     .await;
 
     // Create a StreamContext with a dummy RpcChannel (Hydration does not publish)

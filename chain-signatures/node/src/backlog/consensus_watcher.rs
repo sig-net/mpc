@@ -1,71 +1,239 @@
-use crate::backlog::Backlog;
+//! Combines the contract's consensus checkpoint feed with the local
+//! [`Checkpoints`] state into a single watcher. It exposes the merged view as a
+//! [`ConsensusSnapshot`], blocks until divergence via [`next_regression`], and
+//! owns the peer-fetch + in-place regress used to realign with consensus.
+use crate::backlog::{Backlog, Checkpoint};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
-use crate::backlog::Checkpoint;
 use cait_sith::protocol::Participant;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// Returns None if we are aligned, Some(<new_height>) if we have regressed.
-pub async fn align_backlog_with_consensus(
-    chain: Chain,
-    backlog: &Backlog,
-    checkpoints_rx: &mut CheckpointWatcher,
-    mesh_state: &mut watch::Receiver<MeshState>,
-    node_client: &NodeClient,
-    my_account_id: &AccountId,
-) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
+/// Details of a detected divergence between the local backlog and the
+/// consensus checkpoint published on the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Regression {
+    /// Digest consensus voted for.
+    pub consensus_digest: [u8; 32],
+    /// Height of the consensus checkpoint we must fall back to.
+    pub target_height: u64,
+    /// Height of our newest local checkpoint, if any.
+    pub local_height: Option<u64>,
+}
 
-    match backlog
-        .confirm_consensus(chain, checkpoint_digest.digest)
-        .await
-    {
-        Ok(found) => {
-            if found {
+/// Combined view of the contract consensus checkpoint feed and local state.
+#[derive(Debug, Clone)]
+pub struct ConsensusSnapshot {
+    /// Latest digest observed on the contract.
+    pub consensus: Option<CheckpointDigest>,
+    /// Newest locally known checkpoint (pending or confirmed).
+    pub local: Option<Checkpoint>,
+    /// Whether the two sources agree. Absent consensus, absent local state,
+    /// and transient storage errors all count as aligned.
+    pub aligned: bool,
+}
+
+enum Classification {
+    NoConsensus,
+    NoLocal,
+    Aligned,
+    Retry,
+    Diverged(CheckpointDigest),
+}
+
+/// Watches the contract's consensus checkpoint digest against the local
+/// backlog checkpoint state for one chain.
+pub struct ConsensusCheckpointWatcher {
+    chain: Chain,
+    backlog: Backlog,
+    checkpoints_rx: CheckpointWatcher,
+}
+
+impl ConsensusCheckpointWatcher {
+    pub fn new(chain: Chain, backlog: &Backlog, checkpoints_rx: CheckpointWatcher) -> Self {
+        Self {
+            chain,
+            backlog: backlog.clone(),
+            checkpoints_rx,
+        }
+    }
+
+    /// Local backlog handle, e.g. for loading durable checkpoints during recovery.
+    pub fn backlog(&self) -> &Backlog {
+        &self.backlog
+    }
+
+    /// Non-blocking merged view. Confirming a matching digest (promoting a
+    /// pending checkpoint) happens as a side effect, mirroring detection.
+    pub async fn snapshot(&mut self) -> ConsensusSnapshot {
+        let consensus = self.checkpoints_rx.borrow_and_update().clone();
+        let local = self.backlog.latest_checkpoint(self.chain).await;
+        let aligned = match &consensus {
+            None => true,
+            Some(digest) => !matches!(
+                self.classify_digest(digest.clone()).await,
+                Classification::Diverged(_)
+            ),
+        };
+        ConsensusSnapshot {
+            consensus,
+            local,
+            aligned,
+        }
+    }
+
+    /// Waits until the consensus digest diverges from the local backlog.
+    ///
+    /// Returns the regression details once, alerting (rich log + metric) as a
+    /// side effect, or `None` when the contract checkpoint feed shut down.
+    pub async fn next_regression(&mut self) -> Option<Regression> {
+        loop {
+            match self.classify().await {
+                Classification::Diverged(digest) => {
+                    return Some(self.alert_divergence(digest).await);
+                }
+                Classification::NoLocal => {
+                    tracing::info!(
+                        chain = ?self.chain,
+                        "no local checkpoint; skipping regression check"
+                    );
+                }
+                Classification::NoConsensus | Classification::Aligned | Classification::Retry => {}
+            }
+            if self.checkpoints_rx.changed().await.is_err() {
                 return None;
             }
         }
-        Err(err) => {
-            tracing::warn!(
-                ?chain,
-                %err,
-                "transient storage error confirming consensus checkpoint; retrying later"
-            );
+    }
+
+    /// Realigns the backlog with consensus at startup or after a regression.
+    ///
+    /// On divergence, fetches the consensus checkpoint body from peers and
+    /// regresses the local backlog in place. Returns the regression details,
+    /// `None` when already aligned or when alignment aborted (digest changed
+    /// mid-fetch, no peer served the body).
+    pub(crate) async fn align_with_consensus(
+        &mut self,
+        mesh_state: &mut watch::Receiver<MeshState>,
+        node_client: &NodeClient,
+        my_account_id: &AccountId,
+    ) -> Option<Regression> {
+        let digest = self.checkpoints_rx.borrow_and_update().as_ref().cloned()?;
+        // Unlike steady-state detection (`next_regression`), a missing local
+        // checkpoint counts as divergence here so a fresh node can bootstrap.
+        let diverged = matches!(
+            self.classify_digest(digest.clone()).await,
+            Classification::Diverged(_) | Classification::NoLocal
+        );
+        if !diverged {
             return None;
+        }
+
+        tracing::warn!(
+            chain = ?self.chain,
+            digest = ?digest.digest,
+            "Consensus checkpoint mismatch/divergence detected: triggering regression"
+        );
+        let fetched = find_consensus_checkpoint(
+            mesh_state,
+            node_client,
+            self.chain,
+            digest.digest,
+            &mut self.checkpoints_rx,
+            my_account_id,
+        )
+        .await?;
+
+        Some(self.regress(fetched, digest).await)
+    }
+
+    /// Compares the newest consensus digest against the local backlog.
+    async fn classify(&mut self) -> Classification {
+        let Some(digest) = self.checkpoints_rx.borrow_and_update().as_ref().cloned() else {
+            return Classification::NoConsensus;
+        };
+        self.classify_digest(digest).await
+    }
+
+    async fn classify_digest(&self, digest: CheckpointDigest) -> Classification {
+        if self.backlog.latest_checkpoint(self.chain).await.is_none() {
+            return Classification::NoLocal;
+        }
+
+        // A consensus digest can match either the latest checkpoint or a
+        // retained pending checkpoint while this node is ahead of consensus.
+        match self
+            .backlog
+            .confirm_consensus(self.chain, digest.digest)
+            .await
+        {
+            Ok(true) => Classification::Aligned,
+            Ok(false) => Classification::Diverged(digest),
+            Err(err) => {
+                tracing::warn!(
+                    chain = ?self.chain,
+                    %err,
+                    "transient storage error confirming checkpoint; retrying"
+                );
+                Classification::Retry
+            }
         }
     }
 
-    tracing::warn!(
-        ?chain,
-        ?checkpoint_digest.digest,
-        "Consensus checkpoint mismatch/divergence detected: triggering regression"
-    );
-    let fetched_checkpoint = find_consensus_checkpoint(
-        mesh_state,
-        node_client,
-        chain,
-        checkpoint_digest.digest,
-        checkpoints_rx,
-        my_account_id,
-    )
-    .await?;
-
-    let height = fetched_checkpoint.block_height;
-
-    if let Err(err) = backlog.regress(fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
-        return None;
+    /// Builds the regression payload for an unconfirmed digest and alerts.
+    async fn alert_divergence(&mut self, digest: CheckpointDigest) -> Regression {
+        let local_height = self
+            .backlog
+            .latest_checkpoint(self.chain)
+            .await
+            .map(|checkpoint| checkpoint.block_height);
+        let regression = Regression {
+            consensus_digest: digest.digest,
+            target_height: digest.height,
+            local_height,
+        };
+        alert_regression(self.chain, &regression);
+        regression
     }
 
-    Some(height)
+    /// Regresses the local backlog to a fetched consensus checkpoint.
+    async fn regress(&mut self, checkpoint: Checkpoint, digest: CheckpointDigest) -> Regression {
+        let local_height = self
+            .backlog
+            .latest_checkpoint(self.chain)
+            .await
+            .map(|checkpoint| checkpoint.block_height);
+        if let Err(err) = self.backlog.regress(checkpoint.clone()).await {
+            tracing::error!(chain = ?self.chain, %err, "failed to regress backlog to checkpoint");
+        }
+        let regression = Regression {
+            consensus_digest: digest.digest,
+            target_height: checkpoint.block_height,
+            local_height,
+        };
+        alert_regression(self.chain, &regression);
+        regression
+    }
+}
+
+/// Central regression alert: rich structured log plus a Grafana-facing counter.
+fn alert_regression(chain: Chain, regression: &Regression) {
+    tracing::warn!(
+        ?chain,
+        consensus_digest = ?regression.consensus_digest,
+        target_height = regression.target_height,
+        local_height = ?regression.local_height,
+        "backlog regression against consensus checkpoint"
+    );
+    crate::metrics::requests::CHECKPOINT_REGRESSIONS
+        .with_label_values(&[chain.as_str()])
+        .inc();
 }
 
 async fn fetch_peer_checkpoint(
@@ -101,7 +269,10 @@ async fn fetch_peer_checkpoint(
 }
 
 async fn query_peers_checkpoint(
-    peers: &[(Participant, ParticipantInfo)],
+    peers: &[(
+        Participant,
+        crate::protocol::contract::primitives::ParticipantInfo,
+    )],
     node_client: &NodeClient,
     chain: Chain,
     target_digest: [u8; 32],
@@ -120,7 +291,7 @@ async fn query_peers_checkpoint(
 /// Find the consensus checkpoint from other nodes; this will keep retrying until
 /// the checkpoint is found. If the consensus checkpoint changes during the querying
 /// process, this function will return None.
-pub(crate) async fn find_consensus_checkpoint(
+async fn find_consensus_checkpoint(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     chain: Chain,
@@ -195,57 +366,251 @@ pub(crate) async fn find_consensus_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::Backlog;
+    use crate::backlog::BacklogEntry;
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use crate::backlog::BacklogEntry;
-    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};
+    use crate::web::CheckpointResponse;
+    use mpc_primitives::{IndexedSignRequest, SignArgs, SignId};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    struct AlignFixture {
-        chain: Chain,
+    struct Fixture {
         backlog: Backlog,
+        watcher: ConsensusCheckpointWatcher,
         checkpoints_tx: watch::Sender<Option<CheckpointDigest>>,
-        checkpoints_rx: watch::Receiver<Option<CheckpointDigest>>,
         mesh_tx: watch::Sender<MeshState>,
         mesh_rx: watch::Receiver<MeshState>,
         node_client: NodeClient,
         my_account_id: AccountId,
     }
 
-    impl AlignFixture {
-        fn new(digest: Option<CheckpointDigest>) -> Self {
+    impl Fixture {
+        fn new(initial: Option<CheckpointDigest>) -> Self {
             let chain = Chain::Ethereum;
             let backlog = Backlog::new();
-            let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
+            let (checkpoints_tx, checkpoints_rx) = watch::channel(initial);
+            let watcher = ConsensusCheckpointWatcher::new(chain, &backlog, checkpoints_rx);
             let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-            let node_client = NodeClient::new(&NodeClientOptions::default());
-            let my_account_id: AccountId = "test.near".parse().unwrap();
             Self {
-                chain,
                 backlog,
+                watcher,
                 checkpoints_tx,
-                checkpoints_rx,
                 mesh_tx,
                 mesh_rx,
-                node_client,
-                my_account_id,
+                node_client: NodeClient::new(&NodeClientOptions::default()),
+                my_account_id: "test.near".parse().unwrap(),
             }
         }
 
-        async fn run(&mut self) -> Option<u64> {
-            align_backlog_with_consensus(
-                self.chain,
-                &self.backlog,
-                &mut self.checkpoints_rx,
-                &mut self.mesh_rx,
-                &self.node_client,
-                &self.my_account_id,
-            )
-            .await
+        async fn align(&mut self) -> Option<Regression> {
+            self.watcher
+                .align_with_consensus(&mut self.mesh_rx, &self.node_client, &self.my_account_id)
+                .await
         }
+    }
+
+    fn digest(height: u64, bytes: [u8; 32]) -> Option<CheckpointDigest> {
+        Some(CheckpointDigest {
+            height,
+            digest: bytes,
+        })
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_aligned_without_consensus_or_local() {
+        let backlog = Backlog::new();
+        let mut watcher =
+            ConsensusCheckpointWatcher::new(Chain::Ethereum, &backlog, watch::channel(None).1);
+
+        let snapshot = watcher.snapshot().await;
+        assert!(snapshot.aligned);
+        assert!(snapshot.consensus.is_none());
+        assert!(snapshot.local.is_none());
+    }
+
+    #[tokio::test]
+    async fn matching_consensus_confirms_and_stays_aligned() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(100, checkpoint.digest())).1,
+        );
+
+        let snapshot = watcher.snapshot().await;
+        assert!(snapshot.aligned);
+        assert_eq!(snapshot.local.map(|cp| cp.block_height), Some(100));
+
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(Chain::Ethereum)
+            .await
+            .unwrap();
+        assert_eq!(persisted.map(|cp| cp.block_height), Some(100));
+    }
+
+    #[tokio::test]
+    async fn ahead_with_pending_match_confirms() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        let first = backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        backlog
+            .set_processed_block(Chain::Ethereum, 200)
+            .await
+            .unwrap();
+        backlog.checkpoint(Chain::Ethereum).await.unwrap();
+
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(100, first.digest())).1,
+        );
+
+        let snapshot = watcher.snapshot().await;
+        assert!(snapshot.aligned);
+        let persisted = backlog
+            .checkpoint_storage()
+            .load_latest(Chain::Ethereum)
+            .await
+            .unwrap();
+        assert_eq!(persisted.map(|cp| cp.block_height), Some(100));
+    }
+
+    #[tokio::test]
+    async fn mismatch_is_reported_as_diverged() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(200, [0xab; 32])).1,
+        );
+
+        let snapshot = watcher.snapshot().await;
+        assert!(!snapshot.aligned);
+        assert_eq!(snapshot.local.map(|cp| cp.block_height), Some(100));
+    }
+
+    #[tokio::test]
+    async fn no_local_checkpoint_counts_as_aligned_for_detection() {
+        let backlog = Backlog::new();
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(100, [0x42; 32])).1,
+        );
+
+        assert!(watcher.snapshot().await.aligned);
+    }
+
+    #[tokio::test]
+    async fn next_regression_returns_upfront_mismatch() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(200, [0xab; 32])).1,
+        );
+        let _ = watcher.checkpoints_rx.borrow_and_update();
+
+        let regression =
+            tokio::time::timeout(Duration::from_millis(500), watcher.next_regression())
+                .await
+                .expect("should not hang — upfront check catches mismatch")
+                .expect("should report regression");
+
+        assert_eq!(regression.target_height, 200);
+        assert_eq!(regression.local_height, Some(100));
+        assert_eq!(regression.consensus_digest, [0xab; 32]);
+    }
+
+    #[tokio::test]
+    async fn next_regression_detects_after_change() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let (tx, rx) = watch::channel(digest(100, checkpoint.digest()));
+        let mut watcher = ConsensusCheckpointWatcher::new(Chain::Ethereum, &backlog, rx);
+
+        let handle = tokio::spawn(async move { watcher.next_regression().await });
+        tx.send(digest(200, [0xab; 32])).unwrap();
+
+        let regression = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("timeout")
+            .expect("task should not panic")
+            .expect("should report regression");
+        assert_eq!(regression.target_height, 200);
+    }
+
+    #[tokio::test]
+    async fn next_regression_returns_none_when_feed_shuts_down() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let (tx, rx) = watch::channel(digest(100, checkpoint.digest()));
+        let mut watcher = ConsensusCheckpointWatcher::new(Chain::Ethereum, &backlog, rx);
+
+        let handle = tokio::spawn(async move { watcher.next_regression().await });
+        drop(tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("timeout")
+            .expect("task should not panic");
+        assert!(
+            result.is_none(),
+            "dropped sender should shut down the watcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_regression_increments_regression_metric() {
+        let backlog = Backlog::new();
+        backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await
+            .unwrap();
+        backlog.checkpoint(Chain::Ethereum).await.unwrap();
+        let mut watcher = ConsensusCheckpointWatcher::new(
+            Chain::Ethereum,
+            &backlog,
+            watch::channel(digest(200, [0xab; 32])).1,
+        );
+
+        let before = regression_count(Chain::Ethereum);
+        watcher.next_regression().await.expect("should regress");
+        assert!(regression_count(Chain::Ethereum) >= before + 1.0);
+    }
+
+    fn regression_count(chain: Chain) -> f64 {
+        crate::metrics::requests::CHECKPOINT_REGRESSIONS
+            .with_label_values(&[chain.as_str()])
+            .get()
     }
 
     struct TestCase {
@@ -351,7 +716,7 @@ mod tests {
 
         for case in cases {
             let chain = Chain::Ethereum;
-            let mut fixture = AlignFixture::new(None);
+            let mut fixture = Fixture::new(None);
 
             // 1. Setup local checkpoints
             let mut local_digests = Vec::new();
@@ -417,7 +782,7 @@ mod tests {
 
                 let mut response_map = HashMap::new();
                 response_map.insert(chain, peer_checkpoint);
-                let response = crate::web::CheckpointResponse {
+                let response = CheckpointResponse {
                     version: crate::CHECKPOINT_VERSION,
                     checkpoints: response_map,
                 };
@@ -436,7 +801,7 @@ mod tests {
                 // Register the peer in the mesh state
                 let mut mesh = MeshState::default();
                 let participant = Participant::from(1u32);
-                let mut info = ParticipantInfo::new(1);
+                let mut info = crate::protocol::contract::primitives::ParticipantInfo::new(1);
                 info.url = peer_url;
                 mesh.update(participant, NodeStatus::Active, info);
                 fixture.mesh_tx.send(mesh).unwrap();
@@ -461,13 +826,15 @@ mod tests {
             fixture.checkpoints_tx.send(msg).unwrap();
 
             // 4. Run consensus alignment
-            let result = fixture.run().await;
+            let result = fixture.align().await;
 
             // 5. Assert expected result
             assert_eq!(
-                result, case.expected_result,
+                result.as_ref().map(|r| r.target_height),
+                case.expected_result,
                 "Test case failed: {}, expected result {:?}",
-                case.name, case.expected_result
+                case.name,
+                case.expected_result
             );
 
             // 6. Assert persisted state
@@ -492,7 +859,8 @@ mod tests {
                 if case.remote_use_peer_digest {
                     let latest = fixture.backlog.latest_checkpoint(chain).await.unwrap();
                     assert_eq!(
-                        latest.digest(), remote_digest.unwrap(),
+                        latest.digest(),
+                        remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
                         case.name
                     );
@@ -528,7 +896,7 @@ mod tests {
         let mut newer_server = mockito::Server::new_async().await;
         let mut newer_body = Vec::new();
         ciborium::into_writer(
-            &crate::web::CheckpointResponse {
+            &CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION + 1,
                 checkpoints: [(chain, checkpoint.clone())].into_iter().collect(),
             },
@@ -547,7 +915,7 @@ mod tests {
         let mut current_server = mockito::Server::new_async().await;
         let mut current_body = Vec::new();
         ciborium::into_writer(
-            &crate::web::CheckpointResponse {
+            &CheckpointResponse {
                 version: crate::CHECKPOINT_VERSION,
                 checkpoints: [(chain, checkpoint)].into_iter().collect(),
             },
@@ -565,12 +933,12 @@ mod tests {
 
         let peers = [
             (Participant::from(0u32), {
-                let mut info = ParticipantInfo::new(0);
+                let mut info = crate::protocol::contract::primitives::ParticipantInfo::new(0);
                 info.url = newer_server.url();
                 info
             }),
             (Participant::from(1u32), {
-                let mut info = ParticipantInfo::new(1);
+                let mut info = crate::protocol::contract::primitives::ParticipantInfo::new(1);
                 info.url = current_server.url();
                 info
             }),
@@ -591,10 +959,7 @@ mod tests {
     #[tokio::test]
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
-        let fixture = AlignFixture::new(Some(CheckpointDigest {
-            height: 100,
-            digest: [0xabu8; 32],
-        }));
+        let fixture = Fixture::new(digest(100, [0xabu8; 32]));
 
         // Create a local checkpoint at 100
         fixture
@@ -604,27 +969,25 @@ mod tests {
             .unwrap();
         let _cp = fixture.backlog.checkpoint(chain).await.unwrap();
 
-        let backlog_clone = fixture.backlog.clone();
-        let node_client_clone = fixture.node_client.clone();
-        let my_account_id_clone = fixture.my_account_id.clone();
-        let mut checkpoints_rx_clone = fixture.checkpoints_rx.clone();
-        let mut mesh_rx_clone = fixture.mesh_rx.clone();
+        let Fixture {
+            watcher,
+            checkpoints_tx,
+            mut mesh_rx,
+            node_client,
+            my_account_id,
+            ..
+        } = fixture;
 
         let handle = tokio::spawn(async move {
-            align_backlog_with_consensus(
-                chain,
-                &backlog_clone,
-                &mut checkpoints_rx_clone,
-                &mut mesh_rx_clone,
-                &node_client_clone,
-                &my_account_id_clone,
-            )
-            .await
+            let mut watcher = watcher;
+            watcher
+                .align_with_consensus(&mut mesh_rx, &node_client, &my_account_id)
+                .await
         });
 
         // Let it run and start querying, then update digest to zero to abort
         tokio::time::sleep(Duration::from_millis(50)).await;
-        fixture.checkpoints_tx.send(None).unwrap();
+        checkpoints_tx.send(None).unwrap();
 
         let result = handle.await.unwrap();
         assert!(result.is_none(), "aborted align should return None");
