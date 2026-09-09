@@ -495,7 +495,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         #[cfg(feature = "bench")]
         {
             crate::bench::add_process_time(started_at.elapsed());
-            if crate::bench::inc_slot() % 100 == 0 {
+            if crate::bench::inc_slot().is_multiple_of(100) {
                 crate::bench::report_metrics("catchup_progress");
             }
         }
