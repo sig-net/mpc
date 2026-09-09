@@ -65,8 +65,6 @@ jobs:
           shared-key: workspace
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -165,8 +163,6 @@ jobs:
           shared-key: workspace
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -226,7 +222,6 @@ jobs:
           # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
           shared-key: workspace
           cache-targets: true
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4

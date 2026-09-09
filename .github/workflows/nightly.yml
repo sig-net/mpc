@@ -71,7 +71,6 @@ jobs:
           shared-key: workspace
           cache-targets: true
           cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
