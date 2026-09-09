@@ -13,8 +13,6 @@
 //! - `START` (required) — inclusive start of the catchup range.
 //! - `END` (required) — exclusive end of the catchup range (the anchor
 //!   slot). Must be finalized.
-//! - `WS_URL` (optional) — derived from `RPC_URL` by default; only correct
-//!   for providers that expose websockets on the same host at `/`.
 //!
 //! Note: only slots with program activity are fetched and processed. Pick a
 //! range where the program is active (check with a block explorer), or the

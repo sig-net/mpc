@@ -23,35 +23,13 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 }
 
 /// Build a [`SolConfig`] from the standard set of benchmark env vars
-/// (`RPC_URL`, `WS_URL`, `PROGRAM_ADDRESS`).
+/// (`RPC_URL`, `PROGRAM_ADDRESS`).
 pub fn make_config() -> anyhow::Result<SolConfig> {
     let rpc_http_url = opt_env("RPC_URL")?;
-    let rpc_ws_url = match std::env::var("WS_URL") {
-        Ok(ws) => ws,
-        Err(_) => {
-            // Deriving the WS URL is only correct for providers that expose
-            // the websocket endpoint on the same host at `/` (e.g. Helius).
-            // Set WS_URL explicitly for anything else.
-            let parsed =
-                reqwest::Url::parse(&rpc_http_url).map_err(|e| anyhow!("invalid RPC_URL: {e}"))?;
-            let scheme = match parsed.scheme() {
-                "https" => "wss",
-                "http" => "ws",
-                other => return Err(anyhow!("unsupported RPC_URL scheme: {other}")),
-            };
-            let mut ws = parsed;
-            ws.set_scheme(scheme)
-                .map_err(|_| anyhow!("failed to derive WS_URL from RPC_URL"))?;
-            ws.set_path("/");
-            ws.set_query(None);
-            ws.into()
-        }
-    };
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
         account_sk: String::new(),
         rpc_http_url,
-        rpc_ws_url,
         program_address: opt_env("PROGRAM_ADDRESS")?,
         indexer: Default::default(),
     })
