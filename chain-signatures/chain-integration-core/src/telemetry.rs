@@ -1,4 +1,5 @@
 use super::PublishAction;
+use mpc_primitives::RequestKind;
 
 /// Interface for the Indexer to report telemetry data.
 pub trait ChainTelemetry: Send + Sync + Clone + 'static {
@@ -12,10 +13,10 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     fn checkpoint_created(&self, block_number: u64);
 
     /// Report that a request was indexed at the given block timestamp (currently used for Ethereum due to ~15 min finality delay)
-    fn request_indexed_at(&self, block_timestamp: u64);
+    fn request_indexed_at(&self, block_timestamp: u64, kind: RequestKind);
 
     /// Report that a request was indexed without a block timestamp (faster chains, e.g. for Solana, Canton, or Hydration)
-    fn request_indexed(&self);
+    fn request_indexed(&self, kind: RequestKind);
 
     /// Records a failed attempt to extract the output of a bidirectional
     /// execution on this chain. Counts *attempts*: a retryable failure on the
@@ -54,8 +55,8 @@ impl ChainTelemetry for NoopChainTelemetry {
     fn block_indexed(&self, _block_number: u64) {}
     fn block_finalized(&self, _block_number: u64) {}
     fn checkpoint_created(&self, _block_number: u64) {}
-    fn request_indexed_at(&self, _block_timestamp: u64) {}
-    fn request_indexed(&self) {}
+    fn request_indexed_at(&self, _block_timestamp: u64, _kind: RequestKind) {}
+    fn request_indexed(&self, _kind: RequestKind) {}
     fn bidirectional_extraction_failed(&self, _kind: ExtractionFailureKind) {}
 }
 

@@ -1,7 +1,7 @@
 use mpc_chain_integration_core::{
     ChainTelemetry, ExtractionFailureKind, PublishAction, PublisherTelemetry,
 };
-use mpc_primitives::{Chain, ChainConfig as _};
+use mpc_primitives::{Chain, ChainConfig as _, RequestKind};
 use mpc_utils::time::unix_elapsed;
 
 use super::{
@@ -24,6 +24,7 @@ impl NodeTelemetry {
 impl PublisherTelemetry for NodeTelemetry {
     fn record_publish_metrics(&self, action: &PublishAction) {
         let chain = action.request.chain;
+        let kind = action.request.request_kind();
         let elapsed_secs = unix_elapsed(action.request.unix_timestamp_indexed).as_secs();
 
         if elapsed_secs <= chain.expected_response_time_secs() {
@@ -31,6 +32,7 @@ impl PublisherTelemetry for NodeTelemetry {
                 chain,
                 SignRequestStep::Total,
                 "in_time",
+                kind,
                 action.request.unix_timestamp_indexed,
             );
         } else {
@@ -38,10 +40,17 @@ impl PublisherTelemetry for NodeTelemetry {
                 chain,
                 SignRequestStep::Total,
                 "expired",
+                kind,
                 action.request.unix_timestamp_indexed,
             );
         }
-        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
+        record_request_latency_since(
+            chain,
+            SignRequestStep::Responding,
+            "ok",
+            kind,
+            action.timestamp,
+        );
     }
 }
 
@@ -64,12 +73,18 @@ impl ChainTelemetry for NodeTelemetry {
             .set(block_number as i64);
     }
 
-    fn request_indexed_at(&self, block_timestamp: u64) {
-        record_request_latency_since(self.chain, SignRequestStep::Indexing, "ok", block_timestamp);
+    fn request_indexed_at(&self, block_timestamp: u64, kind: RequestKind) {
+        record_request_latency_since(
+            self.chain,
+            SignRequestStep::Indexing,
+            "ok",
+            kind,
+            block_timestamp,
+        );
     }
 
-    fn request_indexed(&self) {
-        record_indexing_step_reached(self.chain);
+    fn request_indexed(&self, kind: RequestKind) {
+        record_indexing_step_reached(self.chain, kind);
     }
 
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {

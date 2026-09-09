@@ -15,6 +15,7 @@ use mpc_primitives::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
@@ -733,6 +734,28 @@ pub struct BacklogEntry {
     /// is not serialized, and checkpoint recovery resets it.
     #[serde(skip)]
     publish_dispatched: bool,
+    /// Latency bookkeeping for bidirectional requests. Node-local for the same
+    /// reason as `publish_dispatched`: entries feed checkpoint digests, so a
+    /// serialized field here would make per-node timing consensus-relevant.
+    #[serde(skip)]
+    timing: BidirectionalTiming,
+}
+
+/// Node-local timestamps that let the two bidirectional legs be stitched back
+/// into one latency story. Both are `None` on entries restored from a
+/// checkpoint, in which case the spanning steps are simply not observed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BidirectionalTiming {
+    /// When this node moved the entry into `PendingExecution`, i.e. the start of
+    /// the wait for the target chain. Consumed when the wait ends.
+    execution_started: Option<Instant>,
+    /// How long the target-chain wait actually took, fixed at the moment the
+    /// execution was confirmed.
+    awaiting_execution: Option<Duration>,
+    /// `unix_timestamp_indexed` of the *initial* request, carried across the
+    /// swap in `transition_to_bidirectional_response` so the final response can
+    /// still be measured against when the request first entered the system.
+    origin_indexed_at: Option<u64>,
 }
 
 /// Node-local state is not part of an entry's identity to avoid divergence.
@@ -752,6 +775,7 @@ impl BacklogEntry {
             request,
             status,
             publish_dispatched: false,
+            timing: BidirectionalTiming::default(),
         }
     }
 
@@ -843,6 +867,11 @@ impl BacklogEntry {
             return Err(BacklogError::InvalidBidirectionalResponseTransition);
         }
 
+        // The outgoing request is the initial leg, and its indexed timestamp is
+        // the only record of when the request entered the system: the follow-up
+        // request stamps itself with "now". Capture it before the swap.
+        self.timing.origin_indexed_at = Some(self.request.unix_timestamp_indexed);
+        self.timing.awaiting_execution = self.timing.execution_started.take().map(|t| t.elapsed());
         self.request = request;
         self.enter_status(SignStatus::PendingGenerationBidirectional);
         Ok(())
@@ -871,6 +900,7 @@ impl BacklogEntry {
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
+                self.timing.execution_started = Some(Instant::now());
                 self.enter_status(SignStatus::PendingExecution {
                     tx: bidirectional_tx,
                 });
@@ -895,6 +925,20 @@ impl BacklogEntry {
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         self.status.execution_tx()
+    }
+
+    /// How long the target-chain execution wait took, measured from this node's
+    /// own transition into `PendingExecution`. `None` before the execution is
+    /// confirmed, and on entries whose wait began before a restart.
+    pub fn awaiting_execution(&self) -> Option<Duration> {
+        self.timing.awaiting_execution
+    }
+
+    /// `unix_timestamp_indexed` of the initial leg, available once the entry has
+    /// transitioned to its final response. `None` before the transition, and on
+    /// entries restored from a checkpoint.
+    pub fn origin_indexed_at(&self) -> Option<u64> {
+        self.timing.origin_indexed_at
     }
 
     pub fn typename(&self) -> &'static str {
@@ -1570,6 +1614,117 @@ mod tests {
             SignKind::RespondBidirectional(_)
         ));
         assert_eq!(entry.status(), SignStatus::PendingGenerationBidirectional);
+    }
+
+    /// The follow-up request stamps itself with "now", so the only surviving
+    /// record of when the round trip began is the outgoing request's timestamp.
+    /// Losing it in the swap would silently make `end_to_end` measure the second
+    /// leg alone.
+    #[test]
+    fn transition_to_bidirectional_response_carries_origin_indexed_at() {
+        const ORIGIN_INDEXED_AT: u64 = 1_700_000_000;
+
+        let tx = create_test_tx(41);
+        let sign_id = SignId::new(tx.request_id);
+        let mut entry = create_execution_entry_with_timestamp(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+            ORIGIN_INDEXED_AT,
+        );
+        assert_eq!(
+            entry.origin_indexed_at(),
+            None,
+            "origin is only known once the initial leg is behind us"
+        );
+
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(41),
+            Chain::Ethereum,
+            ORIGIN_INDEXED_AT + 500,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+
+        entry
+            .transition_to_bidirectional_response(Arc::new(response_request))
+            .unwrap();
+
+        assert_eq!(entry.origin_indexed_at(), Some(ORIGIN_INDEXED_AT));
+        assert_ne!(
+            entry.request.unix_timestamp_indexed, ORIGIN_INDEXED_AT,
+            "the swapped-in request must not be the source of the origin timestamp"
+        );
+    }
+
+    /// `awaiting_execution` must be fixed at the transition rather than read
+    /// live, so a late reader cannot inflate it.
+    #[test]
+    fn advance_to_execution_measures_the_target_chain_wait() {
+        let tx = create_test_tx(42);
+        let sign_id = SignId::new(tx.request_id);
+        let mut entry = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            SignStatus::PendingGeneration,
+            "ethereum",
+        );
+        assert_eq!(entry.awaiting_execution(), None);
+
+        entry.advance_to_execution(Arc::new(tx.clone())).unwrap();
+        assert_eq!(
+            entry.awaiting_execution(),
+            None,
+            "the wait is not measurable until the execution is confirmed"
+        );
+
+        let response_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(42),
+            Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+        entry
+            .transition_to_bidirectional_response(Arc::new(response_request))
+            .unwrap();
+
+        let measured = entry.awaiting_execution().expect("wait must be measured");
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            entry.awaiting_execution(),
+            Some(measured),
+            "the measurement must not keep growing after the transition"
+        );
+    }
+
+    /// Entries restored from a checkpoint carry no node-local timing, and the
+    /// spanning steps must be skipped rather than reported as zero.
+    #[test]
+    fn recovered_entry_reports_no_bidirectional_timing() {
+        let tx = create_test_tx(43);
+        let entry = create_execution_entry(
+            tx.clone(),
+            Chain::Ethereum,
+            pending_execution_status(&tx),
+            "ethereum",
+        );
+
+        let round_tripped: BacklogEntry =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+
+        assert_eq!(round_tripped, entry, "timing is not part of entry identity");
+        assert_eq!(round_tripped.origin_indexed_at(), None);
+        assert_eq!(round_tripped.awaiting_execution(), None);
     }
 
     #[test]

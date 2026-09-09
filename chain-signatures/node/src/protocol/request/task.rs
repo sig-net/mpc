@@ -222,7 +222,7 @@ impl SignTask {
             match new_phase {
                 SignPhase::Complete(result) => {
                     if result.is_ok() {
-                        durations.emit(state.request().chain);
+                        durations.emit(state.request().chain, state.request().request_kind());
                     }
                     return result;
                 }

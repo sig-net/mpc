@@ -5,8 +5,8 @@ use super::*;
 /// Per-request accumulator for the three looping phases in `SignTask::run`:
 /// Organizing, Posit, Generating. Times are summed across attempts so each
 /// histogram observation covers the full request even when the state machine
-/// loops back. Indexing/AwaitingGeneration/Responding/Total are emitted
-/// elsewhere and ignored by `add`.
+/// loops back. Indexing/AwaitingGeneration/Responding/AwaitingExecution/
+/// EndToEnd/Total are emitted elsewhere and ignored by `add`.
 ///
 /// Additivity caveat: without governance pauses, all five stages sum to
 /// Total. Resharing or other transitions out of `Running` mid-request show
@@ -29,15 +29,32 @@ impl PhaseDurations {
             SignRequestStep::Indexing
             | SignRequestStep::AwaitingGeneration
             | SignRequestStep::Responding
+            | SignRequestStep::AwaitingExecution
+            | SignRequestStep::EndToEnd
             | SignRequestStep::Total => {}
         }
     }
 
     /// Record per-phase totals as latency histograms. Call once on success.
-    pub fn emit(self, chain: Chain) {
-        record_request_latency(chain, SignRequestStep::Organizing, "ok", self.organizing);
-        record_request_latency(chain, SignRequestStep::Posit, "ok", self.posit);
-        record_request_latency(chain, SignRequestStep::Generating, "ok", self.generating);
+    ///
+    /// `kind` separates the two bidirectional legs, which run these same three
+    /// phases under a shared `SignId`.
+    pub fn emit(self, chain: Chain, kind: RequestKind) {
+        record_request_latency(
+            chain,
+            SignRequestStep::Organizing,
+            "ok",
+            kind,
+            self.organizing,
+        );
+        record_request_latency(chain, SignRequestStep::Posit, "ok", kind, self.posit);
+        record_request_latency(
+            chain,
+            SignRequestStep::Generating,
+            "ok",
+            kind,
+            self.generating,
+        );
     }
 }
 
@@ -71,6 +88,11 @@ mod tests {
             Duration::from_millis(200),
         );
         d.add(SignRequestStep::Responding, Duration::from_millis(300));
+        d.add(
+            SignRequestStep::AwaitingExecution,
+            Duration::from_millis(500),
+        );
+        d.add(SignRequestStep::EndToEnd, Duration::from_millis(600));
         d.add(SignRequestStep::Total, Duration::from_millis(400));
 
         assert_eq!(d, PhaseDurations::default());

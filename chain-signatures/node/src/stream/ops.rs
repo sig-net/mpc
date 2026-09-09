@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::metrics::requests::{
+    record_request_latency, record_request_latency_since, SignRequestStep,
+};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
@@ -9,7 +12,7 @@ use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
     RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     SignatureRespondedEvent,
 };
@@ -281,6 +284,19 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     entry.verify_signature(root_pk, &event.signature)?;
 
+    // The whole round trip, measured against when the *initial* request was
+    // indexed. Skipped when the entry crossed a restart, which drops the
+    // node-local origin timestamp.
+    if let Some(origin_indexed_at) = entry.origin_indexed_at() {
+        record_request_latency_since(
+            source_chain,
+            SignRequestStep::EndToEnd,
+            "ok",
+            RequestKind::RespondBidirectional,
+            origin_indexed_at,
+        );
+    }
+
     if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
@@ -373,6 +389,18 @@ pub async fn process_execution_confirmed(
             )
         })?;
     tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "transitioned transaction to final response");
+
+    // Labelled with the kind the entry now carries, so the gap between the two
+    // legs stacks with the second leg's phases rather than sitting on its own.
+    if let Some(awaiting_execution) = updated_tx.awaiting_execution() {
+        record_request_latency(
+            source_chain,
+            SignRequestStep::AwaitingExecution,
+            "ok",
+            RequestKind::RespondBidirectional,
+            awaiting_execution,
+        );
+    }
 
     let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up

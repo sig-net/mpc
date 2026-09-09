@@ -1789,10 +1789,14 @@ mod tests {
             fn block_indexed(&self, _block_number: u64) {}
             fn block_finalized(&self, _block_number: u64) {}
             fn checkpoint_created(&self, _block_number: u64) {}
-            fn request_indexed_at(&self, _block_timestamp: u64) {
+            fn request_indexed_at(
+                &self,
+                _block_timestamp: u64,
+                _kind: mpc_primitives::RequestKind,
+            ) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
-            fn request_indexed(&self) {
+            fn request_indexed(&self, _kind: mpc_primitives::RequestKind) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
             fn bidirectional_extraction_failed(

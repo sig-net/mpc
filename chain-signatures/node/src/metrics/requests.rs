@@ -8,6 +8,7 @@ use crate::metrics::{
     LatencyStart,
 };
 use crate::protocol::Chain;
+use mpc_primitives::RequestKind;
 
 /// Steps and statuses of the sign request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,19 @@ pub enum SignRequestStep {
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
+    /// Bidirectional only: time from publishing the initial response to the
+    /// source chain until the target-chain execution is confirmed and the final
+    /// response request is built (Status: ok).
+    ///
+    /// Recorded under `kind="respond_bidirectional"`, the kind the request has
+    /// once the transition completes, so the whole second leg shares one kind.
+    AwaitingExecution,
+    /// Bidirectional only: time from indexing the initial request to the final
+    /// response landing on the source chain, spanning both legs (Status: ok).
+    ///
+    /// The origin timestamp is node-local state that checkpoint recovery
+    /// resets, so requests that cross a restart are not observed here.
+    EndToEnd,
     /// Total time from indexing to responding
     /// Status:
     ///     - in_time: request was delivered in time (expected finality delay + margin)
@@ -42,6 +56,8 @@ impl SignRequestStep {
             Self::Posit => "posit",
             Self::Generating => "generating",
             Self::Responding => "responding",
+            Self::AwaitingExecution => "awaiting_execution",
+            Self::EndToEnd => "end_to_end",
             Self::Total => "total",
         }
     }
@@ -50,8 +66,8 @@ impl SignRequestStep {
 static SIGN_REQUEST_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_and_version(
         "multichain_sign_request_latency_sec",
-        "Latency of multichain sign request processing with step and status specification.",
-        &["chain", "step", "status"],
+        "Latency of multichain sign request processing with step, status and request kind specification.",
+        &["chain", "step", "status", "kind"],
         // Start: 30ms, Factor: 1.4, Count: 42
         // Range: 0.03s -> ~29,300s (8.1 hours)
         Some(exponential_buckets(0.03, 1.4, 42).unwrap()),
@@ -66,10 +82,11 @@ pub fn record_request_latency(
     chain: Chain,
     step: SignRequestStep,
     status: &str,
+    kind: RequestKind,
     latency: Duration,
 ) {
     SIGN_REQUEST_LATENCY
-        .with_label_values(&[chain.as_str(), step.as_str(), status])
+        .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
         .observe(latency.as_secs_f64());
 }
 
@@ -81,17 +98,23 @@ pub fn record_request_latency_since(
     chain: Chain,
     step: SignRequestStep,
     status: &str,
+    kind: RequestKind,
     start: impl LatencyStart,
 ) {
     SIGN_REQUEST_LATENCY
-        .with_label_values(&[chain.as_str(), step.as_str(), status])
+        .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
         .observe(start.elapsed_seconds());
 }
 /// Some chains do not provide information about the block time.
 /// For that reason we record indexing step reached with 0.0 latency.
-pub fn record_indexing_step_reached(chain: Chain) {
+pub fn record_indexing_step_reached(chain: Chain, kind: RequestKind) {
     SIGN_REQUEST_LATENCY
-        .with_label_values(&[chain.as_str(), SignRequestStep::Indexing.as_str(), "ok"])
+        .with_label_values(&[
+            chain.as_str(),
+            SignRequestStep::Indexing.as_str(),
+            "ok",
+            kind.as_str(),
+        ])
         .observe(0.0);
 }
 
