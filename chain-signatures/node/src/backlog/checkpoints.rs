@@ -294,6 +294,34 @@ impl Checkpoints {
         Ok(pending.into_iter().next_back().or(latest))
     }
 
+    /// Align durable pending checkpoints with the binary's indexer parser version.
+    /// Returns true when pending was evicted.
+    pub(super) async fn apply_parser_version(
+        &self,
+        chain: Chain,
+        version: u64,
+    ) -> anyhow::Result<bool> {
+        let stored = self.storage.load_parser_version(chain).await?;
+        let Some(stored) = stored else {
+            self.storage.persist_parser_version(chain, version).await?;
+            return Ok(false);
+        };
+        if stored == version {
+            return Ok(false);
+        }
+        tracing::warn!(
+            ?chain,
+            stored,
+            current = version,
+            "indexer parser version changed; dropping unconfirmed pending checkpoints"
+        );
+        self.storage.clear_pending(chain).await?;
+        self.storage.persist_parser_version(chain, version).await?;
+        self.pending(chain).write().await.clear();
+        self.observe(chain, 0);
+        Ok(true)
+    }
+
     /// Replaces durable checkpoint state with a consensus checkpoint after regression.
     pub(super) async fn regress(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         self.storage.reset_to_latest(checkpoint).await?;
@@ -590,6 +618,142 @@ mod tests {
                 .unwrap(),
             Some(consensus)
         );
+    }
+
+    fn chain_checkpoint(chain: Chain, height: u64) -> Checkpoint {
+        Checkpoint {
+            chain,
+            block_height: height,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_stored_version_keeps_pending_and_persists() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let pending = checkpoint(1);
+        checkpoints.persist_pending(&pending).await.unwrap();
+
+        assert!(!checkpoints
+            .apply_parser_version(pending.chain, 7)
+            .await
+            .unwrap());
+        assert_eq!(checkpoints.count(pending.chain).await, 1);
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_pending(pending.chain)
+                .await
+                .unwrap(),
+            vec![pending.clone()]
+        );
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_parser_version(pending.chain)
+                .await
+                .unwrap(),
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_parser_version_keeps_pending() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let pending = checkpoint(1);
+        checkpoints.persist_pending(&pending).await.unwrap();
+        checkpoints
+            .storage()
+            .persist_parser_version(pending.chain, 2)
+            .await
+            .unwrap();
+
+        assert!(!checkpoints
+            .apply_parser_version(pending.chain, 2)
+            .await
+            .unwrap());
+        assert_eq!(checkpoints.count(pending.chain).await, 1);
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_pending(pending.chain)
+                .await
+                .unwrap(),
+            vec![pending.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_parser_version_evicts_pending_keeps_latest() {
+        let storage = CheckpointStorage::in_memory();
+        let chain = Chain::Ethereum;
+        let latest = chain_checkpoint(chain, 1);
+        let stale = chain_checkpoint(chain, 2);
+        storage.persist(&latest).await.unwrap();
+        storage.persist_pending(&stale).await.unwrap();
+        storage.persist_parser_version(chain, 1).await.unwrap();
+
+        let checkpoints = Checkpoints::new(storage);
+        assert!(checkpoints.apply_parser_version(chain, 2).await.unwrap());
+        assert_eq!(checkpoints.count(chain).await, 0);
+        assert_eq!(
+            checkpoints.load_local(chain).await.unwrap(),
+            Some(latest.clone())
+        );
+        assert_eq!(checkpoints.count(chain).await, 0);
+        assert_eq!(
+            checkpoints.storage().load_latest(chain).await.unwrap(),
+            Some(latest)
+        );
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_parser_version(chain)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn parser_version_mismatch_leaves_other_chain_pending() {
+        let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
+        let evicted = chain_checkpoint(Chain::Ethereum, 1);
+        let kept = chain_checkpoint(Chain::Solana, 1);
+        checkpoints.persist_pending(&evicted).await.unwrap();
+        checkpoints.persist_pending(&kept).await.unwrap();
+        checkpoints
+            .storage()
+            .persist_parser_version(Chain::Ethereum, 1)
+            .await
+            .unwrap();
+        checkpoints
+            .storage()
+            .persist_parser_version(Chain::Solana, 5)
+            .await
+            .unwrap();
+
+        assert!(checkpoints
+            .apply_parser_version(Chain::Ethereum, 2)
+            .await
+            .unwrap());
+        assert_eq!(checkpoints.count(Chain::Ethereum).await, 0);
+        assert_eq!(checkpoints.count(Chain::Solana).await, 1);
+        assert_eq!(
+            checkpoints
+                .storage()
+                .load_pending(Chain::Solana)
+                .await
+                .unwrap(),
+            vec![kept]
+        );
+        assert!(checkpoints
+            .storage()
+            .load_pending(Chain::Ethereum)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

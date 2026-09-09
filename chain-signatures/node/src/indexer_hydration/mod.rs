@@ -9,6 +9,10 @@ use crate::types::CheckpointWatcher;
 
 pub use config::HydrationConfig;
 
+/// Bump when Hydration indexer parsing changes and unconfirmed
+/// checkpoints produced by the old parser must be dropped.
+const INDEXER_PARSER_VERSION: u64 = 0;
+
 use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -328,6 +332,21 @@ pub async fn run<T: ChainTelemetry>(
     // Hydrate the local checkpoint before aligning: the web server (spawned
     // independently) can then serve durable pending bodies to peers during
     // startup. `load_local` only reads local storage and does not need the mesh.
+    match backlog
+        .apply_parser_version(Chain::Hydration, INDEXER_PARSER_VERSION)
+        .await
+    {
+        Ok(true) => {
+            tracing::info!(
+                chain = ?Chain::Hydration,
+                "dropped unconfirmed pending checkpoints for re-parse after parser bump"
+            );
+        }
+        Ok(false) => {}
+        Err(err) => {
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to apply parser version; continuing");
+        }
+    }
     match backlog.load_local(Chain::Hydration).await {
         Ok(Some(checkpoint)) => {
             tracing::info!(

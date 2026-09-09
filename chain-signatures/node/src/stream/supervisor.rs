@@ -143,6 +143,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         recover_backlog(
             chain,
             load_local,
+            I::INDEXER_PARSER_VERSION,
             &ctx.backlog,
             &mut ctx.checkpoints_rx,
             &mut ctx.mesh_state,

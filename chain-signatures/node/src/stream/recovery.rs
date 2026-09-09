@@ -16,6 +16,7 @@ use tokio::sync::watch;
 pub(crate) async fn recover_backlog(
     chain: Chain,
     load_local: bool,
+    parser_version: u64,
     backlog: &Backlog,
     checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
@@ -28,6 +29,18 @@ pub(crate) async fn recover_backlog(
     // independently) can then serve durable pending bodies to peers during
     // startup. `load_local` only reads local storage and does not need the mesh.
     if load_local {
+        match backlog.apply_parser_version(chain, parser_version).await {
+            Ok(true) => {
+                tracing::info!(
+                    ?chain,
+                    "dropped unconfirmed pending checkpoints for re-parse after parser bump"
+                );
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(?chain, %err, "failed to apply parser version; continuing");
+            }
+        }
         match backlog.load_local(chain).await {
             Ok(Some(checkpoint)) => {
                 tracing::info!(

@@ -593,6 +593,13 @@ impl Backlog {
         self.checkpoints.confirm(chain, digest).await
     }
 
+    /// Drop this chain's unconfirmed pending checkpoints when `version`
+    /// differs from the stored parser version. Missing stored value is
+    /// bootstrap and does not evict. Returns true when pending was dropped.
+    pub async fn apply_parser_version(&self, chain: Chain, version: u64) -> anyhow::Result<bool> {
+        self.checkpoints.apply_parser_version(chain, version).await
+    }
+
     /// Load the durable checkpoint state and return the newest checkpoint.
     pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         self.checkpoints.load_local(chain).await
