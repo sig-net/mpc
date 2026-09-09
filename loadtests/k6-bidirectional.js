@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { check, fail, sleep } from 'k6';
-import { Trend, Rate, Counter } from 'k6/metrics';
+import { Trend, Rate, Counter, Gauge } from 'k6/metrics';
 
 // Load test for the Solana -> Ethereum bidirectional round trip.
 //
@@ -13,11 +13,23 @@ const BASE_URL = __ENV.LT_PINGER_URL || 'https://contract-ping.sig.network';
 
 // The service's own phase timings, not wall-clock around our polling, which
 // would fold the poll interval into whichever phase ended between two polls.
-const leaseWait = new Trend('bidi_lease_wait_ms', true);
-const signature = new Trend('bidi_signature_ms', true);
-const confirmation = new Trend('bidi_confirmation_ms', true);
-const respond = new Trend('bidi_respond_ms', true);
-const total = new Trend('bidi_total_ms', true);
+//
+// Seconds, not the milliseconds the API returns: these are remote-written to
+// Prometheus, which expects base units and a _seconds suffix. That also costs
+// the summary's "17m30s" formatting, since k6 only pretty-prints times it is
+// told are milliseconds — the suffix is the unit now.
+const SEC = 1000;
+const leaseWait = new Trend('bidi_lease_wait_seconds');
+const signature = new Trend('bidi_signature_seconds');
+const confirmation = new Trend('bidi_confirmation_seconds');
+const respond = new Trend('bidi_respond_seconds');
+const total = new Trend('bidi_total_seconds');
+
+// Read once in setup(), so a run records the pool it actually ran against
+// rather than leaving that in a log line nothing can query later.
+const workersTotal = new Gauge('bidi_workers_total');
+const workersUnderfunded = new Gauge('bidi_workers_underfunded');
+const workerBalanceMin = new Gauge('bidi_worker_balance_min_eth');
 
 const success = new Rate('bidi_success');
 
@@ -136,6 +148,14 @@ export function setup() {
 
   const workers = res.json('workers') || [];
   const short = workers.filter(w => w.underfunded);
+
+  // Recorded before the shortfall check below, so an aborted run still says
+  // how short the pool was rather than only that it was short.
+  const balances = workers.map(w => Number(w.balanceWei) / 1e18);
+  workersTotal.add(workers.length);
+  workersUnderfunded.add(short.length);
+  if (balances.length > 0) workerBalanceMin.add(Math.min(...balances));
+
   console.log(
     `${workers.length} derived addresses, ${short.length} below the minimum`
   );
@@ -205,11 +225,11 @@ export default function () {
     if (state !== 'responded' && state !== 'failed') continue;
 
     const d = view.json('durations') || {};
-    if (d.leaseWaitMs !== undefined) leaseWait.add(d.leaseWaitMs);
-    if (d.signatureMs !== undefined) signature.add(d.signatureMs);
-    if (d.confirmationMs !== undefined) confirmation.add(d.confirmationMs);
-    if (d.respondMs !== undefined) respond.add(d.respondMs);
-    if (d.totalMs !== undefined) total.add(d.totalMs);
+    if (d.leaseWaitMs !== undefined) leaseWait.add(d.leaseWaitMs / SEC);
+    if (d.signatureMs !== undefined) signature.add(d.signatureMs / SEC);
+    if (d.confirmationMs !== undefined) confirmation.add(d.confirmationMs / SEC);
+    if (d.respondMs !== undefined) respond.add(d.respondMs / SEC);
+    if (d.totalMs !== undefined) total.add(d.totalMs / SEC);
 
     if (state === 'responded') {
       success.add(true);
