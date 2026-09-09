@@ -60,9 +60,10 @@ test-keep filter="" helios="": (setup helios)
     TESTCONTAINERS=keep cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tk := test-keep
 
-# Run clippy (mirrors CI: cargo clippy --tests -- -Dclippy::all)
+# Run clippy (mirrors CI). --all-features/--all-targets so dead code behind
+# feature gates (bench, test-feature, debug-page, helios, ...) is checked too.
 lint:
-    cargo clippy --tests -- -Dclippy::all
+    cargo clippy --workspace --all-targets --all-features -- -Dclippy::all
 
 # Check formatting without modifying files (mirrors CI)
 fmt-check:
