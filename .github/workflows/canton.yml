@@ -1,12 +1,6 @@
 name: Canton Integration Tests
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - integration-tests/**
-      - chain-signatures/**
   pull_request:
   merge_group:
 
@@ -14,7 +8,12 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   canton:
+    needs: [changes]
+    if: needs.changes.outputs.canton == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Canton ${{ matrix.suite.name }} Tests
     runs-on: warp-ubuntu-latest-x64-4x
     strategy:
@@ -94,7 +93,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Build eth contract
         run: just build eth

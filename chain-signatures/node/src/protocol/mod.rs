@@ -16,7 +16,6 @@ pub mod test_setup;
 
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
-pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};

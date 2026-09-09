@@ -1,23 +1,17 @@
 name: Unit
 on:
-  push:
-    branches:
-      - main
-      - develop
-    paths:
-      - ".github/workflows/unit.yml"
-      - "chain-signatures/**/*.rs"
-      - "chain-signatures/Cargo.*"
-      - "integration-tests/**/*.rs"
-      - "chain-signatures/contract-eth/**/*.sol"
-      - "chain-signatures/contract-eth/**/*.js"
   pull_request:
   merge_group:
 
 env:
   RUSTFLAGS: -D warnings
 jobs:
+  changes:
+    uses: ./.github/workflows/_ci-changes.yml
+
   test:
+    needs: [changes]
+    if: needs.changes.outputs.unit == 'true'
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
@@ -49,7 +43,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.event_name == 'merge_group' }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -81,6 +75,8 @@ jobs:
         run: just test-unit
 
   audit:
+    needs: [changes]
+    if: needs.changes.outputs.audit == 'true'
     name: Audit
     runs-on: ubuntu-latest
     steps:

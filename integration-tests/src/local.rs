@@ -74,8 +74,9 @@ impl Node {
             near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
+            env: ctx.env.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
             sign_sk: Some(sign_sk.clone()),
             eth,
@@ -89,7 +90,6 @@ impl Node {
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
@@ -172,8 +172,9 @@ impl Node {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
+            env: ctx.env.clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
             sign_sk: Some(config.sign_sk.clone()),
             eth,
@@ -187,7 +188,6 @@ impl Node {
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
