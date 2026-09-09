@@ -106,3 +106,18 @@ jobs:
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+
+  # Placeholder twin: keeps the check reporting when gated out.
+  canton-skipped:
+    needs: [changes]
+    if: needs.changes.outputs.canton != 'true' && needs.changes.outputs.core != 'true' && needs.changes.outputs.contract_eth != 'true'
+    name: Canton ${{ matrix.suite.name }} Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: Stream
+          - name: E2E
+    steps:
+      - run: echo "no relevant changes"

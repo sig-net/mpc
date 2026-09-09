@@ -93,6 +93,15 @@ jobs:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
 
+  # Placeholder twin: keeps the check reporting when gated out.
+  fixture-test-skipped:
+    needs: [changes]
+    if: needs.changes.outputs.core != 'true'
+    name: Fixture Test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no relevant changes"
+
   # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
   # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
   cluster-test:
@@ -200,6 +209,18 @@ jobs:
           IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
 
+  # Placeholder twin: keeps the check reporting when gated out.
+  cluster-test-skipped:
+    needs: [changes]
+    if: needs.changes.outputs.core != 'true' && needs.changes.outputs.near != 'true' && needs.changes.outputs.eth != 'true' && needs.changes.outputs.solana != 'true' && needs.changes.outputs.hydration != 'true' && needs.changes.outputs.contract_eth != 'true'
+    name: Integration Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [warp-ubuntu-latest-x64-4x]
+    steps:
+      - run: echo "no relevant changes"
+
   # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
   anvil-integration-test:
     needs: [changes]
@@ -247,3 +268,12 @@ jobs:
 
       - name: Test
         run: just test-eth
+
+  # Placeholder twin: keeps the check reporting when gated out.
+  anvil-integration-test-skipped:
+    needs: [changes]
+    if: needs.changes.outputs.eth != 'true' && needs.changes.outputs.core != 'true' && needs.changes.outputs.contract_eth != 'true'
+    name: Anvil Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no relevant changes"

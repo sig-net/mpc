@@ -85,3 +85,12 @@ jobs:
       - name: Rust intent seam differential
         working-directory: .
         run: just test-midnight-seam
+
+  # Placeholder twin: keeps the check reporting when gated out.
+  test-skipped:
+    needs: [changes]
+    if: needs.changes.outputs.midnight_ts != 'true' && needs.changes.outputs.core != 'true'
+    name: Midnight Publisher TS Tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no relevant changes"

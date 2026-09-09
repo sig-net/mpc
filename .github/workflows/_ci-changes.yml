@@ -11,10 +11,12 @@
 #   cluster-test: core|near|eth|solana|hydration|contract_eth
 #   anvil-test: eth|core|contract_eth    unit-test: unit   audit: audit
 #
-# Skipped jobs satisfy required checks; non-PR events (merge queue, dispatch)
-# set every flag to true — the merge queue is the full-suite safety net. Test
-# workflows have no push trigger: develop only advances through the queue, so
-# the tree was already tested. Caches are saved from merge_group runs.
+# Gated jobs pair with a same-named *-skipped twin (inverse condition) so
+# required checks always report even when a skipped job's check run goes
+# missing. Non-PR events (merge queue, dispatch) set every flag to true —
+# the merge queue is the full-suite safety net. Test workflows have no push
+# trigger: develop only advances through the queue, so the tree was already
+# tested. Caches are saved from merge_group runs.
 # Globs use minimatch: `**` must be a full segment (`**/*canton*`, never
 # `**canton**`).
 name: CI Changes
