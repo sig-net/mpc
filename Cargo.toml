@@ -22,7 +22,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.17.0"
+version = "1.18.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
