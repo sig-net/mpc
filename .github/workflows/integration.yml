@@ -61,8 +61,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
-          shared-key: workspace
+          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
+          # use "workspace" so their faster save cannot race away the release artifacts.
+          shared-key: workspace-release
           cache-targets: true
           cache-on-failure: false
 
@@ -159,8 +160,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
-          shared-key: workspace
+          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
+          # use "workspace" so their faster save cannot race away the release artifacts.
+          shared-key: workspace-release
           cache-targets: true
           cache-on-failure: false
 
@@ -219,7 +221,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by all workflows; per-workflow keys exceeded the 10 GB repo cache quota.
+          # Shared by dev-only jobs; release-building jobs use "workspace-release".
           shared-key: workspace
           cache-targets: true
 
