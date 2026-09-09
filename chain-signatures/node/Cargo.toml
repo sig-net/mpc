@@ -100,7 +100,7 @@ default = []
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
-test-feature = []
+test-feature = ["mpc-chain-midnight/sandbox"]
 # Show a debug page
 debug-page = ["maud"]
 # Enable Helios light client for Ethereum

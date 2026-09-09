@@ -23,7 +23,6 @@ import {
   parseSecp256k1PublicKey,
   requestIdBytes,
   respondBidirectionalEventToCircuitInput,
-  serializeRespondOutput,
   signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
   type RequestIdHex,
@@ -71,6 +70,7 @@ interface SignedTransactionRequest {
 interface SettleResponseRequest {
   op: "settleResponse";
   requestId: string;
+  serializedOutput: string;
 }
 
 interface ShutdownRequest {
@@ -283,9 +283,7 @@ async function dispatch(request: Request): Promise<unknown> {
     const responseKey = active.responseKey;
     if (responseKey === undefined) throw new Error("caller is not initialised");
     const requestId = parseRequestIdHex(request.requestId);
-    const serializedOutput = serializeRespondOutput([{ name: "success", type: "bool" }], {
-      success: true,
-    });
+    const serializedOutput = bytes(request.serializedOutput);
     const response = await waitFor("a verified respondBidirectional entry", () =>
       active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
     );

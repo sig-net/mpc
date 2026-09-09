@@ -13,7 +13,7 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
-use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
+use cait_sith::protocol::{Action, Participant};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::sha2::{Digest, Sha256};
 use mpc_crypto::PublicKey;
@@ -27,14 +27,6 @@ pub fn resharing_running_timeout() -> Duration {
 
 pub fn set_resharing_running_timeout(duration: Duration) {
     RESHARING_RUNNING_TIMEOUT_SECS.swap(duration.as_secs(), Ordering::SeqCst);
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum CryptographicError {
-    #[error("cait-sith initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
 }
 
 pub(crate) trait CryptographicProtocol {

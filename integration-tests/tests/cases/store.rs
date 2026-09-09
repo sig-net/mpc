@@ -415,10 +415,11 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         vec![first.clone(), second.clone()]
     );
 
-    assert!(
+    assert_eq!(
         restarted
-            .promote_pending(Chain::Solana, first.block_height)
-            .await?
+            .promote_pending(Chain::Solana, first.digest())
+            .await?,
+        Some(1)
     );
     assert_eq!(
         restarted.load_latest(Chain::Solana).await?,
@@ -432,20 +433,20 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     let mut conflicting = second.clone();
     conflicting.cumulative_digest[0] = 1;
     assert!(restarted.persist_pending(&conflicting).await.is_err());
-    assert!(
-        !restarted
-            .promote_pending(Chain::Solana, second.block_height + 1)
-            .await?
-    );
+    assert!(restarted
+        .promote_pending(Chain::Solana, [99; 32])
+        .await?
+        .is_none());
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
     assert_eq!(
         restarted.load_pending(Chain::Solana).await?,
         vec![second.clone()]
     );
-    assert!(
+    assert_eq!(
         restarted
-            .promote_pending(Chain::Solana, second.block_height)
-            .await?
+            .promote_pending(Chain::Solana, second.digest())
+            .await?,
+        Some(0)
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
     assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
