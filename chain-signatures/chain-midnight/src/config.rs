@@ -54,16 +54,49 @@ impl Default for IndexerConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputStorageConfig {
+    pub bucket: String,
+    /// Object namespace; use a distinct prefix for deployments that reset chain state.
+    pub prefix: String,
+    pub timeout: Duration,
+    #[cfg(feature = "sandbox")]
+    pub emulator_endpoint: Option<String>,
+}
+
+impl OutputStorageConfig {
+    pub fn new(bucket: String, prefix: String, timeout: Duration) -> Self {
+        Self {
+            bucket,
+            prefix,
+            timeout,
+            #[cfg(feature = "sandbox")]
+            emulator_endpoint: None,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.bucket.trim().is_empty(),
+            "midnight config: publisher.output_storage.bucket must not be empty"
+        );
+        anyhow::ensure!(
+            !self.prefix.trim_matches('/').trim().is_empty(),
+            "midnight config: publisher.output_storage.prefix is required"
+        );
+        anyhow::ensure!(
+            !self.timeout.is_zero(),
+            "midnight config: publisher.output_storage.timeout must be greater than zero"
+        );
+        Ok(())
+    }
+}
+
 /// Runs the out-of-process intent builder, the piece that stays TypeScript for its proving stack.
 #[derive(Clone, PartialEq)]
 pub struct PublisherConfig {
-    /// Optional GCS bucket; when absent, final responses only publish on-chain.
-    pub output_storage_bucket: Option<String>,
-    /// Object namespace; use a distinct prefix for deployments that reset chain state.
-    pub output_storage_prefix: String,
-    pub output_storage_timeout: Duration,
-    #[cfg(feature = "sandbox")]
-    pub output_storage_emulator_endpoint: Option<String>,
+    /// When absent, final responses only publish on-chain.
+    pub output_storage: Option<OutputStorageConfig>,
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,
     /// Funds respond transactions.
@@ -84,11 +117,7 @@ pub struct PublisherConfig {
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
-            output_storage_bucket: None,
-            output_storage_prefix: "v1".to_string(),
-            output_storage_timeout: Duration::from_secs(30),
-            #[cfg(feature = "sandbox")]
-            output_storage_emulator_endpoint: None,
+            output_storage: None,
             // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
@@ -113,17 +142,8 @@ impl Default for PublisherConfig {
 /// than skipped, so a later `derive(Debug)` cannot silently restore the leak.
 impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("PublisherConfig");
-        debug
-            .field("output_storage_bucket", &self.output_storage_bucket)
-            .field("output_storage_prefix", &self.output_storage_prefix)
-            .field("output_storage_timeout", &self.output_storage_timeout);
-        #[cfg(feature = "sandbox")]
-        debug.field(
-            "output_storage_emulator_endpoint",
-            &self.output_storage_emulator_endpoint,
-        );
-        debug
+        f.debug_struct("PublisherConfig")
+            .field("output_storage", &self.output_storage)
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
             .field("proof_server_url", &self.proof_server_url)
@@ -190,24 +210,9 @@ impl MidnightConfig {
 
 impl PublisherConfig {
     pub fn validate_output_storage(&self) -> anyhow::Result<()> {
-        if let Some(bucket) = &self.output_storage_bucket {
-            anyhow::ensure!(
-                !bucket.trim().is_empty(),
-                "midnight config: publisher.output_storage_bucket must not be empty"
-            );
+        if let Some(config) = &self.output_storage {
+            config.validate()?;
         }
-        anyhow::ensure!(
-            !self
-                .output_storage_prefix
-                .trim_matches('/')
-                .trim()
-                .is_empty(),
-            "midnight config: publisher.output_storage_prefix is required"
-        );
-        anyhow::ensure!(
-            !self.output_storage_timeout.is_zero(),
-            "midnight config: publisher.output_storage_timeout must be greater than zero"
-        );
         Ok(())
     }
 
@@ -375,11 +380,14 @@ mod tests {
         let endpoint = "http://127.0.0.1:4443";
         let mut config = valid_config();
         config.publisher.funding_seed = seed.to_string();
-        config.publisher.output_storage_emulator_endpoint = Some(endpoint.to_string());
+        config.publisher.output_storage = Some(OutputStorageConfig {
+            emulator_endpoint: Some(endpoint.to_string()),
+            ..OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(30))
+        });
 
         let rendered = format!("{config:?}");
         assert!(
-            rendered.contains("output_storage_emulator_endpoint"),
+            rendered.contains("emulator_endpoint"),
             "the sandbox-only field is missing from Debug: {rendered}"
         );
         assert!(
@@ -408,29 +416,37 @@ mod tests {
             .expect("output storage is optional by default");
 
         let mut configured = valid_config();
-        configured.publisher.output_storage_bucket = Some("outputs".to_string());
-        configured.publisher.output_storage_prefix = "v1/test-deployment".to_string();
-        configured.publisher.output_storage_timeout = Duration::from_secs(1);
+        configured.publisher.output_storage = Some(OutputStorageConfig::new(
+            "outputs".into(),
+            "v1/test-deployment".into(),
+            Duration::from_secs(1),
+        ));
         configured
             .validate()
             .expect("configured output storage is valid");
 
         for (field, apply) in [
             (
-                "output_storage_bucket",
-                (|config: &mut MidnightConfig| {
-                    config.publisher.output_storage_bucket = Some(" ".to_string());
-                }) as fn(&mut MidnightConfig),
+                "output_storage.bucket",
+                (|config: &mut OutputStorageConfig| {
+                    config.bucket = " ".to_string();
+                }) as fn(&mut OutputStorageConfig),
             ),
-            ("output_storage_prefix", |config: &mut MidnightConfig| {
-                config.publisher.output_storage_prefix = String::new();
-            }),
-            ("output_storage_timeout", |config: &mut MidnightConfig| {
-                config.publisher.output_storage_timeout = Duration::ZERO;
-            }),
+            (
+                "output_storage.prefix",
+                |config: &mut OutputStorageConfig| {
+                    config.prefix = String::new();
+                },
+            ),
+            (
+                "output_storage.timeout",
+                |config: &mut OutputStorageConfig| {
+                    config.timeout = Duration::ZERO;
+                },
+            ),
         ] {
-            let mut invalid = valid_config();
-            apply(&mut invalid);
+            let mut invalid = configured.clone();
+            apply(invalid.publisher.output_storage.as_mut().unwrap());
             let error = invalid.validate().unwrap_err().to_string();
             assert!(
                 error.contains(field),

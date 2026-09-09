@@ -92,10 +92,13 @@ impl MidnightPublisher {
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
-        let output_store =
-            GcsOutputStore::connect(&config.publisher, rpc.network_id(), config.central_address)
-                .await?
-                .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
+        let output_store = GcsOutputStore::connect(
+            config.publisher.output_storage.as_ref(),
+            rpc.network_id(),
+            config.central_address,
+        )
+        .await?
+        .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
         Ok(Self::new(
             &config.publisher,

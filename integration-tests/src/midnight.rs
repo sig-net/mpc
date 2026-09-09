@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_chain_midnight::{probe_network_id, MidnightAddress, MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{
+    probe_network_id, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
+};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -124,14 +126,18 @@ impl MidnightContext {
             publisher_entrypoint.display(),
             publisher_package_dir()?.display()
         );
-        let mut config = responder_config(
+        let config = responder_config(
             &stack.endpoints,
             &bootstrap,
             node_executable()?,
             publisher_entrypoint,
-            Some(output_storage.bucket.clone()),
+            Some(OutputStorageConfig {
+                bucket: output_storage.bucket.clone(),
+                prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
+                timeout: Duration::from_secs(30),
+                emulator_endpoint: Some(output_storage.endpoint.clone()),
+            }),
         )?;
-        config.publisher.output_storage_emulator_endpoint = Some(output_storage.endpoint.clone());
         config.validate()?;
         Ok(Self {
             _stack: stack,
@@ -177,7 +183,12 @@ impl MidnightContext {
     pub async fn stored_output(&self, request_id: [u8; 32]) -> anyhow::Result<Vec<u8>> {
         let object = format!(
             "{}/{}/{}/{}.bin",
-            self.config.publisher.output_storage_prefix,
+            self.config
+                .publisher
+                .output_storage
+                .as_ref()
+                .context("Midnight output storage is disabled")?
+                .prefix,
             self._stack.network_id,
             self.config.central_address.to_hex(),
             hex::encode(request_id),
@@ -237,15 +248,14 @@ fn responder_config(
     bootstrap: &BootstrapResult,
     node_executable: String,
     publisher_entrypoint: PathBuf,
-    output_storage_bucket: Option<String>,
+    output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
-            output_storage_bucket,
-            output_storage_prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
+            output_storage,
             intent_gen_command: vec![
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),

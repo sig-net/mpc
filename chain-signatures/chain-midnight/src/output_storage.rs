@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use google_cloud_storage::client::Storage;
 
-use crate::config::{MidnightAddress, PublisherConfig};
+use crate::config::{MidnightAddress, OutputStorageConfig};
 
 #[async_trait]
 pub(crate) trait OutputStore: Send + Sync {
@@ -21,16 +21,16 @@ pub(crate) struct GcsOutputStore {
 
 impl GcsOutputStore {
     pub(crate) async fn connect(
-        config: &PublisherConfig,
+        config: Option<&OutputStorageConfig>,
         network_id: &str,
         central_address: MidnightAddress,
     ) -> anyhow::Result<Option<Self>> {
-        config.validate_output_storage()?;
-        if config.output_storage_bucket.is_none() {
+        let Some(config) = config else {
             return Ok(None);
-        }
+        };
+        config.validate()?;
         #[cfg(feature = "sandbox")]
-        if let Some(endpoint) = &config.output_storage_emulator_endpoint {
+        if let Some(endpoint) = &config.emulator_endpoint {
             return Self::connect_emulator(config, network_id, central_address, endpoint)
                 .await
                 .map(Some);
@@ -41,7 +41,7 @@ impl GcsOutputStore {
 
     #[cfg(feature = "sandbox")]
     async fn connect_emulator(
-        config: &PublisherConfig,
+        config: &OutputStorageConfig,
         network_id: &str,
         central_address: MidnightAddress,
         endpoint: &str,
@@ -55,28 +55,22 @@ impl GcsOutputStore {
     }
 
     pub(crate) fn new(
-        config: &PublisherConfig,
+        config: &OutputStorageConfig,
         network_id: &str,
         central_address: MidnightAddress,
         client: Storage,
     ) -> anyhow::Result<Self> {
-        config.validate_output_storage()?;
+        config.validate()?;
         Ok(Self {
             client,
-            bucket: format!(
-                "projects/_/buckets/{}",
-                config
-                    .output_storage_bucket
-                    .as_deref()
-                    .context("GCS output storage requires a bucket")?
-            ),
+            bucket: format!("projects/_/buckets/{}", config.bucket),
             prefix: format!(
                 "{}/{}/{}",
-                config.output_storage_prefix.trim_matches('/'),
+                config.prefix.trim_matches('/'),
                 network_id,
                 central_address.to_hex(),
             ),
-            timeout: config.output_storage_timeout,
+            timeout: config.timeout,
         })
     }
 
@@ -147,12 +141,11 @@ mod tests {
             .await
             .unwrap();
         GcsOutputStore::new(
-            &PublisherConfig {
-                output_storage_bucket: Some("outputs".into()),
-                output_storage_prefix: "v1/test-deployment".into(),
-                output_storage_timeout: Duration::from_secs(2),
-                ..Default::default()
-            },
+            &OutputStorageConfig::new(
+                "outputs".into(),
+                "v1/test-deployment".into(),
+                Duration::from_secs(2),
+            ),
             "preprod",
             MidnightAddress::from_bytes([0xab; 32]),
             client,
@@ -269,11 +262,7 @@ mod tests {
             .await
             .unwrap();
         let store = GcsOutputStore::new(
-            &PublisherConfig {
-                output_storage_bucket: Some("outputs".into()),
-                output_storage_timeout: Duration::from_millis(100),
-                ..Default::default()
-            },
+            &OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_millis(100)),
             "preprod",
             MidnightAddress::from_bytes([0xab; 32]),
             client,
@@ -288,28 +277,23 @@ mod tests {
 
     #[tokio::test]
     async fn no_bucket_disables_storage_before_client_initialization() {
-        let store = GcsOutputStore::connect(
-            &PublisherConfig::default(),
-            "preprod",
-            MidnightAddress::from_bytes([0xab; 32]),
-        )
-        .await
-        .unwrap();
+        let store =
+            GcsOutputStore::connect(None, "preprod", MidnightAddress::from_bytes([0xab; 32]))
+                .await
+                .unwrap();
         assert!(store.is_none());
     }
 
     #[test]
     fn output_storage_configuration_rejects_empty_buckets_and_invalid_tuning() {
-        let mut config = PublisherConfig::default();
-        config.validate_output_storage().unwrap();
-        config.output_storage_bucket = Some(" ".into());
-        assert!(config.validate_output_storage().is_err());
-        config.output_storage_bucket = Some("outputs".into());
-        config.validate_output_storage().unwrap();
-        config.output_storage_timeout = Duration::ZERO;
-        assert!(config.validate_output_storage().is_err());
-        config.output_storage_timeout = Duration::from_secs(1);
-        config.output_storage_prefix = String::new();
-        assert!(config.validate_output_storage().is_err());
+        let mut config = OutputStorageConfig::new(" ".into(), "v1".into(), Duration::from_secs(30));
+        assert!(config.validate().is_err());
+        config.bucket = "outputs".into();
+        config.validate().unwrap();
+        config.timeout = Duration::ZERO;
+        assert!(config.validate().is_err());
+        config.timeout = Duration::from_secs(1);
+        config.prefix = String::new();
+        assert!(config.validate().is_err());
     }
 }

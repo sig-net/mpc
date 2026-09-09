@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
+use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
 
@@ -160,16 +160,19 @@ impl MidnightArgs {
             proof_server_url,
             indexer_url,
             indexer_ws_url,
-            output_storage_bucket: self.midnight_output_storage_bucket,
-            #[cfg(feature = "test-feature")]
-            output_storage_emulator_endpoint: self.midnight_output_storage_emulator_endpoint,
+            output_storage: self.midnight_output_storage_bucket.map(|bucket| {
+                OutputStorageConfig::new(
+                    bucket,
+                    self.midnight_output_storage_prefix
+                        .unwrap_or_else(|| "v1".to_string()),
+                    Duration::from_secs(self.midnight_output_storage_timeout_secs.unwrap_or(30)),
+                )
+            }),
             ..Default::default()
         };
-        if let Some(prefix) = self.midnight_output_storage_prefix {
-            publisher.output_storage_prefix = prefix;
-        }
-        if let Some(timeout_secs) = self.midnight_output_storage_timeout_secs {
-            publisher.output_storage_timeout = Duration::from_secs(timeout_secs);
+        #[cfg(feature = "test-feature")]
+        if let Some(storage) = &mut publisher.output_storage {
+            storage.emulator_endpoint = self.midnight_output_storage_emulator_endpoint;
         }
         if let Some(command) = self.midnight_intent_gen_command {
             publisher.intent_gen_command = serde_json::from_str(&command).with_context(|| {
@@ -192,8 +195,6 @@ impl MidnightArgs {
     pub fn from_config(config: Option<MidnightConfig>) -> Self {
         match config {
             Some(c) => {
-                // Cargo can enable the dependency's sandbox without this crate's
-                // test-feature, so its test-only fields may be present but not forwarded.
                 let MidnightConfig {
                     node_url,
                     central_address,
@@ -204,17 +205,13 @@ impl MidnightArgs {
                             proof_server_url,
                             indexer_url,
                             indexer_ws_url,
-                            output_storage_bucket,
-                            output_storage_prefix,
-                            output_storage_timeout,
-                            #[cfg(feature = "test-feature")]
-                            output_storage_emulator_endpoint,
+                            output_storage,
                             ..
                         },
                     rpc: _,
                     indexer: _,
                 } = c;
-                MidnightArgs {
+                let mut args = MidnightArgs {
                     midnight_node_url: Some(node_url),
                     midnight_central_address: Some(central_address.to_hex()),
                     midnight_funding_seed: Some(funding_seed.into()),
@@ -225,12 +222,22 @@ impl MidnightArgs {
                     midnight_proof_server_url: Some(proof_server_url),
                     midnight_indexer_url: Some(indexer_url),
                     midnight_indexer_ws_url: Some(indexer_ws_url),
-                    midnight_output_storage_bucket: output_storage_bucket,
-                    midnight_output_storage_prefix: Some(output_storage_prefix),
-                    midnight_output_storage_timeout_secs: Some(output_storage_timeout.as_secs()),
+                    midnight_output_storage_bucket: None,
+                    midnight_output_storage_prefix: None,
+                    midnight_output_storage_timeout_secs: None,
                     #[cfg(feature = "test-feature")]
-                    midnight_output_storage_emulator_endpoint: output_storage_emulator_endpoint,
+                    midnight_output_storage_emulator_endpoint: None,
+                };
+                if let Some(storage) = output_storage {
+                    args.midnight_output_storage_bucket = Some(storage.bucket);
+                    args.midnight_output_storage_prefix = Some(storage.prefix);
+                    args.midnight_output_storage_timeout_secs = Some(storage.timeout.as_secs());
+                    #[cfg(feature = "test-feature")]
+                    {
+                        args.midnight_output_storage_emulator_endpoint = storage.emulator_endpoint;
+                    }
                 }
+                args
             }
             None => MidnightArgs {
                 midnight_node_url: None,
@@ -273,9 +280,11 @@ mod tests {
                 proof_server_url: "http://127.0.0.1:6300".into(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
-                output_storage_bucket: Some("midnight-results".into()),
-                output_storage_prefix: "staging/testnet".into(),
-                output_storage_timeout: Duration::from_secs(47),
+                output_storage: Some(OutputStorageConfig::new(
+                    "midnight-results".into(),
+                    "staging/testnet".into(),
+                    Duration::from_secs(47),
+                )),
                 ..Default::default()
             },
             rpc: Default::default(),
@@ -463,10 +472,29 @@ mod tests {
             .unwrap()
             .expect("Midnight remains enabled");
         assert_eq!(config.node_url, configured().node_url);
+        assert!(config.publisher.output_storage.is_none());
         let forwarded = MidnightArgs::from_config(Some(config)).into_str_args();
         assert!(!forwarded
             .iter()
-            .any(|arg| arg == "--midnight-output-storage-bucket"));
+            .any(|arg| arg.starts_with("--midnight-output-storage-")));
+    }
+
+    #[test]
+    fn output_storage_defaults_are_resolved_at_the_cli_boundary() {
+        crate::cli::tests::assert_midnight_env_unset();
+        let mut args = MidnightArgs::from_config(Some(configured()));
+        args.midnight_output_storage_prefix = None;
+        args.midnight_output_storage_timeout_secs = None;
+
+        let config = args.into_config().unwrap().unwrap();
+        assert_eq!(
+            config.publisher.output_storage,
+            Some(OutputStorageConfig::new(
+                "midnight-results".into(),
+                "v1".into(),
+                Duration::from_secs(30),
+            ))
+        );
     }
 
     #[test]
