@@ -43,9 +43,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
-        run: |
-          docker pull redis:7.4.2
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -127,9 +126,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
+      # Pull the images in parallel.
+      - name: Pull Redis and Foundry images
         run: |
-          docker pull redis:7.4.2
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
