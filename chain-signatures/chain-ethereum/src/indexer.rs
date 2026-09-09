@@ -149,7 +149,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         #[cfg(feature = "bench")]
         {
             crate::bench::add_process_time(start.elapsed());
-            if crate::bench::inc_block() % 100 == 0 {
+            if crate::bench::inc_block().is_multiple_of(100) {
                 crate::bench::report_metrics("catchup_progress");
             }
         }
