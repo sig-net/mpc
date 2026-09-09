@@ -8,12 +8,7 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   midnight-real-stack:
-    needs: [changes]
-    if: needs.changes.outputs.midnight == 'true' || needs.changes.outputs.core == 'true'
     name: Midnight Real Stack
     runs-on: warp-ubuntu-latest-x64-4x
     timeout-minutes: 90

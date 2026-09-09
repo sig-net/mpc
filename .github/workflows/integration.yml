@@ -7,14 +7,9 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
   # Runs the `fixture` nextest profile (see .config/nextest.toml).
   fixture-test:
-    needs: [changes]
-    if: needs.changes.outputs.core == 'true'
     name: Fixture Test
     runs-on: warp-ubuntu-latest-x64-4x
 
@@ -96,8 +91,6 @@ jobs:
   # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
   # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
   cluster-test:
-    needs: [changes]
-    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.near == 'true' || needs.changes.outputs.eth == 'true' || needs.changes.outputs.solana == 'true' || needs.changes.outputs.hydration == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Integration Test
     strategy:
       matrix:
@@ -202,8 +195,6 @@ jobs:
 
   # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
   anvil-integration-test:
-    needs: [changes]
-    if: needs.changes.outputs.eth == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Anvil Integration Tests
     runs-on: warp-ubuntu-latest-x64-4x
 

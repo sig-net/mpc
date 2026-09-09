@@ -4,8 +4,7 @@
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
 # runs here too: the `intent_seam` differential drives the freshly built entry point
-# with the real client, which is what catches the two sides drifting apart, and is
-# why the `chain-midnight` path filter below is among the triggers.
+# with the real client, which is what catches the two sides drifting apart.
 #
 # The required live end-to-end path runs in the Integration workflow's
 # Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
@@ -16,12 +15,7 @@ on:
   merge_group:
 
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   test:
-    needs: [changes]
-    if: needs.changes.outputs.midnight_ts == 'true' || needs.changes.outputs.core == 'true'
     name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:
