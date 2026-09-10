@@ -8,8 +8,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_midnight::{
-    probe_network_id, IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig,
-    PublisherConfig,
+    probe_network_id, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -268,11 +267,7 @@ fn responder_config(
             ..Default::default()
         },
         rpc: Default::default(),
-        indexer: IndexerConfig {
-            // Default interval is 2sec, set to 500ms to detect events faster in tests.
-            poll_interval: Duration::from_millis(500),
-            ..Default::default()
-        },
+        indexer: Default::default(),
     })
 }
 

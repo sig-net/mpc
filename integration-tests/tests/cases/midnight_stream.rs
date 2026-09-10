@@ -51,12 +51,7 @@ async fn wait_for_completed_checkpoint(
 #[serial]
 #[test(tokio::test)]
 async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::Result<()> {
-    let cluster = cluster::spawn()
-        // The default flow waits for 16 presigs per node to sign a request, 1 should be enough for this test to complete.
-        .with_config(|config| config.protocol.presignature.min_presignatures = 1)
-        .ethereum()
-        .midnight()
-        .await?;
+    let cluster = cluster::spawn().ethereum().midnight().await?;
     cluster.wait().signable().await?;
     let midnight = cluster
         .midnight
