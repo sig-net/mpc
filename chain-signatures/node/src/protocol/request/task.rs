@@ -7,6 +7,10 @@ use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
 
+use crate::sign_bidirectional::PublishState;
+use cait_sith::FullSignature;
+use k256::Secp256k1;
+
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
     pub proposer: Participant,
@@ -26,7 +30,10 @@ pub enum SignPhase {
     Posit(PositPhase),
     /// Commit the reserved presignature and run the signing protocol to completion.
     Generating(GeneratingPhase),
-    /// Terminal: the request finished (`Ok`) or aborted (`Err`).
+    /// Terminal. `Ok` means generation finished and the signature was handed
+    /// off to the backlog and the RPC queue; it does not mean a response is on
+    /// chain, which the backlog state and the chain streams track. `Err` means
+    /// the request aborted.
     Complete(Result<(), SignError>),
 }
 
@@ -112,8 +119,62 @@ impl GeneratingPhase {
         };
 
         match result {
-            Ok(()) => SignPhase::Complete(Ok(())),
+            Ok(output) => {
+                self.hand_off(ctx, state, output).await;
+                SignPhase::Complete(Ok(()))
+            }
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
+        }
+    }
+
+    /// Hand the finished signature on. This is not the on-chain publish: every
+    /// participant moves the backlog entry to pending-publish, the record that
+    /// publish failover works from, and the proposer queues a publish for the
+    /// RPC worker, which submits and retries on its own. Neither outcome is
+    /// reported back here.
+    async fn hand_off(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
+        let sign_id = ctx.sign_id;
+        let request = &state.request;
+        let is_proposer = self.proposer == ctx.governance.me;
+
+        let expected_public_key =
+            mpc_crypto::derive_key(ctx.governance.public_key, request.args.epsilon);
+        let signature = match mpc_crypto::reconstruct_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            request.args.payload,
+        ) {
+            Ok(signature) => signature,
+            Err(err) => {
+                tracing::error!(
+                    ?sign_id,
+                    ?err,
+                    "generated signature does not verify against the derived key; dropping it"
+                );
+                return;
+            }
+        };
+
+        let publish = Arc::new(PublishState::new(
+            signature,
+            self.accepted_participants.clone(),
+            is_proposer,
+        ));
+        if let Err(err) = ctx
+            .backlog
+            .mark_publishing(request.chain, &sign_id, publish)
+            .await
+        {
+            tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+        }
+
+        if is_proposer {
+            ctx.rpc.publish_signature(
+                Arc::clone(request),
+                signature,
+                self.accepted_participants.clone(),
+            );
         }
     }
 
@@ -236,8 +297,6 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            rpc: self.rpc.clone(),
-            backlog: self.backlog.clone(),
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }
