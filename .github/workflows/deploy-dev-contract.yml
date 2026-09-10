@@ -46,7 +46,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: deploy-dev-contract
+          # Shared by dev-only jobs; release-building jobs use "workspace-release".
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
 

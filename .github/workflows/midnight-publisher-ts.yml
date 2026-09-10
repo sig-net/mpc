@@ -65,11 +65,13 @@ jobs:
           toolchain: 1.93.0
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: midnight-seam
+          # Shared by dev-only jobs; release-building jobs use "workspace-release".
+          shared-key: workspace
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.event_name == 'merge_group' }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       # The filter names the test binary: the seam tests live in

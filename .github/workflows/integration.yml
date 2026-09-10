@@ -43,9 +43,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
-        run: |
-          docker pull redis:7.4.2
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -62,7 +61,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fixture-test
+          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
+          # use "workspace" so their faster save cannot race away the release artifacts.
+          shared-key: workspace-release
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -127,9 +128,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
+      # Pull the images in parallel.
+      - name: Pull Redis and Foundry images
         run: |
-          docker pull redis:7.4.2
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -159,7 +162,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: integration-test
+          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
+          # use "workspace" so their faster save cannot race away the release artifacts.
+          shared-key: workspace-release
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -220,8 +225,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: anvil-integration-test
+          # Shared by dev-only jobs; release-building jobs use "workspace-release".
+          shared-key: workspace
           cache-targets: true
+          # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install Node.js

@@ -42,9 +42,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer & Sandbox Docker Images
-        run: |
-          docker pull redis:7.4.2
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
 
       - name: Setup Solana and Anchor
         uses: metadaoproject/setup-anchor@v3.1
@@ -68,11 +67,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly-test
+          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
+          # use "workspace" so their faster save cannot race away the release artifacts.
+          shared-key: workspace-release
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
