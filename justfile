@@ -144,10 +144,6 @@ test-midnight-seam:
 test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
 
-# Nightly helios suite
-test-nightly: (setup "1")
-    cargo test -p integration-tests --features helios --test lib -- cases::nightly --show-output --ignored
-
 # Prod-compat suite (needs `just build compat` output)
 test-compat:
     ./scripts/test-prod-compat.sh
