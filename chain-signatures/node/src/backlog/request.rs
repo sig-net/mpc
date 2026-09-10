@@ -295,9 +295,14 @@ impl SignEntry<Generating> {
             SignStatus::Sign(progress)
             | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
             | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                if !progress.is_generating() {
+                    return Err(BacklogError::InvalidPublishTransition);
+                }
                 *progress = SignProgress::Publishing(publish.clone());
             }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
+                return Err(BacklogError::InvalidPublishTransition);
+            }
         }
         Ok(())
     }

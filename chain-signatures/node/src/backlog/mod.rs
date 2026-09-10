@@ -584,6 +584,8 @@ pub enum BacklogError {
     NotFound { chain: Chain, id: SignId },
     #[error("failed to reconstruct signature")]
     InvalidSignature,
+    #[error("cannot mark publishing: status must be pending generation")]
+    InvalidPublishTransition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

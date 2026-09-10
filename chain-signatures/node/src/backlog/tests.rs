@@ -1005,3 +1005,52 @@ async fn test_pending_executions_typestate() {
     assert_eq!(sol_execs[0].sign_id(), tx2_sol.sign_id());
     assert_eq!(sol_execs[0].execution_tx().id, tx2_sol.id);
 }
+
+#[tokio::test]
+async fn test_advance_rejects_invalid_publish_transition() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::from_u8(77);
+    let req = mock_bidi_request(sign_id, Chain::Solana);
+    let tx = Arc::new(mock_bidirectional_tx(sign_id, Chain::Solana));
+    let (pk, output) = mock_signature_output(&req.args);
+
+    // Insert as Bidirectional(Initial(Generating))
+    let entry = backlog.insert_bidirectional(Arc::clone(&req)).await;
+
+    // Simulate an external event (e.g. peer respond event) moving the storage entry to Executing
+    {
+        let mut pending = backlog.pending(&Chain::Solana).write().await;
+        let storage_entry = pending.requests.get_mut(&sign_id).unwrap();
+        storage_entry.status =
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::clone(&tx)));
+    }
+
+    // Now the stale handle tries to advance to Publishing
+    let err = entry
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap_err();
+    assert_eq!(err, BacklogError::InvalidPublishTransition);
+
+    // Also test when storage entry has already advanced to Publishing
+    let sign_id2 = SignId::from_u8(78);
+    let req2 = mock_sign_request(sign_id2, Chain::Ethereum);
+    let (pk2, output2) = mock_signature_output(&req2.args);
+    let entry2 = backlog.insert_sign(Arc::clone(&req2)).await;
+
+    // Advance storage directly
+    let _ = backlog
+        .get_by::<Sign<Generating>>(Chain::Ethereum, &sign_id2)
+        .await
+        .unwrap()
+        .advance(pk2, &output2, mock_participants(), true)
+        .await
+        .unwrap();
+
+    // Stale handle tries to advance again
+    let err2 = entry2
+        .advance(pk2, &output2, mock_participants(), true)
+        .await
+        .unwrap_err();
+    assert_eq!(err2, BacklogError::InvalidPublishTransition);
+}
