@@ -11,8 +11,6 @@ import {
   fundChildFromRoot,
   GENESIS_MINT_WALLET_SEED,
   initialiseWalletFacade,
-  isFeeReady,
-  readAccountFunding,
   submitUnprovenTransaction,
   withSyncedWalletFacade,
   type MidnightNodeConfig,
@@ -176,11 +174,18 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
   const root = await assertRootFunded(config, GENESIS_MINT_WALLET_SEED, undefined);
   const amount = root.night / 5n;
   if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
-  for (const seed of [DEPLOYER_SEED, INVOKER_SEED, PUBLISHER_SEED]) {
-    const current = await readAccountFunding(config, seed);
-    if (!isFeeReady(current)) {
-      await fundChildWaitingForRootDust(config, seed, amount);
-    }
+  // fundChildFromRoot skips the transfer when the child already holds NIGHT,
+  // so no per-role pre-check is needed (each check costs a full wallet re-sync).
+  // Transfers must stay sequential: concurrent root facades would both spend
+  // the same genesis UTXOs.
+  for (const [name, seed] of [
+    ["deployer", DEPLOYER_SEED],
+    ["invoker", INVOKER_SEED],
+    ["publisher", PUBLISHER_SEED],
+  ] as const) {
+    const startedAt = Date.now();
+    await fundChildWaitingForRootDust(config, seed, amount);
+    diagnostics(`funded ${name} wallet in ${Date.now() - startedAt}ms`);
   }
 }
 
