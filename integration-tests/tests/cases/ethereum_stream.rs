@@ -19,7 +19,7 @@ use mpc_chain_integration_core::{
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
-use mpc_node::node_client::NodeClient;
+use mpc_node::web::client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};

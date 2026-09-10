@@ -1,7 +1,10 @@
 mod cbor;
+mod checkpoint;
 mod error;
+pub mod client;
 #[cfg(test)]
 pub mod mock;
+pub(crate) mod range;
 
 #[cfg(feature = "debug-page")]
 pub mod debug;
@@ -19,7 +22,7 @@ use crate::web::error::Result;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -397,7 +400,8 @@ impl CheckpointQuery {
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Cbor<CheckpointResponse>> {
+    headers: HeaderMap,
+) -> Result<Response> {
     let start = Instant::now();
 
     let mut resp = HashMap::new();
@@ -422,10 +426,20 @@ async fn checkpoint(
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(CheckpointResponse {
+    let body = CheckpointResponse {
         version: crate::CHECKPOINT_VERSION,
         checkpoints: resp,
-    }))
+    };
+    let bytes = crate::protocol::message::cbor_to_bytes(&body).map_err(Error::Message)?;
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    let if_match = headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|v| v.to_str().ok());
+    Ok(crate::web::range::checkpoint_bytes_response(
+        bytes, range, if_match,
+    ))
 }
 
 #[cfg(not(feature = "debug-page"))]

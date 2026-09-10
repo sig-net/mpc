@@ -11,7 +11,7 @@ use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
 use mpc_node::{
     mesh::{Mesh, MeshState},
-    node_client::{self, NodeClient},
+    web::client::{self as node_client, NodeClient},
     protocol::{
         contract::{primitives::Participants, RunningContractState},
         presignature::Presignature,

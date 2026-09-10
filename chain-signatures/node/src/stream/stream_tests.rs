@@ -1,7 +1,7 @@
 use super::supervisor::run_supervised;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;

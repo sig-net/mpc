@@ -4,7 +4,7 @@ pub mod supervisor;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,

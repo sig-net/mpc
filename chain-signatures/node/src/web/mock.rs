@@ -3,8 +3,8 @@ use mockito::ServerGuard;
 use near_sdk::AccountId;
 
 use crate::{
-    node_client::NodeClient,
     protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
+    web::client::NodeClient,
     web::StatusResponse,
     PROTOCOL_VERSION,
 };
@@ -117,7 +117,7 @@ impl MockServers {
     }
 
     pub fn client(&self) -> NodeClient {
-        NodeClient::new(&crate::node_client::Options::default())
+        NodeClient::new(&crate::web::client::Options::default())
     }
 
     pub async fn push(&mut self, id: u32) {

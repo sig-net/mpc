@@ -10,7 +10,7 @@ use mpc_keys::hpke::Ciphered;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::NodeClient;
+use mpc_node::web::client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};

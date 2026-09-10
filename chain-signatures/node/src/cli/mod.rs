@@ -8,7 +8,7 @@ use crate::gcp::GcpService;
 use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
-use crate::node_client::{self, NodeClient};
+use crate::web::client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -124,7 +124,7 @@ pub enum Cli {
         #[clap(flatten)]
         mesh_options: mesh::Options,
         #[clap(flatten)]
-        message_options: node_client::Options,
+        message_options: client::Options,
     },
 }
 
@@ -641,7 +641,7 @@ struct MeshHandles {
 
 impl MeshHandles {
     fn new(
-        message_options: node_client::Options,
+        message_options: client::Options,
         mesh_options: mesh::Options,
         account_id: &AccountId,
     ) -> Self {

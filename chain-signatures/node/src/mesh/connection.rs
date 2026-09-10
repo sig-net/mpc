@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{StreamExt, StreamMap};
 
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::state::NodeStatus as OtherNodeStatus;
 use crate::protocol::{ParticipantInfo, ProtocolState};

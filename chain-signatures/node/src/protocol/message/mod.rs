@@ -29,7 +29,7 @@ pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
 use crate::metrics::messaging::set_channel_capacity_tx;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::protocol::message::filter::MAX_FILTER_SIZE;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,

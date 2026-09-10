@@ -24,7 +24,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+use mpc_node::web::client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};

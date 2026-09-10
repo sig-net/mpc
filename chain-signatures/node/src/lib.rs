@@ -14,7 +14,6 @@ pub mod indexer_hydration;
 pub mod logs;
 pub mod mesh;
 pub mod metrics;
-pub mod node_client;
 pub mod protocol;
 pub mod respond_bidirectional;
 pub mod rpc;

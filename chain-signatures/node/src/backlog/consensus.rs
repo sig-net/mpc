@@ -1,6 +1,6 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::types::CheckpointWatcher;
 
@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
-    use crate::node_client::Options as NodeClientOptions;
+    use crate::web::client::Options as NodeClientOptions;
 
     use crate::backlog::BacklogEntry;
     use mpc_primitives::{CheckpointDigest, IndexedSignRequest, SignArgs, SignId};

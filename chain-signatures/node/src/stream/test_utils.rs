@@ -3,7 +3,7 @@
 use crate::backlog::Backlog;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::stream::{supervisor::run_supervised, StreamContext};

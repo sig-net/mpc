@@ -1,6 +1,6 @@
 use crate::backlog::{consensus, Backlog};
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::types::CheckpointWatcher;
 
 use mpc_primitives::Chain;

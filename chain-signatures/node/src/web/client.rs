@@ -1,8 +1,8 @@
+use super::{CheckpointResponse, StateView, StatusResponse};
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
-use crate::web::{CheckpointResponse, StateView, StatusResponse};
 
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -72,7 +72,7 @@ pub enum RequestError {
 
 #[derive(Debug, Clone)]
 pub struct NodeClient {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     options: Options,
 }
 
@@ -83,7 +83,7 @@ fn check_checkpoint_version(version: u64) -> Result<(), RequestError> {
     Ok(())
 }
 
-fn decode_checkpoint_response(body: &[u8]) -> Result<CheckpointResponse, RequestError> {
+pub(crate) fn decode_checkpoint_response(body: &[u8]) -> Result<CheckpointResponse, RequestError> {
     let resp: CheckpointResponse =
         ciborium::from_reader(body).map_err(|err| RequestError::Conversion(err.to_string()))?;
     check_checkpoint_version(resp.version)?;
@@ -101,7 +101,7 @@ impl NodeClient {
         }
     }
 
-    fn extract_request_id(resp: &reqwest::Response) -> Option<String> {
+    pub(crate) fn extract_request_id(resp: &reqwest::Response) -> Option<String> {
         resp.headers()
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
@@ -123,18 +123,16 @@ impl NodeClient {
 
         let status = resp.status();
         if status.is_success() {
-            Ok(resp.json::<R>().await?)
-        } else {
-            // TODO: parse response body and convert to mpc_node::Error type.
-            let request_id = Self::extract_request_id(&resp);
-            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!(
-                request_id = ?request_id,
-                "failed to send a message to {url} with code {status}: {resp}"
-            );
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
+            return Ok(resp.json::<R>().await?);
         }
+        let request_id = Self::extract_request_id(&resp);
+        let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+        let msg = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+        tracing::warn!(
+            request_id = ?request_id,
+            "failed to send a message to {url} with code {status}: {msg}"
+        );
+        Err(RequestError::Unsuccessful(status, msg.into(), request_id))
     }
 
     pub async fn post_cbor<T: Serialize + ?Sized>(
@@ -152,14 +150,12 @@ impl NodeClient {
 
         let status = resp.status();
         if status.is_success() {
-            Ok(())
-        } else {
-            // TODO: parse response body and convert to mpc_node::Error type.
-            let request_id = Self::extract_request_id(&resp);
-            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
+            return Ok(());
         }
+        let request_id = Self::extract_request_id(&resp);
+        let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+        let msg = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+        Err(RequestError::Unsuccessful(status, msg.into(), request_id))
     }
 
     pub async fn post_cbor_response<T: Serialize + ?Sized, R: DeserializeOwned>(
@@ -180,18 +176,17 @@ impl NodeClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            ciborium::from_reader(body.as_ref())
-                .map_err(|err| RequestError::Conversion(err.to_string()))
-        } else {
-            let request_id = Self::extract_request_id(&resp);
-            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!(
-                request_id = ?request_id,
-                "failed to send a message to {url} with code {status}: {resp}"
-            );
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
+            return ciborium::from_reader(body.as_ref())
+                .map_err(|err| RequestError::Conversion(err.to_string()));
         }
+        let request_id = Self::extract_request_id(&resp);
+        let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+        let msg = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+        tracing::warn!(
+            request_id = ?request_id,
+            "failed to send a message to {url} with code {status}: {msg}"
+        );
+        Err(RequestError::Unsuccessful(status, msg.into(), request_id))
     }
 
     async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
@@ -265,24 +260,9 @@ impl NodeClient {
             )));
         };
 
-        let resp = self
-            .http
-            .get(url)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let request_id = Self::extract_request_id(&resp);
-        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-
-        if status.is_success() {
-            let response = decode_checkpoint_response(body.as_ref())?;
-            Ok(response.checkpoints)
-        } else {
-            let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
-        }
+        let body = self.fetch_bytes(url).await?;
+        let response = decode_checkpoint_response(&body)?;
+        Ok(response.checkpoints)
     }
 
     pub async fn fetch_checkpoint_by_digest(
@@ -299,98 +279,8 @@ impl NodeClient {
             hex::encode(digest)
         )));
 
-        let resp = self
-            .http
-            .get(url)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let request_id = Self::extract_request_id(&resp);
-        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
-
-        if status.is_success() {
-            let response = decode_checkpoint_response(body.as_ref())?;
-            Ok(response.checkpoints.get(&chain).cloned())
-        } else {
-            let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_versioned_checkpoint_responses_decode() {
-        let mut checkpoints = HashMap::new();
-        checkpoints.insert(Chain::Ethereum, Checkpoint::empty(Chain::Ethereum));
-
-        let versioned = CheckpointResponse {
-            version: crate::CHECKPOINT_VERSION,
-            checkpoints: checkpoints.clone(),
-        };
-        let mut versioned_body = Vec::new();
-        ciborium::into_writer(&versioned, &mut versioned_body).unwrap();
-        assert_eq!(
-            decode_checkpoint_response(&versioned_body).unwrap().version,
-            crate::CHECKPOINT_VERSION
-        );
-
-        #[derive(serde::Serialize)]
-        struct MissingVersionResponse {
-            checkpoints: HashMap<Chain, Checkpoint>,
-        }
-
-        let mut missing_version_body = Vec::new();
-        ciborium::into_writer(
-            &MissingVersionResponse { checkpoints },
-            &mut missing_version_body,
-        )
-        .unwrap();
-
-        let decoded_missing = decode_checkpoint_response(&missing_version_body).unwrap();
-        assert_eq!(decoded_missing.version, 0);
-
-        let mut legacy_body = Vec::new();
-        ciborium::into_writer(&HashMap::<Chain, Checkpoint>::new(), &mut legacy_body).unwrap();
-        assert!(decode_checkpoint_response(&legacy_body).is_err());
-    }
-
-    #[tokio::test]
-    async fn test_fetch_checkpoint_reports_newer_version() {
-        let mut server = mockito::Server::new_async().await;
-        let response = CheckpointResponse {
-            version: crate::CHECKPOINT_VERSION + 1,
-            checkpoints: HashMap::new(),
-        };
-        let mut body = Vec::new();
-        ciborium::into_writer(&response, &mut body).unwrap();
-        let mock = server
-            .mock("GET", "/checkpoint")
-            .match_query(mockito::Matcher::Any)
-            .with_status(200)
-            .with_header("content-type", "application/cbor")
-            .with_body(body)
-            .create_async()
-            .await;
-
-        let client = NodeClient::new(&Options::default());
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            client.fetch_checkpoint_by_digest(server.url(), Chain::Ethereum, [0u8; 32]),
-        )
-        .await
-        .expect("newer checkpoint version should not stall");
-
-        assert!(matches!(
-            result,
-            Err(RequestError::MismatchCheckpointVersion(version))
-                if version == crate::CHECKPOINT_VERSION + 1
-        ));
-        mock.assert_async().await;
+        let body = self.fetch_bytes(url).await?;
+        let response = decode_checkpoint_response(&body)?;
+        Ok(response.checkpoints.get(&chain).cloned())
     }
 }

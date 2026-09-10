@@ -32,7 +32,7 @@ use mpc_node::backlog::Checkpoint;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::web::CheckpointResponse;
-use mpc_node::{logs, mesh, node_client, storage};
+use mpc_node::{logs, mesh, storage, web};
 use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
@@ -351,7 +351,7 @@ pub struct Context {
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
-    pub message_options: node_client::Options,
+    pub message_options: web::client::Options,
     pub ethereum: Option<EthereumContext>,
 }
 
@@ -437,7 +437,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         ping_interval: 1000,
     };
 
-    let message_options = node_client::Options {
+    let message_options = web::client::Options {
         timeout: 1000,
         state_timeout: 1000,
         sync_timeout: 60000,

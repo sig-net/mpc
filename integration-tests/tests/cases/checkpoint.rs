@@ -5,7 +5,7 @@ use mpc_node::backlog::consensus::align_backlog_with_consensus;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+use mpc_node::web::client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
 use mpc_primitives::{

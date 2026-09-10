@@ -2,7 +2,7 @@ mod config;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::stream::StreamContext;
 use crate::types::CheckpointWatcher;

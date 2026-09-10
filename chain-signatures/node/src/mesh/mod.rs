@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::mesh::connection::NodeStatus;
-use crate::node_client::NodeClient;
+use crate::web::client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
