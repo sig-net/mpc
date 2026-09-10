@@ -285,7 +285,18 @@ impl MpcFixture {
     /// Send the same `SignCommand` to every node's `sign_tx`.
     pub async fn broadcast(&self, request: &SignCommand) {
         for node in &self.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
+            match request {
+                SignCommand::Request(entry) => {
+                    let (node_entry, _) = node.backlog.insert(Arc::clone(entry.request())).await;
+                    node.sign_tx
+                        .send(SignCommand::Request(node_entry))
+                        .await
+                        .unwrap();
+                }
+                cmd => {
+                    node.sign_tx.send(cmd.clone()).await.unwrap();
+                }
+            }
         }
     }
 

@@ -1158,10 +1158,7 @@ async fn test_signature_message_count() {
         .await;
 
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
     network
         .assert_publish_actions(1, Duration::from_secs(10))
