@@ -11,7 +11,9 @@ use super::*;
 pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    pub presignature: Option<PresignatureReservation>,
+    /// The presignature the proposer already committed before announcing START.
+    /// `None` for deliberators, which fetch it from storage instead.
+    pub presignature: Option<Box<PresignatureTaken>>,
     pub accepted_participants: Vec<Participant>,
 }
 
@@ -62,14 +64,9 @@ impl GeneratingPhase {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(reservation) = self.presignature.take() {
-            // Commit: actually remove from Redis now that posit succeeded and generation starts
-            match reservation.commit().await {
-                Some(taken) => PendingPresignature::Available(Box::new(taken)),
-                None => {
-                    return state.reorganize("failed to commit presignature reservation");
-                }
-            }
+        // Already committed in the posit phase, before START went out.
+        let presignature_pending = if let Some(taken) = self.presignature.take() {
+            PendingPresignature::Available(taken)
         } else {
             PendingPresignature::InStorage(
                 self.presignature_id,

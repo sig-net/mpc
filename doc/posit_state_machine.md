@@ -117,12 +117,13 @@ stateDiagram-v2
     state "Organizing" as OrgIn
     state "<b>Propose sent</b>
     1. tally ACCEPT and REJECT
-    2. once enough ACCEPTs send START to accepters" as ProposeSent
+    2. once enough ACCEPTs, commit the presignature
+    3. send START to accepters" as ProposeSent
     state "Generating" as GenOut
 
     OrgIn --> ProposeSent: proposer, PROPOSE sent
     ProposeSent --> GenOut: START sent
-    ProposeSent --> OrgIn: too many REJECTs, or timeout
+    ProposeSent --> OrgIn: too many REJECTs, timeout, or commit failed
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut outside
@@ -207,7 +208,7 @@ wasted rounds and the repeated reservations.
 
 ```mermaid
 stateDiagram-v2
-    state "<b>Acquiring</b><br/>1. proposer commits its reservation, deliberator fetches the presignature from storage<br/>2. build the generator" as Acquiring
+    state "<b>Acquiring</b><br/>1. the proposer already holds its committed presignature, the deliberator fetches it from storage<br/>2. build the generator" as Acquiring
     state "<b>Signing</b><br/>1. poke cait-sith, relay SendMany and SendPrivate<br/>2. answer late PROPOSE with REJECT AlreadyGenerating<br/>3. Action Return carries big_r and s" as Signing
     state "<b>Recording</b><br/>1. reconstruct against the derived key<br/>2. mark the request publishing in the backlog<br/>3. proposer submits it" as Recording
     state "Posit" as PositIn
@@ -220,7 +221,7 @@ stateDiagram-v2
     Signing --> Recording: Action Return
     Recording --> DoneOut: Complete Ok
 
-    Acquiring --> OrgOut: commit failed, or generator build failed
+    Acquiring --> OrgOut: generator build failed
     Signing --> OrgOut: poke error, receive timeout, or inbox closed
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
@@ -341,6 +342,10 @@ because the round timeout ran out.
   `Propose received`; a deliberator that never gets a `PROPOSE` sends nothing.
 - **The proposer's `START` set is a subset of the accepters**, so every node in
   `Generating` has agreed to the same presignature for the same round.
+- **The proposer commits its presignature before `START` goes out.** Accepters
+  take theirs from storage the moment they see `START`, so a proposer that
+  announced first and then failed to commit would spend their copies on a round
+  it had already left.
 - **`Generating` is not preempted by a new round**; a node only leaves it by
   finishing or failing.
 
