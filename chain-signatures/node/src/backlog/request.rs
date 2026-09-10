@@ -186,26 +186,6 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
-    async fn record_publishing(&self, publish: Publishing) -> Result<(), BacklogError> {
-        let mut pending = self.backlog.pending(&self.chain).write().await;
-        let entry = pending
-            .requests
-            .get_mut(&self.request.id)
-            .ok_or(BacklogError::NotFound {
-                chain: self.chain,
-                id: self.request.id,
-            })?;
-        match &mut entry.status {
-            SignStatus::Sign(progress)
-            | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
-            | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                *progress = SignProgress::Publishing(publish);
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
-        }
-        Ok(())
-    }
-
     async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
@@ -306,6 +286,26 @@ impl SignEntry<Generating> {
         let publish = Publishing::new(signature, participants, is_proposer);
         self.record_publishing(publish.clone()).await?;
         Ok(self.transition(publish))
+    }
+
+    async fn record_publishing(&self, publish: Publishing) -> Result<(), BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        match &mut entry.status {
+            SignStatus::Sign(progress)
+            | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
+            | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                *progress = SignProgress::Publishing(publish);
+            }
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
+        }
+        Ok(())
     }
 }
 

@@ -52,6 +52,7 @@ impl SignCommand {
                         }
                     }
                     mpc_chain_near::SignCommand::Completion(id) => {
+                        backlog.remove(Chain::NEAR, &id).await;
                         if sign_tx.send(Self::Completion(id)).await.is_err() {
                             break;
                         }
