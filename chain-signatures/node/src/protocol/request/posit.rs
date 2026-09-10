@@ -119,7 +119,7 @@ impl PositPhase {
                         "deliberator received Propose"
                     );
 
-                    // Check if we have access to this presignature (in storage or generating)
+                    // Check if the presignature available in storage
                     if !ctx.presignatures.contains(*presignature_id).await {
                         tracing::warn!(
                             ?sign_id,
