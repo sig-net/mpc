@@ -65,8 +65,8 @@ jobs:
           toolchain: 1.93.0
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by dev-only jobs; release-building jobs use "workspace-release".
-          shared-key: workspace
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
 

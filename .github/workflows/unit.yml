@@ -2,11 +2,10 @@ name: Unit
 on:
   pull_request:
   merge_group:
-  # Rebuild the shared dev rust cache on develop so PR and merge-queue runs can restore it
-  # (caches saved on PR or merge-queue refs are invisible to other branches).
+  # Cache policy: docs/ci-caching.md
   push:
     branches: [develop]
-    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*"]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/unit.yml]
   workflow_dispatch:
 
 env:
@@ -40,8 +39,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by dev-only jobs; release-building jobs use "workspace-release".
-          shared-key: workspace
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
       
